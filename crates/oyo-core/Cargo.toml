@@ -1,0 +1,13 @@
+[package]
+name = "oyo-core"
+version.workspace = true
+edition.workspace = true
+description = "Core diff engine for oyo - step-through diff viewer"
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+similar = { workspace = true }

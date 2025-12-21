@@ -1,0 +1,22 @@
+[package]
+name = "oyo"
+version.workspace = true
+edition.workspace = true
+description = "CLI TUI for oyo - step-through diff viewer"
+license.workspace = true
+
+[[bin]]
+name = "oyo"
+path = "src/main.rs"
+
+[dependencies]
+oyo-core = { path = "../oyo-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+ratatui = { workspace = true }
+crossterm = { workspace = true }
+clap = { workspace = true }
+tokio = { workspace = true }
+toml = { workspace = true }
+dirs = { workspace = true }

@@ -1,0 +1,36 @@
+[workspace]
+resolver = "2"
+members = ["crates/oyo-core", "crates/oyo"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Victor Aremu <me@victorare.mu>"]
+license = "MIT"
+repository = "https://github.com/ahkohd/oyo"
+description = "A step-through diff viewer"
+
+[workspace.dependencies]
+# Core
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+anyhow = "1.0"
+
+# Diff engine
+similar = { version = "2.6", features = ["unicode"] }
+
+# TUI
+ratatui = "0.29"
+crossterm = "0.28"
+tui-textarea = "0.7"
+
+# Async
+tokio = { version = "1.0", features = ["full"] }
+
+# CLI
+clap = { version = "4.0", features = ["derive"] }
+
+# Config
+toml = "0.8"
+dirs = "5.0"

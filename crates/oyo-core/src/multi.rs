@@ -1,0 +1,402 @@
+//! Multi-file diff support
+
+use crate::diff::DiffEngine;
+use crate::git::{ChangedFile, FileStatus};
+use crate::step::{DiffNavigator, StepDirection};
+use std::path::{Path, PathBuf};
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum MultiDiffError {
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("Git error: {0}")]
+    Git(#[from] crate::git::GitError),
+}
+
+/// A file entry in a multi-file diff
+#[derive(Debug, Clone)]
+pub struct FileEntry {
+    pub path: PathBuf,
+    pub display_name: String,
+    pub status: FileStatus,
+    pub insertions: usize,
+    pub deletions: usize,
+}
+
+/// Multi-file diff session
+pub struct MultiFileDiff {
+    /// All files being diffed
+    pub files: Vec<FileEntry>,
+    /// Currently selected file index
+    pub selected_index: usize,
+    /// Navigators for each file (lazy loaded)
+    navigators: Vec<Option<DiffNavigator>>,
+    /// Repository root (if in git mode)
+    #[allow(dead_code)]
+    repo_root: Option<PathBuf>,
+    /// Old contents for each file
+    old_contents: Vec<String>,
+    /// New contents for each file
+    new_contents: Vec<String>,
+}
+
+impl MultiFileDiff {
+    /// Create from a list of changed files (git mode)
+    pub fn from_git_changes(
+        repo_root: PathBuf,
+        changes: Vec<ChangedFile>,
+    ) -> Result<Self, MultiDiffError> {
+        let mut files = Vec::new();
+        let mut old_contents = Vec::new();
+        let mut new_contents = Vec::new();
+        let engine = DiffEngine::new().with_word_level(true);
+
+        for change in changes {
+            // Get old and new content
+            let old_content = match change.status {
+                FileStatus::Added | FileStatus::Untracked => String::new(),
+                _ => crate::git::get_head_content(&repo_root, &change.path)
+                    .unwrap_or_default(),
+            };
+
+            let new_content = match change.status {
+                FileStatus::Deleted => String::new(),
+                _ => {
+                    let full_path = repo_root.join(&change.path);
+                    std::fs::read_to_string(&full_path).unwrap_or_default()
+                }
+            };
+
+            // Compute diff stats
+            let diff = engine.diff_strings(&old_content, &new_content);
+
+            files.push(FileEntry {
+                display_name: change.path.display().to_string(),
+                path: change.path,
+                status: change.status,
+                insertions: diff.insertions,
+                deletions: diff.deletions,
+            });
+
+            old_contents.push(old_content);
+            new_contents.push(new_content);
+        }
+
+        let navigators: Vec<Option<DiffNavigator>> = (0..files.len()).map(|_| None).collect();
+
+        Ok(Self {
+            files,
+            selected_index: 0,
+            navigators,
+            repo_root: Some(repo_root),
+            old_contents,
+            new_contents,
+        })
+    }
+
+    /// Create from two directories
+    pub fn from_directories(old_dir: &Path, new_dir: &Path) -> Result<Self, MultiDiffError> {
+        let mut files = Vec::new();
+        let mut old_contents = Vec::new();
+        let mut new_contents = Vec::new();
+        let engine = DiffEngine::new().with_word_level(true);
+
+        // Collect all files from both directories
+        let mut all_files = std::collections::HashSet::new();
+
+        if old_dir.is_dir() {
+            collect_files(old_dir, old_dir, &mut all_files)?;
+        }
+        if new_dir.is_dir() {
+            collect_files(new_dir, new_dir, &mut all_files)?;
+        }
+
+        let mut all_files: Vec<_> = all_files.into_iter().collect();
+        all_files.sort();
+
+        for rel_path in all_files {
+            let old_path = old_dir.join(&rel_path);
+            let new_path = new_dir.join(&rel_path);
+
+            let old_exists = old_path.exists();
+            let new_exists = new_path.exists();
+
+            let status = if !old_exists {
+                FileStatus::Added
+            } else if !new_exists {
+                FileStatus::Deleted
+            } else {
+                FileStatus::Modified
+            };
+
+            let old_content = if old_exists {
+                std::fs::read_to_string(&old_path).unwrap_or_default()
+            } else {
+                String::new()
+            };
+
+            let new_content = if new_exists {
+                std::fs::read_to_string(&new_path).unwrap_or_default()
+            } else {
+                String::new()
+            };
+
+            // Skip if no changes
+            if old_content == new_content {
+                continue;
+            }
+
+            let diff = engine.diff_strings(&old_content, &new_content);
+
+            files.push(FileEntry {
+                display_name: rel_path.display().to_string(),
+                path: rel_path,
+                status,
+                insertions: diff.insertions,
+                deletions: diff.deletions,
+            });
+
+            old_contents.push(old_content);
+            new_contents.push(new_content);
+        }
+
+        let navigators: Vec<Option<DiffNavigator>> = (0..files.len()).map(|_| None).collect();
+
+        Ok(Self {
+            files,
+            selected_index: 0,
+            navigators,
+            repo_root: None,
+            old_contents,
+            new_contents,
+        })
+    }
+
+    /// Create from a single file pair
+    pub fn from_file_pair(
+        _old_path: PathBuf,
+        new_path: PathBuf,
+        old_content: String,
+        new_content: String,
+    ) -> Self {
+        let engine = DiffEngine::new().with_word_level(true);
+        let diff = engine.diff_strings(&old_content, &new_content);
+
+        let files = vec![FileEntry {
+            display_name: new_path.display().to_string(),
+            path: new_path,
+            status: FileStatus::Modified,
+            insertions: diff.insertions,
+            deletions: diff.deletions,
+        }];
+
+        Self {
+            files,
+            selected_index: 0,
+            navigators: vec![None],
+            repo_root: None,
+            old_contents: vec![old_content],
+            new_contents: vec![new_content],
+        }
+    }
+
+    /// Get the navigator for the currently selected file
+    pub fn current_navigator(&mut self) -> &mut DiffNavigator {
+        if self.navigators[self.selected_index].is_none() {
+            let engine = DiffEngine::new().with_word_level(true);
+            let diff = engine.diff_strings(
+                &self.old_contents[self.selected_index],
+                &self.new_contents[self.selected_index],
+            );
+            let navigator = DiffNavigator::new(
+                diff,
+                self.old_contents[self.selected_index].clone(),
+                self.new_contents[self.selected_index].clone(),
+            );
+            self.navigators[self.selected_index] = Some(navigator);
+        }
+        self.navigators[self.selected_index].as_mut().unwrap()
+    }
+
+    /// Get the current file entry
+    pub fn current_file(&self) -> Option<&FileEntry> {
+        self.files.get(self.selected_index)
+    }
+
+    /// Select next file
+    pub fn next_file(&mut self) -> bool {
+        if self.selected_index < self.files.len().saturating_sub(1) {
+            self.selected_index += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Select previous file
+    pub fn prev_file(&mut self) -> bool {
+        if self.selected_index > 0 {
+            self.selected_index -= 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Select file by index
+    pub fn select_file(&mut self, index: usize) {
+        if index < self.files.len() {
+            self.selected_index = index;
+        }
+    }
+
+    /// Total number of files
+    pub fn file_count(&self) -> usize {
+        self.files.len()
+    }
+
+    /// Get the step direction of current navigator (if loaded)
+    pub fn current_step_direction(&self) -> StepDirection {
+        if let Some(Some(nav)) = self.navigators.get(self.selected_index) {
+            nav.state().step_direction
+        } else {
+            StepDirection::None
+        }
+    }
+
+    /// Check if we have multiple files
+    pub fn is_multi_file(&self) -> bool {
+        self.files.len() > 1
+    }
+
+    /// Get total stats across all files
+    pub fn total_stats(&self) -> (usize, usize) {
+        self.files.iter().fold((0, 0), |(ins, del), f| {
+            (ins + f.insertions, del + f.deletions)
+        })
+    }
+
+    /// Refresh all files from git (re-scan for uncommitted changes)
+    /// Returns true if successful, false if not in git mode
+    pub fn refresh_all_from_git(&mut self) -> bool {
+        let repo_root = match &self.repo_root {
+            Some(root) => root.clone(),
+            None => return false,
+        };
+
+        // Get fresh list of changes
+        let changes = match crate::git::get_uncommitted_changes(&repo_root) {
+            Ok(c) => c,
+            Err(_) => return false,
+        };
+
+        // Rebuild the entire diff state
+        let mut files = Vec::new();
+        let mut old_contents = Vec::new();
+        let mut new_contents = Vec::new();
+        let engine = DiffEngine::new().with_word_level(true);
+
+        for change in changes {
+            let old_content = match change.status {
+                FileStatus::Added | FileStatus::Untracked => String::new(),
+                _ => crate::git::get_head_content(&repo_root, &change.path).unwrap_or_default(),
+            };
+
+            let new_content = match change.status {
+                FileStatus::Deleted => String::new(),
+                _ => {
+                    let full_path = repo_root.join(&change.path);
+                    std::fs::read_to_string(&full_path).unwrap_or_default()
+                }
+            };
+
+            let diff = engine.diff_strings(&old_content, &new_content);
+
+            files.push(FileEntry {
+                display_name: change.path.display().to_string(),
+                path: change.path,
+                status: change.status,
+                insertions: diff.insertions,
+                deletions: diff.deletions,
+            });
+
+            old_contents.push(old_content);
+            new_contents.push(new_content);
+        }
+
+        // Update state
+        let navigators: Vec<Option<DiffNavigator>> = (0..files.len()).map(|_| None).collect();
+        self.files = files;
+        self.old_contents = old_contents;
+        self.new_contents = new_contents;
+        self.navigators = navigators;
+
+        // Clamp selected index to valid range
+        if self.selected_index >= self.files.len() {
+            self.selected_index = self.files.len().saturating_sub(1);
+        }
+
+        true
+    }
+
+    /// Refresh the current file from disk (re-read and re-diff)
+    pub fn refresh_current_file(&mut self) {
+        let idx = self.selected_index;
+        let file = &self.files[idx];
+
+        // Get fresh content from disk
+        let new_content = if let Some(ref repo_root) = self.repo_root {
+            // Git mode - read from working directory
+            let full_path = repo_root.join(&file.path);
+            match file.status {
+                FileStatus::Deleted => String::new(),
+                _ => std::fs::read_to_string(&full_path).unwrap_or_default(),
+            }
+        } else {
+            // Non-git mode - just re-read the file
+            std::fs::read_to_string(&file.path).unwrap_or_default()
+        };
+
+        // Update stored content
+        self.new_contents[idx] = new_content;
+
+        // Recompute diff stats
+        let engine = DiffEngine::new().with_word_level(true);
+        let diff = engine.diff_strings(&self.old_contents[idx], &self.new_contents[idx]);
+
+        // Update file entry stats
+        self.files[idx].insertions = diff.insertions;
+        self.files[idx].deletions = diff.deletions;
+
+        // Clear the navigator so it gets rebuilt on next access
+        self.navigators[idx] = None;
+    }
+}
+
+fn collect_files(
+    dir: &Path,
+    base: &Path,
+    files: &mut std::collections::HashSet<PathBuf>,
+) -> Result<(), std::io::Error> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+
+        // Skip hidden files and common ignore patterns
+        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+            if name.starts_with('.') || name == "node_modules" || name == "target" {
+                continue;
+            }
+        }
+
+        if path.is_dir() {
+            collect_files(&path, base, files)?;
+        } else if path.is_file() {
+            if let Ok(rel) = path.strip_prefix(base) {
+                files.insert(rel.to_path_buf());
+            }
+        }
+    }
+    Ok(())
+}
