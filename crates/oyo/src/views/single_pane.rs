@@ -1,5 +1,6 @@
 //! Single pane view - morphs from old to new state
 
+use super::render_empty_state;
 use crate::app::{AnimationPhase, App};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -131,32 +132,36 @@ pub fn render_single_pane(frame: &mut Frame, app: &mut App, area: Rect) {
     };
     frame.render_widget(gutter_paragraph, gutter_area);
 
-    // Render content with horizontal scroll
-    let content_paragraph = if app.line_wrap {
-        Paragraph::new(content_lines)
-            .wrap(Wrap { trim: false })
-            .scroll((app.scroll_offset as u16, 0))
+    // Render content with horizontal scroll (or empty state)
+    if content_lines.is_empty() {
+        render_empty_state(frame, content_area);
     } else {
-        Paragraph::new(content_lines)
-            .scroll((0, app.horizontal_scroll as u16))
-    };
-    frame.render_widget(content_paragraph, content_area);
+        let content_paragraph = if app.line_wrap {
+            Paragraph::new(content_lines)
+                .wrap(Wrap { trim: false })
+                .scroll((app.scroll_offset as u16, 0))
+        } else {
+            Paragraph::new(content_lines)
+                .scroll((0, app.horizontal_scroll as u16))
+        };
+        frame.render_widget(content_paragraph, content_area);
 
-    // Render scrollbar (if enabled)
-    if app.scrollbar_visible {
-        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-            .begin_symbol(Some("↑"))
-            .end_symbol(Some("↓"));
+        // Render scrollbar (if enabled)
+        if app.scrollbar_visible {
+            let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(Some("↑"))
+                .end_symbol(Some("↓"));
 
-        let total_lines = view_lines.len();
-        let mut scrollbar_state = ScrollbarState::new(total_lines)
-            .position(app.scroll_offset);
+            let total_lines = view_lines.len();
+            let mut scrollbar_state = ScrollbarState::new(total_lines)
+                .position(app.scroll_offset);
 
-        frame.render_stateful_widget(
-            scrollbar,
-            area.inner(ratatui::layout::Margin { vertical: 1, horizontal: 0 }),
-            &mut scrollbar_state,
-        );
+            frame.render_stateful_widget(
+                scrollbar,
+                area.inner(ratatui::layout::Margin { vertical: 1, horizontal: 0 }),
+                &mut scrollbar_state,
+            );
+        }
     }
 }
 

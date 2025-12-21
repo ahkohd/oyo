@@ -150,11 +150,11 @@ fn draw_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
         Span::raw("  "),
     ];
 
-    spans.push(Span::styled(display_path, Style::default().fg(Color::White)));
+    spans.push(Span::styled(display_path, Style::default().fg(Color::DarkGray)));
 
     // Add branch suffix if in git mode (":main")
     if let Some(ref suffix) = branch_suffix {
-        spans.push(Span::styled(suffix.clone(), Style::default().fg(Color::White)));
+        spans.push(Span::styled(suffix.clone(), Style::default().fg(Color::DarkGray)));
     }
 
     spans.extend([
@@ -174,7 +174,7 @@ fn draw_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
         Span::raw(" "),
         Span::styled(format!("-{}", deletions), Style::default().fg(Color::Red)),
         Span::raw(" ".repeat(padding.max(1))),
-        Span::styled(file_text, Style::default().fg(Color::White)),
+        Span::styled(file_text, Style::default().fg(Color::DarkGray)),
     ]);
 
     let status_line = Line::from(spans);

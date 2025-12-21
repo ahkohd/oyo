@@ -1,5 +1,6 @@
 //! Split view with synchronized stepping
 
+use super::render_empty_state;
 use crate::app::{AnimationPhase, App};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -136,16 +137,20 @@ fn render_old_pane(frame: &mut Frame, app: &mut App, area: Rect) {
     };
     frame.render_widget(gutter_paragraph, gutter_area);
 
-    // Render content with horizontal scroll
-    let content_paragraph = if app.line_wrap {
-        Paragraph::new(content_lines)
-            .wrap(Wrap { trim: false })
-            .scroll((app.scroll_offset as u16, 0))
+    // Render content with horizontal scroll (or empty state)
+    if content_lines.is_empty() {
+        render_empty_state(frame, content_area);
     } else {
-        Paragraph::new(content_lines)
-            .scroll((0, app.horizontal_scroll as u16))
-    };
-    frame.render_widget(content_paragraph, content_area);
+        let content_paragraph = if app.line_wrap {
+            Paragraph::new(content_lines)
+                .wrap(Wrap { trim: false })
+                .scroll((app.scroll_offset as u16, 0))
+        } else {
+            Paragraph::new(content_lines)
+                .scroll((0, app.horizontal_scroll as u16))
+        };
+        frame.render_widget(content_paragraph, content_area);
+    }
 
     // Render border
     let border = Block::default()
@@ -239,16 +244,20 @@ fn render_new_pane(frame: &mut Frame, app: &mut App, area: Rect) {
     };
     frame.render_widget(gutter_paragraph, gutter_area);
 
-    // Render content with horizontal scroll
-    let content_paragraph = if app.line_wrap {
-        Paragraph::new(content_lines)
-            .wrap(Wrap { trim: false })
-            .scroll((app.scroll_offset as u16, 0))
+    // Render content with horizontal scroll (or empty state)
+    if content_lines.is_empty() {
+        render_empty_state(frame, content_area);
     } else {
-        Paragraph::new(content_lines)
-            .scroll((0, app.horizontal_scroll as u16))
-    };
-    frame.render_widget(content_paragraph, content_area);
+        let content_paragraph = if app.line_wrap {
+            Paragraph::new(content_lines)
+                .wrap(Wrap { trim: false })
+                .scroll((app.scroll_offset as u16, 0))
+        } else {
+            Paragraph::new(content_lines)
+                .scroll((0, app.horizontal_scroll as u16))
+        };
+        frame.render_widget(content_paragraph, content_area);
+    }
 
     // Render marker (no horizontal scroll)
     let marker_paragraph = if app.line_wrap {
