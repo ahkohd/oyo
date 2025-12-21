@@ -127,9 +127,10 @@ impl DiffNavigator {
             return false;
         }
 
+        let prev_hunk = self.state.current_hunk;
+
         self.state.step_direction = StepDirection::Forward;
         self.state.animating_hunk = None; // Clear hunk animation for single-step
-        self.state.last_nav_was_hunk = false; // Clear hunk nav flag for single-step
 
         // Get the next change to apply
         let change_idx = self.state.current_step;
@@ -146,6 +147,11 @@ impl DiffNavigator {
 
         self.state.current_step += 1;
 
+        // Clear extent markers only when leaving hunk
+        if self.state.current_hunk != prev_hunk {
+            self.state.last_nav_was_hunk = false;
+        }
+
         true
     }
 
@@ -155,9 +161,10 @@ impl DiffNavigator {
             return false;
         }
 
+        let prev_hunk = self.state.current_hunk;
+
         self.state.step_direction = StepDirection::Backward;
         self.state.animating_hunk = None; // Clear hunk animation for single-step
-        self.state.last_nav_was_hunk = false; // Clear hunk nav flag for single-step
         self.state.current_step -= 1;
 
         // Pop the change and set it as active for backward animation
@@ -179,6 +186,11 @@ impl DiffNavigator {
         // Reset hunk cursor when at start; animation state cleared by CLI after animation completes
         if self.state.is_at_start() {
             self.state.current_hunk = 0;
+        }
+
+        // Clear extent markers when leaving hunk or at step 0
+        if self.state.is_at_start() || self.state.current_hunk != prev_hunk {
+            self.state.last_nav_was_hunk = false;
         }
 
         true
@@ -277,8 +289,10 @@ impl DiffNavigator {
             return self.next_hunk();
         }
 
-        // Set after all internal calls to avoid being cleared
-        self.state.last_nav_was_hunk = true;
+        // Only set extent markers if we actually moved
+        if moved {
+            self.state.last_nav_was_hunk = true;
+        }
 
         moved
     }
@@ -341,8 +355,10 @@ impl DiffNavigator {
 
         // Animation state cleared by CLI after animation completes
 
-        // Set after all internal calls to avoid being cleared
-        self.state.last_nav_was_hunk = true;
+        // Set or clear extent markers based on whether we landed at step 0
+        if moved {
+            self.state.last_nav_was_hunk = !self.state.is_at_start();
+        }
 
         moved
     }
