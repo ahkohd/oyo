@@ -3,6 +3,7 @@
 mod app;
 mod color;
 mod config;
+mod syntax;
 mod ui;
 mod views;
 
@@ -45,7 +46,7 @@ struct Args {
     #[arg(long, value_enum)]
     theme_mode: Option<CliThemeMode>,
 
-    /// Disable stepping (classic diff view)
+    /// Disable stepping (no-step diff view)
     #[arg(long)]
     no_step: bool,
 }
@@ -265,6 +266,7 @@ fn main() -> Result<()> {
     app.line_wrap = config.ui.line_wrap;
     app.scrollbar_visible = config.ui.scrollbar;
     app.strikethrough_deletions = config.ui.strikethrough_deletions;
+    app.syntax_mode = config.ui.syntax;
     app.auto_step_on_enter = config.playback.auto_step_on_enter;
     app.auto_step_blank_files = config.playback.auto_step_blank_files;
     app.primary_marker = config.ui.primary_marker.clone();
@@ -291,7 +293,7 @@ fn main() -> Result<()> {
         app.stepping = config.ui.stepping;
     }
 
-    // If starting in no-step mode (classic), verify constraints and jump to end
+    // If starting in no-step mode, verify constraints and jump to end
     if !app.stepping {
         app.enter_no_step_mode();
     }
@@ -600,6 +602,11 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<()> 
                             app.reset_count();
                             // Toggle line wrap
                             app.toggle_line_wrap();
+                        }
+                        KeyCode::Char('t') => {
+                            app.reset_count();
+                            // Toggle syntax highlighting mode
+                            app.toggle_syntax();
                         }
                         KeyCode::Char('s') => {
                             app.reset_count();

@@ -3,6 +3,7 @@
 use super::render_empty_state;
 use crate::app::App;
 use crate::color;
+use crate::syntax::SyntaxSide;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -140,28 +141,46 @@ pub fn render_single_pane(frame: &mut Frame, app: &mut App, area: Rect) {
 
         // Build content line (scrollable)
         let mut content_spans: Vec<Span> = Vec::new();
-        for view_span in &view_line.spans {
-            let style = get_span_style(view_span.kind, view_line.kind, view_line.is_active, app);
-            // For deleted spans, don't strikethrough leading whitespace
-            if app.strikethrough_deletions
-                && matches!(
-                    view_span.kind,
-                    ViewSpanKind::Deleted | ViewSpanKind::PendingDelete
-                )
-            {
-                let text = &view_span.text;
-                let trimmed = text.trim_start();
-                let leading_ws_len = text.len() - trimmed.len();
-                if leading_ws_len > 0 && !trimmed.is_empty() {
-                    // Render leading whitespace without strikethrough
-                    let ws_style = style.remove_modifier(Modifier::CROSSED_OUT);
-                    content_spans.push(Span::styled(text[..leading_ws_len].to_string(), ws_style));
-                    content_spans.push(Span::styled(trimmed.to_string(), style));
+        let mut used_syntax = false;
+        if app.syntax_enabled() && matches!(view_line.kind, LineKind::Context) {
+            let side = if view_line.new_line.is_some() {
+                SyntaxSide::New
+            } else {
+                SyntaxSide::Old
+            };
+            let line_num = view_line.new_line.or(view_line.old_line);
+            if let Some(spans) = app.syntax_spans_for_line(side, line_num) {
+                content_spans = spans;
+                used_syntax = true;
+            }
+        }
+        if !used_syntax {
+            for view_span in &view_line.spans {
+                let style = get_span_style(view_span.kind, view_line.kind, view_line.is_active, app);
+                // For deleted spans, don't strikethrough leading whitespace
+                if app.strikethrough_deletions
+                    && matches!(
+                        view_span.kind,
+                        ViewSpanKind::Deleted | ViewSpanKind::PendingDelete
+                    )
+                {
+                    let text = &view_span.text;
+                    let trimmed = text.trim_start();
+                    let leading_ws_len = text.len() - trimmed.len();
+                    if leading_ws_len > 0 && !trimmed.is_empty() {
+                        // Render leading whitespace without strikethrough
+                        let ws_style = style.remove_modifier(Modifier::CROSSED_OUT);
+                        content_spans.push(Span::styled(
+                            text[..leading_ws_len].to_string(),
+                            ws_style,
+                        ));
+                        content_spans.push(Span::styled(trimmed.to_string(), style));
+                    } else {
+                        content_spans.push(Span::styled(view_span.text.clone(), style));
+                    }
                 } else {
                     content_spans.push(Span::styled(view_span.text.clone(), style));
                 }
-            } else {
-                content_spans.push(Span::styled(view_span.text.clone(), style));
             }
         }
 

@@ -69,6 +69,17 @@ pub struct ThemeTokens {
     pub warning: Option<DarkLight>,
     pub success: Option<DarkLight>,
     pub info: Option<DarkLight>,
+    pub syntax_plain: Option<DarkLight>,
+    pub syntax_keyword: Option<DarkLight>,
+    pub syntax_string: Option<DarkLight>,
+    pub syntax_number: Option<DarkLight>,
+    pub syntax_comment: Option<DarkLight>,
+    pub syntax_type: Option<DarkLight>,
+    pub syntax_function: Option<DarkLight>,
+    pub syntax_variable: Option<DarkLight>,
+    pub syntax_constant: Option<DarkLight>,
+    pub syntax_operator: Option<DarkLight>,
+    pub syntax_punctuation: Option<DarkLight>,
     pub background: Option<DarkLight>,
     pub background_panel: Option<DarkLight>,
     pub background_element: Option<DarkLight>,
@@ -118,6 +129,19 @@ pub struct ResolvedTheme {
     pub warning: Color,
     pub success: Color,
     pub info: Color,
+
+    // Syntax
+    pub syntax_plain: Color,
+    pub syntax_keyword: Color,
+    pub syntax_string: Color,
+    pub syntax_number: Color,
+    pub syntax_comment: Color,
+    pub syntax_type: Color,
+    pub syntax_function: Color,
+    pub syntax_variable: Color,
+    pub syntax_constant: Color,
+    pub syntax_operator: Color,
+    pub syntax_punctuation: Color,
 
     // Backgrounds (None = transparent)
     pub background: Option<Color>,
@@ -248,6 +272,19 @@ impl ThemeConfig {
             success: resolve(&tokens.success, Color::Green),
             info: resolve(&tokens.info, Color::Blue),
 
+            // Syntax (fallbacks align to existing UI colors)
+            syntax_plain: resolve(&tokens.syntax_plain, Color::Reset),
+            syntax_keyword: resolve(&tokens.syntax_keyword, resolve(&tokens.accent, Color::Cyan)),
+            syntax_string: resolve(&tokens.syntax_string, resolve(&tokens.success, Color::Green)),
+            syntax_number: resolve(&tokens.syntax_number, resolve(&tokens.warning, Color::Yellow)),
+            syntax_comment: resolve(&tokens.syntax_comment, resolve(&tokens.text_muted, Color::DarkGray)),
+            syntax_type: resolve(&tokens.syntax_type, resolve(&tokens.primary, Color::Cyan)),
+            syntax_function: resolve(&tokens.syntax_function, resolve(&tokens.info, Color::Blue)),
+            syntax_variable: resolve(&tokens.syntax_variable, resolve(&tokens.error, Color::Red)),
+            syntax_constant: resolve(&tokens.syntax_constant, resolve(&tokens.secondary, Color::Cyan)),
+            syntax_operator: resolve(&tokens.syntax_operator, resolve(&tokens.text, Color::Reset)),
+            syntax_punctuation: resolve(&tokens.syntax_punctuation, resolve(&tokens.text_muted, Color::DarkGray)),
+
             // Backgrounds - transparent by default
             background: resolve_bg(&tokens.background),
             background_panel: resolve_bg(&tokens.background_panel),
@@ -287,7 +324,9 @@ pub struct UiConfig {
     pub scrollbar: bool,
     /// Show strikethrough on deleted text
     pub strikethrough_deletions: bool,
-    /// Enable stepping (default: true). If false, shows all changes (classic diff behavior)
+    /// Syntax highlighting: "auto", "on", or "off"
+    pub syntax: SyntaxMode,
+    /// Enable stepping (default: true). If false, shows all changes (no-step behavior)
     pub stepping: bool,
     /// Marker for primary active line (left pane / single pane)
     pub primary_marker: String,
@@ -310,6 +349,7 @@ impl Default for UiConfig {
             line_wrap: false,
             scrollbar: false,
             strikethrough_deletions: false,
+            syntax: SyntaxMode::Auto,
             stepping: true,
             primary_marker: "▶".to_string(),
             primary_marker_right: None,
@@ -317,6 +357,21 @@ impl Default for UiConfig {
             extent_marker_right: None,
             theme: ThemeConfig::default(),
         }
+    }
+}
+
+/// Syntax highlighting mode
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SyntaxMode {
+    Auto,
+    On,
+    Off,
+}
+
+impl Default for SyntaxMode {
+    fn default() -> Self {
+        SyntaxMode::Auto
     }
 }
 

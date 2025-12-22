@@ -8,6 +8,7 @@ Step through changes one at a time and watch the code transform, unlike traditio
 - **No-step mode**: Disable stepping to review all changes at once with scroll-only navigation
 - **Hunk navigation**: Jump between groups of related changes (hunks) with `h` and `l`
 - **Animated transitions**: Smooth fade in/out animations as changes are applied
+- **Syntax highlighting**: Highlight code in no-step mode for easier review
 - **Three view modes**:
   - **Single**: Watch the code morph from old to new state
   - **Split**: See old and new versions with synchronized stepping
@@ -111,6 +112,7 @@ Recommended git aliases in `~/.gitconfig`:
 | `Z` | Toggle zen mode |
 | `a` | Toggle animations |
 | `w` | Toggle line wrap |
+| `t` | Toggle syntax highlight |
 | `s` | Toggle stepping (no-step mode) |
 | `S` | Toggle strikethrough |
 | `r` | Refresh file (or all files when file list focused) |
@@ -133,7 +135,15 @@ view_mode = "single"        # Default: "single", "split", or "evolution"
 line_wrap = false           # Wrap long lines (default: false, uses horizontal scroll)
 scrollbar = false           # Show scrollbar (default: false)
 strikethrough_deletions = false # Show strikethrough on deleted text
-stepping = true             # Enable stepping (false = classic diff mode)
+stepping = true             # Enable stepping (false = no-step mode)
+syntax = "auto"             # "auto" (no-step only), "on", or "off"
+# Optional syntax tokens (fallbacks apply if omitted):
+# syntaxPlain, syntaxKeyword, syntaxString, syntaxNumber, syntaxComment,
+# syntaxType, syntaxFunction, syntaxVariable, syntaxConstant,
+# syntaxOperator, syntaxPunctuation
+# Example:
+# [ui.theme.theme]
+# syntaxKeyword = { dark = "darkPurple", light = "lightPurple" }
 primary_marker = "▶"        # Marker for primary active line (single-width char recommended)
 primary_marker_right = "◀"  # Right pane marker (optional, defaults to ◀)
 extent_marker = "▌"         # Left pane extent marker (Left Half Block)

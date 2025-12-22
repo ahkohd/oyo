@@ -664,6 +664,7 @@ fn draw_help_popover(frame: &mut Frame, app: &App) {
         help_line("^G", "Show full file path".into()),
         help_line("z", "Center on active".into()),
         help_line("w", "Toggle line wrap".into()),
+        help_line("t", "Toggle syntax highlight".into()),
         help_line("s", "Toggle stepping".into()),
         help_line("S", "Toggle strikethrough".into()),
         Line::from(""),

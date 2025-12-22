@@ -1,7 +1,9 @@
 //! Application state and logic
 
-use crate::config::ResolvedTheme;
+use crate::config::{ResolvedTheme, SyntaxMode};
+use crate::syntax::{SyntaxCache, SyntaxEngine, SyntaxSide};
 use oyo_core::{AnimationFrame, LineKind, MultiFileDiff, StepDirection, StepState, ViewLine};
+use ratatui::text::Span;
 use std::time::{Duration, Instant};
 
 /// Animation phase for smooth transitions
@@ -139,8 +141,14 @@ pub struct App {
     pub clear_active_on_next_render: bool,
     /// Resolved theme (colors, gradients)
     pub theme: ResolvedTheme,
-    /// Whether stepping is enabled (false = classic diff view)
+    /// Whether stepping is enabled (false = no-step diff view)
     pub stepping: bool,
+    /// Syntax highlighting mode
+    pub syntax_mode: SyntaxMode,
+    /// Syntax highlighter (lazy initialized)
+    syntax_engine: Option<SyntaxEngine>,
+    /// Per-file syntax cache (old/new spans)
+    syntax_caches: Vec<Option<SyntaxCache>>,
 }
 
 /// Pure helper: determine if overscroll should be allowed
@@ -212,6 +220,9 @@ impl App {
             clear_active_on_next_render: false,
             theme: ResolvedTheme::default(),
             stepping: true,
+            syntax_mode: SyntaxMode::Auto,
+            syntax_engine: None,
+            syntax_caches: vec![None; file_count],
         }
     }
 
@@ -241,8 +252,78 @@ impl App {
         self.show_path_popup = !self.show_path_popup;
     }
 
+    pub fn toggle_syntax(&mut self) {
+        self.syntax_mode = match self.syntax_mode {
+            SyntaxMode::Auto => SyntaxMode::On,
+            SyntaxMode::On => SyntaxMode::Off,
+            SyntaxMode::Off => SyntaxMode::Auto,
+        };
+        if matches!(self.syntax_mode, SyntaxMode::Off) {
+            self.syntax_engine = None;
+            self.syntax_caches = vec![None; self.multi_diff.file_count()];
+        }
+    }
+
     pub fn state(&mut self) -> StepState {
         self.multi_diff.current_navigator().state().clone()
+    }
+
+    pub fn syntax_enabled(&self) -> bool {
+        match self.syntax_mode {
+            SyntaxMode::On => true,
+            SyntaxMode::Off => false,
+            SyntaxMode::Auto => !self.stepping,
+        }
+    }
+
+    pub fn syntax_spans_for_line(
+        &mut self,
+        side: SyntaxSide,
+        line_num: Option<usize>,
+    ) -> Option<Vec<Span<'static>>> {
+        if !self.syntax_enabled() {
+            return None;
+        }
+        let line_num = line_num?;
+        if line_num == 0 {
+            return None;
+        }
+        let cache = self.ensure_syntax_cache()?;
+        let spans = cache.spans(side, line_num - 1)?;
+        Some(
+            spans
+                .iter()
+                .map(|span| Span::styled(span.text.clone(), span.style))
+                .collect(),
+        )
+    }
+
+    fn ensure_syntax_cache(&mut self) -> Option<&SyntaxCache> {
+        if !self.syntax_enabled() {
+            return None;
+        }
+        let idx = self.multi_diff.selected_index;
+        if idx >= self.syntax_caches.len() {
+            self.syntax_caches = vec![None; self.multi_diff.file_count()];
+        }
+        if self.syntax_caches[idx].is_none() {
+            let file_name = self.current_file_path();
+            let (old_content, new_content) = {
+                let nav = self.multi_diff.current_navigator();
+                (nav.old_content().to_string(), nav.new_content().to_string())
+            };
+            if self.syntax_engine.is_none() {
+                self.syntax_engine = Some(SyntaxEngine::new(&self.theme));
+            }
+            let engine = self.syntax_engine.as_ref()?;
+            self.syntax_caches[idx] = Some(SyntaxCache::new(
+                engine,
+                &old_content,
+                &new_content,
+                &file_name,
+            ));
+        }
+        self.syntax_caches[idx].as_ref()
     }
 
     pub fn next_step(&mut self) {
@@ -893,7 +974,7 @@ impl App {
         }
     }
 
-    /// Enter classic (no-step) mode without changing scroll position.
+    /// Enter no-step mode without changing scroll position.
     pub fn enter_no_step_mode(&mut self) {
         // Evolution mode requires stepping, so switch to Single view
         if self.view_mode == ViewMode::Evolution {
@@ -1494,6 +1575,10 @@ impl App {
     /// Refresh current file from disk
     pub fn refresh_current_file(&mut self) {
         self.multi_diff.refresh_current_file();
+        let idx = self.multi_diff.selected_index;
+        if idx < self.syntax_caches.len() {
+            self.syntax_caches[idx] = None;
+        }
         self.scroll_offset = 0;
         self.horizontal_scroll = 0;
         self.centered_once = false;
@@ -1508,6 +1593,7 @@ impl App {
             self.scroll_offsets = vec![0; file_count];
             self.horizontal_scrolls = vec![0; file_count];
             self.files_visited = vec![false; file_count];
+            self.syntax_caches = vec![None; file_count];
             self.scroll_offset = 0;
             self.horizontal_scroll = 0;
             self.needs_scroll_to_active = true;
@@ -1832,7 +1918,7 @@ mod tests {
         let total_hunks = app.multi_diff.current_navigator().state().total_hunks;
         assert_eq!(total_hunks, 2);
 
-        app.goto_end(); // classic mode: scroll-only, no cursor
+        app.goto_end(); // no-step mode: scroll-only, no cursor
         app.prev_hunk_scroll();
         {
             let state = app.multi_diff.current_navigator().state();
@@ -1848,7 +1934,7 @@ mod tests {
     #[test]
     fn test_no_step_next_hunk_after_goto_start() {
         let mut app = make_app_with_two_hunks();
-        app.goto_start(); // classic mode: clears cursor + scope
+        app.goto_start(); // no-step mode: clears cursor + scope
 
         app.next_hunk_scroll();
         let state = app.multi_diff.current_navigator().state();
@@ -1869,7 +1955,7 @@ mod tests {
     }
 
     #[test]
-    fn test_goto_start_clears_hunk_scope_in_classic() {
+    fn test_goto_start_clears_hunk_scope_in_no_step() {
         let mut app = make_app_with_two_hunks();
         app.next_hunk_scroll();
         app.goto_start();
@@ -1880,7 +1966,7 @@ mod tests {
     }
 
     #[test]
-    fn test_goto_end_clears_hunk_scope_in_classic() {
+    fn test_goto_end_clears_hunk_scope_in_no_step() {
         let mut app = make_app_with_two_hunks();
         app.next_hunk_scroll();
         app.goto_end();
