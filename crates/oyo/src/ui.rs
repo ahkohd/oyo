@@ -141,34 +141,38 @@ fn draw_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
     // Build CENTER section: progress bar (wide) + step counter
     let show_bar = available_width >= 80;
     let mut center_spans = Vec::new();
-    let autoplay_marker = if app.autoplay { "▶" } else { " " };
-    center_spans.push(Span::styled(autoplay_marker, arrow_style));
-    center_spans.push(Span::raw(" "));
-    if show_bar {
-        let bar_width = 6usize;
-        let progress = if step_total > 0 {
-            step_current as f64 / step_total as f64
-        } else {
-            0.0
-        };
-        let filled = ((progress * bar_width as f64).round() as usize).min(bar_width);
-        let empty = bar_width.saturating_sub(filled);
-        let filled_bar = "=".repeat(filled);
-        let empty_bar = "-".repeat(empty);
-
-        center_spans.push(Span::styled("[", Style::default().fg(app.theme.text_muted)));
-        center_spans.push(Span::styled(
-            filled_bar,
-            Style::default().fg(app.theme.accent),
-        ));
-        center_spans.push(Span::styled(
-            empty_bar,
-            Style::default().fg(app.theme.text_muted),
-        ));
-        center_spans.push(Span::styled("]", Style::default().fg(app.theme.text_muted)));
+    
+    // Only show step progress if stepping is enabled
+    if app.stepping {
+        let autoplay_marker = if app.autoplay { "▶" } else { " " };
+        center_spans.push(Span::styled(autoplay_marker, arrow_style));
         center_spans.push(Span::raw(" "));
+        if show_bar {
+            let bar_width = 6usize;
+            let progress = if step_total > 0 {
+                step_current as f64 / step_total as f64
+            } else {
+                0.0
+            };
+            let filled = ((progress * bar_width as f64).round() as usize).min(bar_width);
+            let empty = bar_width.saturating_sub(filled);
+            let filled_bar = "=".repeat(filled);
+            let empty_bar = "-".repeat(empty);
+
+            center_spans.push(Span::styled("[", Style::default().fg(app.theme.text_muted)));
+            center_spans.push(Span::styled(
+                filled_bar,
+                Style::default().fg(app.theme.accent),
+            ));
+            center_spans.push(Span::styled(
+                empty_bar,
+                Style::default().fg(app.theme.text_muted),
+            ));
+            center_spans.push(Span::styled("]", Style::default().fg(app.theme.text_muted)));
+            center_spans.push(Span::raw(" "));
+        }
+        center_spans.push(Span::styled(step_text.clone(), step_style));
     }
-    center_spans.push(Span::styled(step_text.clone(), step_style));
 
     // Build RIGHT section: stats + hunk + file
     let mut right_spans = vec![
@@ -660,7 +664,8 @@ fn draw_help_popover(frame: &mut Frame, app: &App) {
         help_line("^G", "Show full file path".into()),
         help_line("z", "Center on active".into()),
         help_line("w", "Toggle line wrap".into()),
-        help_line("s", "Toggle strikethrough".into()),
+        help_line("s", "Toggle stepping".into()),
+        help_line("S", "Toggle strikethrough".into()),
         Line::from(""),
         Line::from(Span::styled(" Playback", section_style)),
         help_line("Space", "Toggle autoplay".into()),

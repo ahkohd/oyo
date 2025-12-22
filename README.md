@@ -5,6 +5,7 @@ Step through changes one at a time and watch the code transform, unlike traditio
 ## Features
 
 - **Step-through navigation**: Move through changes one at a time with keyboard shortcuts
+- **No-step mode**: Disable stepping to review all changes at once with scroll-only navigation
 - **Hunk navigation**: Jump between groups of related changes (hunks) with `h` and `l`
 - **Animated transitions**: Smooth fade in/out animations as changes are applied
 - **Three view modes**:
@@ -19,13 +20,10 @@ Step through changes one at a time and watch the code transform, unlike traditio
 
 ## Installation
 
-### CLI (Rust)
+### CLI (Cargo)
 
 ```bash
-# From source
-git clone https://github.com/ahkohd/oyo
-cd oyo
-cargo install --path crates/oyo
+cargo install oyo
 ```
 
 ## Usage
@@ -50,6 +48,9 @@ oyo old.rs new.rs --autoplay
 
 # Custom autoplay speed (100ms between steps)
 oyo old.rs new.rs --speed 100
+
+# No-step mode
+oyo old.rs new.rs --no-step
 ```
 
 ### Git Integration
@@ -85,16 +86,16 @@ Recommended git aliases in `~/.gitconfig`:
 
 | Key | Action |
 |-----|--------|
-| `↓` / `j` | Next step (supports count) |
-| `↑` / `k` | Previous step (supports count) |
-| `→` / `l` | Next hunk (supports count) |
-| `←` / `h` | Previous hunk (supports count) |
-| `b` | Jump to beginning of current hunk |
-| `e` | Jump to end of current hunk |
+| `↓` / `j` | Next step (scrolls in no-step mode) |
+| `↑` / `k` | Previous step (scrolls in no-step mode) |
+| `→` / `l` | Next hunk (scrolls in no-step mode) |
+| `←` / `h` | Previous hunk (scrolls in no-step mode) |
+| `b` | Jump to beginning of current hunk (scrolls in no-step mode) |
+| `e` | Jump to end of current hunk (scrolls in no-step mode) |
 | `<` | First applied step |
 | `>` | Last step |
-| `gg` | Go to start (scroll + first step) |
-| `G` | Go to end (scroll + last step) |
+| `gg` | Go to start (scroll-only in no-step mode) |
+| `G` | Go to end (scroll-only in no-step mode) |
 | `Space` | Toggle autoplay |
 | `Tab` | Toggle view mode |
 | `K` | Scroll up (supports count) |
@@ -110,7 +111,8 @@ Recommended git aliases in `~/.gitconfig`:
 | `Z` | Toggle zen mode |
 | `a` | Toggle animations |
 | `w` | Toggle line wrap |
-| `s` | Toggle strikethrough |
+| `s` | Toggle stepping (no-step mode) |
+| `S` | Toggle strikethrough |
 | `r` | Refresh file (or all files when file list focused) |
 | `f` | Toggle file panel |
 | `]` | Next file (supports count) |
@@ -131,6 +133,7 @@ view_mode = "single"        # Default: "single", "split", or "evolution"
 line_wrap = false           # Wrap long lines (default: false, uses horizontal scroll)
 scrollbar = false           # Show scrollbar (default: false)
 strikethrough_deletions = false # Show strikethrough on deleted text
+stepping = true             # Enable stepping (false = classic diff mode)
 primary_marker = "▶"        # Marker for primary active line (single-width char recommended)
 primary_marker_right = "◀"  # Right pane marker (optional, defaults to ◀)
 extent_marker = "▌"         # Left pane extent marker (Left Half Block)

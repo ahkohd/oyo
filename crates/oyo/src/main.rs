@@ -44,6 +44,10 @@ struct Args {
     /// Theme mode: dark or light
     #[arg(long, value_enum)]
     theme_mode: Option<CliThemeMode>,
+
+    /// Disable stepping (classic diff view)
+    #[arg(long)]
+    no_step: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -280,6 +284,18 @@ fn main() -> Result<()> {
     };
     app.theme = config.ui.theme.resolve(light_mode);
 
+    // Override config with CLI flag
+    if args.no_step {
+        app.stepping = false;
+    } else {
+        app.stepping = config.ui.stepping;
+    }
+
+    // If starting in no-step mode (classic), verify constraints and jump to end
+    if !app.stepping {
+        app.enter_no_step_mode();
+    }
+
     // Handle initial file enter (respects auto_step_blank_files and auto_step_on_enter)
     app.handle_file_enter();
 
@@ -326,15 +342,19 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<()> 
                         MouseEventKind::ScrollUp => {
                             if app.file_list_focused {
                                 app.prev_file();
-                            } else {
+                            } else if app.stepping {
                                 app.prev_step();
+                            } else {
+                                app.scroll_up();
                             }
                         }
                         MouseEventKind::ScrollDown => {
                             if app.file_list_focused {
                                 app.next_file();
-                            } else {
+                            } else if app.stepping {
                                 app.next_step();
+                            } else {
+                                app.scroll_down();
                             }
                         }
                         _ => {}
@@ -406,36 +426,62 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<()> 
                         KeyCode::Down | KeyCode::Char('j') => {
                             let count = app.take_count();
                             for _ in 0..count {
-                                app.next_step();
+                                if app.stepping {
+                                    app.next_step();
+                                } else {
+                                    app.scroll_down();
+                                }
                             }
                         }
                         KeyCode::Up | KeyCode::Char('k') => {
                             let count = app.take_count();
                             for _ in 0..count {
-                                app.prev_step();
+                                if app.stepping {
+                                    app.prev_step();
+                                } else {
+                                    app.scroll_up();
+                                }
                             }
                         }
                         // Hunk navigation (h/l and arrow keys, supports count)
                         KeyCode::Right | KeyCode::Char('l') => {
-                            let count = app.take_count();
-                            for _ in 0..count {
-                                app.next_hunk();
+                            if app.stepping {
+                                let count = app.take_count();
+                                for _ in 0..count {
+                                    app.next_hunk();
+                                }
+                            } else {
+                                // Scroll-only navigation in no-step mode
+                                app.next_hunk_scroll();
                             }
                         }
                         KeyCode::Left | KeyCode::Char('h') => {
-                            let count = app.take_count();
-                            for _ in 0..count {
-                                app.prev_hunk();
+                            if app.stepping {
+                                let count = app.take_count();
+                                for _ in 0..count {
+                                    app.prev_hunk();
+                                }
+                            } else {
+                                // Scroll-only navigation in no-step mode
+                                app.prev_hunk_scroll();
                             }
                         }
                         // Jump to begin/end of current hunk
                         KeyCode::Char('b') => {
                             app.reset_count();
-                            app.goto_hunk_start();
+                            if app.stepping {
+                                app.goto_hunk_start();
+                            } else {
+                                app.goto_hunk_start_scroll();
+                            }
                         }
                         KeyCode::Char('e') => {
                             app.reset_count();
-                            app.goto_hunk_end();
+                            if app.stepping {
+                                app.goto_hunk_end();
+                            } else {
+                                app.goto_hunk_end_scroll();
+                            }
                         }
                         KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             app.reset_count();
@@ -456,11 +502,15 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<()> 
                         }
                         KeyCode::Char('<') => {
                             app.reset_count();
-                            app.goto_first_step();
+                            if app.stepping {
+                                app.goto_first_step();
+                            }
                         }
                         KeyCode::Char('>') => {
                             app.reset_count();
-                            app.goto_last_step();
+                            if app.stepping {
+                                app.goto_last_step();
+                            }
                         }
                         // File navigation (supports count)
                         KeyCode::Char('[') | KeyCode::BackTab => {
@@ -478,7 +528,9 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<()> 
                         // General controls
                         KeyCode::Char(' ') => {
                             app.reset_count();
-                            app.toggle_autoplay();
+                            if app.stepping {
+                                app.toggle_autoplay();
+                            }
                         }
                         KeyCode::Tab => {
                             app.reset_count();
@@ -550,6 +602,11 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<()> 
                             app.toggle_line_wrap();
                         }
                         KeyCode::Char('s') => {
+                            app.reset_count();
+                            // Toggle stepping state
+                            app.toggle_stepping();
+                        }
+                        KeyCode::Char('S') => {
                             app.reset_count();
                             // Toggle strikethrough for deletions
                             app.toggle_strikethrough_deletions();

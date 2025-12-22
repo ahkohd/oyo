@@ -287,6 +287,8 @@ pub struct UiConfig {
     pub scrollbar: bool,
     /// Show strikethrough on deleted text
     pub strikethrough_deletions: bool,
+    /// Enable stepping (default: true). If false, shows all changes (classic diff behavior)
+    pub stepping: bool,
     /// Marker for primary active line (left pane / single pane)
     pub primary_marker: String,
     /// Marker for right pane primary line (defaults to ◀)
@@ -308,6 +310,7 @@ impl Default for UiConfig {
             line_wrap: false,
             scrollbar: false,
             strikethrough_deletions: false,
+            stepping: true,
             primary_marker: "▶".to_string(),
             primary_marker_right: None,
             extent_marker: "▌".to_string(),

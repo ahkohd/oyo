@@ -33,6 +33,9 @@ pub struct StepState {
     pub applied_changes: Vec<usize>,
     /// ID of the change being highlighted/animated at current step
     pub active_change: Option<usize>,
+    /// Cursor change used for non-stepping navigation (does not imply animation)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor_change: Option<usize>,
     /// Hunk currently being animated (distinct from cursor position in current_hunk)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub animating_hunk: Option<usize>,
@@ -57,6 +60,7 @@ impl StepState {
             total_steps: total_changes + 1, // +1 for initial state
             applied_changes: Vec::new(),
             active_change: None,
+            cursor_change: None,
             animating_hunk: None,
             step_direction: StepDirection::None,
             current_hunk: 0,
@@ -95,17 +99,29 @@ pub struct DiffNavigator {
     old_content: String,
     /// New content (for reconstructing views)
     new_content: String,
+    /// Mapping from change ID to hunk index
+    change_to_hunk: std::collections::HashMap<usize, usize>,
 }
 
 impl DiffNavigator {
     pub fn new(diff: DiffResult, old_content: String, new_content: String) -> Self {
         let total_changes = diff.significant_changes.len();
         let total_hunks = diff.hunks.len();
+        
+        // Build change ID to hunk index mapping
+        let mut change_to_hunk = std::collections::HashMap::new();
+        for (hunk_idx, hunk) in diff.hunks.iter().enumerate() {
+            for &change_id in &hunk.change_ids {
+                change_to_hunk.insert(change_id, hunk_idx);
+            }
+        }
+
         Self {
             diff,
             state: StepState::new(total_changes, total_hunks),
             old_content,
             new_content,
+            change_to_hunk,
         }
     }
 
@@ -123,6 +139,24 @@ impl DiffNavigator {
     /// Get the diff result
     pub fn diff(&self) -> &DiffResult {
         &self.diff
+    }
+
+    /// Set a non-animated cursor for classic (no-step) navigation.
+    pub fn set_cursor_hunk(&mut self, hunk_idx: usize, change_id: Option<usize>) {
+        if self.state.total_hunks > 0 {
+            self.state.current_hunk = hunk_idx.min(self.state.total_hunks - 1);
+        }
+        self.state.cursor_change = change_id;
+    }
+
+    /// Clear the non-animated cursor.
+    pub fn clear_cursor_change(&mut self) {
+        self.state.cursor_change = None;
+    }
+
+    /// Control hunk scope markers (extent indicators).
+    pub fn set_hunk_scope(&mut self, enabled: bool) {
+        self.state.last_nav_was_hunk = enabled;
     }
 
     /// Move to the next step
@@ -295,6 +329,7 @@ impl DiffNavigator {
         self.state.current_step = 0;
         self.state.applied_changes.clear();
         self.state.active_change = None;
+        self.state.cursor_change = None;
         self.state.animating_hunk = None;
         self.state.current_hunk = 0;
         self.state.last_nav_was_hunk = false; // Clear hunk nav flag on goto
@@ -679,7 +714,12 @@ impl DiffNavigator {
 
         // Primary cursor destination: last applied change on backward, active_change on forward
         // Fallback to active_change at step 0 so cursor stays on fading line
-        let primary_change_id = if self.state.step_direction == StepDirection::Backward {
+        let primary_change_id = if self.state.cursor_change.is_some()
+            && self.state.active_change.is_none()
+            && self.state.step_direction == StepDirection::None
+        {
+            self.state.cursor_change
+        } else if self.state.step_direction == StepDirection::Backward {
             self.state.applied_changes.last().copied().or(self.state.active_change)
         } else {
             self.state.active_change
@@ -729,7 +769,7 @@ impl DiffNavigator {
             } else {
                 // Single span - handle as before
                 if let Some(span) = change.spans.first() {
-                    if let Some(line) = self.build_single_span_line(span, is_applied, is_active, is_primary_active, show_hunk_extent, frame) {
+                    if let Some(line) = self.build_single_span_line(span, change.id, is_applied, is_active, is_primary_active, show_hunk_extent, frame) {
                         lines.push(line);
                     }
                 }
@@ -877,6 +917,9 @@ impl DiffNavigator {
             LineKind::Context
         };
 
+        // Populate hunk metadata
+        let hunk_index = self.change_to_hunk.get(&change.id).copied();
+
         Some(ViewLine {
             content,
             spans: view_spans,
@@ -886,12 +929,15 @@ impl DiffNavigator {
             is_active,
             is_primary_active,
             show_hunk_extent,
+            change_id: change.id,
+            hunk_index,
         })
     }
 
     fn build_single_span_line(
         &self,
         span: &ChangeSpan,
+        change_id: usize,
         is_applied: bool,
         is_active: bool,
         is_primary_active: bool,
@@ -962,6 +1008,9 @@ impl DiffNavigator {
             }
         }
 
+        // Populate hunk metadata
+        let hunk_index = self.change_to_hunk.get(&change_id).copied();
+
         Some(ViewLine {
             content: content.clone(),
             spans: vec![ViewSpan {
@@ -974,6 +1023,8 @@ impl DiffNavigator {
             is_active,
             is_primary_active,
             show_hunk_extent,
+            change_id,
+            hunk_index,
         })
     }
 
@@ -1022,6 +1073,10 @@ pub struct ViewLine {
     pub is_primary_active: bool,
     /// Show extent marker (true only during hunk navigation)
     pub show_hunk_extent: bool,
+    /// ID of the change this line belongs to
+    pub change_id: usize,
+    /// Index of the hunk this line belongs to
+    pub hunk_index: Option<usize>,
 }
 
 /// The kind of line in the view
