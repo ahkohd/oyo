@@ -363,6 +363,19 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<()> 
                         continue;
                     }
 
+                    if app.pending_g_prefix {
+                        let is_plain_g = matches!(key.code, KeyCode::Char('g'))
+                            && !key.modifiers.contains(KeyModifiers::CONTROL)
+                            && !key.modifiers.contains(KeyModifiers::ALT);
+                        if is_plain_g {
+                            app.pending_g_prefix = false;
+                            app.reset_count();
+                            app.goto_start();
+                            continue;
+                        }
+                        app.pending_g_prefix = false;
+                    }
+
                     match key.code {
                         // Digit keys for vim-style counts (e.g., 10j, 5l)
                         KeyCode::Char(c @ '0'..='9') => {
@@ -429,9 +442,13 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<()> 
                             // Toggle file path popup
                             app.toggle_path_popup();
                         }
-                        KeyCode::Home | KeyCode::Char('g') => {
+                        KeyCode::Home => {
                             app.reset_count();
                             app.goto_start();
+                        }
+                        KeyCode::Char('g') => {
+                            app.reset_count();
+                            app.pending_g_prefix = true;
                         }
                         KeyCode::End | KeyCode::Char('G') => {
                             app.reset_count();

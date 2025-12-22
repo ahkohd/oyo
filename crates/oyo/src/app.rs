@@ -91,6 +91,8 @@ pub struct App {
     pub animation_duration: u64,
     /// Pending count for vim-style commands (e.g., 10j = scroll down 10 lines)
     pub pending_count: Option<usize>,
+    /// Pending "g" prefix for vim-style commands (e.g., gg)
+    pub pending_g_prefix: bool,
     /// Horizontal scroll offset (for long lines)
     pub horizontal_scroll: usize,
     /// Per-file horizontal scroll offsets
@@ -177,6 +179,7 @@ impl App {
             auto_center: true,
             animation_duration: 150,
             pending_count: None,
+            pending_g_prefix: false,
             horizontal_scroll: 0,
             horizontal_scrolls: vec![0; file_count],
             line_wrap: false,
@@ -362,7 +365,7 @@ impl App {
     }
 
     pub fn goto_first_step(&mut self) {
-        self.multi_diff.current_navigator().goto_start();
+        self.multi_diff.current_navigator().goto(1);
         self.animation_phase = AnimationPhase::Idle;
         self.animation_progress = 1.0;
         self.centered_once = false;
@@ -702,7 +705,7 @@ impl App {
         let view = self.multi_diff.current_navigator().current_view_with_frame(frame);
         let step_direction = self.multi_diff.current_step_direction();
 
-        let (_display_len, display_idx) = display_metrics(
+        let (display_len, display_idx) = display_metrics(
             &view,
             self.view_mode,
             self.animation_phase,
@@ -721,6 +724,9 @@ impl App {
             else if idx >= self.scroll_offset.saturating_add(viewport_height.saturating_sub(margin)) {
                 self.scroll_offset = idx.saturating_sub(viewport_height.saturating_sub(margin + 1));
             }
+        } else if display_len > 0 {
+            // No active line (step 0); snap to top so "first step" is visible.
+            self.scroll_offset = 0;
         }
     }
 
@@ -730,7 +736,7 @@ impl App {
         let view = self.multi_diff.current_navigator().current_view_with_frame(frame);
         let step_direction = self.multi_diff.current_step_direction();
 
-        let (_display_len, display_idx) = display_metrics(
+        let (display_len, display_idx) = display_metrics(
             &view,
             self.view_mode,
             self.animation_phase,
@@ -741,6 +747,9 @@ impl App {
         if let Some(idx) = display_idx {
             let half_viewport = viewport_height / 2;
             self.scroll_offset = idx.saturating_sub(half_viewport);
+        } else if display_len > 0 {
+            // No active line (step 0); default to top of file.
+            self.scroll_offset = 0;
         }
 
         // Enable overscroll so centering works at bottom edge

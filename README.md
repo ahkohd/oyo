@@ -91,9 +91,9 @@ Recommended git aliases in `~/.gitconfig`:
 | `←` / `h` | Previous hunk (supports count) |
 | `b` | Jump to beginning of current hunk |
 | `e` | Jump to end of current hunk |
-| `<` | First step |
+| `<` | First applied step |
 | `>` | Last step |
-| `g` | Go to start (scroll + first step) |
+| `gg` | Go to start (scroll + first step) |
 | `G` | Go to end (scroll + last step) |
 | `Space` | Toggle autoplay |
 | `Tab` | Toggle view mode |
