@@ -485,6 +485,28 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<()> 
                                 app.goto_hunk_end_scroll();
                             }
                         }
+                        // Peek old without stepping (single view)
+                        KeyCode::Char('p') => {
+                            app.reset_count();
+                            if app.stepping {
+                                app.toggle_peek_old_change();
+                            }
+                        }
+                        KeyCode::Char('P') => {
+                            app.reset_count();
+                            if app.stepping {
+                                app.toggle_peek_old_hunk();
+                            }
+                        }
+                        // Yank to clipboard
+                        KeyCode::Char('y') => {
+                            app.reset_count();
+                            app.yank_current_change();
+                        }
+                        KeyCode::Char('Y') => {
+                            app.reset_count();
+                            app.yank_current_hunk();
+                        }
                         KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             app.reset_count();
                             // Toggle file path popup

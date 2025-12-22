@@ -2,9 +2,13 @@
 
 use crate::config::{ResolvedTheme, SyntaxMode};
 use crate::syntax::{SyntaxCache, SyntaxEngine, SyntaxSide};
-use oyo_core::{AnimationFrame, LineKind, MultiFileDiff, StepDirection, StepState, ViewLine};
+use oyo_core::{AnimationFrame, ChangeKind, LineKind, MultiFileDiff, StepDirection, StepState, ViewLine};
 use ratatui::text::Span;
 use std::time::{Duration, Instant};
+use std::{
+    io::Write,
+    process::{Command, Stdio},
+};
 
 /// Animation phase for smooth transitions
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,6 +153,8 @@ pub struct App {
     syntax_engine: Option<SyntaxEngine>,
     /// Per-file syntax cache (old/new spans)
     syntax_caches: Vec<Option<SyntaxCache>>,
+    /// Peek old/new state (stepping-only)
+    peek_state: Option<PeekState>,
 }
 
 /// Pure helper: determine if overscroll should be allowed
@@ -164,6 +170,17 @@ fn max_scroll(total_lines: usize, viewport_height: usize, allow_overscroll: bool
     } else {
         total_lines.saturating_sub(viewport_height)
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeekScope {
+    Change,
+    Hunk,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PeekState {
+    pub scope: PeekScope,
 }
 
 impl App {
@@ -210,7 +227,7 @@ impl App {
             file_panel_manually_set: false,
             show_path_popup: false,
             file_panel_auto_hidden: false,
-            auto_step_on_enter: false,
+            auto_step_on_enter: true,
             auto_step_blank_files: true,
             centered_once: false,
             primary_marker: "▶".to_string(),
@@ -223,6 +240,7 @@ impl App {
             syntax_mode: SyntaxMode::Auto,
             syntax_engine: None,
             syntax_caches: vec![None; file_count],
+            peek_state: None,
         }
     }
 
@@ -261,6 +279,112 @@ impl App {
         if matches!(self.syntax_mode, SyntaxMode::Off) {
             self.syntax_engine = None;
             self.syntax_caches = vec![None; self.multi_diff.file_count()];
+        }
+    }
+
+    pub fn toggle_peek_old_change(&mut self) {
+        self.toggle_peek(PeekScope::Change);
+    }
+
+    pub fn toggle_peek_old_hunk(&mut self) {
+        self.toggle_peek(PeekScope::Hunk);
+    }
+
+    fn toggle_peek(&mut self, scope: PeekScope) {
+        if !self.stepping {
+            return;
+        }
+        let next = PeekState { scope };
+        if self.peek_state == Some(next) {
+            self.peek_state = None;
+        } else {
+            self.peek_state = Some(next);
+        }
+    }
+
+    pub fn peek_active_for_line(&mut self, view_line: &ViewLine) -> bool {
+        let peek = match self.peek_state {
+            Some(peek) => peek,
+            None => return false,
+        };
+        if !self.stepping || self.animation_phase != AnimationPhase::Idle {
+            return false;
+        }
+        match peek.scope {
+            PeekScope::Change => view_line.is_primary_active,
+            PeekScope::Hunk => {
+                let current_hunk = self.multi_diff.current_navigator().state().current_hunk;
+                view_line.hunk_index == Some(current_hunk)
+            }
+        }
+    }
+
+    pub fn yank_current_change(&mut self) {
+        let frame = self.animation_frame();
+        let view_lines = self
+            .multi_diff
+            .current_navigator()
+            .current_view_with_frame(frame);
+        let Some(line) = view_lines.iter().find(|line| line.is_primary_active) else {
+            return;
+        };
+        if let Some(text) = self.text_for_yank(line) {
+            copy_to_clipboard(&text);
+        }
+    }
+
+    pub fn yank_current_hunk(&mut self) {
+        let frame = self.animation_frame();
+        let view_lines = self
+            .multi_diff
+            .current_navigator()
+            .current_view_with_frame(frame);
+        let current_hunk = self.multi_diff.current_navigator().state().current_hunk;
+        let mut lines: Vec<String> = Vec::new();
+        for line in view_lines.iter().filter(|line| line.hunk_index == Some(current_hunk)) {
+            if let Some(text) = self.text_for_yank(line) {
+                lines.push(text);
+            }
+        }
+        if lines.is_empty() {
+            return;
+        }
+        copy_to_clipboard(&lines.join("\n"));
+    }
+
+    fn text_for_yank(&mut self, view_line: &ViewLine) -> Option<String> {
+        if self.peek_active_for_line(view_line) {
+            if let Some(text) = self.peek_text_for_line(view_line) {
+                return Some(text);
+            }
+        }
+        Some(view_line.content.clone())
+    }
+
+    fn peek_text_for_line(&mut self, view_line: &ViewLine) -> Option<String> {
+        if !matches!(view_line.kind, LineKind::Modified | LineKind::PendingModify) {
+            return None;
+        }
+        let change = self
+            .multi_diff
+            .current_navigator()
+            .diff()
+            .changes
+            .get(view_line.change_id)?;
+        let mut text = String::new();
+        for span in &change.spans {
+            match span.kind {
+                ChangeKind::Equal => text.push_str(&span.text),
+                ChangeKind::Delete | ChangeKind::Replace => {
+                    text.push_str(&span.text);
+                }
+                ChangeKind::Insert => {}
+            }
+        }
+        if text.is_empty() {
+            None
+        } else {
+            Some(text)
         }
     }
 
@@ -982,6 +1106,7 @@ impl App {
         }
 
         let old_scroll = self.scroll_offset;
+        self.peek_state = None;
         self.multi_diff.current_navigator().goto_end();
         self.multi_diff.current_navigator().clear_active_change();
         self.animation_phase = AnimationPhase::Idle;
@@ -998,6 +1123,7 @@ impl App {
         } else {
             // Turning ON stepping
             // Reset to clean slate (start)
+            self.peek_state = None;
             self.goto_start();
         }
     }
@@ -1603,6 +1729,51 @@ impl App {
     }
 }
 
+fn copy_to_clipboard(text: &str) -> bool {
+    if text.is_empty() {
+        return false;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        return write_to_clipboard_cmd("pbcopy", &[], text);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if write_to_clipboard_cmd("wl-copy", &["--type", "text/plain"], text) {
+            return true;
+        }
+        if write_to_clipboard_cmd("xclip", &["-selection", "clipboard"], text) {
+            return true;
+        }
+        return write_to_clipboard_cmd("xsel", &["--clipboard", "--input"], text);
+    }
+    #[cfg(target_os = "windows")]
+    {
+        return write_to_clipboard_cmd("clip", &[], text);
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        false
+    }
+}
+
+fn write_to_clipboard_cmd(cmd: &str, args: &[&str], text: &str) -> bool {
+    let mut child = match Command::new(cmd)
+        .args(args)
+        .stdin(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => return false,
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        if stdin.write_all(text.as_bytes()).is_err() {
+            return false;
+        }
+    }
+    child.wait().is_ok()
+}
+
 /// Compute display metrics for scroll calculations.
 /// Returns (display_len, display_idx_of_active).
 /// display_idx is the row index of the primary active line (fallback to any active)
@@ -1783,6 +1954,7 @@ mod tests {
             show_hunk_extent: false,
             change_id: 0,
             hunk_index: None,
+            has_changes: kind != LineKind::Context,
         }
     }
 

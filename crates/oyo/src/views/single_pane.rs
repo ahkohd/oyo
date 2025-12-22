@@ -11,7 +11,7 @@ use ratatui::{
     widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
     Frame,
 };
-use oyo_core::{LineKind, ViewSpanKind};
+use oyo_core::{ChangeKind, LineKind, ViewSpan, ViewSpanKind};
 
 /// Width of the fixed line number gutter (marker + line num + prefix + space)
 const GUTTER_WIDTH: u16 = 8; // "▶1234 + "
@@ -142,7 +142,46 @@ pub fn render_single_pane(frame: &mut Frame, app: &mut App, area: Rect) {
         // Build content line (scrollable)
         let mut content_spans: Vec<Span> = Vec::new();
         let mut used_syntax = false;
-        if app.syntax_enabled() && matches!(view_line.kind, LineKind::Context) {
+        let mut peek_spans: Vec<ViewSpan> = Vec::new();
+        let mut has_peek = false;
+        if app.peek_active_for_line(view_line) {
+            if matches!(view_line.kind, LineKind::Modified | LineKind::PendingModify) {
+                if let Some(change) = app
+                    .multi_diff
+                    .current_navigator()
+                    .diff()
+                    .changes
+                    .get(view_line.change_id)
+                {
+                    for span in &change.spans {
+                        match span.kind {
+                            ChangeKind::Equal => peek_spans.push(ViewSpan {
+                                text: span.text.clone(),
+                                kind: ViewSpanKind::Equal,
+                            }),
+                            ChangeKind::Delete | ChangeKind::Replace => {
+                                peek_spans.push(ViewSpan {
+                                    text: span.text.clone(),
+                                    kind: ViewSpanKind::Deleted,
+                                });
+                            }
+                            ChangeKind::Insert => {}
+                        }
+                    }
+                }
+                if !peek_spans.is_empty() {
+                    has_peek = true;
+                }
+            }
+        }
+        let pure_context = matches!(view_line.kind, LineKind::Context)
+            && !view_line.has_changes
+            && !view_line.is_active
+            && view_line
+                .spans
+                .iter()
+                .all(|span| matches!(span.kind, ViewSpanKind::Equal));
+        if app.syntax_enabled() && pure_context {
             let side = if view_line.new_line.is_some() {
                 SyntaxSide::New
             } else {
@@ -155,8 +194,67 @@ pub fn render_single_pane(frame: &mut Frame, app: &mut App, area: Rect) {
             }
         }
         if !used_syntax {
-            for view_span in &view_line.spans {
-                let style = get_span_style(view_span.kind, view_line.kind, view_line.is_active, app);
+            let mut rebuilt_spans: Vec<ViewSpan> = Vec::new();
+            let spans = if has_peek {
+                &peek_spans
+            } else if !app.stepping
+                && matches!(view_line.kind, LineKind::Modified | LineKind::PendingModify)
+            {
+                if let Some(change) = app
+                    .multi_diff
+                    .current_navigator()
+                    .diff()
+                    .changes
+                    .get(view_line.change_id)
+                {
+                    for span in &change.spans {
+                        match span.kind {
+                            ChangeKind::Equal => rebuilt_spans.push(ViewSpan {
+                                text: span.text.clone(),
+                                kind: ViewSpanKind::Equal,
+                            }),
+                            ChangeKind::Delete => rebuilt_spans.push(ViewSpan {
+                                text: span.text.clone(),
+                                kind: ViewSpanKind::Deleted,
+                            }),
+                            ChangeKind::Insert => rebuilt_spans.push(ViewSpan {
+                                text: span.text.clone(),
+                                kind: ViewSpanKind::Inserted,
+                            }),
+                            ChangeKind::Replace => {
+                                rebuilt_spans.push(ViewSpan {
+                                    text: span.text.clone(),
+                                    kind: ViewSpanKind::Deleted,
+                                });
+                                rebuilt_spans.push(ViewSpan {
+                                    text: span.new_text.clone().unwrap_or_else(|| span.text.clone()),
+                                    kind: ViewSpanKind::Inserted,
+                                });
+                            }
+                        }
+                    }
+                }
+                if rebuilt_spans.is_empty() {
+                    &view_line.spans
+                } else {
+                    &rebuilt_spans
+                }
+            } else {
+                &view_line.spans
+            };
+
+            let style_line_kind = if has_peek
+                || (!app.stepping
+                && matches!(view_line.kind, LineKind::Modified | LineKind::PendingModify)
+            )
+            {
+                LineKind::Context
+            } else {
+                view_line.kind
+            };
+            for view_span in spans {
+                let style =
+                    get_span_style(view_span.kind, style_line_kind, view_line.is_active, app);
                 // For deleted spans, don't strikethrough leading whitespace
                 if app.strikethrough_deletions
                     && matches!(

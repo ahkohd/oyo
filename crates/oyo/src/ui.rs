@@ -655,6 +655,8 @@ fn draw_help_popover(frame: &mut Frame, app: &App) {
         help_line("j / k / ↑↓", "Step forward/back".into()),
         help_line("h / l / ←→", "Prev/next hunk".into()),
         help_line("b / e", "Hunk begin/end".into()),
+        help_line("p / P", "Peek old (change/hunk)".into()),
+        help_line("y / Y", "Yank line/hunk".into()),
         help_line("< / >", "First/last applied step".into()),
         help_line("gg / G", "Go to start/end".into()),
         help_line("J / K", "Scroll up/down".into()),

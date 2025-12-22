@@ -142,7 +142,14 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
         // Build content line (scrollable)
         let mut content_spans: Vec<Span> = Vec::new();
         let mut used_syntax = false;
-        if app.syntax_enabled() && matches!(view_line.kind, LineKind::Context) {
+        let pure_context = matches!(view_line.kind, LineKind::Context)
+            && !view_line.has_changes
+            && !view_line.is_active
+            && view_line
+                .spans
+                .iter()
+                .all(|span| matches!(span.kind, ViewSpanKind::Equal));
+        if app.syntax_enabled() && pure_context {
             let side = if view_line.new_line.is_some() {
                 SyntaxSide::New
             } else {

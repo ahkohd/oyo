@@ -10,7 +10,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Wrap},
     Frame,
 };
-use oyo_core::{LineKind, ViewSpanKind};
+use oyo_core::{ChangeKind, LineKind, ViewSpan, ViewSpanKind};
 
 /// Width of the fixed line number gutter
 const GUTTER_WIDTH: u16 = 6; // "▶1234 " or " 1234 "
@@ -103,7 +103,14 @@ fn render_old_pane(frame: &mut Frame, app: &mut App, area: Rect) {
             // Build content line
             let mut content_spans: Vec<Span> = Vec::new();
             let mut used_syntax = false;
-            if app.syntax_enabled() && matches!(view_line.kind, LineKind::Context) {
+            let pure_context = matches!(view_line.kind, LineKind::Context)
+                && !view_line.has_changes
+                && !view_line.is_active
+                && view_line
+                    .spans
+                    .iter()
+                    .all(|span| matches!(span.kind, ViewSpanKind::Equal));
+            if app.syntax_enabled() && pure_context {
                 if let Some(spans) = app.syntax_spans_for_line(SyntaxSide::Old, Some(old_line_num))
                 {
                     content_spans = spans;
@@ -111,7 +118,44 @@ fn render_old_pane(frame: &mut Frame, app: &mut App, area: Rect) {
                 }
             }
             if !used_syntax {
-                for view_span in &view_line.spans {
+                let mut rebuilt_spans: Vec<ViewSpan> = Vec::new();
+                let spans = if matches!(
+                    view_line.kind,
+                    LineKind::Modified | LineKind::PendingModify
+                ) {
+                    if let Some(change) = app
+                        .multi_diff
+                        .current_navigator()
+                        .diff()
+                        .changes
+                        .get(view_line.change_id)
+                    {
+                        for span in &change.spans {
+                            match span.kind {
+                                ChangeKind::Equal => rebuilt_spans.push(ViewSpan {
+                                    text: span.text.clone(),
+                                    kind: ViewSpanKind::Equal,
+                                }),
+                                ChangeKind::Delete | ChangeKind::Replace => {
+                                    rebuilt_spans.push(ViewSpan {
+                                        text: span.text.clone(),
+                                        kind: ViewSpanKind::Deleted,
+                                    });
+                                }
+                                ChangeKind::Insert => {}
+                            }
+                        }
+                    }
+                    if rebuilt_spans.is_empty() {
+                        &view_line.spans
+                    } else {
+                        &rebuilt_spans
+                    }
+                } else {
+                    &view_line.spans
+                };
+
+                for view_span in spans {
                     let style =
                         get_old_span_style(view_span.kind, view_line.kind, view_line.is_active, app);
                     // For deleted spans, don't strikethrough leading whitespace
@@ -260,7 +304,14 @@ fn render_new_pane(frame: &mut Frame, app: &mut App, area: Rect) {
             // Build content line
             let mut content_spans: Vec<Span> = Vec::new();
             let mut used_syntax = false;
-            if app.syntax_enabled() && matches!(view_line.kind, LineKind::Context) {
+            let pure_context = matches!(view_line.kind, LineKind::Context)
+                && !view_line.has_changes
+                && !view_line.is_active
+                && view_line
+                    .spans
+                    .iter()
+                    .all(|span| matches!(span.kind, ViewSpanKind::Equal));
+            if app.syntax_enabled() && pure_context {
                 if let Some(spans) = app.syntax_spans_for_line(SyntaxSide::New, Some(new_line_num))
                 {
                     content_spans = spans;
@@ -330,7 +381,8 @@ fn render_new_pane(frame: &mut Frame, app: &mut App, area: Rect) {
 
 fn get_old_span_style(kind: ViewSpanKind, line_kind: LineKind, is_active: bool, app: &App) -> Style {
     let theme = &app.theme;
-    let is_modification = matches!(line_kind, LineKind::Modified | LineKind::PendingModify);
+    let is_modification = matches!(line_kind, LineKind::Modified | LineKind::PendingModify)
+        && app.stepping;
     match kind {
         ViewSpanKind::Equal => Style::default().fg(theme.diff_context),
         ViewSpanKind::Deleted => {
@@ -410,7 +462,8 @@ fn get_old_span_style(kind: ViewSpanKind, line_kind: LineKind, is_active: bool, 
 
 fn get_new_span_style(kind: ViewSpanKind, line_kind: LineKind, is_active: bool, app: &App) -> Style {
     let theme = &app.theme;
-    let is_modification = matches!(line_kind, LineKind::Modified | LineKind::PendingModify);
+    let is_modification = matches!(line_kind, LineKind::Modified | LineKind::PendingModify)
+        && app.stepping;
     match kind {
         ViewSpanKind::Equal => Style::default().fg(theme.diff_context),
         ViewSpanKind::Inserted => {

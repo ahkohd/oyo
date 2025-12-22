@@ -919,6 +919,7 @@ impl DiffNavigator {
 
         // Populate hunk metadata
         let hunk_index = self.change_to_hunk.get(&change.id).copied();
+        let has_changes = change.has_changes();
 
         Some(ViewLine {
             content,
@@ -931,6 +932,7 @@ impl DiffNavigator {
             show_hunk_extent,
             change_id: change.id,
             hunk_index,
+            has_changes,
         })
     }
 
@@ -1010,6 +1012,7 @@ impl DiffNavigator {
 
         // Populate hunk metadata
         let hunk_index = self.change_to_hunk.get(&change_id).copied();
+        let has_changes = !matches!(span.kind, ChangeKind::Equal);
 
         Some(ViewLine {
             content: content.clone(),
@@ -1025,6 +1028,7 @@ impl DiffNavigator {
             show_hunk_extent,
             change_id,
             hunk_index,
+            has_changes,
         })
     }
 
@@ -1077,6 +1081,8 @@ pub struct ViewLine {
     pub change_id: usize,
     /// Index of the hunk this line belongs to
     pub hunk_index: Option<usize>,
+    /// True if the underlying change contains any non-equal spans
+    pub has_changes: bool,
 }
 
 /// The kind of line in the view
