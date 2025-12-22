@@ -138,8 +138,7 @@ fn draw_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
     let current_file = app.multi_diff.selected_index + 1;
     let file_text = format!("{}/{}", current_file, file_count);
 
-    // Build CENTER section: progress bar (wide) + step counter
-    let show_bar = available_width >= 80;
+    // Build CENTER section: step counter
     let mut center_spans = Vec::new();
     
     // Only show step progress if stepping is enabled
@@ -147,30 +146,10 @@ fn draw_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
         let autoplay_marker = if app.autoplay { "▶" } else { " " };
         center_spans.push(Span::styled(autoplay_marker, arrow_style));
         center_spans.push(Span::raw(" "));
-        if show_bar {
-            let bar_width = 6usize;
-            let progress = if step_total > 0 {
-                step_current as f64 / step_total as f64
-            } else {
-                0.0
-            };
-            let filled = ((progress * bar_width as f64).round() as usize).min(bar_width);
-            let empty = bar_width.saturating_sub(filled);
-            let filled_bar = "=".repeat(filled);
-            let empty_bar = "-".repeat(empty);
-
-            center_spans.push(Span::styled("[", Style::default().fg(app.theme.text_muted)));
-            center_spans.push(Span::styled(
-                filled_bar,
-                Style::default().fg(app.theme.accent),
-            ));
-            center_spans.push(Span::styled(
-                empty_bar,
-                Style::default().fg(app.theme.text_muted),
-            ));
-            center_spans.push(Span::styled("]", Style::default().fg(app.theme.text_muted)));
-            center_spans.push(Span::raw(" "));
-        }
+        center_spans.push(Span::styled(
+            "step ",
+            Style::default().fg(app.theme.text_muted),
+        ));
         center_spans.push(Span::styled(step_text.clone(), step_style));
     }
 
@@ -198,6 +177,7 @@ fn draw_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
         format!("file {}", file_text),
         Style::default().fg(app.theme.text_muted),
     ));
+    right_spans.push(Span::raw(" "));
 
     // Build LEFT section: mode + scope (path + branch)
     let center_width: usize = center_spans.iter().map(|s| s.content.len()).sum();
