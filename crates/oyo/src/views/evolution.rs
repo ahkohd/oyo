@@ -1,7 +1,7 @@
 //! Evolution view - shows file morphing without deletion markers
 //! Deleted lines simply disappear, showing the file as it evolves
 
-use super::render_empty_state;
+use super::{render_empty_state, spans_to_text};
 use crate::app::{AnimationPhase, App};
 use crate::syntax::SyntaxSide;
 use ratatui::{
@@ -56,6 +56,8 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
     let mut display_line_num = 0usize;
     let mut max_line_width: usize = 0;
 
+    let query = app.search_query().trim().to_ascii_lowercase();
+    let has_query = !query.is_empty();
     for view_line in view_lines.iter() {
         // Skip lines that are deleted or pending delete (they disappear in evolution view)
         match view_line.kind {
@@ -75,6 +77,7 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
         }
 
         display_line_num += 1;
+        let display_idx = display_line_num - 1;
 
         // Handle scrolling - when wrapping, we need all lines
         if !app.line_wrap && display_line_num <= app.scroll_offset {
@@ -140,7 +143,7 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
         gutter_lines.push(Line::from(gutter_spans));
 
         // Build content line (scrollable)
-        let mut content_spans: Vec<Span> = Vec::new();
+        let mut content_spans: Vec<Span<'static>> = Vec::new();
         let mut used_syntax = false;
         let pure_context = matches!(view_line.kind, LineKind::Context)
             && !view_line.has_changes
@@ -190,6 +193,12 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
                 }
             }
         }
+
+        let line_text = spans_to_text(&content_spans);
+        let is_active_match = app.search_target() == Some(display_idx)
+            && has_query
+            && line_text.to_ascii_lowercase().contains(&query);
+        content_spans = app.highlight_search_spans(content_spans, &line_text, is_active_match);
 
         // Track max line width
         let line_width: usize = content_spans.iter().map(|s| s.content.len()).sum();

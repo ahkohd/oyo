@@ -1,6 +1,6 @@
 //! Single pane view - morphs from old to new state
 
-use super::render_empty_state;
+use super::{render_empty_state, spans_to_text};
 use crate::app::App;
 use crate::color;
 use crate::syntax::SyntaxSide;
@@ -47,6 +47,8 @@ pub fn render_single_pane(frame: &mut Frame, app: &mut App, area: Rect) {
     let mut content_lines: Vec<Line> = Vec::new();
     let mut max_line_width: usize = 0;
 
+    let query = app.search_query().trim().to_ascii_lowercase();
+    let has_query = !query.is_empty();
     for (idx, view_line) in view_lines.iter().enumerate() {
         // When wrapping, we need all lines for proper wrap calculation
         // When not wrapping, skip lines before scroll offset
@@ -140,7 +142,7 @@ pub fn render_single_pane(frame: &mut Frame, app: &mut App, area: Rect) {
         gutter_lines.push(Line::from(gutter_spans));
 
         // Build content line (scrollable)
-        let mut content_spans: Vec<Span> = Vec::new();
+        let mut content_spans: Vec<Span<'static>> = Vec::new();
         let mut used_syntax = false;
         let mut peek_spans: Vec<ViewSpan> = Vec::new();
         let mut has_peek = false;
@@ -281,6 +283,12 @@ pub fn render_single_pane(frame: &mut Frame, app: &mut App, area: Rect) {
                 }
             }
         }
+
+        let line_text = spans_to_text(&content_spans);
+        let is_active_match = app.search_target() == Some(idx)
+            && has_query
+            && line_text.to_ascii_lowercase().contains(&query);
+        content_spans = app.highlight_search_spans(content_spans, &line_text, is_active_match);
 
         // Track max line width for horizontal scroll clamping
         let line_width: usize = content_spans.iter().map(|s| s.content.len()).sum();

@@ -384,6 +384,35 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<()> 
                         }
                         continue;
                     }
+                    if app.search_active() {
+                        match key.code {
+                            KeyCode::Esc => {
+                                app.clear_search();
+                            }
+                            KeyCode::Enter => {
+                                app.stop_search();
+                                app.search_next();
+                            }
+                            KeyCode::Backspace => {
+                                if app.search_query().is_empty() {
+                                    app.clear_search();
+                                } else {
+                                    app.pop_search_char();
+                                }
+                            }
+                            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                app.clear_search_text();
+                            }
+                            KeyCode::Char(c)
+                                if !key.modifiers.contains(KeyModifiers::CONTROL)
+                                    && !key.modifiers.contains(KeyModifiers::ALT) =>
+                            {
+                                app.push_search_char(c);
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
 
                     if app.pending_g_prefix {
                         let is_plain_g = matches!(key.code, KeyCode::Char('g'))
@@ -396,6 +425,15 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<()> 
                             continue;
                         }
                         app.pending_g_prefix = false;
+                    }
+                    if matches!(key.code, KeyCode::Esc)
+                        && !app.show_help
+                        && !app.show_path_popup
+                        && (app.search_active() || !app.search_query().is_empty())
+                    {
+                        app.reset_count();
+                        app.clear_search();
+                        continue;
                     }
 
                     match key.code {
@@ -684,9 +722,21 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<()> 
                                 app.toggle_file_panel();
                             }
                         }
-                        KeyCode::Char('/') if app.file_list_focused => {
+                        KeyCode::Char('/') => {
                             app.reset_count();
-                            app.start_file_filter();
+                            if app.file_list_focused {
+                                app.start_file_filter();
+                            } else {
+                                app.start_search();
+                            }
+                        }
+                        KeyCode::Char('n') => {
+                            app.reset_count();
+                            app.search_next();
+                        }
+                        KeyCode::Char('N') => {
+                            app.reset_count();
+                            app.search_prev();
                         }
                         KeyCode::Char('?') => {
                             app.reset_count();

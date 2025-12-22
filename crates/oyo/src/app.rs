@@ -1,9 +1,14 @@
 //! Application state and logic
 
+use crate::color;
 use crate::config::{ResolvedTheme, SyntaxMode};
 use crate::syntax::{SyntaxCache, SyntaxEngine, SyntaxSide};
-use oyo_core::{AnimationFrame, ChangeKind, LineKind, MultiFileDiff, StepDirection, StepState, ViewLine};
+use oyo_core::{
+    AnimationFrame, Change, ChangeKind, LineKind, MultiFileDiff, StepDirection, StepState, ViewLine,
+};
+use ratatui::style::Color;
 use ratatui::text::Span;
+use regex::{Regex, RegexBuilder};
 use std::time::{Duration, Instant};
 use std::{
     io::Write,
@@ -155,6 +160,18 @@ pub struct App {
     syntax_caches: Vec<Option<SyntaxCache>>,
     /// Peek old/new state (stepping-only)
     peek_state: Option<PeekState>,
+    /// Search query (diff pane)
+    search_query: String,
+    /// True when search input is active
+    search_active: bool,
+    /// Last matched display index for search navigation
+    search_last_target: Option<usize>,
+    /// Pending scroll to a search target
+    needs_scroll_to_search: bool,
+    /// Target display index for search scrolling
+    search_target: Option<usize>,
+    /// Cached search regex (case-insensitive)
+    search_regex: Option<Regex>,
 }
 
 /// Pure helper: determine if overscroll should be allowed
@@ -241,6 +258,12 @@ impl App {
             syntax_engine: None,
             syntax_caches: vec![None; file_count],
             peek_state: None,
+            search_query: String::new(),
+            search_active: false,
+            search_last_target: None,
+            needs_scroll_to_search: false,
+            search_target: None,
+            search_regex: None,
         }
     }
 
@@ -319,6 +342,138 @@ impl App {
         }
     }
 
+    pub fn start_search(&mut self) {
+        self.search_active = true;
+        self.search_query.clear();
+        self.search_last_target = None;
+        self.search_target = None;
+        self.needs_scroll_to_search = false;
+        self.search_regex = None;
+    }
+
+    pub fn stop_search(&mut self) {
+        self.search_active = false;
+    }
+
+    pub fn clear_search(&mut self) {
+        self.search_active = false;
+        self.search_query.clear();
+        self.search_last_target = None;
+        self.search_target = None;
+        self.needs_scroll_to_search = false;
+        self.search_regex = None;
+    }
+
+    pub fn clear_search_text(&mut self) {
+        self.search_query.clear();
+        self.search_last_target = None;
+        self.search_target = None;
+        self.needs_scroll_to_search = false;
+        self.search_regex = None;
+    }
+
+    pub fn push_search_char(&mut self, ch: char) {
+        self.search_query.push(ch);
+        self.search_last_target = None;
+        self.update_search_regex();
+    }
+
+    pub fn pop_search_char(&mut self) {
+        self.search_query.pop();
+        self.search_last_target = None;
+        self.update_search_regex();
+    }
+
+    fn reset_search_for_file_switch(&mut self) {
+        self.search_last_target = None;
+        self.search_target = None;
+        self.needs_scroll_to_search = false;
+    }
+
+    pub fn search_active(&self) -> bool {
+        self.search_active
+    }
+
+    pub fn search_query(&self) -> &str {
+        &self.search_query
+    }
+
+    fn update_search_regex(&mut self) {
+        let query = self.search_query.trim();
+        if query.is_empty() {
+            self.search_regex = None;
+            return;
+        }
+        let regex = RegexBuilder::new(query)
+            .case_insensitive(true)
+            .build()
+            .or_else(|_| {
+                RegexBuilder::new(&regex::escape(query))
+                    .case_insensitive(true)
+                    .build()
+            })
+            .ok();
+        self.search_regex = regex;
+    }
+
+    pub fn search_target(&self) -> Option<usize> {
+        self.search_target
+    }
+
+    pub fn search_next(&mut self) {
+        let matches = self.collect_search_matches();
+        if matches.is_empty() {
+            return;
+        }
+        let start = self.search_last_target.unwrap_or(self.scroll_offset);
+        let target = matches
+            .iter()
+            .copied()
+            .find(|idx| *idx > start)
+            .unwrap_or(matches[0]);
+        self.search_last_target = Some(target);
+        self.search_target = Some(target);
+        self.needs_scroll_to_search = true;
+    }
+
+    pub fn search_prev(&mut self) {
+        let matches = self.collect_search_matches();
+        if matches.is_empty() {
+            return;
+        }
+        let start = self.search_last_target.unwrap_or(self.scroll_offset);
+        let target = matches
+            .iter()
+            .copied()
+            .rev()
+            .find(|idx| *idx < start)
+            .unwrap_or(*matches.last().unwrap());
+        self.search_last_target = Some(target);
+        self.search_target = Some(target);
+        self.needs_scroll_to_search = true;
+    }
+
+    pub fn highlight_search_spans(
+        &self,
+        spans: Vec<Span<'static>>,
+        text: &str,
+        is_active: bool,
+    ) -> Vec<Span<'static>> {
+        let Some(regex) = self.search_regex.as_ref() else {
+            return spans;
+        };
+        let ranges = match_ranges(text, regex);
+        if ranges.is_empty() {
+            return spans;
+        }
+        let highlight_bg = if is_active {
+            self.theme.accent
+        } else {
+            color::dim_color(self.theme.accent)
+        };
+        apply_highlight_spans(spans, &ranges, highlight_bg)
+    }
+
     pub fn yank_current_change(&mut self) {
         let frame = self.animation_frame();
         let view_lines = self
@@ -371,21 +526,133 @@ impl App {
             .diff()
             .changes
             .get(view_line.change_id)?;
-        let mut text = String::new();
-        for span in &change.spans {
-            match span.kind {
-                ChangeKind::Equal => text.push_str(&span.text),
-                ChangeKind::Delete | ChangeKind::Replace => {
-                    text.push_str(&span.text);
+        let text = old_text_for_change(change);
+        if text.is_empty() { None } else { Some(text) }
+    }
+
+    fn collect_search_matches(&mut self) -> Vec<usize> {
+        let regex = match self.search_regex.as_ref() {
+            Some(regex) => regex.clone(),
+            None => return Vec::new(),
+        };
+        let frame = self.animation_frame();
+        let view = self
+            .multi_diff
+            .current_navigator()
+            .current_view_with_frame(frame);
+        let mut matches = Vec::new();
+
+        match self.view_mode {
+            ViewMode::SinglePane => {
+                let mut display_idx = 0usize;
+                for line in &view {
+                    let text = self.search_text_single(line);
+                    if line_has_query(&text, &regex) {
+                        matches.push(display_idx);
+                    }
+                    display_idx += 1;
                 }
-                ChangeKind::Insert => {}
+            }
+            ViewMode::Evolution => {
+                let mut display_idx = 0usize;
+                for line in &view {
+                    let visible = match line.kind {
+                        LineKind::Deleted => false,
+                        LineKind::PendingDelete => {
+                            line.is_active && self.animation_phase != AnimationPhase::Idle
+                        }
+                        _ => true,
+                    };
+                    if !visible {
+                        continue;
+                    }
+                    let text = self.search_text_single(line);
+                    if line_has_query(&text, &regex) {
+                        matches.push(display_idx);
+                    }
+                    display_idx += 1;
+                }
+            }
+            ViewMode::Split => {
+                let mut old_idx = 0usize;
+                let mut new_idx = 0usize;
+                for line in &view {
+                    if line.old_line.is_some() {
+                        if let Some(text) = self.search_text_split_old(line) {
+                            if line_has_query(&text, &regex) {
+                                matches.push(old_idx);
+                            }
+                        }
+                        old_idx += 1;
+                    }
+                    if line.new_line.is_some()
+                        && !matches!(line.kind, LineKind::Deleted | LineKind::PendingDelete)
+                    {
+                        if let Some(text) = self.search_text_split_new(line) {
+                            if line_has_query(&text, &regex) {
+                                matches.push(new_idx);
+                            }
+                        }
+                        new_idx += 1;
+                    }
+                }
             }
         }
-        if text.is_empty() {
-            None
-        } else {
-            Some(text)
+
+        matches.sort_unstable();
+        matches
+    }
+
+    fn search_text_single(&mut self, view_line: &ViewLine) -> String {
+        if self.peek_active_for_line(view_line) {
+            if let Some(text) = self.peek_text_for_line(view_line) {
+                return text;
+            }
         }
+        if !self.stepping && matches!(view_line.kind, LineKind::Modified | LineKind::PendingModify)
+        {
+            if let Some(change) = self
+                .multi_diff
+                .current_navigator()
+                .diff()
+                .changes
+                .get(view_line.change_id)
+            {
+                let text = inline_text_for_change(change);
+                if !text.is_empty() {
+                    return text;
+                }
+            }
+        }
+        view_line.content.clone()
+    }
+
+    fn search_text_split_old(&mut self, view_line: &ViewLine) -> Option<String> {
+        if view_line.old_line.is_none() {
+            return None;
+        }
+        if matches!(view_line.kind, LineKind::Modified | LineKind::PendingModify) {
+            if let Some(change) = self
+                .multi_diff
+                .current_navigator()
+                .diff()
+                .changes
+                .get(view_line.change_id)
+            {
+                let text = old_text_for_change(change);
+                if !text.is_empty() {
+                    return Some(text);
+                }
+            }
+        }
+        Some(view_line.content.clone())
+    }
+
+    fn search_text_split_new(&mut self, view_line: &ViewLine) -> Option<String> {
+        if view_line.new_line.is_none() {
+            return None;
+        }
+        Some(view_line.content.clone())
     }
 
     pub fn state(&mut self) -> StepState {
@@ -1358,6 +1625,7 @@ impl App {
             self.horizontal_scroll = self.horizontal_scrolls[self.multi_diff.selected_index];
             self.animation_phase = AnimationPhase::Idle;
             self.animation_progress = 1.0;
+            self.reset_search_for_file_switch();
             self.update_file_list_scroll();
             self.centered_once = false;
             self.handle_file_enter();
@@ -1391,6 +1659,7 @@ impl App {
             self.horizontal_scroll = self.horizontal_scrolls[self.multi_diff.selected_index];
             self.animation_phase = AnimationPhase::Idle;
             self.animation_progress = 1.0;
+            self.reset_search_for_file_switch();
             self.update_file_list_scroll();
             self.centered_once = false;
             self.handle_file_enter();
@@ -1407,6 +1676,7 @@ impl App {
         self.horizontal_scroll = self.horizontal_scrolls[self.multi_diff.selected_index];
         self.animation_phase = AnimationPhase::Idle;
         self.animation_progress = 1.0;
+        self.reset_search_for_file_switch();
         self.centered_once = false;
         self.update_file_list_scroll();
         self.handle_file_enter();
@@ -1556,6 +1826,27 @@ impl App {
 
     /// Ensure active change is visible if needed (called from views after stepping)
     pub fn ensure_active_visible_if_needed(&mut self, viewport_height: usize) {
+        if self.needs_scroll_to_search {
+            self.needs_scroll_to_search = false;
+            if let Some(idx) = self.search_target {
+                if self.auto_center {
+                    let half_viewport = viewport_height / 2;
+                    self.scroll_offset = idx.saturating_sub(half_viewport);
+                    self.centered_once = true;
+                } else {
+                    let margin = 3.min(viewport_height / 4);
+                    if idx < self.scroll_offset.saturating_add(margin) {
+                        self.scroll_offset = idx.saturating_sub(margin);
+                    } else if idx
+                        >= self.scroll_offset.saturating_add(viewport_height.saturating_sub(margin))
+                    {
+                        self.scroll_offset =
+                            idx.saturating_sub(viewport_height.saturating_sub(margin + 1));
+                    }
+                }
+            }
+            return;
+        }
         if !self.needs_scroll_to_active {
             return;
         }
@@ -1772,6 +2063,106 @@ fn write_to_clipboard_cmd(cmd: &str, args: &[&str], text: &str) -> bool {
         }
     }
     child.wait().is_ok()
+}
+
+fn old_text_for_change(change: &Change) -> String {
+    let mut text = String::new();
+    for span in &change.spans {
+        match span.kind {
+            ChangeKind::Equal => text.push_str(&span.text),
+            ChangeKind::Delete | ChangeKind::Replace => text.push_str(&span.text),
+            ChangeKind::Insert => {}
+        }
+    }
+    text
+}
+
+fn inline_text_for_change(change: &Change) -> String {
+    let mut text = String::new();
+    for span in &change.spans {
+        match span.kind {
+            ChangeKind::Equal => text.push_str(&span.text),
+            ChangeKind::Delete => text.push_str(&span.text),
+            ChangeKind::Insert => text.push_str(&span.text),
+            ChangeKind::Replace => {
+                text.push_str(&span.text);
+                text.push_str(&span.new_text.clone().unwrap_or_else(|| span.text.clone()));
+            }
+        }
+    }
+    text
+}
+
+fn line_has_query(text: &str, regex: &Regex) -> bool {
+    regex.is_match(text)
+}
+
+fn match_ranges(text: &str, regex: &Regex) -> Vec<(usize, usize)> {
+    let mut ranges = Vec::new();
+    for mat in regex.find_iter(text) {
+        ranges.push((mat.start(), mat.end()));
+    }
+    ranges
+}
+
+fn apply_highlight_spans(
+    spans: Vec<Span<'static>>,
+    ranges: &[(usize, usize)],
+    bg: Color,
+) -> Vec<Span<'static>> {
+    if ranges.is_empty() {
+        return spans;
+    }
+    let mut out: Vec<Span> = Vec::new();
+    let mut range_idx = 0usize;
+    let mut offset = 0usize;
+
+    for span in spans {
+        let text = span.content.as_ref();
+        let span_len = text.len();
+        let span_start = offset;
+        let span_end = offset + span_len;
+
+        if span_len == 0 {
+            continue;
+        }
+
+        while range_idx < ranges.len() && ranges[range_idx].1 <= span_start {
+            range_idx += 1;
+        }
+
+        let mut cursor = span_start;
+        while range_idx < ranges.len() && ranges[range_idx].0 < span_end {
+            let (r_start, r_end) = ranges[range_idx];
+            let before_end = r_start.max(span_start);
+            if before_end > cursor {
+                let slice = &text[(cursor - span_start)..(before_end - span_start)];
+                out.push(Span::styled(slice.to_string(), span.style));
+            }
+            let highlight_start = r_start.max(span_start);
+            let highlight_end = r_end.min(span_end);
+            if highlight_end > highlight_start {
+                let slice = &text[(highlight_start - span_start)..(highlight_end - span_start)];
+                let style = span.style.bg(bg);
+                out.push(Span::styled(slice.to_string(), style));
+            }
+            cursor = highlight_end;
+            if r_end <= span_end {
+                range_idx += 1;
+            } else {
+                break;
+            }
+        }
+
+        if cursor < span_end {
+            let slice = &text[(cursor - span_start)..(span_end - span_start)];
+            out.push(Span::styled(slice.to_string(), span.style));
+        }
+
+        offset += span_len;
+    }
+
+    out
 }
 
 /// Compute display metrics for scroll calculations.

@@ -95,6 +95,8 @@ Recommended git aliases in `~/.gitconfig`:
 | `e` | Jump to end of current hunk (scrolls in no-step mode) |
 | `p` / `P` | Peek old (change/hunk) |
 | `y` / `Y` | Yank line/hunk to clipboard |
+| `/` | Search (diff pane, regex) |
+| `n` / `N` | Next/previous match |
 | `<` | First applied step |
 | `>` | Last step |
 | `gg` | Go to start (scroll-only in no-step mode) |
@@ -127,6 +129,7 @@ Recommended git aliases in `~/.gitconfig`:
 | `q` / `Esc` | Quit (or close help) |
 
 Clipboard support uses system tools: `pbcopy` (macOS), `wl-copy` / `xclip` / `xsel` (Linux), `clip` (Windows).
+Search is case-insensitive regex; invalid patterns fall back to literal matching.
 
 ## Configuration
 

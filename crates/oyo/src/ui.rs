@@ -138,11 +138,25 @@ fn draw_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
     let current_file = app.multi_diff.selected_index + 1;
     let file_text = format!("{}/{}", current_file, file_count);
 
-    // Build CENTER section: step counter
+    // Build CENTER section: search prompt or step counter
     let mut center_spans = Vec::new();
-    
-    // Only show step progress if stepping is enabled
-    if app.stepping {
+    let show_search = app.search_active();
+    if show_search {
+        center_spans.push(Span::styled("/", Style::default().fg(app.theme.text_muted)));
+        center_spans.push(Span::raw(" "));
+        let query = app.search_query();
+        let query_text = if app.search_active() && query.is_empty() {
+            "Search".to_string()
+        } else {
+            query.to_string()
+        };
+        let query_style = if app.search_active() && query.is_empty() {
+            Style::default().fg(app.theme.text_muted)
+        } else {
+            Style::default().fg(app.theme.text)
+        };
+        center_spans.push(Span::styled(query_text, query_style));
+    } else if app.stepping {
         let autoplay_marker = if app.autoplay { "▶" } else { " " };
         center_spans.push(Span::styled(autoplay_marker, arrow_style));
         center_spans.push(Span::raw(" "));
@@ -637,6 +651,8 @@ fn draw_help_popover(frame: &mut Frame, app: &App) {
         help_line("b / e", "Hunk begin/end".into()),
         help_line("p / P", "Peek old (change/hunk)".into()),
         help_line("y / Y", "Yank line/hunk".into()),
+        help_line("/", "Search (diff pane)".into()),
+        help_line("n / N", "Next/prev match".into()),
         help_line("< / >", "First/last applied step".into()),
         help_line("gg / G", "Go to start/end".into()),
         help_line("J / K", "Scroll up/down".into()),

@@ -8,13 +8,23 @@ pub use evolution::render_evolution;
 pub use split::render_split;
 pub use single_pane::render_single_pane;
 
+use ratatui::text::Span;
+
+pub(crate) fn spans_to_text(spans: &[Span]) -> String {
+    let mut out = String::new();
+    for span in spans {
+        out.push_str(span.content.as_ref());
+    }
+    out
+}
+
 use crate::app::AnimationPhase;
 use crate::color;
 use crate::config::ResolvedTheme;
 use ratatui::{
     layout::{Alignment, Rect},
     style::{Color, Modifier, Style},
-    text::{Line, Span},
+    text::Line,
     widgets::Paragraph,
     Frame,
 };

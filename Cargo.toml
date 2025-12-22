@@ -34,3 +34,4 @@ clap = { version = "4.0", features = ["derive"] }
 # Config
 toml = "0.8"
 dirs = "5.0"
+regex = "1.10"
