@@ -122,6 +122,10 @@ fn build_theme(theme: &ResolvedTheme) -> Theme {
 
     let mut scopes = Vec::new();
     scopes.push(theme_item("comment", theme.syntax_comment));
+    scopes.push(theme_item(
+        "punctuation.definition.comment, punctuation.definition.comment.begin, punctuation.definition.comment.end",
+        theme.syntax_comment,
+    ));
     scopes.push(theme_item("string", theme.syntax_string));
     scopes.push(theme_item("keyword", theme.syntax_keyword));
     scopes.push(theme_item("constant.numeric", theme.syntax_number));
