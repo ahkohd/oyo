@@ -112,6 +112,10 @@ pub struct App {
     pub auto_center: bool,
     /// Animation duration in milliseconds (how long fade effects take)
     pub animation_duration: u64,
+    /// Delay (ms) before modified lines animate to new state (single view)
+    pub delay_modified_animation: u64,
+    /// Hold start time for modified animation delay
+    modified_animation_hold_until: Option<Instant>,
     /// Pending count for vim-style commands (e.g., 10j = scroll down 10 lines)
     pub pending_count: Option<usize>,
     /// Pending "g" prefix for vim-style commands (e.g., gg)
@@ -248,6 +252,8 @@ impl App {
             git_branch,
             auto_center: true,
             animation_duration: 150,
+            delay_modified_animation: 100,
+            modified_animation_hold_until: None,
             pending_count: None,
             pending_g_prefix: false,
             horizontal_scroll: 0,
@@ -1965,10 +1971,45 @@ impl App {
             .collect()
     }
 
+    fn active_change_is_modified(&mut self) -> bool {
+        let Some(change) = self.multi_diff.current_navigator().active_change() else {
+            return false;
+        };
+        let mut has_old = false;
+        let mut has_new = false;
+        for span in &change.spans {
+            match span.kind {
+                ChangeKind::Delete => has_old = true,
+                ChangeKind::Insert => has_new = true,
+                ChangeKind::Replace => {
+                    has_old = true;
+                    has_new = true;
+                }
+                ChangeKind::Equal => {}
+            }
+        }
+        has_old && has_new
+    }
+
     fn start_animation(&mut self) {
         self.animation_phase = AnimationPhase::FadeOut;
         self.animation_progress = 0.0;
         self.last_animation_tick = Instant::now();
+        self.modified_animation_hold_until = None;
+
+        if self.delay_modified_animation == 0 {
+            return;
+        }
+        if self.view_mode != ViewMode::SinglePane {
+            return;
+        }
+        if self.multi_diff.current_step_direction() != StepDirection::Forward {
+            return;
+        }
+        if self.active_change_is_modified() {
+            self.modified_animation_hold_until =
+                Some(Instant::now() + Duration::from_millis(self.delay_modified_animation));
+        }
     }
 
     /// Ensure active change is visible if needed (called from views after stepping)
@@ -2069,6 +2110,13 @@ impl App {
 
         // Update animation
         if self.animation_phase != AnimationPhase::Idle {
+            if let Some(hold_until) = self.modified_animation_hold_until {
+                if now < hold_until {
+                    return;
+                }
+                self.modified_animation_hold_until = None;
+                self.last_animation_tick = now;
+            }
             let elapsed = now.duration_since(self.last_animation_tick);
             let phase_duration = Duration::from_millis(self.animation_duration);
 
@@ -2084,6 +2132,7 @@ impl App {
                     AnimationPhase::FadeIn => {
                         self.animation_phase = AnimationPhase::Idle;
                         self.animation_progress = 1.0;
+                        self.modified_animation_hold_until = None;
 
                         // If this was a backward animation, clear the active change
                         // so un-applied insertions properly disappear

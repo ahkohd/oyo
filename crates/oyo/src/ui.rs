@@ -183,7 +183,7 @@ fn draw_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
         right_spans.push(Span::raw("  "));
         right_spans.push(Span::styled(
             format!("hunk {}", hunk),
-            Style::default().fg(app.theme.diff_line_number),
+            Style::default().fg(app.theme.text_muted),
         ));
     }
     right_spans.push(Span::raw("  "));

@@ -419,25 +419,11 @@ fn render_new_pane(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(marker_paragraph, marker_area);
 }
 
-fn get_old_span_style(kind: ViewSpanKind, line_kind: LineKind, is_active: bool, app: &App) -> Style {
+fn get_old_span_style(kind: ViewSpanKind, _line_kind: LineKind, is_active: bool, app: &App) -> Style {
     let theme = &app.theme;
-    let is_modification = matches!(line_kind, LineKind::Modified | LineKind::PendingModify)
-        && app.stepping;
     match kind {
         ViewSpanKind::Equal => Style::default().fg(theme.diff_context),
         ViewSpanKind::Deleted => {
-            if is_modification {
-                if is_active {
-                    return super::modify_style(
-                        app.animation_phase,
-                        app.animation_progress,
-                        app.is_backward_animation(),
-                        theme.modify_base(),
-                        theme.diff_context,
-                    );
-                }
-                return Style::default().fg(theme.modify_base());
-            }
             // Completed deletion: base color with optional strikethrough
             let mut style = super::delete_style(
                 AnimationPhase::Idle,
@@ -457,18 +443,6 @@ fn get_old_span_style(kind: ViewSpanKind, line_kind: LineKind, is_active: bool, 
             Style::default().fg(theme.text_muted)
         }
         ViewSpanKind::PendingDelete => {
-            if is_modification {
-                if is_active {
-                    return super::modify_style(
-                        app.animation_phase,
-                        app.animation_progress,
-                        app.is_backward_animation(),
-                        theme.modify_base(),
-                        theme.diff_context,
-                    );
-                }
-                return Style::default().fg(theme.modify_dim());
-            }
             if is_active {
                 super::delete_style(
                     app.animation_phase,
@@ -500,25 +474,11 @@ fn get_old_span_style(kind: ViewSpanKind, line_kind: LineKind, is_active: bool, 
     }
 }
 
-fn get_new_span_style(kind: ViewSpanKind, line_kind: LineKind, is_active: bool, app: &App) -> Style {
+fn get_new_span_style(kind: ViewSpanKind, _line_kind: LineKind, is_active: bool, app: &App) -> Style {
     let theme = &app.theme;
-    let is_modification = matches!(line_kind, LineKind::Modified | LineKind::PendingModify)
-        && app.stepping;
     match kind {
         ViewSpanKind::Equal => Style::default().fg(theme.diff_context),
         ViewSpanKind::Inserted => {
-            if is_modification {
-                if is_active {
-                    return super::modify_style(
-                        app.animation_phase,
-                        app.animation_progress,
-                        app.is_backward_animation(),
-                        theme.modify_base(),
-                        theme.diff_context,
-                    );
-                }
-                return Style::default().fg(theme.modify_base());
-            }
             // Completed insertion: base color
             super::insert_style(
                 AnimationPhase::Idle,
@@ -533,18 +493,6 @@ fn get_new_span_style(kind: ViewSpanKind, line_kind: LineKind, is_active: bool, 
             Style::default().fg(theme.text_muted)
         }
         ViewSpanKind::PendingInsert => {
-            if is_modification {
-                if is_active {
-                    return super::modify_style(
-                        app.animation_phase,
-                        app.animation_progress,
-                        app.is_backward_animation(),
-                        theme.modify_base(),
-                        theme.diff_context,
-                    );
-                }
-                return Style::default().fg(theme.modify_dim());
-            }
             if is_active {
                 super::insert_style(
                     app.animation_phase,
