@@ -73,7 +73,9 @@ impl DiffResult {
 
     /// Find which hunk a change belongs to
     pub fn hunk_for_change(&self, change_id: usize) -> Option<&Hunk> {
-        self.hunks.iter().find(|h| h.change_ids.contains(&change_id))
+        self.hunks
+            .iter()
+            .find(|h| h.change_ids.contains(&change_id))
     }
 }
 
@@ -157,13 +159,17 @@ impl DiffEngine {
                     new_line_num += 1;
                 }
                 ChangeTag::Delete => {
-                    pending_deletes
-                        .push((change.value().trim_end_matches('\n').to_string(), old_line_num));
+                    pending_deletes.push((
+                        change.value().trim_end_matches('\n').to_string(),
+                        old_line_num,
+                    ));
                     old_line_num += 1;
                 }
                 ChangeTag::Insert => {
-                    pending_inserts
-                        .push((change.value().trim_end_matches('\n').to_string(), new_line_num));
+                    pending_inserts.push((
+                        change.value().trim_end_matches('\n').to_string(),
+                        new_line_num,
+                    ));
                     new_line_num += 1;
                 }
             }
@@ -218,7 +224,9 @@ impl DiffEngine {
             };
 
             // Get line numbers from first span
-            let (old_line, new_line) = change.spans.first()
+            let (old_line, new_line) = change
+                .spans
+                .first()
                 .map(|s| (s.old_line, s.new_line))
                 .unwrap_or((None, None));
 
@@ -297,6 +305,7 @@ impl DiffEngine {
         hunks
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn flush_pending_changes(
         &self,
         pending_deletes: &mut Vec<(String, usize)>,
@@ -373,10 +382,8 @@ fn tokenize_code(line: &str) -> Vec<String> {
             }
             if ch.is_whitespace() {
                 // Group consecutive whitespace
-                if buf.is_empty() || !buf.chars().all(char::is_whitespace) {
-                    if !buf.is_empty() {
-                        tokens.push(std::mem::take(&mut buf));
-                    }
+                if !buf.is_empty() && !buf.chars().all(char::is_whitespace) {
+                    tokens.push(std::mem::take(&mut buf));
                 }
                 buf.push(ch);
             } else {
@@ -483,7 +490,10 @@ mod tests {
     #[test]
     fn test_tokenize_code_basic() {
         let tokens = tokenize_code("KeyModifiers, MouseEventKind}");
-        assert_eq!(tokens, vec!["KeyModifiers", ",", " ", "MouseEventKind", "}"]);
+        assert_eq!(
+            tokens,
+            vec!["KeyModifiers", ",", " ", "MouseEventKind", "}"]
+        );
     }
 
     #[test]
@@ -495,7 +505,10 @@ mod tests {
     #[test]
     fn test_tokenize_code_punctuation() {
         let tokens = tokenize_code("use foo::{A, B};");
-        assert_eq!(tokens, vec!["use", " ", "foo", ":", ":", "{", "A", ",", " ", "B", "}", ";"]);
+        assert_eq!(
+            tokens,
+            vec!["use", " ", "foo", ":", ":", "{", "A", ",", " ", "B", "}", ";"]
+        );
     }
 
     #[test]
@@ -515,11 +528,15 @@ mod tests {
         let change = &result.changes[result.significant_changes[0]];
 
         // Find spans by kind
-        let equal_content: String = change.spans.iter()
+        let equal_content: String = change
+            .spans
+            .iter()
             .filter(|s| s.kind == ChangeKind::Equal)
             .map(|s| s.text.as_str())
             .collect();
-        let insert_content: String = change.spans.iter()
+        let insert_content: String = change
+            .spans
+            .iter()
             .filter(|s| s.kind == ChangeKind::Insert)
             .map(|s| s.text.as_str())
             .collect();
@@ -528,14 +545,16 @@ mod tests {
         assert!(
             equal_content.contains("KeyModifiers"),
             "KeyModifiers should be equal, got equal: '{}', insert: '{}'",
-            equal_content, insert_content
+            equal_content,
+            insert_content
         );
 
         // MouseEventKind should be in insert spans (new)
         assert!(
             insert_content.contains("MouseEventKind"),
             "MouseEventKind should be inserted, got equal: '{}', insert: '{}'",
-            equal_content, insert_content
+            equal_content,
+            insert_content
         );
 
         // KeyModifiers should NOT be in insert spans

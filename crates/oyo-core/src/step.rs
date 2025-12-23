@@ -107,7 +107,7 @@ impl DiffNavigator {
     pub fn new(diff: DiffResult, old_content: String, new_content: String) -> Self {
         let total_changes = diff.significant_changes.len();
         let total_hunks = diff.hunks.len();
-        
+
         // Build change ID to hunk index mapping
         let mut change_to_hunk = std::collections::HashMap::new();
         for (hunk_idx, hunk) in diff.hunks.iter().enumerate() {
@@ -160,6 +160,7 @@ impl DiffNavigator {
     }
 
     /// Move to the next step
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> bool {
         // Handle preview mode dissolution on first step
         if self.state.hunk_preview_mode {
@@ -201,7 +202,7 @@ impl DiffNavigator {
     /// Dissolve preview mode on step down: keep first change, apply second
     fn dissolve_preview_for_step_down(&mut self) -> bool {
         let hunk = &self.diff.hunks[self.state.current_hunk];
-        
+
         // If hunk has only one change, stepping down exits the hunk
         if hunk.change_ids.len() <= 1 {
             self.state.hunk_preview_mode = false;
@@ -212,25 +213,25 @@ impl DiffNavigator {
         // Keep only first change, unapply the rest
         let first_change = hunk.change_ids[0];
         let second_change = hunk.change_ids[1];
-        
+
         // Remove all changes in this hunk except the first
-        self.state.applied_changes.retain(|&id| {
-            !hunk.change_ids.contains(&id) || id == first_change
-        });
-        
+        self.state
+            .applied_changes
+            .retain(|&id| !hunk.change_ids.contains(&id) || id == first_change);
+
         // Apply second change
         self.state.applied_changes.push(second_change);
-        
+
         // Update current_step to reflect actual applied changes
         self.state.current_step = self.state.applied_changes.len();
-        
+
         self.state.active_change = Some(second_change);
         self.state.step_direction = StepDirection::Forward;
         self.state.hunk_preview_mode = false;
         self.state.animating_hunk = None;
         // Preserve extent markers - we're still in the hunk scope
         self.state.last_nav_was_hunk = true;
-        
+
         true
     }
 
@@ -284,28 +285,28 @@ impl DiffNavigator {
     fn dissolve_preview_for_step_up(&mut self) -> bool {
         let current_hunk_idx = self.state.current_hunk;
         let hunk = &self.diff.hunks[current_hunk_idx];
-        
+
         // Set animating hunk for backward fade animation
         self.state.animating_hunk = Some(current_hunk_idx);
         self.state.active_change = hunk.change_ids.first().copied();
-        
+
         // Unapply all changes in this hunk
         for &change_id in &hunk.change_ids {
             self.state.applied_changes.retain(|&id| id != change_id);
         }
-        
+
         // Update current_step to reflect actual applied changes
         self.state.current_step = self.state.applied_changes.len();
-        
+
         // Move to previous hunk if possible
         if current_hunk_idx > 0 {
             self.state.current_hunk = current_hunk_idx - 1;
         }
-        
+
         self.state.step_direction = StepDirection::Backward;
         self.state.hunk_preview_mode = false;
         self.state.last_nav_was_hunk = false; // Exiting hunk
-        
+
         true
     }
 
@@ -372,7 +373,9 @@ impl DiffNavigator {
         self.state.hunk_preview_mode = false; // Will be set to true after applying
 
         let current_hunk = &self.diff.hunks[self.state.current_hunk];
-        let has_applied_in_current = current_hunk.change_ids.iter()
+        let has_applied_in_current = current_hunk
+            .change_ids
+            .iter()
             .any(|id| self.state.applied_changes.contains(id));
 
         // If current hunk has no applied changes, apply ALL changes (full preview)
@@ -463,7 +466,9 @@ impl DiffNavigator {
         // On hunk 0, only proceed if there are applied changes to unapply
         if self.state.current_hunk == 0 {
             let hunk = &self.diff.hunks[0];
-            let has_applied = hunk.change_ids.iter()
+            let has_applied = hunk
+                .change_ids
+                .iter()
                 .any(|id| self.state.applied_changes.contains(id));
             if !has_applied {
                 // No movement, restore preview mode
@@ -481,7 +486,12 @@ impl DiffNavigator {
 
         // Unapply changes from current hunk that are applied
         for &change_id in current_hunk.change_ids.iter().rev() {
-            if let Some(pos) = self.state.applied_changes.iter().position(|&id| id == change_id) {
+            if let Some(pos) = self
+                .state
+                .applied_changes
+                .iter()
+                .position(|&id| id == change_id)
+            {
                 self.state.applied_changes.remove(pos);
                 self.state.current_step = self.state.current_step.saturating_sub(1);
                 moved = true;
@@ -497,7 +507,9 @@ impl DiffNavigator {
         // (current_hunk tracks cursor position, animating_hunk tracks animation)
         if moved {
             // Check if we should move to previous hunk
-            let still_has_applied = current_hunk.change_ids.iter()
+            let still_has_applied = current_hunk
+                .change_ids
+                .iter()
                 .any(|id| self.state.applied_changes.contains(id));
             if !still_has_applied && self.state.current_hunk > 0 {
                 self.state.current_hunk -= 1;
@@ -577,7 +589,12 @@ impl DiffNavigator {
         // Unapply all changes in this hunk except the first
         let mut unapplied_any = false;
         for &change_id in &hunk.change_ids[1..] {
-            if let Some(pos) = self.state.applied_changes.iter().position(|&id| id == change_id) {
+            if let Some(pos) = self
+                .state
+                .applied_changes
+                .iter()
+                .position(|&id| id == change_id)
+            {
                 self.state.applied_changes.remove(pos);
                 self.state.current_step = self.state.current_step.saturating_sub(1);
                 unapplied_any = true;
@@ -603,7 +620,9 @@ impl DiffNavigator {
         }
 
         let hunk = &self.diff.hunks[self.state.current_hunk];
-        let has_applied = hunk.change_ids.iter()
+        let has_applied = hunk
+            .change_ids
+            .iter()
             .any(|id| self.state.applied_changes.contains(id));
         if !has_applied {
             return false;
@@ -674,7 +693,8 @@ impl DiffNavigator {
 
     /// Check if a change belongs to the current hunk (for persistent extent markers)
     fn is_change_in_current_hunk(&self, change_id: usize) -> bool {
-        self.diff.hunks
+        self.diff
+            .hunks
             .get(self.state.current_hunk)
             .map(|hunk| hunk.change_ids.contains(&change_id))
             .unwrap_or(false)
@@ -720,7 +740,11 @@ impl DiffNavigator {
         {
             self.state.cursor_change
         } else if self.state.step_direction == StepDirection::Backward {
-            self.state.applied_changes.last().copied().or(self.state.active_change)
+            self.state
+                .applied_changes
+                .last()
+                .copied()
+                .or(self.state.active_change)
         } else {
             self.state.active_change
         };
@@ -740,18 +764,13 @@ impl DiffNavigator {
             // Active if: (1) the active_change, or (2) in animating hunk (lights up whole hunk during animation)
             let is_active = is_active_change || is_in_hunk;
             // Show extent marker if animating hunk OR (last nav was hunk AND change in current hunk)
-            let show_hunk_extent = is_in_hunk ||
-                (self.state.last_nav_was_hunk && self.is_change_in_current_hunk(change.id));
+            let show_hunk_extent = is_in_hunk
+                || (self.state.last_nav_was_hunk && self.is_change_in_current_hunk(change.id));
 
             // Fallback: if primary_change_id is None but we're in an animating hunk,
             // first active line becomes primary
-            let is_primary_active = if is_primary_active {
-                true
-            } else if !primary_assigned && is_in_hunk && primary_change_id.is_none() {
-                true
-            } else {
-                false
-            };
+            let is_primary_active = is_primary_active
+                || (!primary_assigned && is_in_hunk && primary_change_id.is_none());
 
             if is_primary_active {
                 primary_assigned = true;
@@ -762,14 +781,29 @@ impl DiffNavigator {
 
             if is_word_level {
                 // Combine all spans into a single line
-                let line = self.build_word_level_line(change, is_applied, is_active, is_primary_active, show_hunk_extent, frame);
+                let line = self.build_word_level_line(
+                    change,
+                    is_applied,
+                    is_active,
+                    is_primary_active,
+                    show_hunk_extent,
+                    frame,
+                );
                 if let Some(l) = line {
                     lines.push(l);
                 }
             } else {
                 // Single span - handle as before
                 if let Some(span) = change.spans.first() {
-                    if let Some(line) = self.build_single_span_line(span, change.id, is_applied, is_active, is_primary_active, show_hunk_extent, frame) {
+                    if let Some(line) = self.build_single_span_line(
+                        span,
+                        change.id,
+                        is_applied,
+                        is_active,
+                        is_primary_active,
+                        show_hunk_extent,
+                        frame,
+                    ) {
                         lines.push(line);
                     }
                 }
@@ -810,12 +844,14 @@ impl DiffNavigator {
 
         // Pre-scan to classify: does this change have old content, new content, or both?
         // Replace counts as both since it has old text and new_text.
-        let has_old = change.spans.iter().any(|s| {
-            matches!(s.kind, ChangeKind::Delete | ChangeKind::Replace)
-        });
-        let has_new = change.spans.iter().any(|s| {
-            matches!(s.kind, ChangeKind::Insert | ChangeKind::Replace)
-        });
+        let has_old = change
+            .spans
+            .iter()
+            .any(|s| matches!(s.kind, ChangeKind::Delete | ChangeKind::Replace));
+        let has_new = change
+            .spans
+            .iter()
+            .any(|s| matches!(s.kind, ChangeKind::Insert | ChangeKind::Replace));
 
         // Build spans for the view line
         let mut view_spans = Vec::new();
@@ -899,7 +935,10 @@ impl DiffNavigator {
             };
 
             content.push_str(&text);
-            view_spans.push(ViewSpan { text, kind: span_kind });
+            view_spans.push(ViewSpan {
+                text,
+                kind: span_kind,
+            });
         }
 
         // Defensive guard: don't emit blank lines if all spans were filtered
@@ -936,6 +975,7 @@ impl DiffNavigator {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn build_single_span_line(
         &self,
         span: &ChangeSpan,
@@ -1206,7 +1246,8 @@ mod tests {
         );
         // current_hunk should have moved to 0 (cursor position)
         assert_eq!(
-            nav.state().current_hunk, 0,
+            nav.state().current_hunk,
+            0,
             "current_hunk should move to destination for status display"
         );
 
@@ -1281,7 +1322,10 @@ mod tests {
 
         // prev_hunk from hunk 0 should work (unapply the hunk)
         let moved = nav.prev_hunk();
-        assert!(moved, "prev_hunk should succeed when hunk 0 has applied changes");
+        assert!(
+            moved,
+            "prev_hunk should succeed when hunk 0 has applied changes"
+        );
         assert!(nav.state().is_at_start());
         assert_eq!(nav.state().current_step, 0);
 
@@ -1295,7 +1339,10 @@ mod tests {
 
         // Calling prev_hunk again should return false (nothing to unapply)
         let moved_again = nav.prev_hunk();
-        assert!(!moved_again, "prev_hunk should fail when hunk 0 has no applied changes");
+        assert!(
+            !moved_again,
+            "prev_hunk should fail when hunk 0 has no applied changes"
+        );
     }
 
     #[test]
@@ -1353,7 +1400,10 @@ mod tests {
 
         let engine = DiffEngine::new();
         let diff = engine.diff_strings(old, new);
-        assert!(!diff.hunks.is_empty(), "Fixture must produce at least 1 hunk");
+        assert!(
+            !diff.hunks.is_empty(),
+            "Fixture must produce at least 1 hunk"
+        );
         assert!(
             diff.hunks[0].change_ids.len() >= 2,
             "Hunk 0 must have at least 2 changes for this test"
@@ -1396,13 +1446,21 @@ mod tests {
 
         // next_hunk applies ALL changes (full preview), cursor at first
         nav.next_hunk();
-        assert_eq!(nav.state().current_step, 2, "Should apply all 2 changes after next_hunk");
+        assert_eq!(
+            nav.state().current_step,
+            2,
+            "Should apply all 2 changes after next_hunk"
+        );
         assert!(nav.state().hunk_preview_mode, "Should be in preview mode");
 
         // Step down dissolves preview: keeps first, applies second, cursor on second
         let moved = nav.next();
         assert!(moved, "next() should succeed");
-        assert_eq!(nav.state().current_step, 2, "Should still be at step 2 after dissolve");
+        assert_eq!(
+            nav.state().current_step,
+            2,
+            "Should still be at step 2 after dissolve"
+        );
         assert!(!nav.state().hunk_preview_mode, "Should exit preview mode");
 
         // Verify cursor is now on LINE3 (second change)
@@ -1417,7 +1475,7 @@ mod tests {
 
     #[test]
     fn test_next_hunk_completes_current_then_lands_on_next() {
-        // Two hunks separated by >3 lines. next_hunk on hunk 0 applies all, 
+        // Two hunks separated by >3 lines. next_hunk on hunk 0 applies all,
         // then next_hunk moves to hunk 1 with full preview.
         let old = "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8";
         let new = "line1\nLINE2\nLINE3\nline4\nline5\nline6\nLINE7\nLINE8";
@@ -1432,7 +1490,11 @@ mod tests {
         // First next_hunk: apply all changes in hunk 0 (full preview)
         nav.next_hunk();
         assert_eq!(nav.state().current_hunk, 0);
-        assert_eq!(nav.state().current_step, 2, "Should apply all 2 changes in hunk 0");
+        assert_eq!(
+            nav.state().current_step,
+            2,
+            "Should apply all 2 changes in hunk 0"
+        );
         assert!(nav.state().hunk_preview_mode);
 
         // Second next_hunk: move to hunk 1 with full preview
@@ -1463,7 +1525,11 @@ mod tests {
         let engine = DiffEngine::new();
         let diff = engine.diff_strings(old, new);
         assert_eq!(diff.hunks.len(), 1, "Must have exactly 1 hunk");
-        assert_eq!(diff.hunks[0].change_ids.len(), 2, "Hunk must have 2 changes");
+        assert_eq!(
+            diff.hunks[0].change_ids.len(),
+            2,
+            "Hunk must have 2 changes"
+        );
 
         let mut nav = DiffNavigator::new(diff, old.to_string(), new.to_string());
 
@@ -1491,11 +1557,17 @@ mod tests {
         let mut nav = DiffNavigator::new(diff, old.to_string(), new.to_string());
 
         nav.next_hunk();
-        assert!(nav.state().last_nav_was_hunk, "last_nav_was_hunk should be true after next_hunk");
+        assert!(
+            nav.state().last_nav_was_hunk,
+            "last_nav_was_hunk should be true after next_hunk"
+        );
 
         // Step within hunk (still in hunk 0)
         nav.next();
-        assert!(nav.state().last_nav_was_hunk, "last_nav_was_hunk should persist within hunk");
+        assert!(
+            nav.state().last_nav_was_hunk,
+            "last_nav_was_hunk should persist within hunk"
+        );
     }
 
     #[test]
@@ -1517,7 +1589,10 @@ mod tests {
 
         // Step into hunk 1 via next() - should clear markers
         nav.next();
-        assert!(!nav.state().last_nav_was_hunk, "Markers should clear when stepping into different hunk");
+        assert!(
+            !nav.state().last_nav_was_hunk,
+            "Markers should clear when stepping into different hunk"
+        );
     }
 
     #[test]
@@ -1736,7 +1811,10 @@ mod tests {
         // FadeOut: insert-only should still be visible (shows the inserted content)
         let view = nav.current_view_with_frame(AnimationFrame::FadeOut);
         let active_line = view.iter().find(|l| l.is_active);
-        assert!(active_line.is_some(), "Should have an active line during FadeOut");
+        assert!(
+            active_line.is_some(),
+            "Should have an active line during FadeOut"
+        );
         let active = active_line.unwrap();
         assert!(
             active.content.contains("bar"),
@@ -1747,7 +1825,10 @@ mod tests {
         // FadeIn: should also show the inserted content (visible both phases)
         let view = nav.current_view_with_frame(AnimationFrame::FadeIn);
         let active_line = view.iter().find(|l| l.is_active);
-        assert!(active_line.is_some(), "Should have an active line during FadeIn");
+        assert!(
+            active_line.is_some(),
+            "Should have an active line during FadeIn"
+        );
         let active = active_line.unwrap();
         assert!(
             active.content.contains("bar"),
@@ -1799,8 +1880,15 @@ mod tests {
         let view = nav.current_view_with_frame(AnimationFrame::FadeIn);
 
         let primary: Vec<_> = view.iter().filter(|l| l.is_primary_active).collect();
-        assert_eq!(primary.len(), 1, "Exactly one line should be primary active");
-        assert!(primary[0].is_active, "Primary active line must also be is_active");
+        assert_eq!(
+            primary.len(),
+            1,
+            "Exactly one line should be primary active"
+        );
+        assert!(
+            primary[0].is_active,
+            "Primary active line must also be is_active"
+        );
     }
 
     #[test]
@@ -1827,8 +1915,16 @@ mod tests {
         let extent = view.iter().filter(|l| l.show_hunk_extent).count();
         let primary = view.iter().filter(|l| l.is_primary_active).count();
 
-        assert!(active > 1, "Multiple lines should be active during animation, got {}", active);
-        assert!(extent > 1, "Multiple lines should show extent markers, got {}", extent);
+        assert!(
+            active > 1,
+            "Multiple lines should be active during animation, got {}",
+            active
+        );
+        assert!(
+            extent > 1,
+            "Multiple lines should show extent markers, got {}",
+            extent
+        );
         assert_eq!(primary, 1, "Exactly one line should be primary active");
     }
 
@@ -1849,8 +1945,15 @@ mod tests {
         let view = nav.current_view_with_frame(AnimationFrame::FadeOut);
 
         let primary: Vec<_> = view.iter().filter(|l| l.is_primary_active).collect();
-        assert_eq!(primary.len(), 1, "Exactly one line should be primary active");
-        assert!(primary[0].is_active, "Primary active line must also be is_active");
+        assert_eq!(
+            primary.len(),
+            1,
+            "Exactly one line should be primary active"
+        );
+        assert!(
+            primary[0].is_active,
+            "Primary active line must also be is_active"
+        );
 
         // Verify it's the first active line in the view
         let first_active_idx = view.iter().position(|l| l.is_active).unwrap();

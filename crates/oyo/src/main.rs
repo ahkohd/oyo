@@ -11,17 +11,20 @@ use anyhow::{Context, Result};
 use app::{App, ViewMode};
 use clap::Parser;
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+        MouseEventKind,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use oyo_core::MultiFileDiff;
 use ratatui::prelude::*;
 use std::fs::OpenOptions;
 use std::io::{self, IsTerminal};
 #[cfg(unix)]
 use std::path::PathBuf;
 use std::time::Duration;
-use oyo_core::MultiFileDiff;
 
 #[derive(Parser, Debug)]
 #[command(name = "oyo")]
@@ -223,7 +226,11 @@ fn main() -> Result<()> {
 
     // Create multi-file diff based on mode
     let (multi_diff, git_branch) = match input_mode {
-        InputMode::GitExternal { display_path, old_file, new_file } => {
+        InputMode::GitExternal {
+            display_path,
+            old_file,
+            new_file,
+        } => {
             // Git external diff mode
             let old_content = if old_file.to_string_lossy() == "/dev/null" {
                 String::new()
@@ -240,9 +247,9 @@ fn main() -> Result<()> {
             };
 
             // Detect git branch from current directory
-            let branch = oyo_core::git::get_current_branch(
-                &std::env::current_dir().unwrap_or_default()
-            ).ok();
+            let branch =
+                oyo_core::git::get_current_branch(&std::env::current_dir().unwrap_or_default())
+                    .ok();
 
             let diff = MultiFileDiff::from_file_pair(
                 display_path.clone(),
@@ -263,12 +270,7 @@ fn main() -> Result<()> {
                 let new_content = std::fs::read_to_string(&new_path)
                     .context(format!("Failed to read: {}", new_path.display()))?;
 
-                MultiFileDiff::from_file_pair(
-                    old_path,
-                    new_path,
-                    old_content,
-                    new_content,
-                )
+                MultiFileDiff::from_file_pair(old_path, new_path, old_content, new_content)
             };
             (diff, None)
         }
@@ -286,8 +288,8 @@ fn main() -> Result<()> {
                 );
             }
 
-            let repo_root = oyo_core::git::get_repo_root(&cwd)
-                .context("Failed to get git repository root")?;
+            let repo_root =
+                oyo_core::git::get_repo_root(&cwd).context("Failed to get git repository root")?;
 
             let changes = oyo_core::git::get_uncommitted_changes(&repo_root)
                 .context("Failed to get uncommitted changes")?;
@@ -317,8 +319,8 @@ fn main() -> Result<()> {
                 );
             }
 
-            let repo_root = oyo_core::git::get_repo_root(&cwd)
-                .context("Failed to get git repository root")?;
+            let repo_root =
+                oyo_core::git::get_repo_root(&cwd).context("Failed to get git repository root")?;
 
             let changes = oyo_core::git::get_staged_changes(&repo_root)
                 .context("Failed to get staged changes")?;
@@ -348,8 +350,8 @@ fn main() -> Result<()> {
                 );
             }
 
-            let repo_root = oyo_core::git::get_repo_root(&cwd)
-                .context("Failed to get git repository root")?;
+            let repo_root =
+                oyo_core::git::get_repo_root(&cwd).context("Failed to get git repository root")?;
 
             let changes = oyo_core::git::get_changes_between(&repo_root, &from, &to)
                 .context("Failed to get range changes")?;
@@ -409,13 +411,7 @@ fn main() -> Result<()> {
     let autoplay = args.autoplay || config.playback.autoplay;
 
     // Create app
-    let mut app = App::new(
-        multi_diff,
-        view_mode,
-        speed,
-        autoplay,
-        git_branch,
-    );
+    let mut app = App::new(multi_diff, view_mode, speed, autoplay, git_branch);
 
     // Apply additional config settings
     app.zen_mode = config.ui.zen;
@@ -432,11 +428,15 @@ fn main() -> Result<()> {
     app.auto_step_on_enter = config.playback.auto_step_on_enter;
     app.auto_step_blank_files = config.playback.auto_step_blank_files;
     app.primary_marker = config.ui.primary_marker.clone();
-    app.primary_marker_right = config.ui.primary_marker_right
+    app.primary_marker_right = config
+        .ui
+        .primary_marker_right
         .clone()
         .unwrap_or_else(|| "◀".to_string());
     app.extent_marker = config.ui.extent_marker.clone();
-    app.extent_marker_right = config.ui.extent_marker_right
+    app.extent_marker_right = config
+        .ui
+        .extent_marker_right
         .clone()
         .unwrap_or_else(|| "▐".to_string());
 

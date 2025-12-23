@@ -66,8 +66,7 @@ impl MultiFileDiff {
             // Get old and new content
             let old_content = match change.status {
                 FileStatus::Added | FileStatus::Untracked => String::new(),
-                _ => crate::git::get_head_content(&repo_root, &change.path)
-                    .unwrap_or_default(),
+                _ => crate::git::get_head_content(&repo_root, &change.path).unwrap_or_default(),
             };
 
             let new_content = match change.status {
@@ -118,7 +117,10 @@ impl MultiFileDiff {
         let engine = DiffEngine::new().with_word_level(true);
 
         for change in changes {
-            let old_path = change.old_path.clone().unwrap_or_else(|| change.path.clone());
+            let old_path = change
+                .old_path
+                .clone()
+                .unwrap_or_else(|| change.path.clone());
             let old_content = match change.status {
                 FileStatus::Added | FileStatus::Untracked => String::new(),
                 _ => crate::git::get_head_content(&repo_root, &old_path).unwrap_or_default(),
@@ -170,11 +172,15 @@ impl MultiFileDiff {
         let engine = DiffEngine::new().with_word_level(true);
 
         for change in changes {
-            let old_path = change.old_path.clone().unwrap_or_else(|| change.path.clone());
+            let old_path = change
+                .old_path
+                .clone()
+                .unwrap_or_else(|| change.path.clone());
             let old_content = match change.status {
                 FileStatus::Added | FileStatus::Untracked => String::new(),
-                _ => crate::git::get_file_at_commit(&repo_root, &from, &old_path)
-                    .unwrap_or_default(),
+                _ => {
+                    crate::git::get_file_at_commit(&repo_root, &from, &old_path).unwrap_or_default()
+                }
             };
 
             let new_content = match change.status {
@@ -455,47 +461,54 @@ impl MultiFileDiff {
         let engine = DiffEngine::new().with_word_level(true);
 
         for change in changes {
-            let old_path = change.old_path.clone().unwrap_or_else(|| change.path.clone());
-            let (old_content, new_content) = match mode {
-                GitDiffMode::Uncommitted => {
-                    let old_content = match change.status {
-                        FileStatus::Added | FileStatus::Untracked => String::new(),
-                        _ => crate::git::get_head_content(&repo_root, &old_path).unwrap_or_default(),
-                    };
-                    let new_content = match change.status {
-                        FileStatus::Deleted => String::new(),
-                        _ => {
-                            let full_path = repo_root.join(&change.path);
-                            std::fs::read_to_string(&full_path).unwrap_or_default()
-                        }
-                    };
-                    (old_content, new_content)
-                }
-                GitDiffMode::Staged => {
-                    let old_content = match change.status {
-                        FileStatus::Added | FileStatus::Untracked => String::new(),
-                        _ => crate::git::get_head_content(&repo_root, &old_path).unwrap_or_default(),
-                    };
-                    let new_content = match change.status {
-                        FileStatus::Deleted => String::new(),
-                        _ => crate::git::get_staged_content(&repo_root, &change.path).unwrap_or_default(),
-                    };
-                    (old_content, new_content)
-                }
-                GitDiffMode::Range { ref from, ref to } => {
-                    let old_content = match change.status {
-                        FileStatus::Added | FileStatus::Untracked => String::new(),
-                        _ => crate::git::get_file_at_commit(&repo_root, from, &old_path)
-                            .unwrap_or_default(),
-                    };
-                    let new_content = match change.status {
-                        FileStatus::Deleted => String::new(),
-                        _ => crate::git::get_file_at_commit(&repo_root, to, &change.path)
-                            .unwrap_or_default(),
-                    };
-                    (old_content, new_content)
-                }
-            };
+            let old_path = change
+                .old_path
+                .clone()
+                .unwrap_or_else(|| change.path.clone());
+            let (old_content, new_content) =
+                match mode {
+                    GitDiffMode::Uncommitted => {
+                        let old_content = match change.status {
+                            FileStatus::Added | FileStatus::Untracked => String::new(),
+                            _ => crate::git::get_head_content(&repo_root, &old_path)
+                                .unwrap_or_default(),
+                        };
+                        let new_content = match change.status {
+                            FileStatus::Deleted => String::new(),
+                            _ => {
+                                let full_path = repo_root.join(&change.path);
+                                std::fs::read_to_string(&full_path).unwrap_or_default()
+                            }
+                        };
+                        (old_content, new_content)
+                    }
+                    GitDiffMode::Staged => {
+                        let old_content = match change.status {
+                            FileStatus::Added | FileStatus::Untracked => String::new(),
+                            _ => crate::git::get_head_content(&repo_root, &old_path)
+                                .unwrap_or_default(),
+                        };
+                        let new_content = match change.status {
+                            FileStatus::Deleted => String::new(),
+                            _ => crate::git::get_staged_content(&repo_root, &change.path)
+                                .unwrap_or_default(),
+                        };
+                        (old_content, new_content)
+                    }
+                    GitDiffMode::Range { ref from, ref to } => {
+                        let old_content = match change.status {
+                            FileStatus::Added | FileStatus::Untracked => String::new(),
+                            _ => crate::git::get_file_at_commit(&repo_root, from, &old_path)
+                                .unwrap_or_default(),
+                        };
+                        let new_content = match change.status {
+                            FileStatus::Deleted => String::new(),
+                            _ => crate::git::get_file_at_commit(&repo_root, to, &change.path)
+                                .unwrap_or_default(),
+                        };
+                        (old_content, new_content)
+                    }
+                };
 
             let diff = engine.diff_strings(&old_content, &new_content);
 

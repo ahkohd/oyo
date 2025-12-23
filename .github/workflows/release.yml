@@ -1,0 +1,102 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump_type:
+        description: 'Version bump type'
+        required: true
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+      dry_run:
+        description: 'Dry run (no publish, no push)'
+        required: false
+        type: boolean
+        default: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Calculate new version
+        id: version
+        run: |
+          current=$(grep -m1 'version = ' Cargo.toml | sed 's/.*"\(.*\)"/\1/')
+          IFS='.' read -r major minor patch <<< "$current"
+          case "${{ inputs.bump_type }}" in
+            major) major=$((major + 1)); minor=0; patch=0 ;;
+            minor) minor=$((minor + 1)); patch=0 ;;
+            patch) patch=$((patch + 1)) ;;
+          esac
+          new="${major}.${minor}.${patch}"
+          echo "current=$current" >> $GITHUB_OUTPUT
+          echo "new=$new" >> $GITHUB_OUTPUT
+          echo "Bumping $current -> $new"
+
+      - name: Update version in Cargo.toml
+        run: |
+          sed -i 's/^version = ".*"/version = "${{ steps.version.outputs.new }}"/' Cargo.toml
+          cargo update --workspace
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Commit and tag
+        if: ${{ !inputs.dry_run }}
+        run: |
+          git add Cargo.toml Cargo.lock
+          git commit -m "chore: release v${{ steps.version.outputs.new }}"
+          git tag "v${{ steps.version.outputs.new }}"
+          git push origin main
+          git push origin "v${{ steps.version.outputs.new }}"
+
+      - name: Publish oyo-core
+        if: ${{ !inputs.dry_run }}
+        run: cargo publish -p oyo-core
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Wait for crates.io index
+        if: ${{ !inputs.dry_run }}
+        run: sleep 30
+
+      - name: Publish oyo
+        if: ${{ !inputs.dry_run }}
+        run: cargo publish -p oyo
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Create GitHub Release
+        if: ${{ !inputs.dry_run }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.new }}
+          generate_release_notes: true
+
+      - name: Dry run summary
+        if: ${{ inputs.dry_run }}
+        run: |
+          echo "## Dry Run Summary" >> $GITHUB_STEP_SUMMARY
+          echo "- Current version: ${{ steps.version.outputs.current }}" >> $GITHUB_STEP_SUMMARY
+          echo "- New version: ${{ steps.version.outputs.new }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Would commit, tag, and push v${{ steps.version.outputs.new }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Would publish oyo-core and oyo to crates.io" >> $GITHUB_STEP_SUMMARY
+          cargo publish -p oyo-core --dry-run
+          cargo publish -p oyo --dry-run

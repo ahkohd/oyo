@@ -4,6 +4,7 @@
 use super::{render_empty_state, spans_to_text, truncate_text};
 use crate::app::{AnimationPhase, App};
 use crate::syntax::SyntaxSide;
+use oyo_core::{LineKind, ViewSpanKind};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -11,7 +12,6 @@ use ratatui::{
     widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
     Frame,
 };
-use oyo_core::{LineKind, ViewSpanKind};
 
 /// Width of the fixed line number gutter (marker + line num + space + blank sign + space)
 const GUTTER_WIDTH: u16 = 8; // "▶1234   " (matches single-pane width)
@@ -27,7 +27,10 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
 
     app.ensure_active_visible_if_needed(visible_height);
     let animation_frame = app.animation_frame();
-    let view_lines = app.multi_diff.current_navigator().current_view_with_frame(animation_frame);
+    let view_lines = app
+        .multi_diff
+        .current_navigator()
+        .current_view_with_frame(animation_frame);
     let step_direction = app.multi_diff.current_step_direction();
     let (display_len, _) = crate::app::display_metrics(
         &view_lines,
@@ -42,10 +45,7 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
     // Split area into gutter (fixed) and content (scrollable)
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Length(GUTTER_WIDTH),
-            Constraint::Min(0),
-        ])
+        .constraints([Constraint::Length(GUTTER_WIDTH), Constraint::Min(0)])
         .split(area);
 
     let gutter_area = chunks[0];
@@ -125,9 +125,17 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
 
         // Gutter marker: primary marker for focus, extent marker for hunk nav, blank otherwise
         let (active_marker, active_style) = if view_line.is_primary_active {
-            (primary_marker.as_str(), Style::default().fg(app.theme.primary).add_modifier(Modifier::BOLD))
+            (
+                primary_marker.as_str(),
+                Style::default()
+                    .fg(app.theme.primary)
+                    .add_modifier(Modifier::BOLD),
+            )
         } else if view_line.show_hunk_extent {
-            (extent_marker.as_str(), Style::default().fg(app.theme.diff_ext_marker))
+            (
+                extent_marker.as_str(),
+                Style::default().fg(app.theme.diff_ext_marker),
+            )
         } else {
             (" ", Style::default())
         };
@@ -167,8 +175,12 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
         }
         if !used_syntax {
             for view_span in &view_line.spans {
-                let style =
-                    get_evolution_span_style(view_span.kind, view_line.kind, view_line.is_active, app);
+                let style = get_evolution_span_style(
+                    view_span.kind,
+                    view_line.kind,
+                    view_line.is_active,
+                    app,
+                );
                 // For deleted spans, don't strikethrough leading whitespace
                 if app.strikethrough_deletions
                     && matches!(
@@ -181,10 +193,8 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
                     let leading_ws_len = text.len() - trimmed.len();
                     if leading_ws_len > 0 && !trimmed.is_empty() {
                         let ws_style = style.remove_modifier(Modifier::CROSSED_OUT);
-                        content_spans.push(Span::styled(
-                            text[..leading_ws_len].to_string(),
-                            ws_style,
-                        ));
+                        content_spans
+                            .push(Span::styled(text[..leading_ws_len].to_string(), ws_style));
                         content_spans.push(Span::styled(trimmed.to_string(), style));
                     } else {
                         content_spans.push(Span::styled(view_span.text.clone(), style));
@@ -236,7 +246,12 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
 
     // Render content with horizontal scroll (or empty state)
     if content_lines.is_empty() {
-        let has_changes = !app.multi_diff.current_navigator().diff().significant_changes.is_empty();
+        let has_changes = !app
+            .multi_diff
+            .current_navigator()
+            .diff()
+            .significant_changes
+            .is_empty();
         render_empty_state(frame, content_area, &app.theme, has_changes);
     } else {
         let mut content_paragraph = if app.line_wrap {
@@ -244,8 +259,7 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
                 .wrap(Wrap { trim: false })
                 .scroll((app.scroll_offset as u16, 0))
         } else {
-            Paragraph::new(content_lines)
-                .scroll((0, app.horizontal_scroll as u16))
+            Paragraph::new(content_lines).scroll((0, app.horizontal_scroll as u16))
         };
         if let Some(style) = bg_style {
             content_paragraph = content_paragraph.style(style);
@@ -276,7 +290,12 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
-fn get_evolution_span_style(span_kind: ViewSpanKind, line_kind: LineKind, is_active: bool, app: &App) -> Style {
+fn get_evolution_span_style(
+    span_kind: ViewSpanKind,
+    line_kind: LineKind,
+    is_active: bool,
+    app: &App,
+) -> Style {
     let theme = &app.theme;
     // Check if this is a modification line - use modify gradient instead of insert
     let is_modification = matches!(line_kind, LineKind::Modified | LineKind::PendingModify);
@@ -321,18 +340,16 @@ fn get_evolution_span_style(span_kind: ViewSpanKind, line_kind: LineKind, is_act
                 } else {
                     Style::default().fg(theme.modify_dim())
                 }
+            } else if is_active {
+                super::insert_style(
+                    app.animation_phase,
+                    app.animation_progress,
+                    app.is_backward_animation(),
+                    theme.insert_base(),
+                    theme.diff_context,
+                )
             } else {
-                if is_active {
-                    super::insert_style(
-                        app.animation_phase,
-                        app.animation_progress,
-                        app.is_backward_animation(),
-                        theme.insert_base(),
-                        theme.diff_context,
-                    )
-                } else {
-                    Style::default().fg(theme.insert_dim())
-                }
+                Style::default().fg(theme.insert_dim())
             }
         }
         ViewSpanKind::PendingDelete => {

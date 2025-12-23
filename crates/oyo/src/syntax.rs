@@ -2,17 +2,17 @@
 
 use crate::config::ResolvedTheme;
 use ratatui::style::{Color as TuiColor, Modifier, Style};
+use std::collections::BTreeSet;
+use std::str::FromStr;
 use syntect::{
     easy::HighlightLines,
     highlighting::{
-        Color, FontStyle, Style as SynStyle, StyleModifier, Theme, ThemeItem, ThemeSettings,
-        ScopeSelectors,
+        Color, FontStyle, ScopeSelectors, Style as SynStyle, StyleModifier, Theme, ThemeItem,
+        ThemeSettings,
     },
     parsing::{ParseState, ScopeStack, SyntaxReference, SyntaxSet},
     util::LinesWithEndings,
 };
-use std::collections::BTreeSet;
-use std::str::FromStr;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SyntaxSide {
@@ -90,7 +90,12 @@ impl SyntaxEngine {
         out
     }
 
-    pub fn scopes_for_line(&self, content: &str, file_name: &str, line_index: usize) -> Vec<String> {
+    pub fn scopes_for_line(
+        &self,
+        content: &str,
+        file_name: &str,
+        line_index: usize,
+    ) -> Vec<String> {
         let syntax = self.syntax_for_file(file_name);
         let mut state = ParseState::new(syntax);
         let mut stack = ScopeStack::new();
@@ -140,61 +145,64 @@ impl SyntaxCache {
 }
 
 fn build_theme(theme: &ResolvedTheme) -> Theme {
-    let mut t = Theme::default();
-    t.settings = ThemeSettings {
-        foreground: Some(to_syntect(theme.syntax_plain)),
-        ..ThemeSettings::default()
+    let mut t = Theme {
+        settings: ThemeSettings {
+            foreground: Some(to_syntect(theme.syntax_plain)),
+            ..ThemeSettings::default()
+        },
+        ..Theme::default()
     };
 
-    let mut scopes = Vec::new();
-    scopes.push(theme_item("comment", theme.syntax_comment));
-    scopes.push(theme_item(
-        "punctuation.definition.comment, punctuation.definition.comment.begin, punctuation.definition.comment.end",
-        theme.syntax_comment,
-    ));
-    scopes.push(theme_item("string", theme.syntax_string));
-    scopes.push(theme_item(
-        "keyword, keyword.declaration, keyword.control, keyword.other, storage.modifier",
-        theme.syntax_keyword,
-    ));
-    scopes.push(theme_item("constant.numeric", theme.syntax_number));
-    scopes.push(theme_item(
-        "meta.annotation, meta.attribute, entity.other.attribute-name, variable.annotation",
-        theme.syntax_attribute,
-    ));
-    scopes.push(theme_item(
-        "meta.struct, meta.enum, meta.trait, meta.type, meta.generic",
-        theme.syntax_type,
-    ));
-    scopes.push(theme_item(
-        "storage.type, entity.name.type, entity.name.type.struct, entity.name.type.enum, entity.name.type.trait, entity.name.type.alias, entity.name.type.interface, entity.name.namespace, support.type, support.namespace",
-        theme.syntax_type,
-    ));
-    scopes.push(theme_item(
-        "entity.name.function, entity.name.function.method, support.function",
-        theme.syntax_function,
-    ));
-    scopes.push(theme_item(
-        "entity.name.function.macro, support.function.macro",
-        theme.syntax_macro,
-    ));
-    scopes.push(theme_item(
-        "variable, variable.parameter, variable.other, variable.other.member, variable.other.constant, variable.language",
-        theme.syntax_variable,
-    ));
-    scopes.push(theme_item(
-        "constant, constant.language, constant.character, constant.other",
-        theme.syntax_constant,
-    ));
-    scopes.push(theme_item(
-        "support.type.builtin, support.constant.builtin, support.function.builtin",
-        theme.syntax_builtin,
-    ));
-    scopes.push(theme_item(
-        "keyword.operator, keyword.operator.word, keyword.operator.symbol, operator",
-        theme.syntax_operator,
-    ));
-    scopes.push(theme_item("punctuation", theme.syntax_punctuation));
+    let scopes = vec![
+        theme_item("comment", theme.syntax_comment),
+        theme_item(
+            "punctuation.definition.comment, punctuation.definition.comment.begin, punctuation.definition.comment.end",
+            theme.syntax_comment,
+        ),
+        theme_item("string", theme.syntax_string),
+        theme_item(
+            "keyword, keyword.declaration, keyword.control, keyword.other, storage.modifier",
+            theme.syntax_keyword,
+        ),
+        theme_item("constant.numeric", theme.syntax_number),
+        theme_item(
+            "meta.annotation, meta.attribute, entity.other.attribute-name, variable.annotation",
+            theme.syntax_attribute,
+        ),
+        theme_item(
+            "meta.struct, meta.enum, meta.trait, meta.type, meta.generic",
+            theme.syntax_type,
+        ),
+        theme_item(
+            "storage.type, entity.name.type, entity.name.type.struct, entity.name.type.enum, entity.name.type.trait, entity.name.type.alias, entity.name.type.interface, entity.name.namespace, support.type, support.namespace",
+            theme.syntax_type,
+        ),
+        theme_item(
+            "entity.name.function, entity.name.function.method, support.function",
+            theme.syntax_function,
+        ),
+        theme_item(
+            "entity.name.function.macro, support.function.macro",
+            theme.syntax_macro,
+        ),
+        theme_item(
+            "variable, variable.parameter, variable.other, variable.other.member, variable.other.constant, variable.language",
+            theme.syntax_variable,
+        ),
+        theme_item(
+            "constant, constant.language, constant.character, constant.other",
+            theme.syntax_constant,
+        ),
+        theme_item(
+            "support.type.builtin, support.constant.builtin, support.function.builtin",
+            theme.syntax_builtin,
+        ),
+        theme_item(
+            "keyword.operator, keyword.operator.word, keyword.operator.symbol, operator",
+            theme.syntax_operator,
+        ),
+        theme_item("punctuation", theme.syntax_punctuation),
+    ];
 
     t.scopes = scopes;
     t

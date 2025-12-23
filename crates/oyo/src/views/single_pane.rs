@@ -4,6 +4,7 @@ use super::{render_empty_state, spans_to_text, truncate_text};
 use crate::app::App;
 use crate::color;
 use crate::syntax::SyntaxSide;
+use oyo_core::{ChangeKind, LineKind, ViewSpan, ViewSpanKind};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -11,7 +12,6 @@ use ratatui::{
     widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
     Frame,
 };
-use oyo_core::{ChangeKind, LineKind, ViewSpan, ViewSpanKind};
 
 /// Width of the fixed line number gutter (marker + line num + prefix + space)
 const GUTTER_WIDTH: u16 = 8; // "▶1234 + "
@@ -27,17 +27,17 @@ pub fn render_single_pane(frame: &mut Frame, app: &mut App, area: Rect) {
 
     app.ensure_active_visible_if_needed(visible_height);
     let animation_frame = app.animation_frame();
-    let view_lines = app.multi_diff.current_navigator().current_view_with_frame(animation_frame);
+    let view_lines = app
+        .multi_diff
+        .current_navigator()
+        .current_view_with_frame(animation_frame);
     app.clamp_scroll(view_lines.len(), visible_height, app.allow_overscroll());
     let debug_target = app.syntax_scope_target(&view_lines);
 
     // Split area into gutter (fixed) and content (scrollable)
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Length(GUTTER_WIDTH),
-            Constraint::Min(0),
-        ])
+        .constraints([Constraint::Length(GUTTER_WIDTH), Constraint::Min(0)])
         .split(area);
 
     let gutter_area = chunks[0];
@@ -70,12 +70,30 @@ pub fn render_single_pane(frame: &mut Frame, app: &mut App, area: Rect) {
 
         let (line_prefix, line_num_style) = match view_line.kind {
             LineKind::Context => (" ", Style::default().fg(app.theme.diff_line_number)),
-            LineKind::Inserted => ("+", Style::default().fg(Color::Rgb(insert_base.r, insert_base.g, insert_base.b))),
-            LineKind::Deleted => ("-", Style::default().fg(Color::Rgb(delete_base.r, delete_base.g, delete_base.b))),
-            LineKind::Modified => ("~", Style::default().fg(Color::Rgb(modify_base.r, modify_base.g, modify_base.b))),
-            LineKind::PendingDelete => ("-", Style::default().fg(Color::Rgb(delete_base.r, delete_base.g, delete_base.b))),
-            LineKind::PendingInsert => ("+", Style::default().fg(Color::Rgb(insert_base.r, insert_base.g, insert_base.b))),
-            LineKind::PendingModify => ("~", Style::default().fg(Color::Rgb(modify_base.r, modify_base.g, modify_base.b))),
+            LineKind::Inserted => (
+                "+",
+                Style::default().fg(Color::Rgb(insert_base.r, insert_base.g, insert_base.b)),
+            ),
+            LineKind::Deleted => (
+                "-",
+                Style::default().fg(Color::Rgb(delete_base.r, delete_base.g, delete_base.b)),
+            ),
+            LineKind::Modified => (
+                "~",
+                Style::default().fg(Color::Rgb(modify_base.r, modify_base.g, modify_base.b)),
+            ),
+            LineKind::PendingDelete => (
+                "-",
+                Style::default().fg(Color::Rgb(delete_base.r, delete_base.g, delete_base.b)),
+            ),
+            LineKind::PendingInsert => (
+                "+",
+                Style::default().fg(Color::Rgb(insert_base.r, insert_base.g, insert_base.b)),
+            ),
+            LineKind::PendingModify => (
+                "~",
+                Style::default().fg(Color::Rgb(modify_base.r, modify_base.g, modify_base.b)),
+            ),
         };
 
         // Sign column should fade with the line animation
@@ -125,9 +143,17 @@ pub fn render_single_pane(frame: &mut Frame, app: &mut App, area: Rect) {
 
         // Gutter marker: primary marker for focus, extent marker for hunk nav, blank otherwise
         let (active_marker, active_style) = if view_line.is_primary_active {
-            (primary_marker.as_str(), Style::default().fg(app.theme.primary).add_modifier(Modifier::BOLD))
+            (
+                primary_marker.as_str(),
+                Style::default()
+                    .fg(app.theme.primary)
+                    .add_modifier(Modifier::BOLD),
+            )
         } else if view_line.show_hunk_extent {
-            (extent_marker.as_str(), Style::default().fg(app.theme.diff_ext_marker))
+            (
+                extent_marker.as_str(),
+                Style::default().fg(app.theme.diff_ext_marker),
+            )
         } else {
             (" ", Style::default())
         };
@@ -147,34 +173,34 @@ pub fn render_single_pane(frame: &mut Frame, app: &mut App, area: Rect) {
         let mut used_syntax = false;
         let mut peek_spans: Vec<ViewSpan> = Vec::new();
         let mut has_peek = false;
-        if app.peek_active_for_line(view_line) {
-            if matches!(view_line.kind, LineKind::Modified | LineKind::PendingModify) {
-                if let Some(change) = app
-                    .multi_diff
-                    .current_navigator()
-                    .diff()
-                    .changes
-                    .get(view_line.change_id)
-                {
-                    for span in &change.spans {
-                        match span.kind {
-                            ChangeKind::Equal => peek_spans.push(ViewSpan {
+        if app.peek_active_for_line(view_line)
+            && matches!(view_line.kind, LineKind::Modified | LineKind::PendingModify)
+        {
+            if let Some(change) = app
+                .multi_diff
+                .current_navigator()
+                .diff()
+                .changes
+                .get(view_line.change_id)
+            {
+                for span in &change.spans {
+                    match span.kind {
+                        ChangeKind::Equal => peek_spans.push(ViewSpan {
+                            text: span.text.clone(),
+                            kind: ViewSpanKind::Equal,
+                        }),
+                        ChangeKind::Delete | ChangeKind::Replace => {
+                            peek_spans.push(ViewSpan {
                                 text: span.text.clone(),
-                                kind: ViewSpanKind::Equal,
-                            }),
-                            ChangeKind::Delete | ChangeKind::Replace => {
-                                peek_spans.push(ViewSpan {
-                                    text: span.text.clone(),
-                                    kind: ViewSpanKind::Deleted,
-                                });
-                            }
-                            ChangeKind::Insert => {}
+                                kind: ViewSpanKind::Deleted,
+                            });
                         }
+                        ChangeKind::Insert => {}
                     }
                 }
-                if !peek_spans.is_empty() {
-                    has_peek = true;
-                }
+            }
+            if !peek_spans.is_empty() {
+                has_peek = true;
             }
         }
         let pure_context = matches!(view_line.kind, LineKind::Context)
@@ -230,7 +256,10 @@ pub fn render_single_pane(frame: &mut Frame, app: &mut App, area: Rect) {
                                     kind: ViewSpanKind::Deleted,
                                 });
                                 rebuilt_spans.push(ViewSpan {
-                                    text: span.new_text.clone().unwrap_or_else(|| span.text.clone()),
+                                    text: span
+                                        .new_text
+                                        .clone()
+                                        .unwrap_or_else(|| span.text.clone()),
                                     kind: ViewSpanKind::Inserted,
                                 });
                             }
@@ -248,8 +277,7 @@ pub fn render_single_pane(frame: &mut Frame, app: &mut App, area: Rect) {
 
             let style_line_kind = if has_peek
                 || (!app.stepping
-                && matches!(view_line.kind, LineKind::Modified | LineKind::PendingModify)
-            )
+                    && matches!(view_line.kind, LineKind::Modified | LineKind::PendingModify))
             {
                 LineKind::Context
             } else {
@@ -271,10 +299,8 @@ pub fn render_single_pane(frame: &mut Frame, app: &mut App, area: Rect) {
                     if leading_ws_len > 0 && !trimmed.is_empty() {
                         // Render leading whitespace without strikethrough
                         let ws_style = style.remove_modifier(Modifier::CROSSED_OUT);
-                        content_spans.push(Span::styled(
-                            text[..leading_ws_len].to_string(),
-                            ws_style,
-                        ));
+                        content_spans
+                            .push(Span::styled(text[..leading_ws_len].to_string(), ws_style));
                         content_spans.push(Span::styled(trimmed.to_string(), style));
                     } else {
                         content_spans.push(Span::styled(view_span.text.clone(), style));
@@ -326,7 +352,12 @@ pub fn render_single_pane(frame: &mut Frame, app: &mut App, area: Rect) {
 
     // Render content with horizontal scroll (or empty state)
     if content_lines.is_empty() {
-        let has_changes = !app.multi_diff.current_navigator().diff().significant_changes.is_empty();
+        let has_changes = !app
+            .multi_diff
+            .current_navigator()
+            .diff()
+            .significant_changes
+            .is_empty();
         render_empty_state(frame, content_area, &app.theme, has_changes);
     } else {
         let mut content_paragraph = if app.line_wrap {
@@ -334,8 +365,7 @@ pub fn render_single_pane(frame: &mut Frame, app: &mut App, area: Rect) {
                 .wrap(Wrap { trim: false })
                 .scroll((app.scroll_offset as u16, 0))
         } else {
-            Paragraph::new(content_lines)
-                .scroll((0, app.horizontal_scroll as u16))
+            Paragraph::new(content_lines).scroll((0, app.horizontal_scroll as u16))
         };
         if let Some(style) = bg_style {
             content_paragraph = content_paragraph.style(style);
@@ -351,12 +381,15 @@ pub fn render_single_pane(frame: &mut Frame, app: &mut App, area: Rect) {
             let total_lines = view_lines.len();
             let visible_lines = content_area.height as usize;
             if total_lines > visible_lines {
-                let mut scrollbar_state = ScrollbarState::new(total_lines)
-                    .position(app.scroll_offset);
+                let mut scrollbar_state =
+                    ScrollbarState::new(total_lines).position(app.scroll_offset);
 
                 frame.render_stateful_widget(
                     scrollbar,
-                    area.inner(ratatui::layout::Margin { vertical: 1, horizontal: 0 }),
+                    area.inner(ratatui::layout::Margin {
+                        vertical: 1,
+                        horizontal: 0,
+                    }),
                     &mut scrollbar_state,
                 );
             }

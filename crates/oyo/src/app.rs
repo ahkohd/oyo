@@ -47,7 +47,6 @@ impl ViewMode {
             ViewMode::Evolution => ViewMode::SinglePane,
         }
     }
-
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -189,7 +188,11 @@ pub struct App {
 }
 
 /// Pure helper: determine if overscroll should be allowed
-fn allow_overscroll_state(auto_center: bool, needs_scroll_to_active: bool, centered_once: bool) -> bool {
+fn allow_overscroll_state(
+    auto_center: bool,
+    needs_scroll_to_active: bool,
+    centered_once: bool,
+) -> bool {
     (auto_center && needs_scroll_to_active) || centered_once
 }
 
@@ -197,7 +200,9 @@ fn allow_overscroll_state(auto_center: bool, needs_scroll_to_active: bool, cente
 fn max_scroll(total_lines: usize, viewport_height: usize, allow_overscroll: bool) -> usize {
     if allow_overscroll {
         // Allow last line to be centered: enough space for half viewport below
-        total_lines.saturating_sub(1).saturating_sub(viewport_height / 2)
+        total_lines
+            .saturating_sub(1)
+            .saturating_sub(viewport_height / 2)
     } else {
         total_lines.saturating_sub(viewport_height)
     }
@@ -530,7 +535,10 @@ impl App {
             .current_view_with_frame(frame);
         let current_hunk = self.multi_diff.current_navigator().state().current_hunk;
         let mut lines: Vec<String> = Vec::new();
-        for line in view_lines.iter().filter(|line| line.hunk_index == Some(current_hunk)) {
+        for line in view_lines
+            .iter()
+            .filter(|line| line.hunk_index == Some(current_hunk))
+        {
             if let Some(text) = self.text_for_yank(line) {
                 lines.push(text);
             }
@@ -561,7 +569,11 @@ impl App {
             .changes
             .get(view_line.change_id)?;
         let text = old_text_for_change(change);
-        if text.is_empty() { None } else { Some(text) }
+        if text.is_empty() {
+            None
+        } else {
+            Some(text)
+        }
     }
 
     fn collect_search_matches(&mut self) -> Vec<usize> {
@@ -578,13 +590,11 @@ impl App {
 
         match self.view_mode {
             ViewMode::SinglePane => {
-                let mut display_idx = 0usize;
-                for line in &view {
+                for (display_idx, line) in view.iter().enumerate() {
                     let text = self.search_text_single(line);
                     if line_has_query(&text, &regex) {
                         matches.push(display_idx);
                     }
-                    display_idx += 1;
                 }
             }
             ViewMode::Evolution => {
@@ -662,9 +672,7 @@ impl App {
     }
 
     fn search_text_split_old(&mut self, view_line: &ViewLine) -> Option<String> {
-        if view_line.old_line.is_none() {
-            return None;
-        }
+        view_line.old_line?;
         if matches!(view_line.kind, LineKind::Modified | LineKind::PendingModify) {
             if let Some(change) = self
                 .multi_diff
@@ -683,9 +691,7 @@ impl App {
     }
 
     fn search_text_split_new(&mut self, view_line: &ViewLine) -> Option<String> {
-        if view_line.new_line.is_none() {
-            return None;
-        }
+        view_line.new_line?;
         Some(view_line.content.clone())
     }
 
@@ -719,7 +725,7 @@ impl App {
             spans
                 .iter()
                 .map(|span| Span::styled(span.text.clone(), span.style))
-            .collect(),
+                .collect(),
         )
     }
 
@@ -808,16 +814,16 @@ impl App {
         display_idx: usize,
     ) -> Option<(SyntaxSide, usize)> {
         match self.view_mode {
-            ViewMode::SinglePane => view
-                .get(display_idx)
-                .and_then(|line| line.new_line.or(line.old_line).map(|line_num| {
+            ViewMode::SinglePane => view.get(display_idx).and_then(|line| {
+                line.new_line.or(line.old_line).map(|line_num| {
                     let side = if line.new_line.is_some() {
                         SyntaxSide::New
                     } else {
                         SyntaxSide::Old
                     };
                     (side, line_num)
-                })),
+                })
+            }),
             ViewMode::Evolution => {
                 let mut display_count = 0usize;
                 for line in view {
@@ -977,10 +983,7 @@ impl App {
                             end: start,
                         });
                     } else {
-                        bounds[hidx] = Some(HunkBounds {
-                            start,
-                            end: start,
-                        });
+                        bounds[hidx] = Some(HunkBounds { start, end: start });
                     }
                 }
             }
@@ -1031,9 +1034,7 @@ impl App {
     }
 
     /// Compute hunk bounds for split view (per-pane display start/end + change id).
-    fn compute_hunk_bounds_split(
-        &mut self,
-    ) -> (Vec<Option<HunkBounds>>, Vec<Option<HunkBounds>>) {
+    fn compute_hunk_bounds_split(&mut self) -> (Vec<Option<HunkBounds>>, Vec<Option<HunkBounds>>) {
         let view = self
             .multi_diff
             .current_navigator()
@@ -1059,10 +1060,7 @@ impl App {
                                 end: start,
                             });
                         } else {
-                            old_bounds[hidx] = Some(HunkBounds {
-                                start,
-                                end: start,
-                            });
+                            old_bounds[hidx] = Some(HunkBounds { start, end: start });
                         }
                     }
                 }
@@ -1081,10 +1079,7 @@ impl App {
                                 end: start,
                             });
                         } else {
-                            new_bounds[hidx] = Some(HunkBounds {
-                                start,
-                                end: start,
-                            });
+                            new_bounds[hidx] = Some(HunkBounds { start, end: start });
                         }
                     }
                 }
@@ -1095,15 +1090,17 @@ impl App {
         (old_bounds, new_bounds)
     }
 
-    fn pick_split_start(&self, old: Option<HunkStart>, new: Option<HunkStart>) -> Option<HunkStart> {
+    fn pick_split_start(
+        &self,
+        old: Option<HunkStart>,
+        new: Option<HunkStart>,
+    ) -> Option<HunkStart> {
         match (old, new) {
             (Some(o), Some(n)) => {
                 let old_dist = (o.idx as isize - self.scroll_offset as isize).abs();
                 let new_dist = (n.idx as isize - self.scroll_offset as isize).abs();
                 if old_dist < new_dist {
                     Some(o)
-                } else if new_dist < old_dist {
-                    Some(n)
                 } else {
                     Some(n)
                 }
@@ -1125,8 +1122,6 @@ impl App {
                 let new_dist = (n.start.idx as isize - self.scroll_offset as isize).abs();
                 if old_dist < new_dist {
                     Some(o)
-                } else if new_dist < old_dist {
-                    Some(n)
                 } else {
                     Some(n)
                 }
@@ -1198,10 +1193,7 @@ impl App {
         only
     }
 
-    fn prev_hunk_from_starts(
-        &self,
-        starts: &[Option<HunkStart>],
-    ) -> Option<(usize, HunkStart)> {
+    fn prev_hunk_from_starts(&self, starts: &[Option<HunkStart>]) -> Option<(usize, HunkStart)> {
         starts
             .iter()
             .enumerate()
@@ -1229,13 +1221,9 @@ impl App {
     }
 
     fn current_hunk_from_bounds(&self, bounds: &[Option<HunkBounds>]) -> Option<usize> {
-        bounds
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, bound)| bound.map(|b| (idx, b.start.idx)))
-            .filter(|&(_, start)| start <= self.scroll_offset)
-            .map(|(idx, _)| idx)
-            .last()
+        bounds.iter().enumerate().rev().find_map(|(idx, bound)| {
+            bound.and_then(|b| (b.start.idx <= self.scroll_offset).then_some(idx))
+        })
     }
 
     fn first_available_hunk(bounds: &[Option<HunkBounds>]) -> Option<(usize, HunkBounds)> {
@@ -1251,24 +1239,22 @@ impl App {
                 let (old_starts, new_starts) = self.compute_hunk_starts_split();
                 let effective: Vec<Option<HunkStart>> = old_starts
                     .into_iter()
-                    .zip(new_starts.into_iter())
+                    .zip(new_starts)
                     .map(|(old, new)| self.pick_split_start(old, new))
                     .collect();
-                effective
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(idx, start)| start.map(|s| (idx, s)))
-                    .filter(|&(_, start)| start.idx <= self.scroll_offset)
-                    .last()
+                effective.iter().enumerate().rev().find_map(|(idx, start)| {
+                    start.and_then(|s| (s.idx <= self.scroll_offset).then_some((idx, s)))
+                })
             }
             _ => {
                 let hunk_starts = self.compute_hunk_starts_single();
                 hunk_starts
                     .iter()
                     .enumerate()
-                    .filter_map(|(idx, start)| start.map(|s| (idx, s)))
-                    .filter(|&(_, start)| start.idx <= self.scroll_offset)
-                    .last()
+                    .rev()
+                    .find_map(|(idx, start)| {
+                        start.and_then(|s| (s.idx <= self.scroll_offset).then_some((idx, s)))
+                    })
             }
         };
 
@@ -1288,7 +1274,11 @@ impl App {
             let state = self.multi_diff.current_navigator().state();
             (state.current_hunk, state.cursor_change.is_some())
         };
-        let in_hunk_scope = self.multi_diff.current_navigator().state().last_nav_was_hunk;
+        let in_hunk_scope = self
+            .multi_diff
+            .current_navigator()
+            .state()
+            .last_nav_was_hunk;
         let use_cursor = auto_center && cursor_set && in_hunk_scope;
         let inclusive = in_hunk_scope;
         let target = match self.view_mode {
@@ -1296,7 +1286,7 @@ impl App {
                 let (old_starts, new_starts) = self.compute_hunk_starts_split();
                 let effective: Vec<Option<HunkStart>> = old_starts
                     .into_iter()
-                    .zip(new_starts.into_iter())
+                    .zip(new_starts)
                     .map(|(old, new)| self.pick_split_start(old, new))
                     .collect();
                 let mut target = if use_cursor && current_hunk < effective.len() {
@@ -1343,14 +1333,18 @@ impl App {
             let state = self.multi_diff.current_navigator().state();
             (state.current_hunk, state.cursor_change.is_some())
         };
-        let in_hunk_scope = self.multi_diff.current_navigator().state().last_nav_was_hunk;
+        let in_hunk_scope = self
+            .multi_diff
+            .current_navigator()
+            .state()
+            .last_nav_was_hunk;
         let use_cursor = auto_center && cursor_set && in_hunk_scope;
         let target = match self.view_mode {
             ViewMode::Split => {
                 let (old_starts, new_starts) = self.compute_hunk_starts_split();
                 let effective: Vec<Option<HunkStart>> = old_starts
                     .into_iter()
-                    .zip(new_starts.into_iter())
+                    .zip(new_starts)
                     .map(|(old, new)| self.pick_split_start(old, new))
                     .collect();
                 let mut target = if use_cursor && current_hunk < effective.len() {
@@ -1442,7 +1436,7 @@ impl App {
                 let (old_bounds, new_bounds) = self.compute_hunk_bounds_split();
                 let effective: Vec<Option<HunkBounds>> = old_bounds
                     .into_iter()
-                    .zip(new_bounds.into_iter())
+                    .zip(new_bounds)
                     .map(|(old, new)| self.pick_split_bounds(old, new))
                     .collect();
                 let hidx = if in_hunk_scope {
@@ -1502,7 +1496,7 @@ impl App {
                 let (old_bounds, new_bounds) = self.compute_hunk_bounds_split();
                 let effective: Vec<Option<HunkBounds>> = old_bounds
                     .into_iter()
-                    .zip(new_bounds.into_iter())
+                    .zip(new_bounds)
                     .map(|(old, new)| self.pick_split_bounds(old, new))
                     .collect();
                 let hidx = if in_hunk_scope {
@@ -1717,13 +1711,24 @@ impl App {
 
     /// Clamp scroll offset so we don't scroll past content
     /// When allow_overscroll is true, permits enough scroll for the last line to be centered
-    pub fn clamp_scroll(&mut self, total_lines: usize, viewport_height: usize, allow_overscroll: bool) {
-        self.scroll_offset = self.scroll_offset.min(max_scroll(total_lines, viewport_height, allow_overscroll));
+    pub fn clamp_scroll(
+        &mut self,
+        total_lines: usize,
+        viewport_height: usize,
+        allow_overscroll: bool,
+    ) {
+        self.scroll_offset =
+            self.scroll_offset
+                .min(max_scroll(total_lines, viewport_height, allow_overscroll));
     }
 
     /// Whether overscroll is allowed (centering is about to happen or manual zz was used)
     pub fn allow_overscroll(&self) -> bool {
-        allow_overscroll_state(self.auto_center, self.needs_scroll_to_active, self.centered_once)
+        allow_overscroll_state(
+            self.auto_center,
+            self.needs_scroll_to_active,
+            self.centered_once,
+        )
     }
 
     pub fn scroll_half_page_down(&mut self, viewport_height: usize) {
@@ -1959,10 +1964,7 @@ impl App {
 
         // Keep selected file visible in the file list
         let selected = self.multi_diff.selected_index;
-        let selected_pos = indices
-            .iter()
-            .position(|&i| i == selected)
-            .unwrap_or(0);
+        let selected_pos = indices.iter().position(|&i| i == selected).unwrap_or(0);
         if selected_pos < self.file_list_scroll {
             self.file_list_scroll = selected_pos;
         }
@@ -2061,7 +2063,9 @@ impl App {
                     if idx < self.scroll_offset.saturating_add(margin) {
                         self.scroll_offset = idx.saturating_sub(margin);
                     } else if idx
-                        >= self.scroll_offset.saturating_add(viewport_height.saturating_sub(margin))
+                        >= self
+                            .scroll_offset
+                            .saturating_add(viewport_height.saturating_sub(margin))
                     {
                         self.scroll_offset =
                             idx.saturating_sub(viewport_height.saturating_sub(margin + 1));
@@ -2082,7 +2086,10 @@ impl App {
         }
 
         let frame = self.animation_frame();
-        let view = self.multi_diff.current_navigator().current_view_with_frame(frame);
+        let view = self
+            .multi_diff
+            .current_navigator()
+            .current_view_with_frame(frame);
         let step_direction = self.multi_diff.current_step_direction();
 
         let (display_len, display_idx) = display_metrics(
@@ -2101,7 +2108,11 @@ impl App {
                 self.scroll_offset = idx.saturating_sub(margin);
             }
             // Check if active line is below viewport
-            else if idx >= self.scroll_offset.saturating_add(viewport_height.saturating_sub(margin)) {
+            else if idx
+                >= self
+                    .scroll_offset
+                    .saturating_add(viewport_height.saturating_sub(margin))
+            {
                 self.scroll_offset = idx.saturating_sub(viewport_height.saturating_sub(margin + 1));
             }
         } else if display_len > 0 {
@@ -2113,7 +2124,10 @@ impl App {
     /// Center the viewport on the active change (like Vim's zz)
     pub fn center_on_active(&mut self, viewport_height: usize) {
         let frame = self.animation_frame();
-        let view = self.multi_diff.current_navigator().current_view_with_frame(frame);
+        let view = self
+            .multi_diff
+            .current_navigator()
+            .current_view_with_frame(frame);
         let step_direction = self.multi_diff.current_step_direction();
 
         let (display_len, display_idx) = display_metrics(
@@ -2155,7 +2169,8 @@ impl App {
             let elapsed = now.duration_since(self.last_animation_tick);
             let phase_duration = Duration::from_millis(self.animation_duration);
 
-            self.animation_progress = (elapsed.as_secs_f32() / phase_duration.as_secs_f32()).min(1.0);
+            self.animation_progress =
+                (elapsed.as_secs_f32() / phase_duration.as_secs_f32()).min(1.0);
 
             if self.animation_progress >= 1.0 {
                 match self.animation_phase {
@@ -2202,7 +2217,10 @@ impl App {
     #[allow(dead_code)]
     pub fn total_lines(&mut self) -> usize {
         let frame = self.animation_frame();
-        self.multi_diff.current_navigator().current_view_with_frame(frame).len()
+        self.multi_diff
+            .current_navigator()
+            .current_view_with_frame(frame)
+            .len()
     }
 
     /// Get statistics about the current file's diff
@@ -2256,7 +2274,7 @@ fn copy_to_clipboard(text: &str) -> bool {
     }
     #[cfg(target_os = "macos")]
     {
-        return write_to_clipboard_cmd("pbcopy", &[], text);
+        write_to_clipboard_cmd("pbcopy", &[], text)
     }
     #[cfg(target_os = "linux")]
     {
@@ -2266,11 +2284,11 @@ fn copy_to_clipboard(text: &str) -> bool {
         if write_to_clipboard_cmd("xclip", &["-selection", "clipboard"], text) {
             return true;
         }
-        return write_to_clipboard_cmd("xsel", &["--clipboard", "--input"], text);
+        write_to_clipboard_cmd("xsel", &["--clipboard", "--input"], text)
     }
     #[cfg(target_os = "windows")]
     {
-        return write_to_clipboard_cmd("clip", &[], text);
+        write_to_clipboard_cmd("clip", &[], text)
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
@@ -2279,11 +2297,7 @@ fn copy_to_clipboard(text: &str) -> bool {
 }
 
 fn write_to_clipboard_cmd(cmd: &str, args: &[&str], text: &str) -> bool {
-    let mut child = match Command::new(cmd)
-        .args(args)
-        .stdin(Stdio::piped())
-        .spawn()
-    {
+    let mut child = match Command::new(cmd).args(args).stdin(Stdio::piped()).spawn() {
         Ok(child) => child,
         Err(_) => return false,
     };
@@ -2530,12 +2544,12 @@ mod tests {
     fn test_allow_overscroll_state() {
         // (auto_center, needs_scroll_to_active, centered_once) -> expected
         assert!(!allow_overscroll_state(false, false, false));
-        assert!(allow_overscroll_state(false, false, true));   // manual zz
+        assert!(allow_overscroll_state(false, false, true)); // manual zz
         assert!(!allow_overscroll_state(false, true, false));
-        assert!(!allow_overscroll_state(true, false, false));  // auto_center but not scrolling
-        assert!(allow_overscroll_state(true, true, false));    // auto_center + about to scroll
-        assert!(allow_overscroll_state(true, true, true));     // both
-        assert!(allow_overscroll_state(true, false, true));    // centered_once wins
+        assert!(!allow_overscroll_state(true, false, false)); // auto_center but not scrolling
+        assert!(allow_overscroll_state(true, true, false)); // auto_center + about to scroll
+        assert!(allow_overscroll_state(true, true, true)); // both
+        assert!(allow_overscroll_state(true, false, true)); // centered_once wins
     }
 
     #[test]
@@ -2543,7 +2557,7 @@ mod tests {
         assert_eq!(max_scroll(100, 20, false), 80);
         assert_eq!(max_scroll(50, 10, false), 40);
         assert_eq!(max_scroll(20, 20, false), 0);
-        assert_eq!(max_scroll(5, 20, false), 0);  // short file
+        assert_eq!(max_scroll(5, 20, false), 0); // short file
     }
 
     #[test]
@@ -2624,9 +2638,9 @@ mod tests {
         // Insert-only change: primary exists only on new side (new_line.is_some())
         // Old side has a non-primary active line closer to scroll_offset
         let view = vec![
-            make_view_line(LineKind::Context, Some(1), Some(1), true, false),  // active but not primary, both sides
+            make_view_line(LineKind::Context, Some(1), Some(1), true, false), // active but not primary, both sides
             make_view_line(LineKind::Context, Some(2), Some(2), false, false),
-            make_view_line(LineKind::Inserted, None, Some(3), true, true),     // primary, new side only
+            make_view_line(LineKind::Inserted, None, Some(3), true, true), // primary, new side only
         ];
         // scroll_offset=0: old side's active at idx 0 is closer than new side's primary at idx 2
         // But primary must dominate, so result should be new side's idx 2

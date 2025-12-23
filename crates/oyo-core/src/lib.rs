@@ -13,4 +13,7 @@ pub use change::{Change, ChangeKind, ChangeSpan};
 pub use diff::{DiffEngine, DiffResult, FileDiff, Hunk};
 pub use git::{ChangedFile, FileStatus};
 pub use multi::{FileEntry, MultiFileDiff};
-pub use step::{AnimationFrame, DiffNavigator, LineKind, StepDirection, StepState, ViewLine, ViewSpan, ViewSpanKind};
+pub use step::{
+    AnimationFrame, DiffNavigator, LineKind, StepDirection, StepState, ViewLine, ViewSpan,
+    ViewSpanKind,
+};

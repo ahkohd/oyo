@@ -4,6 +4,11 @@ version.workspace = true
 edition.workspace = true
 description = "Core diff engine for oyo - step-through diff viewer"
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+readme = "../../README.md"
+keywords = ["diff", "git", "viewer"]
+categories = ["development-tools"]
 
 [dependencies]
 serde = { workspace = true }

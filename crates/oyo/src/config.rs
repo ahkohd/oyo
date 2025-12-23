@@ -113,37 +113,157 @@ pub struct ThemeConfig {
 }
 
 const BUILTIN_THEMES: &[(&str, &str)] = &[
-    ("aura", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/themes/aura.json"))),
-    ("ayu", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/themes/ayu.json"))),
-    ("catppuccin", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/themes/catppuccin.json"))),
-    ("catppuccin-frappe", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/themes/catppuccin-frappe.json"))),
-    ("catppuccin-macchiato", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/themes/catppuccin-macchiato.json"))),
-    ("cobalt2", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/themes/cobalt2.json"))),
-    ("cursor", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/themes/cursor.json"))),
-    ("dracula", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/themes/dracula.json"))),
-    ("everforest", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/themes/everforest.json"))),
-    ("flexoki", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/themes/flexoki.json"))),
-    ("github", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/themes/github.json"))),
-    ("gruvbox", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/themes/gruvbox.json"))),
-    ("kanagawa", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/themes/kanagawa.json"))),
-    ("lucent-orng", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/themes/lucent-orng.json"))),
-    ("material", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/themes/material.json"))),
-    ("matrix", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/themes/matrix.json"))),
-    ("mercury", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/themes/mercury.json"))),
-    ("monokai", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/themes/monokai.json"))),
-    ("nightowl", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/themes/nightowl.json"))),
-    ("nord", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/themes/nord.json"))),
-    ("one-dark", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/themes/one-dark.json"))),
-    ("opencode", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/themes/opencode.json"))),
-    ("orng", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/themes/orng.json"))),
-    ("palenight", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/themes/palenight.json"))),
-    ("rosepine", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/themes/rosepine.json"))),
-    ("solarized", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/themes/solarized.json"))),
-    ("synthwave84", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/themes/synthwave84.json"))),
-    ("tokyonight", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/themes/tokyonight.json"))),
-    ("vercel", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/themes/vercel.json"))),
-    ("vesper", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/themes/vesper.json"))),
-    ("zenburn", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/themes/zenburn.json"))),
+    (
+        "aura",
+        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/themes/aura.json")),
+    ),
+    (
+        "ayu",
+        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/themes/ayu.json")),
+    ),
+    (
+        "catppuccin",
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/themes/catppuccin.json"
+        )),
+    ),
+    (
+        "catppuccin-frappe",
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/themes/catppuccin-frappe.json"
+        )),
+    ),
+    (
+        "catppuccin-macchiato",
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/themes/catppuccin-macchiato.json"
+        )),
+    ),
+    (
+        "cobalt2",
+        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/themes/cobalt2.json")),
+    ),
+    (
+        "cursor",
+        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/themes/cursor.json")),
+    ),
+    (
+        "dracula",
+        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/themes/dracula.json")),
+    ),
+    (
+        "everforest",
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/themes/everforest.json"
+        )),
+    ),
+    (
+        "flexoki",
+        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/themes/flexoki.json")),
+    ),
+    (
+        "github",
+        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/themes/github.json")),
+    ),
+    (
+        "gruvbox",
+        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/themes/gruvbox.json")),
+    ),
+    (
+        "kanagawa",
+        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/themes/kanagawa.json")),
+    ),
+    (
+        "lucent-orng",
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/themes/lucent-orng.json"
+        )),
+    ),
+    (
+        "material",
+        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/themes/material.json")),
+    ),
+    (
+        "matrix",
+        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/themes/matrix.json")),
+    ),
+    (
+        "mercury",
+        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/themes/mercury.json")),
+    ),
+    (
+        "monokai",
+        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/themes/monokai.json")),
+    ),
+    (
+        "nightowl",
+        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/themes/nightowl.json")),
+    ),
+    (
+        "nord",
+        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/themes/nord.json")),
+    ),
+    (
+        "one-dark",
+        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/themes/one-dark.json")),
+    ),
+    (
+        "opencode",
+        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/themes/opencode.json")),
+    ),
+    (
+        "orng",
+        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/themes/orng.json")),
+    ),
+    (
+        "palenight",
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/themes/palenight.json"
+        )),
+    ),
+    (
+        "rosepine",
+        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/themes/rosepine.json")),
+    ),
+    (
+        "solarized",
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/themes/solarized.json"
+        )),
+    ),
+    (
+        "synthwave84",
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/themes/synthwave84.json"
+        )),
+    ),
+    (
+        "tokyonight",
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/themes/tokyonight.json"
+        )),
+    ),
+    (
+        "vercel",
+        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/themes/vercel.json")),
+    ),
+    (
+        "vesper",
+        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/themes/vesper.json")),
+    ),
+    (
+        "zenburn",
+        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/themes/zenburn.json")),
+    ),
 ];
 
 impl ThemeConfig {
@@ -159,7 +279,7 @@ impl ThemeConfig {
         let mut base = self
             .name
             .as_deref()
-            .and_then(|name| ThemeConfig::builtin(name))
+            .and_then(ThemeConfig::builtin)
             .unwrap_or_default();
 
         base.name = self.name.clone();
@@ -348,9 +468,18 @@ impl ThemeConfig {
             // Syntax (fallbacks align to existing UI colors)
             syntax_plain: resolve(&tokens.syntax_plain, Color::Reset),
             syntax_keyword: resolve(&tokens.syntax_keyword, resolve(&tokens.accent, Color::Cyan)),
-            syntax_string: resolve(&tokens.syntax_string, resolve(&tokens.success, Color::Green)),
-            syntax_number: resolve(&tokens.syntax_number, resolve(&tokens.warning, Color::Yellow)),
-            syntax_comment: resolve(&tokens.syntax_comment, resolve(&tokens.text_muted, Color::DarkGray)),
+            syntax_string: resolve(
+                &tokens.syntax_string,
+                resolve(&tokens.success, Color::Green),
+            ),
+            syntax_number: resolve(
+                &tokens.syntax_number,
+                resolve(&tokens.warning, Color::Yellow),
+            ),
+            syntax_comment: resolve(
+                &tokens.syntax_comment,
+                resolve(&tokens.text_muted, Color::DarkGray),
+            ),
             syntax_attribute: resolve(
                 &tokens.syntax_attribute,
                 resolve(&tokens.syntax_keyword, resolve(&tokens.accent, Color::Cyan)),
@@ -358,7 +487,10 @@ impl ThemeConfig {
             syntax_type: resolve(&tokens.syntax_type, resolve(&tokens.primary, Color::Cyan)),
             syntax_function: resolve(&tokens.syntax_function, resolve(&tokens.info, Color::Blue)),
             syntax_variable: resolve(&tokens.syntax_variable, resolve(&tokens.error, Color::Red)),
-            syntax_constant: resolve(&tokens.syntax_constant, resolve(&tokens.secondary, Color::Cyan)),
+            syntax_constant: resolve(
+                &tokens.syntax_constant,
+                resolve(&tokens.secondary, Color::Cyan),
+            ),
             syntax_builtin: resolve(
                 &tokens.syntax_builtin,
                 resolve(&tokens.syntax_type, resolve(&tokens.primary, Color::Cyan)),
@@ -368,7 +500,10 @@ impl ThemeConfig {
                 resolve(&tokens.syntax_function, resolve(&tokens.info, Color::Blue)),
             ),
             syntax_operator: resolve(&tokens.syntax_operator, resolve(&tokens.text, Color::Reset)),
-            syntax_punctuation: resolve(&tokens.syntax_punctuation, resolve(&tokens.text_muted, Color::DarkGray)),
+            syntax_punctuation: resolve(
+                &tokens.syntax_punctuation,
+                resolve(&tokens.text_muted, Color::DarkGray),
+            ),
 
             // Backgrounds - transparent by default
             background: resolve_bg(&tokens.background),
@@ -551,18 +686,13 @@ impl Default for UiConfig {
 }
 
 /// Syntax highlighting mode
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum SyntaxMode {
+    #[default]
     Auto,
     On,
     Off,
-}
-
-impl Default for SyntaxMode {
-    fn default() -> Self {
-        SyntaxMode::Auto
-    }
 }
 
 /// Playback configuration
@@ -619,19 +749,14 @@ impl Default for FilesConfig {
 }
 
 /// File list counts display behavior
-#[derive(Debug, Deserialize, Clone, Copy)]
+#[derive(Debug, Deserialize, Clone, Copy, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum FileCountMode {
+    #[default]
     Active,
     Focused,
     All,
     Off,
-}
-
-impl Default for FileCountMode {
-    fn default() -> Self {
-        FileCountMode::Active
-    }
 }
 
 /// Root configuration

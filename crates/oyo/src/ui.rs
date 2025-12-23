@@ -105,8 +105,7 @@ fn draw_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
             .unwrap_or_default()
             .as_millis()
             / 500)
-            % 2
-            == 0;
+            .is_multiple_of(2);
         if flash {
             (
                 Style::default().fg(app.theme.warning),
@@ -516,10 +515,7 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
             .rsplit('/')
             .next()
             .unwrap_or(&file.display_name);
-        let max_name_len = list_area
-            .width
-            .saturating_sub(4 + signs_len as u16)
-            .max(1) as usize;
+        let max_name_len = list_area.width.saturating_sub(4 + signs_len as u16).max(1) as usize;
         let name = if file_name.len() > max_name_len {
             if max_name_len == 1 {
                 "…".to_string()
@@ -575,15 +571,9 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
             } else {
                 Style::default().fg(app.theme.text_muted)
             };
-            line_spans.push(Span::styled(
-                insert_text,
-                sign_style,
-            ));
+            line_spans.push(Span::styled(insert_text, sign_style));
             line_spans.push(Span::raw(" "));
-            line_spans.push(Span::styled(
-                delete_text,
-                delete_style,
-            ));
+            line_spans.push(Span::styled(delete_text, delete_style));
         }
 
         let line = Line::from(line_spans);

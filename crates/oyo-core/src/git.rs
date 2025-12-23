@@ -75,9 +75,7 @@ pub fn get_repo_root(path: &Path) -> Result<PathBuf, GitError> {
         return Err(GitError::NotARepo);
     }
 
-    let root = String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .to_string();
+    let root = String::from_utf8_lossy(&output.stdout).trim().to_string();
     Ok(PathBuf::from(root))
 }
 

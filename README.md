@@ -289,7 +289,3 @@ cargo test
 # Run CLI in development
 cargo run --bin oyo -- old.js new.js
 ```
-
-## License
-
-MIT

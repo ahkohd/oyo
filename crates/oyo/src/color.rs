@@ -32,7 +32,10 @@ pub struct AnimationGradient {
 pub fn parse_hex(s: &str) -> Result<Rgb, String> {
     let s = s.trim().trim_start_matches('#');
     if s.len() != 6 {
-        return Err(format!("invalid hex color: expected 6 characters, got {}", s.len()));
+        return Err(format!(
+            "invalid hex color: expected 6 characters, got {}",
+            s.len()
+        ));
     }
 
     let r = u8::from_str_radix(&s[0..2], 16)
@@ -210,7 +213,11 @@ pub fn animation_t(phase: AnimationPhase, progress: f32, backward: bool) -> f32 
         AnimationPhase::Idle => 0.5,
     };
 
-    if backward { 1.0 - t } else { t }
+    if backward {
+        1.0 - t
+    } else {
+        t
+    }
 }
 
 /// Compute a linear animation t value across both phases (0.0 → 1.0)
@@ -289,21 +296,21 @@ pub fn parse_ansi_name(name: &str) -> Option<Color> {
 /// Resolve a color string: def reference, hex, or ANSI name
 pub fn resolve_color(value: &str, defs: &HashMap<String, String>) -> Option<Color> {
     let value = value.trim();
-    
+
     // Check def reference first
     if let Some(hex) = defs.get(value) {
         return parse_hex(hex)
             .ok()
             .map(|rgb| Color::Rgb(rgb.r, rgb.g, rgb.b));
     }
-    
+
     // Try hex
     if value.starts_with('#') {
         return parse_hex(value)
             .ok()
             .map(|rgb| Color::Rgb(rgb.r, rgb.g, rgb.b));
     }
-    
+
     // Try ANSI name
     parse_ansi_name(value)
 }
@@ -362,7 +369,11 @@ pub fn gradient_from_color(color: Color) -> AnimationGradient {
         Color::Red | Color::LightRed => parse_hex(defaults::DELETE_HEX).unwrap(),
         Color::Yellow | Color::LightYellow => parse_hex(defaults::MODIFY_HEX).unwrap(),
         // Fallback to a neutral gray for other colors
-        _ => Rgb { r: 128, g: 128, b: 128 },
+        _ => Rgb {
+            r: 128,
+            g: 128,
+            b: 128,
+        },
     };
     derive_gradient(rgb_to_hsl(rgb))
 }
@@ -386,10 +397,14 @@ mod tests {
 
     #[test]
     fn test_rgb_hsl_roundtrip() {
-        let original = Rgb { r: 46, g: 204, b: 113 };
+        let original = Rgb {
+            r: 46,
+            g: 204,
+            b: 113,
+        };
         let hsl = rgb_to_hsl(original);
         let back = hsl_to_rgb(hsl);
-        
+
         // Allow for rounding errors
         assert!((original.r as i16 - back.r as i16).abs() <= 1);
         assert!((original.g as i16 - back.g as i16).abs() <= 1);
@@ -405,7 +420,11 @@ mod tests {
 
     #[test]
     fn test_gradient_positions() {
-        let base = Hsl { h: 145.0, s: 0.63, l: 0.49 };
+        let base = Hsl {
+            h: 145.0,
+            s: 0.63,
+            l: 0.49,
+        };
         let gradient = derive_gradient(base);
 
         // t=0 should be neutral
@@ -441,19 +460,25 @@ mod tests {
         defs.insert("oyo14".to_string(), "#A3BE8C".to_string());
 
         // Def reference
-        assert!(matches!(resolve_color("oyo14", &defs), Some(Color::Rgb(163, 190, 140))));
-        
+        assert!(matches!(
+            resolve_color("oyo14", &defs),
+            Some(Color::Rgb(163, 190, 140))
+        ));
+
         // Hex
-        assert!(matches!(resolve_color("#ff0000", &defs), Some(Color::Rgb(255, 0, 0))));
-        
+        assert!(matches!(
+            resolve_color("#ff0000", &defs),
+            Some(Color::Rgb(255, 0, 0))
+        ));
+
         // ANSI
         assert_eq!(resolve_color("cyan", &defs), Some(Color::Cyan));
-        
+
         // Default/reset for terminal palette
         assert_eq!(resolve_color("default", &defs), Some(Color::Reset));
         assert_eq!(resolve_color("reset", &defs), Some(Color::Reset));
         assert_eq!(resolve_color("transparent", &defs), Some(Color::Reset));
-        
+
         // Unknown
         assert_eq!(resolve_color("notacolor", &defs), None);
     }
@@ -465,7 +490,11 @@ mod tests {
         let dim = dim_color(bright);
         if let Color::Rgb(r, g, b) = dim {
             // Should be darker/less saturated
-            let bright_rgb = Rgb { r: 46, g: 204, b: 113 };
+            let bright_rgb = Rgb {
+                r: 46,
+                g: 204,
+                b: 113,
+            };
             let dim_rgb = Rgb { r, g, b };
             let bright_hsl = rgb_to_hsl(bright_rgb);
             let dim_hsl = rgb_to_hsl(dim_rgb);

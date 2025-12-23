@@ -4,13 +4,18 @@ version.workspace = true
 edition.workspace = true
 description = "CLI TUI for oyo - Step-through diff viewer"
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+readme = "../../README.md"
+keywords = ["diff", "tui", "git", "cli", "viewer"]
+categories = ["command-line-utilities", "development-tools"]
 
 [[bin]]
 name = "oyo"
 path = "src/main.rs"
 
 [dependencies]
-oyo-core = { path = "../oyo-core" }
+oyo-core = { path = "../oyo-core", version = "0.1.0" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
