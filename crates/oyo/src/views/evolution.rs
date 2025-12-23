@@ -1,7 +1,10 @@
 //! Evolution view - shows file morphing without deletion markers
 //! Deleted lines simply disappear, showing the file as it evolves
 
-use super::{render_empty_state, spans_to_text, truncate_text};
+use super::{
+    expand_tabs_in_spans, render_empty_state, spans_to_text, spans_width, truncate_text,
+    wrap_count_for_spans, wrap_count_for_text, TAB_WIDTH,
+};
 use crate::app::{AnimationPhase, App};
 use crate::syntax::SyntaxSide;
 use oyo_core::{LineKind, ViewSpanKind};
@@ -25,21 +28,29 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
     let primary_marker = app.primary_marker.clone();
     let extent_marker = app.extent_marker.clone();
 
-    app.ensure_active_visible_if_needed(visible_height);
+    if app.line_wrap {
+        app.handle_search_scroll_if_needed(visible_height);
+    } else {
+        app.ensure_active_visible_if_needed(visible_height);
+    }
     let animation_frame = app.animation_frame();
     let view_lines = app
         .multi_diff
         .current_navigator()
         .current_view_with_frame(animation_frame);
     let step_direction = app.multi_diff.current_step_direction();
-    let (display_len, _) = crate::app::display_metrics(
-        &view_lines,
-        app.view_mode,
-        app.animation_phase,
-        app.scroll_offset,
-        step_direction,
-    );
-    app.clamp_scroll(display_len, visible_height, app.allow_overscroll());
+    let mut display_len = 0usize;
+    if !app.line_wrap {
+        let (len, _) = crate::app::display_metrics(
+            &view_lines,
+            app.view_mode,
+            app.animation_phase,
+            app.scroll_offset,
+            step_direction,
+        );
+        app.clamp_scroll(len, visible_height, app.allow_overscroll());
+        display_len = len;
+    }
     let debug_target = app.syntax_scope_target(&view_lines);
 
     // Split area into gutter (fixed) and content (scrollable)
@@ -56,6 +67,9 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
     let mut content_lines: Vec<Line> = Vec::new();
     let mut display_line_num = 0usize;
     let mut max_line_width: usize = 0;
+    let wrap_width = visible_width;
+    let mut primary_display_idx: Option<usize> = None;
+    let mut active_display_idx: Option<usize> = None;
 
     let query = app.search_query().trim().to_ascii_lowercase();
     let has_query = !query.is_empty();
@@ -75,6 +89,16 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
                 // Show it fading out during both phases
             }
             _ => {}
+        }
+
+        if app.line_wrap {
+            let display_idx = display_len;
+            if view_line.is_primary_active && primary_display_idx.is_none() {
+                primary_display_idx = Some(display_idx);
+            }
+            if view_line.is_active && active_display_idx.is_none() {
+                active_display_idx = Some(display_idx);
+            }
         }
 
         display_line_num += 1;
@@ -211,20 +235,60 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
             && line_text.to_ascii_lowercase().contains(&query);
         content_spans = app.highlight_search_spans(content_spans, &line_text, is_active_match);
 
+        if app.line_wrap {
+            content_spans = expand_tabs_in_spans(&content_spans, TAB_WIDTH);
+        }
+
         // Track max line width
-        let line_width: usize = content_spans.iter().map(|s| s.content.len()).sum();
+        let line_width = spans_width(&content_spans);
         max_line_width = max_line_width.max(line_width);
 
+        let wrap_count = if app.line_wrap {
+            wrap_count_for_spans(&content_spans, wrap_width)
+        } else {
+            1
+        };
+        if app.line_wrap {
+            display_len += wrap_count;
+        }
+
         content_lines.push(Line::from(content_spans));
+        if app.line_wrap && wrap_count > 1 {
+            for _ in 1..wrap_count {
+                gutter_lines.push(Line::from(Span::raw(" ")));
+            }
+        }
 
         if let Some((debug_idx, ref label)) = debug_target {
             if debug_idx == display_idx {
                 let debug_text = truncate_text(&format!("  {}", label), visible_width);
                 let debug_style = Style::default().fg(app.theme.text_muted);
+                let debug_wrap = if app.line_wrap {
+                    wrap_count_for_text(&debug_text, wrap_width)
+                } else {
+                    1
+                };
                 gutter_lines.push(Line::from(Span::raw(" ")));
                 content_lines.push(Line::from(Span::styled(debug_text, debug_style)));
+                if app.line_wrap {
+                    display_len += debug_wrap;
+                    if debug_wrap > 1 {
+                        for _ in 1..debug_wrap {
+                            gutter_lines.push(Line::from(Span::raw(" ")));
+                        }
+                    }
+                }
             }
         }
+    }
+
+    if app.line_wrap {
+        app.ensure_active_visible_if_needed_wrapped(
+            visible_height,
+            display_len,
+            primary_display_idx.or(active_display_idx),
+        );
+        app.clamp_scroll(display_len, visible_height, app.allow_overscroll());
     }
 
     // Clamp horizontal scroll

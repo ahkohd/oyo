@@ -1,9 +1,12 @@
 //! Single pane view - morphs from old to new state
 
-use super::{render_empty_state, spans_to_text, truncate_text};
-use crate::app::{App, AnimationPhase};
-use crate::config::ModifiedStepMode;
+use super::{
+    expand_tabs_in_spans, render_empty_state, spans_to_text, spans_width, truncate_text,
+    wrap_count_for_spans, wrap_count_for_text, TAB_WIDTH,
+};
+use crate::app::{AnimationPhase, App};
 use crate::color;
+use crate::config::ModifiedStepMode;
 use crate::syntax::SyntaxSide;
 use oyo_core::{Change, ChangeKind, LineKind, ViewSpan, ViewSpanKind};
 use ratatui::{
@@ -152,7 +155,11 @@ fn build_modified_only_spans(
             ChangeKind::Delete => {}
         }
     }
-    if spans.is_empty() { None } else { Some(spans) }
+    if spans.is_empty() {
+        None
+    } else {
+        Some(spans)
+    }
 }
 
 /// Render the single-pane morphing view
@@ -164,13 +171,19 @@ pub fn render_single_pane(frame: &mut Frame, app: &mut App, area: Rect) {
     let primary_marker = app.primary_marker.clone();
     let extent_marker = app.extent_marker.clone();
 
-    app.ensure_active_visible_if_needed(visible_height);
+    if app.line_wrap {
+        app.handle_search_scroll_if_needed(visible_height);
+    } else {
+        app.ensure_active_visible_if_needed(visible_height);
+    }
     let animation_frame = app.animation_frame();
     let view_lines = app
         .multi_diff
         .current_navigator()
         .current_view_with_frame(animation_frame);
-    app.clamp_scroll(view_lines.len(), visible_height, app.allow_overscroll());
+    if !app.line_wrap {
+        app.clamp_scroll(view_lines.len(), visible_height, app.allow_overscroll());
+    }
     let debug_target = app.syntax_scope_target(&view_lines);
 
     // Split area into gutter (fixed) and content (scrollable)
@@ -186,6 +199,10 @@ pub fn render_single_pane(frame: &mut Frame, app: &mut App, area: Rect) {
     let mut gutter_lines: Vec<Line> = Vec::new();
     let mut content_lines: Vec<Line> = Vec::new();
     let mut max_line_width: usize = 0;
+    let wrap_width = visible_width;
+    let mut display_len = if app.line_wrap { 0 } else { view_lines.len() };
+    let mut primary_display_idx: Option<usize> = None;
+    let mut active_display_idx: Option<usize> = None;
 
     let query = app.search_query().trim().to_ascii_lowercase();
     let has_query = !query.is_empty();
@@ -372,8 +389,7 @@ pub fn render_single_pane(frame: &mut Frame, app: &mut App, area: Rect) {
             let peek_override = app.is_peek_override_for_line(view_line);
             let is_modified_peek =
                 peek_override && peek_mode == Some(crate::app::PeekMode::Modified);
-            let default_modified_only =
-                app.single_modified_step_mode == ModifiedStepMode::Modified;
+            let default_modified_only = app.single_modified_step_mode == ModifiedStepMode::Modified;
             let change = {
                 let nav = app.multi_diff.current_navigator();
                 nav.diff().changes.get(view_line.change_id).cloned()
@@ -492,20 +508,69 @@ pub fn render_single_pane(frame: &mut Frame, app: &mut App, area: Rect) {
             && line_text.to_ascii_lowercase().contains(&query);
         content_spans = app.highlight_search_spans(content_spans, &line_text, is_active_match);
 
+        if app.line_wrap {
+            if view_line.is_primary_active && primary_display_idx.is_none() {
+                primary_display_idx = Some(display_len);
+            }
+            if view_line.is_active && active_display_idx.is_none() {
+                active_display_idx = Some(display_len);
+            }
+        }
+
+        if app.line_wrap {
+            content_spans = expand_tabs_in_spans(&content_spans, TAB_WIDTH);
+        }
+
         // Track max line width for horizontal scroll clamping
-        let line_width: usize = content_spans.iter().map(|s| s.content.len()).sum();
+        let line_width = spans_width(&content_spans);
         max_line_width = max_line_width.max(line_width);
 
+        let wrap_count = if app.line_wrap {
+            wrap_count_for_spans(&content_spans, wrap_width)
+        } else {
+            1
+        };
+        if app.line_wrap {
+            display_len += wrap_count;
+        }
+
         content_lines.push(Line::from(content_spans));
+        if app.line_wrap && wrap_count > 1 {
+            for _ in 1..wrap_count {
+                gutter_lines.push(Line::from(Span::raw(" ")));
+            }
+        }
 
         if let Some((debug_idx, ref label)) = debug_target {
             if debug_idx == idx {
                 let debug_text = truncate_text(&format!("  {}", label), visible_width);
                 let debug_style = Style::default().fg(app.theme.text_muted);
+                let debug_wrap = if app.line_wrap {
+                    wrap_count_for_text(&debug_text, wrap_width)
+                } else {
+                    1
+                };
                 gutter_lines.push(Line::from(Span::raw(" ")));
                 content_lines.push(Line::from(Span::styled(debug_text, debug_style)));
+                if app.line_wrap {
+                    display_len += debug_wrap;
+                    if debug_wrap > 1 {
+                        for _ in 1..debug_wrap {
+                            gutter_lines.push(Line::from(Span::raw(" ")));
+                        }
+                    }
+                }
             }
         }
+    }
+
+    if app.line_wrap {
+        app.ensure_active_visible_if_needed_wrapped(
+            visible_height,
+            display_len,
+            primary_display_idx.or(active_display_idx),
+        );
+        app.clamp_scroll(display_len, visible_height, app.allow_overscroll());
     }
 
     // Clamp horizontal scroll
@@ -553,7 +618,11 @@ pub fn render_single_pane(frame: &mut Frame, app: &mut App, area: Rect) {
                 .begin_symbol(Some("↑"))
                 .end_symbol(Some("↓"));
 
-            let total_lines = view_lines.len();
+            let total_lines = if app.line_wrap {
+                display_len
+            } else {
+                view_lines.len()
+            };
             let visible_lines = content_area.height as usize;
             if total_lines > visible_lines {
                 let mut scrollbar_state =

@@ -35,3 +35,5 @@ clap = { version = "4.0", features = ["derive"] }
 toml = "0.8"
 dirs = "5.0"
 regex = "1.10"
+unicode-width = "0.1"
+unicode-segmentation = "1.11"

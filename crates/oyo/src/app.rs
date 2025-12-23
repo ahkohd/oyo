@@ -125,6 +125,10 @@ pub struct App {
     horizontal_scrolls: Vec<usize>,
     /// Line wrap mode (when true, horizontal scroll is ignored)
     pub line_wrap: bool,
+    /// Cached wrapped display length (for line wrap centering)
+    last_wrap_display_len: Option<usize>,
+    /// Cached wrapped active display index (for line wrap centering)
+    last_wrap_active_idx: Option<usize>,
     /// Show scrollbar
     pub scrollbar_visible: bool,
     /// Show strikethrough on deleted text
@@ -280,6 +284,8 @@ impl App {
             horizontal_scroll: 0,
             horizontal_scrolls: vec![0; file_count],
             line_wrap: false,
+            last_wrap_display_len: None,
+            last_wrap_active_idx: None,
             scrollbar_visible: false,
             strikethrough_deletions: false,
             file_panel_manually_set: false,
@@ -1074,7 +1080,6 @@ impl App {
             false
         }
     }
-
 
     /// Compute hunk starts for single/evolution view (display index + change id).
     fn compute_hunk_starts_single(&mut self) -> Vec<Option<HunkStart>> {
@@ -1947,6 +1952,8 @@ impl App {
         if self.line_wrap {
             self.horizontal_scroll = 0;
         }
+        self.last_wrap_display_len = None;
+        self.last_wrap_active_idx = None;
     }
 
     pub fn toggle_strikethrough_deletions(&mut self) {
@@ -2187,27 +2194,7 @@ impl App {
 
     /// Ensure active change is visible if needed (called from views after stepping)
     pub fn ensure_active_visible_if_needed(&mut self, viewport_height: usize) {
-        if self.needs_scroll_to_search {
-            self.needs_scroll_to_search = false;
-            if let Some(idx) = self.search_target {
-                if self.auto_center {
-                    let half_viewport = viewport_height / 2;
-                    self.scroll_offset = idx.saturating_sub(half_viewport);
-                    self.centered_once = true;
-                } else {
-                    let margin = 3.min(viewport_height / 4);
-                    if idx < self.scroll_offset.saturating_add(margin) {
-                        self.scroll_offset = idx.saturating_sub(margin);
-                    } else if idx
-                        >= self
-                            .scroll_offset
-                            .saturating_add(viewport_height.saturating_sub(margin))
-                    {
-                        self.scroll_offset =
-                            idx.saturating_sub(viewport_height.saturating_sub(margin + 1));
-                    }
-                }
-            }
+        if self.handle_search_scroll_if_needed(viewport_height) {
             return;
         }
         if !self.needs_scroll_to_active {
@@ -2265,8 +2252,107 @@ impl App {
         }
     }
 
+    pub fn handle_search_scroll_if_needed(&mut self, viewport_height: usize) -> bool {
+        if !self.needs_scroll_to_search {
+            return false;
+        }
+        self.needs_scroll_to_search = false;
+        if let Some(idx) = self.search_target {
+            if self.auto_center {
+                let half_viewport = viewport_height / 2;
+                self.scroll_offset = idx.saturating_sub(half_viewport);
+                self.centered_once = true;
+            } else {
+                let margin = 3.min(viewport_height / 4);
+                if idx < self.scroll_offset.saturating_add(margin) {
+                    self.scroll_offset = idx.saturating_sub(margin);
+                } else if idx
+                    >= self
+                        .scroll_offset
+                        .saturating_add(viewport_height.saturating_sub(margin))
+                {
+                    self.scroll_offset =
+                        idx.saturating_sub(viewport_height.saturating_sub(margin + 1));
+                }
+            }
+        }
+        true
+    }
+
+    pub fn ensure_active_visible_if_needed_wrapped(
+        &mut self,
+        viewport_height: usize,
+        display_len: usize,
+        display_idx: Option<usize>,
+    ) {
+        self.last_wrap_display_len = Some(display_len);
+        self.last_wrap_active_idx = display_idx;
+
+        if !self.needs_scroll_to_active {
+            return;
+        }
+        if self.auto_center && self.snap_frame.is_some() {
+            return;
+        }
+        self.needs_scroll_to_active = false;
+
+        if self.auto_center {
+            self.center_with_display_idx(viewport_height, display_len, display_idx);
+            return;
+        }
+
+        if let Some(idx) = display_idx {
+            let margin = 3.min(viewport_height / 4);
+
+            if idx < self.scroll_offset.saturating_add(margin) {
+                self.scroll_offset = idx.saturating_sub(margin);
+            } else if idx
+                >= self
+                    .scroll_offset
+                    .saturating_add(viewport_height.saturating_sub(margin))
+            {
+                self.scroll_offset = idx.saturating_sub(viewport_height.saturating_sub(margin + 1));
+            }
+        } else if display_len > 0 {
+            let state = self.multi_diff.current_navigator().state();
+            if self.view_mode == ViewMode::Evolution && self.stepping && state.current_step > 0 {
+                return;
+            }
+            self.scroll_offset = 0;
+        }
+    }
+
+    fn center_with_display_idx(
+        &mut self,
+        viewport_height: usize,
+        display_len: usize,
+        display_idx: Option<usize>,
+    ) {
+        if let Some(idx) = display_idx {
+            let half_viewport = viewport_height / 2;
+            self.scroll_offset = idx.saturating_sub(half_viewport);
+        } else if display_len > 0 {
+            let state = self.multi_diff.current_navigator().state();
+            if self.view_mode == ViewMode::Evolution && self.stepping && state.current_step > 0 {
+                return;
+            }
+            self.scroll_offset = 0;
+        }
+
+        self.centered_once = true;
+        self.horizontal_scroll = 0;
+    }
+
     /// Center the viewport on the active change (like Vim's zz)
     pub fn center_on_active(&mut self, viewport_height: usize) {
+        if self.line_wrap {
+            if let Some(display_len) = self.last_wrap_display_len {
+                let display_idx = self.last_wrap_active_idx;
+                self.center_with_display_idx(viewport_height, display_len, display_idx);
+                return;
+            }
+        }
+
         let frame = self.animation_frame();
         let view = self
             .multi_diff
@@ -2282,23 +2368,7 @@ impl App {
             step_direction,
         );
 
-        if let Some(idx) = display_idx {
-            let half_viewport = viewport_height / 2;
-            self.scroll_offset = idx.saturating_sub(half_viewport);
-        } else if display_len > 0 {
-            let state = self.multi_diff.current_navigator().state();
-            if self.view_mode == ViewMode::Evolution && self.stepping && state.current_step > 0 {
-                return;
-            }
-            // No active line (step 0); default to top of file.
-            self.scroll_offset = 0;
-        }
-
-        // Enable overscroll so centering works at bottom edge
-        self.centered_once = true;
-
-        // Also reset horizontal scroll
-        self.horizontal_scroll = 0;
+        self.center_with_display_idx(viewport_height, display_len, display_idx);
     }
 
     /// Called every frame to update animations and autoplay

@@ -1,9 +1,14 @@
 //! Split view with synchronized stepping
 
-use super::{render_empty_state, spans_to_text, truncate_text};
+use super::{
+    expand_tabs_in_spans, render_empty_state, spans_to_text, spans_width, truncate_text,
+    wrap_count_for_spans, wrap_count_for_text, TAB_WIDTH,
+};
 use crate::app::{AnimationPhase, App};
 use crate::syntax::SyntaxSide;
-use oyo_core::{AnimationFrame, ChangeKind, LineKind, ViewSpan, ViewSpanKind};
+use oyo_core::{
+    AnimationFrame, ChangeKind, LineKind, StepDirection, ViewLine, ViewSpan, ViewSpanKind,
+};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
@@ -14,30 +19,57 @@ use ratatui::{
 
 /// Width of the fixed line number gutter
 const GUTTER_WIDTH: u16 = 6; // "▶1234 " or " 1234 "
+const OLD_BORDER_WIDTH: u16 = 1;
+const NEW_GUTTER_WIDTH: u16 = 5; // "1234 "
+const NEW_MARKER_WIDTH: u16 = 1;
 
 /// Render the split view
 pub fn render_split(frame: &mut Frame, app: &mut App, area: Rect) {
     let visible_height = area.height as usize;
-    app.ensure_active_visible_if_needed(visible_height);
+    if app.line_wrap {
+        app.handle_search_scroll_if_needed(visible_height);
+    } else {
+        app.ensure_active_visible_if_needed(visible_height);
+    }
     let view_lines = app
         .multi_diff
         .current_navigator()
         .current_view_with_frame(AnimationFrame::Idle);
     let step_direction = app.multi_diff.current_step_direction();
-    let (display_len, _) = crate::app::display_metrics(
-        &view_lines,
-        app.view_mode,
-        app.animation_phase,
-        app.scroll_offset,
-        step_direction,
-    );
-    app.clamp_scroll(display_len, visible_height, app.allow_overscroll());
 
     // Split into two panes
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(area);
+
+    if app.line_wrap {
+        let old_width = chunks[0]
+            .width
+            .saturating_sub(GUTTER_WIDTH + OLD_BORDER_WIDTH) as usize;
+        let new_width = chunks[1]
+            .width
+            .saturating_sub(NEW_GUTTER_WIDTH + NEW_MARKER_WIDTH) as usize;
+        let (display_len, active_idx) = split_wrap_display_metrics(
+            app,
+            &view_lines,
+            old_width,
+            new_width,
+            app.scroll_offset,
+            step_direction,
+        );
+        app.ensure_active_visible_if_needed_wrapped(visible_height, display_len, active_idx);
+        app.clamp_scroll(display_len, visible_height, app.allow_overscroll());
+    } else {
+        let (display_len, _) = crate::app::display_metrics(
+            &view_lines,
+            app.view_mode,
+            app.animation_phase,
+            app.scroll_offset,
+            step_direction,
+        );
+        app.clamp_scroll(display_len, visible_height, app.allow_overscroll());
+    }
 
     render_old_pane(frame, app, chunks[0]);
     render_new_pane(frame, app, chunks[1]);
@@ -209,17 +241,44 @@ fn render_old_pane(frame: &mut Frame, app: &mut App, area: Rect) {
                 && line_text.to_ascii_lowercase().contains(&query);
             content_spans = app.highlight_search_spans(content_spans, &line_text, is_active_match);
 
-            // Track max line width
-            let line_width: usize = content_spans.iter().map(|s| s.content.len()).sum();
+            if app.line_wrap {
+                content_spans = expand_tabs_in_spans(&content_spans, TAB_WIDTH);
+            }
+
+            let line_width = spans_width(&content_spans);
             max_line_width = max_line_width.max(line_width);
 
+            let wrap_count = if app.line_wrap {
+                wrap_count_for_spans(&content_spans, visible_width)
+            } else {
+                1
+            };
             content_lines.push(Line::from(content_spans));
+            if app.line_wrap {
+                if wrap_count > 1 {
+                    for _ in 1..wrap_count {
+                        gutter_lines.push(Line::from(Span::raw(" ")));
+                    }
+                }
+            }
             line_idx += 1;
 
             if let Some((debug_idx, _)) = debug_target {
                 if debug_idx == display_idx {
+                    let debug_wrap = if app.line_wrap {
+                        wrap_count_for_text("", visible_width)
+                    } else {
+                        1
+                    };
                     gutter_lines.push(Line::from(Span::raw(" ")));
                     content_lines.push(Line::from(Span::raw("")));
+                    if app.line_wrap {
+                        if debug_wrap > 1 {
+                            for _ in 1..debug_wrap {
+                                gutter_lines.push(Line::from(Span::raw(" ")));
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -437,10 +496,27 @@ fn render_new_pane(frame: &mut Frame, app: &mut App, area: Rect) {
                 && line_text.to_ascii_lowercase().contains(&query);
             content_spans = app.highlight_search_spans(content_spans, &line_text, is_active_match);
 
+            if app.line_wrap {
+                content_spans = expand_tabs_in_spans(&content_spans, TAB_WIDTH);
+            }
+
+            let wrap_count = if app.line_wrap {
+                wrap_count_for_spans(&content_spans, visible_width)
+            } else {
+                1
+            };
             content_lines.push(Line::from(content_spans));
 
             // Build marker line
             marker_lines.push(Line::from(Span::styled(active_marker, active_style)));
+            if app.line_wrap {
+                if wrap_count > 1 {
+                    for _ in 1..wrap_count {
+                        gutter_lines.push(Line::from(Span::raw(" ")));
+                        marker_lines.push(Line::from(Span::raw(" ")));
+                    }
+                }
+            }
 
             line_idx += 1;
 
@@ -448,9 +524,22 @@ fn render_new_pane(frame: &mut Frame, app: &mut App, area: Rect) {
                 if debug_idx == display_idx {
                     let debug_text = truncate_text(&format!("  {}", label), visible_width);
                     let debug_style = Style::default().fg(app.theme.text_muted);
+                    let debug_wrap = if app.line_wrap {
+                        wrap_count_for_text(&debug_text, visible_width)
+                    } else {
+                        1
+                    };
                     gutter_lines.push(Line::from(Span::raw(" ")));
                     content_lines.push(Line::from(Span::styled(debug_text, debug_style)));
                     marker_lines.push(Line::from(Span::raw(" ")));
+                    if app.line_wrap {
+                        if debug_wrap > 1 {
+                            for _ in 1..debug_wrap {
+                                gutter_lines.push(Line::from(Span::raw(" ")));
+                                marker_lines.push(Line::from(Span::raw(" ")));
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -503,6 +592,143 @@ fn render_new_pane(frame: &mut Frame, app: &mut App, area: Rect) {
         marker_paragraph = marker_paragraph.style(style);
     }
     frame.render_widget(marker_paragraph, marker_area);
+}
+
+fn split_wrap_display_metrics(
+    app: &mut App,
+    view: &[ViewLine],
+    old_width: usize,
+    new_width: usize,
+    scroll_offset: usize,
+    step_direction: StepDirection,
+) -> (usize, Option<usize>) {
+    let mut old_len = 0usize;
+    let mut new_len = 0usize;
+    let mut old_primary_idx: Option<usize> = None;
+    let mut new_primary_idx: Option<usize> = None;
+    let mut old_fallback_idx: Option<usize> = None;
+    let mut new_fallback_idx: Option<usize> = None;
+
+    for line in view {
+        if line.old_line.is_some() {
+            if line.is_primary_active {
+                old_primary_idx = Some(old_len);
+            } else if line.is_active && old_fallback_idx.is_none() {
+                old_fallback_idx = Some(old_len);
+            }
+            let wrap_count = split_old_line_wrap_count(app, line, old_width);
+            old_len += wrap_count;
+        }
+        if line.new_line.is_some() {
+            if matches!(line.kind, LineKind::Deleted | LineKind::PendingDelete) {
+                continue;
+            }
+            if line.is_primary_active {
+                new_primary_idx = Some(new_len);
+            } else if line.is_active && new_fallback_idx.is_none() {
+                new_fallback_idx = Some(new_len);
+            }
+            let wrap_count = split_new_line_wrap_count(app, line, new_width);
+            new_len += wrap_count;
+        }
+    }
+
+    let display_len = old_len.max(new_len);
+    let (old_idx, new_idx) = if old_primary_idx.is_some() || new_primary_idx.is_some() {
+        (old_primary_idx, new_primary_idx)
+    } else {
+        (old_fallback_idx, new_fallback_idx)
+    };
+
+    let active_idx = match (old_idx, new_idx) {
+        (Some(old), Some(new)) => {
+            let old_dist = (old as isize - scroll_offset as isize).abs();
+            let new_dist = (new as isize - scroll_offset as isize).abs();
+            if old_dist < new_dist {
+                Some(old)
+            } else if new_dist < old_dist {
+                Some(new)
+            } else {
+                match step_direction {
+                    StepDirection::Forward | StepDirection::None => Some(new),
+                    StepDirection::Backward => Some(old),
+                }
+            }
+        }
+        (Some(old), None) => Some(old),
+        (None, Some(new)) => Some(new),
+        (None, None) => None,
+    };
+
+    (display_len, active_idx)
+}
+
+fn split_old_line_wrap_count(app: &mut App, line: &ViewLine, wrap_width: usize) -> usize {
+    if matches!(line.kind, LineKind::Modified | LineKind::PendingModify) {
+        if let Some(change) = app
+            .multi_diff
+            .current_navigator()
+            .diff()
+            .changes
+            .get(line.change_id)
+        {
+            let mut text = String::new();
+            for span in &change.spans {
+                match span.kind {
+                    ChangeKind::Equal | ChangeKind::Delete | ChangeKind::Replace => {
+                        text.push_str(&span.text);
+                    }
+                    ChangeKind::Insert => {}
+                }
+            }
+            if !text.is_empty() {
+                return wrap_count_for_text(&text, wrap_width);
+            }
+        }
+    }
+
+    let text = view_spans_to_text(&line.spans);
+    wrap_count_for_text(&text, wrap_width)
+}
+
+fn split_new_line_wrap_count(app: &mut App, line: &ViewLine, wrap_width: usize) -> usize {
+    if matches!(line.kind, LineKind::Modified | LineKind::PendingModify) {
+        if let Some(change) = app
+            .multi_diff
+            .current_navigator()
+            .diff()
+            .changes
+            .get(line.change_id)
+        {
+            let mut text = String::new();
+            for span in &change.spans {
+                match span.kind {
+                    ChangeKind::Equal | ChangeKind::Insert => {
+                        text.push_str(&span.text);
+                    }
+                    ChangeKind::Replace => {
+                        let new_text = span.new_text.as_ref().unwrap_or(&span.text);
+                        text.push_str(new_text);
+                    }
+                    ChangeKind::Delete => {}
+                }
+            }
+            if !text.is_empty() {
+                return wrap_count_for_text(&text, wrap_width);
+            }
+        }
+    }
+
+    let text = view_spans_to_text(&line.spans);
+    wrap_count_for_text(&text, wrap_width)
+}
+
+fn view_spans_to_text(spans: &[ViewSpan]) -> String {
+    let mut out = String::new();
+    for span in spans {
+        out.push_str(&span.text);
+    }
+    out
 }
 
 fn get_old_span_style(
