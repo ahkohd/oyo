@@ -11,17 +11,73 @@ use ratatui::{
     Frame,
 };
 
+fn truncate_filename_keep_ext(name: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    if name.len() <= max_width {
+        return name.to_string();
+    }
+    if max_width <= 3 {
+        return ".".repeat(max_width);
+    }
+
+    let (stem, ext) = match name.rfind('.') {
+        Some(idx) if idx > 0 && idx < name.len().saturating_sub(1) => (&name[..idx], &name[idx..]),
+        _ => (name, ""),
+    };
+    let ext_len = ext.len();
+    if ext_len >= max_width {
+        let suffix_len = max_width.saturating_sub(3);
+        return format!("...{}", &name[name.len().saturating_sub(suffix_len)..]);
+    }
+
+    if ext_len == 0 {
+        let stem_keep = max_width.saturating_sub(3);
+        let head_len = (stem_keep + 1) / 2;
+        let tail_len = stem_keep.saturating_sub(head_len);
+        let head = &stem[..head_len.min(stem.len())];
+        let tail = if tail_len > 0 && tail_len <= stem.len() {
+            &stem[stem.len().saturating_sub(tail_len)..]
+        } else {
+            ""
+        };
+        return format!("{head}...{tail}");
+    }
+
+    let max_stem_len = max_width.saturating_sub(ext_len);
+    if max_stem_len <= 3 {
+        let dots = ".".repeat(max_stem_len);
+        return format!("{dots}{ext}");
+    }
+
+    let stem_keep = max_stem_len.saturating_sub(3);
+    let head_len = (stem_keep + 1) / 2;
+    let tail_len = stem_keep.saturating_sub(head_len);
+    let head = &stem[..head_len.min(stem.len())];
+    let tail = if tail_len > 0 && tail_len <= stem.len() {
+        &stem[stem.len().saturating_sub(tail_len)..]
+    } else {
+        ""
+    };
+    format!("{head}...{tail}{ext}")
+}
+
 /// Truncate a path to fit a given width, using /.../ for middle sections
 fn truncate_path(path: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
     if path.len() <= max_width {
         return path.to_string();
     }
+    if max_width <= 3 {
+        return ".".repeat(max_width);
+    }
 
     let parts: Vec<&str> = path.split('/').collect();
-    if parts.len() <= 2 {
-        // Just truncate from start if path is simple
-        let suffix_len = max_width.saturating_sub(3);
-        return format!("...{}", &path[path.len().saturating_sub(suffix_len)..]);
+    if parts.len() == 1 {
+        return truncate_filename_keep_ext(path, max_width);
     }
 
     // Keep first and last parts, abbreviate middle
@@ -29,14 +85,27 @@ fn truncate_path(path: &str, max_width: usize) -> String {
     let last = parts.last().unwrap_or(&"");
 
     // If just first + last fits with /.../, use that
-    let simple = format!("{}/.../{}", first, last);
-    if simple.len() <= max_width {
-        return simple;
+    let prefix = format!("{}/.../", first);
+    let available = max_width.saturating_sub(prefix.len());
+    if available > 0 {
+        let last_display = truncate_filename_keep_ext(last, available);
+        let simple = format!("{prefix}{last_display}");
+        if simple.len() <= max_width {
+            return simple;
+        }
     }
 
     // Otherwise just show .../filename
-    let suffix_len = max_width.saturating_sub(4);
-    format!(".../{}", &last[last.len().saturating_sub(suffix_len)..])
+    if max_width <= 4 {
+        return ".".repeat(max_width);
+    }
+    let prefix = ".../";
+    let available = max_width.saturating_sub(prefix.len());
+    if available == 0 {
+        return ".".repeat(max_width);
+    }
+    let last_display = truncate_filename_keep_ext(last, available);
+    format!("{prefix}{last_display}")
 }
 
 /// Main drawing function
@@ -511,25 +580,14 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
             0
         };
 
-        // Truncate filename to fit
+        // Truncate filename to fit (preserve extension)
         let file_name = file
             .display_name
             .rsplit('/')
             .next()
             .unwrap_or(&file.display_name);
         let max_name_len = list_area.width.saturating_sub(4 + signs_len as u16).max(1) as usize;
-        let name = if file_name.len() > max_name_len {
-            if max_name_len == 1 {
-                "…".to_string()
-            } else {
-                format!(
-                    "…{}",
-                    &file_name[file_name.len().saturating_sub(max_name_len - 1)..]
-                )
-            }
-        } else {
-            file_name.to_string()
-        };
+        let name = truncate_filename_keep_ext(file_name, max_name_len);
 
         let mut icon_style = status_style;
         if let Some(bg) = selected_bg {
