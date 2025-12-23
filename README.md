@@ -297,5 +297,5 @@ cargo build
 cargo test
 
 # Run CLI in development
-cargo run --bin oyo -- old.js new.js
+cargo run --bin oyo -- old.rs new.rs
 ```
