@@ -100,6 +100,7 @@ fn draw_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
     let step_total = state.total_steps;
     let step_text = format!("{}/{}", step_current, step_total);
     let (arrow_style, step_style) = if app.autoplay {
+        #[allow(clippy::manual_is_multiple_of)]
         let flash = (std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
