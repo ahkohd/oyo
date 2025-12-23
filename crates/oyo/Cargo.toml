@@ -15,7 +15,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
 ratatui = { workspace = true }
-crossterm = { workspace = true }
+crossterm = { workspace = true, features = ["use-dev-tty"] }
 clap = { workspace = true }
 tokio = { workspace = true }
 toml = { workspace = true }

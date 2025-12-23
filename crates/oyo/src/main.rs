@@ -16,7 +16,9 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::prelude::*;
-use std::io;
+use std::fs::OpenOptions;
+use std::io::{self, IsTerminal};
+#[cfg(unix)]
 use std::path::PathBuf;
 use std::time::Duration;
 use oyo_core::MultiFileDiff;
@@ -123,7 +125,7 @@ fn detect_input_mode(paths: &[PathBuf]) -> InputMode {
             old_file,
             new_file,
         }
-    } else if paths.len() == 2 {
+    } else if paths.len() >= 2 {
         InputMode::TwoPaths {
             old_path: paths[0].clone(),
             new_path: paths[1].clone(),
@@ -380,7 +382,14 @@ fn main() -> Result<()> {
 
     // Setup terminal
     enable_raw_mode()?;
-    let mut stdout = io::stdout();
+    let mut stdout: Box<dyn io::Write> = if io::stdout().is_terminal() {
+        Box::new(io::stdout())
+    } else {
+        match OpenOptions::new().read(true).write(true).open("/dev/tty") {
+            Ok(file) => Box::new(file),
+            Err(_) => Box::new(io::stdout()),
+        }
+    };
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;

@@ -102,10 +102,24 @@ In `~/.config/jj/config.toml`:
 
 ```toml
 [ui]
+paginate = "never"
 diff-formatter = ["oyo", "$left", "$right"]
 ```
 
+To use `jj diff --tool=oyo`:
+
+```toml
+[diff-tools.oyo]
+command = ["oyo", "$left", "$right"]
+```
+
 Note: do not set your `ui.pager` to `oyo`.
+
+Example range diff:
+
+```bash
+jj diff -f zy -t w
+```
 
 ### Keyboard Shortcuts
 
