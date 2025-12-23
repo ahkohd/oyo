@@ -652,7 +652,9 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<()> 
                         KeyCode::Down | KeyCode::Char('j') => {
                             let count = app.take_count();
                             for _ in 0..count {
-                                if app.stepping {
+                                if app.file_list_focused {
+                                    app.next_file();
+                                } else if app.stepping {
                                     app.next_step();
                                 } else {
                                     app.scroll_down();
@@ -662,7 +664,9 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<()> 
                         KeyCode::Up | KeyCode::Char('k') => {
                             let count = app.take_count();
                             for _ in 0..count {
-                                if app.stepping {
+                                if app.file_list_focused {
+                                    app.prev_file();
+                                } else if app.stepping {
                                     app.prev_step();
                                 } else {
                                     app.scroll_up();

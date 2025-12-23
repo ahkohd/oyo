@@ -146,8 +146,8 @@ jj diff -f zy -t w
 
 | Key | Action |
 |-----|--------|
-| `↓` / `j` | Next step (scrolls in no-step mode) |
-| `↑` / `k` | Previous step (scrolls in no-step mode) |
+| `↓` / `j` | Next step (scrolls in no-step mode; moves file selection when focused) |
+| `↑` / `k` | Previous step (scrolls in no-step mode; moves file selection when focused) |
 | `→` / `l` | Next hunk (scrolls in no-step mode) |
 | `←` / `h` | Previous hunk (scrolls in no-step mode) |
 | `b` | Jump to beginning of current hunk (scrolls in no-step mode) |
@@ -180,6 +180,7 @@ jj diff -f zy -t w
 | `S` | Toggle strikethrough |
 | `r` | Refresh file (or all files when file list focused) |
 | `f` | Toggle file panel |
+| `Enter` | Focus file list |
 | `]` | Next file (supports count) |
 | `[` | Previous file (supports count) |
 | `+` / `=` | Increase speed |

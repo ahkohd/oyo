@@ -520,7 +520,7 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
                     break;
                 }
             }
-            let header_max = list_area.width.saturating_sub(2).max(1) as usize;
+            let header_max = list_area.width.saturating_sub(6).max(1) as usize;
             let header_text = truncate_path(&group, header_max);
             let header_line = Line::from(vec![
                 Span::raw("  "),
@@ -586,7 +586,7 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
             .rsplit('/')
             .next()
             .unwrap_or(&file.display_name);
-        let max_name_len = list_area.width.saturating_sub(4 + signs_len as u16).max(1) as usize;
+        let max_name_len = list_area.width.saturating_sub(8 + signs_len as u16).max(1) as usize;
         let name = truncate_filename_keep_ext(file_name, max_name_len);
 
         let mut icon_style = status_style;
@@ -797,6 +797,7 @@ fn draw_help_popover(frame: &mut Frame, app: &App) {
         lines.push(help_line("[ / ]", "Prev/next file".into()));
         lines.push(help_line("f", "Toggle file panel".into()));
         lines.push(help_line("Enter", "Focus file list".into()));
+        lines.push(help_line("j / k / ↑↓", "Move selection (focused)".into()));
         lines.push(help_line("/", "Filter files (when focused)".into()));
         lines.push(help_line("r", "Refresh all (when focused)".into()));
     }
