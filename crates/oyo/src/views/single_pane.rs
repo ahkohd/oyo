@@ -1,10 +1,10 @@
 //! Single pane view - morphs from old to new state
 
 use super::{render_empty_state, spans_to_text, truncate_text};
-use crate::app::App;
+use crate::app::{App, AnimationPhase};
 use crate::color;
 use crate::syntax::SyntaxSide;
-use oyo_core::{ChangeKind, LineKind, ViewSpan, ViewSpanKind};
+use oyo_core::{Change, ChangeKind, LineKind, ViewSpan, ViewSpanKind};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -15,6 +15,131 @@ use ratatui::{
 
 /// Width of the fixed line number gutter (marker + line num + prefix + space)
 const GUTTER_WIDTH: u16 = 8; // "▶1234 + "
+
+fn build_inline_modified_spans(
+    change: &Change,
+    app: &App,
+    include_equal: bool,
+    use_animation: bool,
+) -> Option<Vec<Span<'static>>> {
+    let mut spans = Vec::new();
+    let mut has_old = false;
+    let mut has_new = false;
+    let (phase, progress, backward) = if use_animation {
+        (
+            app.animation_phase,
+            app.animation_progress,
+            app.is_backward_animation(),
+        )
+    } else {
+        (AnimationPhase::Idle, 1.0, false)
+    };
+    let delete_style = super::delete_style(
+        phase,
+        progress,
+        backward,
+        app.strikethrough_deletions,
+        app.theme.delete_base(),
+        app.theme.diff_context,
+    );
+    let insert_style = super::insert_style(
+        phase,
+        progress,
+        backward,
+        app.theme.insert_base(),
+        app.theme.insert_dim(),
+    );
+    let context_style = Style::default().fg(app.theme.diff_context);
+    for span in &change.spans {
+        match span.kind {
+            ChangeKind::Equal => {
+                if !include_equal {
+                    continue;
+                }
+                spans.push(Span::styled(span.text.clone(), context_style));
+            }
+            ChangeKind::Delete => {
+                has_old = true;
+                let text = &span.text;
+                if app.strikethrough_deletions {
+                    let trimmed = text.trim_start();
+                    let leading_ws_len = text.len() - trimmed.len();
+                    if leading_ws_len > 0 && !trimmed.is_empty() {
+                        let ws_style = delete_style.remove_modifier(Modifier::CROSSED_OUT);
+                        spans.push(Span::styled(text[..leading_ws_len].to_string(), ws_style));
+                        spans.push(Span::styled(trimmed.to_string(), delete_style));
+                    } else {
+                        spans.push(Span::styled(text.to_string(), delete_style));
+                    }
+                } else {
+                    spans.push(Span::styled(text.to_string(), delete_style));
+                }
+            }
+            ChangeKind::Insert => {
+                has_new = true;
+                spans.push(Span::styled(span.text.clone(), insert_style));
+            }
+            ChangeKind::Replace => {
+                has_old = true;
+                has_new = true;
+                let text = &span.text;
+                if app.strikethrough_deletions {
+                    let trimmed = text.trim_start();
+                    let leading_ws_len = text.len() - trimmed.len();
+                    if leading_ws_len > 0 && !trimmed.is_empty() {
+                        let ws_style = delete_style.remove_modifier(Modifier::CROSSED_OUT);
+                        spans.push(Span::styled(text[..leading_ws_len].to_string(), ws_style));
+                        spans.push(Span::styled(trimmed.to_string(), delete_style));
+                    } else {
+                        spans.push(Span::styled(text.to_string(), delete_style));
+                    }
+                } else {
+                    spans.push(Span::styled(text.to_string(), delete_style));
+                }
+                spans.push(Span::styled(
+                    span.new_text.clone().unwrap_or_else(|| span.text.clone()),
+                    insert_style,
+                ));
+            }
+        }
+    }
+
+    if has_old || has_new {
+        Some(spans)
+    } else {
+        None
+    }
+}
+
+fn build_modified_only_spans(change: &Change, app: &App) -> Option<Vec<Span<'static>>> {
+    let mut spans = Vec::new();
+    let modify_style = super::modify_style(
+        AnimationPhase::Idle,
+        1.0,
+        false,
+        app.theme.modify_base(),
+        app.theme.diff_context,
+    );
+    let context_style = Style::default().fg(app.theme.diff_context);
+    for span in &change.spans {
+        match span.kind {
+            ChangeKind::Equal => {
+                spans.push(Span::styled(span.text.clone(), context_style));
+            }
+            ChangeKind::Insert => {
+                spans.push(Span::styled(span.text.clone(), modify_style));
+            }
+            ChangeKind::Replace => {
+                spans.push(Span::styled(
+                    span.new_text.clone().unwrap_or_else(|| span.text.clone()),
+                    modify_style,
+                ));
+            }
+            ChangeKind::Delete => {}
+        }
+    }
+    if spans.is_empty() { None } else { Some(spans) }
+}
 
 /// Render the single-pane morphing view
 pub fn render_single_pane(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -171,9 +296,11 @@ pub fn render_single_pane(frame: &mut Frame, app: &mut App, area: Rect) {
         // Build content line (scrollable)
         let mut content_spans: Vec<Span<'static>> = Vec::new();
         let mut used_syntax = false;
+        let mut used_inline_modified = false;
         let mut peek_spans: Vec<ViewSpan> = Vec::new();
         let mut has_peek = false;
-        if app.peek_active_for_line(view_line)
+        let peek_mode = app.peek_mode_for_line(view_line);
+        if peek_mode == Some(crate::app::PeekMode::Old)
             && matches!(view_line.kind, LineKind::Modified | LineKind::PendingModify)
         {
             if let Some(change) = app
@@ -222,7 +349,31 @@ pub fn render_single_pane(frame: &mut Frame, app: &mut App, area: Rect) {
                 used_syntax = true;
             }
         }
-        if !used_syntax {
+        if !used_syntax
+            && app.stepping
+            && view_line.is_active
+            && !has_peek
+            && matches!(view_line.kind, LineKind::Modified | LineKind::PendingModify)
+        {
+            let is_modified_peek = peek_mode == Some(crate::app::PeekMode::Modified);
+            let change = {
+                let nav = app.multi_diff.current_navigator();
+                nav.diff().changes.get(view_line.change_id).cloned()
+            };
+            if let Some(change) = change {
+                if is_modified_peek {
+                    if let Some(spans) = build_modified_only_spans(&change, app) {
+                        content_spans = spans;
+                        used_inline_modified = true;
+                    }
+                } else if let Some(spans) = build_inline_modified_spans(&change, app, true, true) {
+                    content_spans = spans;
+                    used_inline_modified = true;
+                }
+            }
+        }
+
+        if !used_syntax && !used_inline_modified {
             let mut rebuilt_spans: Vec<ViewSpan> = Vec::new();
             let spans = if has_peek {
                 &peek_spans

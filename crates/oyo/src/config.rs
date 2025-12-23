@@ -32,7 +32,6 @@
 //! animation = false
 //! auto_step_on_enter = true
 //! auto_step_blank_files = true
-//! delay_modified_animation = 200
 //!
 //! [files]
 //! panel_visible = true
@@ -711,8 +710,6 @@ pub struct PlaybackConfig {
     pub auto_step_on_enter: bool,
     /// Auto-step when file would be blank at step 0 (new files)
     pub auto_step_blank_files: bool,
-    /// Delay (ms) before modified lines animate to new state (single view)
-    pub delay_modified_animation: u64,
 }
 
 impl Default for PlaybackConfig {
@@ -724,7 +721,6 @@ impl Default for PlaybackConfig {
             animation_duration: 150,
             auto_step_on_enter: true,
             auto_step_blank_files: true,
-            delay_modified_animation: 200,
         }
     }
 }

@@ -421,7 +421,6 @@ fn main() -> Result<()> {
     app.zen_mode = config.ui.zen;
     app.animation_enabled = config.playback.animation;
     app.animation_duration = config.playback.animation_duration;
-    app.delay_modified_animation = config.playback.delay_modified_animation;
     app.file_panel_visible = config.files.panel_visible;
     app.file_count_mode = config.files.counts;
     app.auto_center = config.ui.auto_center;

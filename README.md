@@ -149,7 +149,7 @@ jj diff -f zy -t w
 | `←` / `h` | Previous hunk (scrolls in no-step mode) |
 | `b` | Jump to beginning of current hunk (scrolls in no-step mode) |
 | `e` | Jump to end of current hunk (scrolls in no-step mode) |
-| `p` / `P` | Peek old (change/hunk) |
+| `p` / `P` | Peek change (modified → old → mixed) / Peek old hunk |
 | `y` / `Y` | Yank line/hunk to clipboard |
 | `/` | Search (diff pane, regex) |
 | `n` / `N` | Next/previous match |
@@ -221,7 +221,6 @@ animation = false           # Enable fade animations
 animation_duration = 150    # Animation duration per phase (ms)
 auto_step_on_enter = true   # Auto-step to first change when entering a file
 auto_step_blank_files = true # Auto-step when file would be blank at step 0 (new files)
-delay_modified_animation = 200 # Delay before modified lines animate to new state (ms)
 
 [files]
 panel_visible = true        # Show file panel in multi-file mode

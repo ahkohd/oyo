@@ -115,10 +115,6 @@ pub struct App {
     pub auto_center: bool,
     /// Animation duration in milliseconds (how long fade effects take)
     pub animation_duration: u64,
-    /// Delay (ms) before modified lines animate to new state (single view)
-    pub delay_modified_animation: u64,
-    /// Hold start time for modified animation delay
-    modified_animation_hold_until: Option<Instant>,
     /// Pending count for vim-style commands (e.g., 10j = scroll down 10 lines)
     pub pending_count: Option<usize>,
     /// Pending "g" prefix for vim-style commands (e.g., gg)
@@ -215,8 +211,15 @@ pub enum PeekScope {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeekMode {
+    Old,
+    Modified,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PeekState {
     pub scope: PeekScope,
+    pub mode: PeekMode,
 }
 
 #[derive(Debug, Clone)]
@@ -263,8 +266,6 @@ impl App {
             git_branch,
             auto_center: true,
             animation_duration: 150,
-            delay_modified_animation: 100,
-            modified_animation_hold_until: None,
             pending_count: None,
             pending_g_prefix: false,
             horizontal_scroll: 0,
@@ -345,18 +346,53 @@ impl App {
     }
 
     pub fn toggle_peek_old_change(&mut self) {
-        self.toggle_peek(PeekScope::Change);
+        self.cycle_peek_change();
     }
 
     pub fn toggle_peek_old_hunk(&mut self) {
-        self.toggle_peek(PeekScope::Hunk);
+        self.toggle_peek_hunk();
     }
 
-    fn toggle_peek(&mut self, scope: PeekScope) {
+    fn clear_peek(&mut self) {
+        self.peek_state = None;
+    }
+
+    fn cycle_peek_change(&mut self) {
         if !self.stepping {
             return;
         }
-        let next = PeekState { scope };
+        let next = match self.peek_state {
+            None => Some(PeekState {
+                scope: PeekScope::Change,
+                mode: PeekMode::Modified,
+            }),
+            Some(PeekState {
+                scope: PeekScope::Change,
+                mode: PeekMode::Modified,
+            }) => Some(PeekState {
+                scope: PeekScope::Change,
+                mode: PeekMode::Old,
+            }),
+            Some(PeekState {
+                scope: PeekScope::Change,
+                mode: PeekMode::Old,
+            }) => None,
+            _ => Some(PeekState {
+                scope: PeekScope::Change,
+                mode: PeekMode::Modified,
+            }),
+        };
+        self.peek_state = next;
+    }
+
+    fn toggle_peek_hunk(&mut self) {
+        if !self.stepping {
+            return;
+        }
+        let next = PeekState {
+            scope: PeekScope::Hunk,
+            mode: PeekMode::Old,
+        };
         if self.peek_state == Some(next) {
             self.peek_state = None;
         } else {
@@ -364,21 +400,29 @@ impl App {
         }
     }
 
-    pub fn peek_active_for_line(&mut self, view_line: &ViewLine) -> bool {
-        let peek = match self.peek_state {
-            Some(peek) => peek,
-            None => return false,
-        };
-        if !self.stepping || self.animation_phase != AnimationPhase::Idle {
-            return false;
+    pub fn peek_mode_for_line(&mut self, view_line: &ViewLine) -> Option<PeekMode> {
+        let peek = self.peek_state?;
+        if !self.stepping {
+            return None;
         }
-        match peek.scope {
-            PeekScope::Change => view_line.is_primary_active,
+        let mode = match peek.scope {
+            PeekScope::Change => {
+                if view_line.is_primary_active {
+                    Some(peek.mode)
+                } else {
+                    None
+                }
+            }
             PeekScope::Hunk => {
                 let current_hunk = self.multi_diff.current_navigator().state().current_hunk;
-                view_line.hunk_index == Some(current_hunk)
+                if view_line.hunk_index == Some(current_hunk) {
+                    Some(PeekMode::Old)
+                } else {
+                    None
+                }
             }
-        }
+        };
+        mode
     }
 
     pub fn start_search(&mut self) {
@@ -550,9 +594,18 @@ impl App {
     }
 
     fn text_for_yank(&mut self, view_line: &ViewLine) -> Option<String> {
-        if self.peek_active_for_line(view_line) {
-            if let Some(text) = self.peek_text_for_line(view_line) {
-                return Some(text);
+        if let Some(mode) = self.peek_mode_for_line(view_line) {
+            match mode {
+                PeekMode::Old => {
+                    if let Some(text) = self.peek_text_for_line(view_line) {
+                        return Some(text);
+                    }
+                }
+                PeekMode::Modified => {
+                    if let Some(text) = self.modified_only_text_for_line(view_line) {
+                        return Some(text);
+                    }
+                }
             }
         }
         Some(view_line.content.clone())
@@ -569,6 +622,24 @@ impl App {
             .changes
             .get(view_line.change_id)?;
         let text = old_text_for_change(change);
+        if text.is_empty() {
+            None
+        } else {
+            Some(text)
+        }
+    }
+
+    fn modified_only_text_for_line(&mut self, view_line: &ViewLine) -> Option<String> {
+        if !matches!(view_line.kind, LineKind::Modified | LineKind::PendingModify) {
+            return None;
+        }
+        let change = self
+            .multi_diff
+            .current_navigator()
+            .diff()
+            .changes
+            .get(view_line.change_id)?;
+        let text = modified_only_text_for_change(change);
         if text.is_empty() {
             None
         } else {
@@ -648,9 +719,18 @@ impl App {
     }
 
     fn search_text_single(&mut self, view_line: &ViewLine) -> String {
-        if self.peek_active_for_line(view_line) {
-            if let Some(text) = self.peek_text_for_line(view_line) {
-                return text;
+        if let Some(mode) = self.peek_mode_for_line(view_line) {
+            match mode {
+                PeekMode::Old => {
+                    if let Some(text) = self.peek_text_for_line(view_line) {
+                        return text;
+                    }
+                }
+                PeekMode::Modified => {
+                    if let Some(text) = self.modified_only_text_for_line(view_line) {
+                        return text;
+                    }
+                }
             }
         }
         if !self.stepping && matches!(view_line.kind, LineKind::Modified | LineKind::PendingModify)
@@ -891,6 +971,7 @@ impl App {
     }
 
     fn step_forward(&mut self) -> bool {
+        self.clear_peek();
         if self.multi_diff.current_navigator().next() {
             if self.animation_enabled {
                 self.start_animation();
@@ -903,6 +984,7 @@ impl App {
     }
 
     fn step_backward(&mut self) -> bool {
+        self.clear_peek();
         if self.multi_diff.current_navigator().prev() {
             if self.animation_enabled {
                 self.start_animation();
@@ -1386,6 +1468,7 @@ impl App {
 
     /// Move to the next hunk (group of related changes)
     pub fn next_hunk(&mut self) {
+        self.clear_peek();
         if self.multi_diff.current_navigator().next_hunk() {
             if self.animation_enabled {
                 self.start_animation();
@@ -1396,6 +1479,7 @@ impl App {
 
     /// Move to the previous hunk (group of related changes)
     pub fn prev_hunk(&mut self) {
+        self.clear_peek();
         if self.multi_diff.current_navigator().prev_hunk() {
             if self.animation_enabled {
                 self.start_animation();
@@ -1414,6 +1498,7 @@ impl App {
 
     /// Jump to first change of current hunk
     pub fn goto_hunk_start(&mut self) {
+        self.clear_peek();
         if self.multi_diff.current_navigator().goto_hunk_start() {
             if self.animation_enabled {
                 self.start_animation();
@@ -1474,6 +1559,7 @@ impl App {
 
     /// Jump to last change of current hunk
     pub fn goto_hunk_end(&mut self) {
+        self.clear_peek();
         if self.multi_diff.current_navigator().goto_hunk_end() {
             if self.animation_enabled {
                 self.start_animation();
@@ -1611,6 +1697,7 @@ impl App {
     }
 
     pub fn goto_start(&mut self) {
+        self.clear_peek();
         if !self.stepping {
             self.scroll_offset = 0;
             self.centered_once = false;
@@ -1628,6 +1715,7 @@ impl App {
     }
 
     pub fn goto_end(&mut self) {
+        self.clear_peek();
         if !self.stepping {
             self.scroll_offset = usize::MAX;
             self.centered_once = false;
@@ -1645,6 +1733,7 @@ impl App {
     }
 
     pub fn goto_first_step(&mut self) {
+        self.clear_peek();
         self.multi_diff.current_navigator().goto(1);
         self.animation_phase = AnimationPhase::Idle;
         self.animation_progress = 1.0;
@@ -1653,6 +1742,7 @@ impl App {
     }
 
     pub fn goto_last_step(&mut self) {
+        self.clear_peek();
         self.multi_diff.current_navigator().goto_end();
         self.animation_phase = AnimationPhase::Idle;
         self.animation_progress = 1.0;
@@ -2008,45 +2098,10 @@ impl App {
             .collect()
     }
 
-    fn active_change_is_modified(&mut self) -> bool {
-        let Some(change) = self.multi_diff.current_navigator().active_change() else {
-            return false;
-        };
-        let mut has_old = false;
-        let mut has_new = false;
-        for span in &change.spans {
-            match span.kind {
-                ChangeKind::Delete => has_old = true,
-                ChangeKind::Insert => has_new = true,
-                ChangeKind::Replace => {
-                    has_old = true;
-                    has_new = true;
-                }
-                ChangeKind::Equal => {}
-            }
-        }
-        has_old && has_new
-    }
-
     fn start_animation(&mut self) {
         self.animation_phase = AnimationPhase::FadeOut;
         self.animation_progress = 0.0;
         self.last_animation_tick = Instant::now();
-        self.modified_animation_hold_until = None;
-
-        if self.delay_modified_animation == 0 {
-            return;
-        }
-        if self.view_mode != ViewMode::SinglePane {
-            return;
-        }
-        if self.multi_diff.current_step_direction() != StepDirection::Forward {
-            return;
-        }
-        if self.active_change_is_modified() {
-            self.modified_animation_hold_until =
-                Some(Instant::now() + Duration::from_millis(self.delay_modified_animation));
-        }
     }
 
     /// Ensure active change is visible if needed (called from views after stepping)
@@ -2159,13 +2214,6 @@ impl App {
 
         // Update animation
         if self.animation_phase != AnimationPhase::Idle {
-            if let Some(hold_until) = self.modified_animation_hold_until {
-                if now < hold_until {
-                    return;
-                }
-                self.modified_animation_hold_until = None;
-                self.last_animation_tick = now;
-            }
             let elapsed = now.duration_since(self.last_animation_tick);
             let phase_duration = Duration::from_millis(self.animation_duration);
 
@@ -2182,7 +2230,6 @@ impl App {
                     AnimationPhase::FadeIn => {
                         self.animation_phase = AnimationPhase::Idle;
                         self.animation_progress = 1.0;
-                        self.modified_animation_hold_until = None;
 
                         // If this was a backward animation, clear the active change
                         // so un-applied insertions properly disappear
@@ -2330,6 +2377,21 @@ fn inline_text_for_change(change: &Change) -> String {
             ChangeKind::Insert => text.push_str(&span.text),
             ChangeKind::Replace => {
                 text.push_str(&span.text);
+                text.push_str(&span.new_text.clone().unwrap_or_else(|| span.text.clone()));
+            }
+        }
+    }
+    text
+}
+
+fn modified_only_text_for_change(change: &Change) -> String {
+    let mut text = String::new();
+    for span in &change.spans {
+        match span.kind {
+            ChangeKind::Equal => text.push_str(&span.text),
+            ChangeKind::Delete => {}
+            ChangeKind::Insert => text.push_str(&span.text),
+            ChangeKind::Replace => {
                 text.push_str(&span.new_text.clone().unwrap_or_else(|| span.text.clone()));
             }
         }
