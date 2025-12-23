@@ -139,6 +139,27 @@ pub fn get_uncommitted_changes(repo_path: &Path) -> Result<Vec<ChangedFile>, Git
     Ok(changes)
 }
 
+/// Get list of staged changed files (index vs HEAD)
+pub fn get_staged_changes(repo_path: &Path) -> Result<Vec<ChangedFile>, GitError> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .arg("diff")
+        .arg("--cached")
+        .arg("--name-status")
+        .output()?;
+
+    if !output.status.success() {
+        return Err(GitError::CommandFailed(
+            String::from_utf8_lossy(&output.stderr).to_string(),
+        ));
+    }
+
+    let mut changes = Vec::new();
+    parse_name_status(&String::from_utf8_lossy(&output.stdout), &mut changes);
+    Ok(changes)
+}
+
 /// Get changes between two commits or refs
 pub fn get_changes_between(
     repo_path: &Path,

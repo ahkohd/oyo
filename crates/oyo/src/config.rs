@@ -30,7 +30,7 @@
 //! speed = 200
 //! autoplay = false
 //! animation = false
-//! auto_step_on_enter = true
+//! auto_step_on_enter = false
 //! auto_step_blank_files = true
 //!
 //! [files]
@@ -588,7 +588,7 @@ impl Default for PlaybackConfig {
             autoplay: false,
             animation: false,
             animation_duration: 150,
-            auto_step_on_enter: true,
+            auto_step_on_enter: false,
             auto_step_blank_files: true,
         }
     }

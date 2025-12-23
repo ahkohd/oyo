@@ -18,6 +18,7 @@ pub enum MultiDiffError {
 #[derive(Debug, Clone)]
 pub struct FileEntry {
     pub path: PathBuf,
+    pub old_path: Option<PathBuf>,
     pub display_name: String,
     pub status: FileStatus,
     pub insertions: usize,
@@ -35,10 +36,19 @@ pub struct MultiFileDiff {
     /// Repository root (if in git mode)
     #[allow(dead_code)]
     repo_root: Option<PathBuf>,
+    /// Git diff mode (if in git mode)
+    git_mode: Option<GitDiffMode>,
     /// Old contents for each file
     old_contents: Vec<String>,
     /// New contents for each file
     new_contents: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+enum GitDiffMode {
+    Uncommitted,
+    Staged,
+    Range { from: String, to: String },
 }
 
 impl MultiFileDiff {
@@ -74,6 +84,7 @@ impl MultiFileDiff {
             files.push(FileEntry {
                 display_name: change.path.display().to_string(),
                 path: change.path,
+                old_path: change.old_path,
                 status: change.status,
                 insertions: diff.insertions,
                 deletions: diff.deletions,
@@ -90,6 +101,111 @@ impl MultiFileDiff {
             selected_index: 0,
             navigators,
             repo_root: Some(repo_root),
+            git_mode: Some(GitDiffMode::Uncommitted),
+            old_contents,
+            new_contents,
+        })
+    }
+
+    /// Create from staged git changes (index vs HEAD)
+    pub fn from_git_staged(
+        repo_root: PathBuf,
+        changes: Vec<ChangedFile>,
+    ) -> Result<Self, MultiDiffError> {
+        let mut files = Vec::new();
+        let mut old_contents = Vec::new();
+        let mut new_contents = Vec::new();
+        let engine = DiffEngine::new().with_word_level(true);
+
+        for change in changes {
+            let old_path = change.old_path.clone().unwrap_or_else(|| change.path.clone());
+            let old_content = match change.status {
+                FileStatus::Added | FileStatus::Untracked => String::new(),
+                _ => crate::git::get_head_content(&repo_root, &old_path).unwrap_or_default(),
+            };
+
+            let new_content = match change.status {
+                FileStatus::Deleted => String::new(),
+                _ => crate::git::get_staged_content(&repo_root, &change.path).unwrap_or_default(),
+            };
+
+            let diff = engine.diff_strings(&old_content, &new_content);
+
+            files.push(FileEntry {
+                display_name: change.path.display().to_string(),
+                path: change.path,
+                old_path: change.old_path,
+                status: change.status,
+                insertions: diff.insertions,
+                deletions: diff.deletions,
+            });
+
+            old_contents.push(old_content);
+            new_contents.push(new_content);
+        }
+
+        let navigators: Vec<Option<DiffNavigator>> = (0..files.len()).map(|_| None).collect();
+
+        Ok(Self {
+            files,
+            selected_index: 0,
+            navigators,
+            repo_root: Some(repo_root),
+            git_mode: Some(GitDiffMode::Staged),
+            old_contents,
+            new_contents,
+        })
+    }
+
+    /// Create from a git range (from..to)
+    pub fn from_git_range(
+        repo_root: PathBuf,
+        changes: Vec<ChangedFile>,
+        from: String,
+        to: String,
+    ) -> Result<Self, MultiDiffError> {
+        let mut files = Vec::new();
+        let mut old_contents = Vec::new();
+        let mut new_contents = Vec::new();
+        let engine = DiffEngine::new().with_word_level(true);
+
+        for change in changes {
+            let old_path = change.old_path.clone().unwrap_or_else(|| change.path.clone());
+            let old_content = match change.status {
+                FileStatus::Added | FileStatus::Untracked => String::new(),
+                _ => crate::git::get_file_at_commit(&repo_root, &from, &old_path)
+                    .unwrap_or_default(),
+            };
+
+            let new_content = match change.status {
+                FileStatus::Deleted => String::new(),
+                _ => crate::git::get_file_at_commit(&repo_root, &to, &change.path)
+                    .unwrap_or_default(),
+            };
+
+            let diff = engine.diff_strings(&old_content, &new_content);
+
+            files.push(FileEntry {
+                display_name: change.path.display().to_string(),
+                path: change.path,
+                old_path: change.old_path,
+                status: change.status,
+                insertions: diff.insertions,
+                deletions: diff.deletions,
+            });
+
+            old_contents.push(old_content);
+            new_contents.push(new_content);
+        }
+
+        let navigators: Vec<Option<DiffNavigator>> = (0..files.len()).map(|_| None).collect();
+
+        Ok(Self {
+            files,
+            selected_index: 0,
+            navigators,
+            repo_root: Some(repo_root),
+            git_mode: Some(GitDiffMode::Range { from, to }),
             old_contents,
             new_contents,
         })
@@ -152,6 +268,7 @@ impl MultiFileDiff {
             files.push(FileEntry {
                 display_name: rel_path.display().to_string(),
                 path: rel_path,
+                old_path: None,
                 status,
                 insertions: diff.insertions,
                 deletions: diff.deletions,
@@ -168,6 +285,7 @@ impl MultiFileDiff {
             selected_index: 0,
             navigators,
             repo_root: None,
+            git_mode: None,
             old_contents,
             new_contents,
         })
@@ -186,6 +304,7 @@ impl MultiFileDiff {
         let files = vec![FileEntry {
             display_name: new_path.display().to_string(),
             path: new_path,
+            old_path: None,
             status: FileStatus::Modified,
             insertions: diff.insertions,
             deletions: diff.deletions,
@@ -196,6 +315,7 @@ impl MultiFileDiff {
             selected_index: 0,
             navigators: vec![None],
             repo_root: None,
+            git_mode: None,
             old_contents: vec![old_content],
             new_contents: vec![new_content],
         }
@@ -310,9 +430,20 @@ impl MultiFileDiff {
             Some(root) => root.clone(),
             None => return false,
         };
+        let mode = match &self.git_mode {
+            Some(mode) => mode.clone(),
+            None => return false,
+        };
 
         // Get fresh list of changes
-        let changes = match crate::git::get_uncommitted_changes(&repo_root) {
+        let changes = match mode {
+            GitDiffMode::Uncommitted => crate::git::get_uncommitted_changes(&repo_root),
+            GitDiffMode::Staged => crate::git::get_staged_changes(&repo_root),
+            GitDiffMode::Range { ref from, ref to } => {
+                crate::git::get_changes_between(&repo_root, from, to)
+            }
+        };
+        let changes = match changes {
             Ok(c) => c,
             Err(_) => return false,
         };
@@ -324,16 +455,45 @@ impl MultiFileDiff {
         let engine = DiffEngine::new().with_word_level(true);
 
         for change in changes {
-            let old_content = match change.status {
-                FileStatus::Added | FileStatus::Untracked => String::new(),
-                _ => crate::git::get_head_content(&repo_root, &change.path).unwrap_or_default(),
-            };
-
-            let new_content = match change.status {
-                FileStatus::Deleted => String::new(),
-                _ => {
-                    let full_path = repo_root.join(&change.path);
-                    std::fs::read_to_string(&full_path).unwrap_or_default()
+            let old_path = change.old_path.clone().unwrap_or_else(|| change.path.clone());
+            let (old_content, new_content) = match mode {
+                GitDiffMode::Uncommitted => {
+                    let old_content = match change.status {
+                        FileStatus::Added | FileStatus::Untracked => String::new(),
+                        _ => crate::git::get_head_content(&repo_root, &old_path).unwrap_or_default(),
+                    };
+                    let new_content = match change.status {
+                        FileStatus::Deleted => String::new(),
+                        _ => {
+                            let full_path = repo_root.join(&change.path);
+                            std::fs::read_to_string(&full_path).unwrap_or_default()
+                        }
+                    };
+                    (old_content, new_content)
+                }
+                GitDiffMode::Staged => {
+                    let old_content = match change.status {
+                        FileStatus::Added | FileStatus::Untracked => String::new(),
+                        _ => crate::git::get_head_content(&repo_root, &old_path).unwrap_or_default(),
+                    };
+                    let new_content = match change.status {
+                        FileStatus::Deleted => String::new(),
+                        _ => crate::git::get_staged_content(&repo_root, &change.path).unwrap_or_default(),
+                    };
+                    (old_content, new_content)
+                }
+                GitDiffMode::Range { ref from, ref to } => {
+                    let old_content = match change.status {
+                        FileStatus::Added | FileStatus::Untracked => String::new(),
+                        _ => crate::git::get_file_at_commit(&repo_root, from, &old_path)
+                            .unwrap_or_default(),
+                    };
+                    let new_content = match change.status {
+                        FileStatus::Deleted => String::new(),
+                        _ => crate::git::get_file_at_commit(&repo_root, to, &change.path)
+                            .unwrap_or_default(),
+                    };
+                    (old_content, new_content)
                 }
             };
 
@@ -342,6 +502,7 @@ impl MultiFileDiff {
             files.push(FileEntry {
                 display_name: change.path.display().to_string(),
                 path: change.path,
+                old_path: change.old_path,
                 status: change.status,
                 insertions: diff.insertions,
                 deletions: diff.deletions,
@@ -370,21 +531,56 @@ impl MultiFileDiff {
     pub fn refresh_current_file(&mut self) {
         let idx = self.selected_index;
         let file = &self.files[idx];
+        let old_path = file.old_path.clone().unwrap_or_else(|| file.path.clone());
 
-        // Get fresh content from disk
-        let new_content = if let Some(ref repo_root) = self.repo_root {
-            // Git mode - read from working directory
-            let full_path = repo_root.join(&file.path);
-            match file.status {
-                FileStatus::Deleted => String::new(),
-                _ => std::fs::read_to_string(&full_path).unwrap_or_default(),
+        // Get fresh content based on mode
+        let (old_content, new_content) = match (&self.repo_root, &self.git_mode) {
+            (Some(repo_root), Some(GitDiffMode::Uncommitted)) => {
+                let old_content = match file.status {
+                    FileStatus::Added | FileStatus::Untracked => String::new(),
+                    _ => crate::git::get_head_content(repo_root, &old_path).unwrap_or_default(),
+                };
+                let new_content = match file.status {
+                    FileStatus::Deleted => String::new(),
+                    _ => {
+                        let full_path = repo_root.join(&file.path);
+                        std::fs::read_to_string(&full_path).unwrap_or_default()
+                    }
+                };
+                (old_content, new_content)
             }
-        } else {
-            // Non-git mode - just re-read the file
-            std::fs::read_to_string(&file.path).unwrap_or_default()
+            (Some(repo_root), Some(GitDiffMode::Staged)) => {
+                let old_content = match file.status {
+                    FileStatus::Added | FileStatus::Untracked => String::new(),
+                    _ => crate::git::get_head_content(repo_root, &old_path).unwrap_or_default(),
+                };
+                let new_content = match file.status {
+                    FileStatus::Deleted => String::new(),
+                    _ => crate::git::get_staged_content(repo_root, &file.path).unwrap_or_default(),
+                };
+                (old_content, new_content)
+            }
+            (Some(repo_root), Some(GitDiffMode::Range { from, to })) => {
+                let old_content = match file.status {
+                    FileStatus::Added | FileStatus::Untracked => String::new(),
+                    _ => crate::git::get_file_at_commit(repo_root, from, &old_path)
+                        .unwrap_or_default(),
+                };
+                let new_content = match file.status {
+                    FileStatus::Deleted => String::new(),
+                    _ => crate::git::get_file_at_commit(repo_root, to, &file.path)
+                        .unwrap_or_default(),
+                };
+                (old_content, new_content)
+            }
+            _ => {
+                let new_content = std::fs::read_to_string(&file.path).unwrap_or_default();
+                (self.old_contents[idx].clone(), new_content)
+            }
         };
 
         // Update stored content
+        self.old_contents[idx] = old_content;
         self.new_contents[idx] = new_content;
 
         // Recompute diff stats

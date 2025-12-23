@@ -52,34 +52,60 @@ oyo old.rs new.rs --speed 100
 
 # No-step mode
 oyo old.rs new.rs --no-step
+
+# Staged changes (index vs HEAD)
+oyo --staged
+
+# Git range
+oyo --range HEAD~1..HEAD
+# or
+oyo --range main...feature
 ```
 
 ### Git Integration
 
-`oyo` works seamlessly with git:
+`oyo` supports git external diff (7-arg interface) and `git difftool`. For most workflows,
+`difftool` is smoother; `diff.external` will open a TUI per file.
 
 ```bash
-# Use as git external diff (one-off)
-git -c diff.external=oyo diff
-
-# Configure permanently
-git config --global diff.external oyo
-
-# Then just use git normally
-git diff
-git show --ext-diff
-git log -p --ext-diff
+# One-off (recommended)
+git difftool -y --tool=oyo
 ```
 
-Recommended git aliases in `~/.gitconfig`:
+Recommended `~/.gitconfig`:
 
 ```gitconfig
+[difftool "oyo"]
+    cmd = oyo "$LOCAL" "$REMOTE"
+
+[difftool]
+    prompt = false
+
 [alias]
-    # Step-through diff aliases
-    dlog = -c diff.external=oyo log --ext-diff
-    dshow = -c diff.external=oyo show --ext-diff
-    ddiff = -c diff.external=oyo diff
+    d = difftool -y --tool=oyo
+    oyo = "!oyo"
 ```
+
+External diff setup (optional):
+
+```bash
+git config --global diff.external oyo
+```
+
+Note: keep your pager (e.g., `less`, `moar`, `moor`) for normal `git diff` output.
+Do not set `core.pager` to `oyo`. Also avoid `interactive.diffFilter` — it expects
+a stdin filter, not a TUI.
+
+### Jujutsu (jj)
+
+In `~/.config/jj/config.toml`:
+
+```toml
+[ui]
+diff-formatter = ["oyo", "$left", "$right"]
+```
+
+Note: do not set your `ui.pager` to `oyo`.
 
 ### Keyboard Shortcuts
 
@@ -163,7 +189,7 @@ speed = 200                 # Autoplay interval in milliseconds
 autoplay = false            # Start with autoplay enabled
 animation = false           # Enable fade animations
 animation_duration = 150    # Animation duration per phase (ms)
-auto_step_on_enter = true   # Auto-step to first change when entering a file
+auto_step_on_enter = false  # Auto-step to first change when entering a file
 auto_step_blank_files = true # Auto-step when file would be blank at step 0 (new files)
 
 [files]

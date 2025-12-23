@@ -49,6 +49,14 @@ struct Args {
     /// Disable stepping (no-step diff view)
     #[arg(long)]
     no_step: bool,
+
+    /// Show staged changes (index vs HEAD)
+    #[arg(long, alias = "cached", conflicts_with = "range")]
+    staged: bool,
+
+    /// Diff a git range (e.g. HEAD~1..HEAD)
+    #[arg(long, value_name = "RANGE", conflicts_with = "staged")]
+    range: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -94,6 +102,10 @@ enum InputMode {
     },
     /// No args - try git uncommitted changes in current directory
     GitUncommitted,
+    /// Staged changes (index vs HEAD)
+    GitStaged,
+    /// Git range
+    GitRange { from: String, to: String },
     /// No valid input
     None,
 }
@@ -124,11 +136,88 @@ fn detect_input_mode(paths: &[PathBuf]) -> InputMode {
     }
 }
 
+fn parse_range(range: &str) -> Result<(String, String)> {
+    if let Some((from, to)) = range.split_once("...") {
+        if from.is_empty() || to.is_empty() {
+            anyhow::bail!("Range must be in the form A..B or A...B");
+        }
+        if to.contains("..") {
+            anyhow::bail!("Range must be in the form A..B or A...B");
+        }
+        return Ok((from.to_string(), to.to_string()));
+    }
+    if let Some((from, to)) = range.split_once("..") {
+        if from.is_empty() || to.is_empty() {
+            anyhow::bail!("Range must be in the form A..B or A...B");
+        }
+        if to.contains("..") {
+            anyhow::bail!("Range must be in the form A..B or A...B");
+        }
+        return Ok((from.to_string(), to.to_string()));
+    }
+    anyhow::bail!("Range must be in the form A..B or A...B");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_range;
+
+    #[test]
+    fn parse_range_accepts_double_dot() {
+        let (from, to) = parse_range("HEAD~1..HEAD").unwrap();
+        assert_eq!(from, "HEAD~1");
+        assert_eq!(to, "HEAD");
+    }
+
+    #[test]
+    fn parse_range_accepts_triple_dot() {
+        let (from, to) = parse_range("main...feature").unwrap();
+        assert_eq!(from, "main");
+        assert_eq!(to, "feature");
+    }
+
+    #[test]
+    fn parse_range_rejects_empty_bounds() {
+        assert!(parse_range("..HEAD").is_err());
+        assert!(parse_range("HEAD..").is_err());
+        assert!(parse_range("...HEAD").is_err());
+        assert!(parse_range("HEAD...").is_err());
+    }
+
+    #[test]
+    fn parse_range_rejects_extra_separators() {
+        assert!(parse_range("A..B..C").is_err());
+        assert!(parse_range("A...B..C").is_err());
+    }
+
+    #[test]
+    fn parse_range_rejects_missing_separator() {
+        assert!(parse_range("HEAD").is_err());
+    }
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
     let config = config::Config::load();
 
-    let input_mode = detect_input_mode(&args.paths);
+    let input_mode = if args.paths.len() == 7 {
+        detect_input_mode(&args.paths)
+    } else if args.staged || args.range.is_some() {
+        if !args.paths.is_empty() {
+            anyhow::bail!("--staged/--range cannot be used with file paths");
+        }
+        if args.staged && args.range.is_some() {
+            anyhow::bail!("--staged and --range are mutually exclusive");
+        }
+        if let Some(range) = args.range.as_deref() {
+            let (from, to) = parse_range(range)?;
+            InputMode::GitRange { from, to }
+        } else {
+            InputMode::GitStaged
+        }
+    } else {
+        detect_input_mode(&args.paths)
+    };
 
     // Create multi-file diff based on mode
     let (multi_diff, git_branch) = match input_mode {
@@ -210,6 +299,68 @@ fn main() -> Result<()> {
 
             let diff = MultiFileDiff::from_git_changes(repo_root, changes)
                 .context("Failed to create diff from git changes")?;
+
+            (diff, branch)
+        }
+        InputMode::GitStaged => {
+            let cwd = std::env::current_dir().unwrap_or_default();
+
+            if !oyo_core::git::is_git_repo(&cwd) {
+                anyhow::bail!(
+                    "Not in a git repository.\n\
+                     \n\
+                     Usage: oyo --staged\n\
+                     \n\
+                     Or run from a git repository."
+                );
+            }
+
+            let repo_root = oyo_core::git::get_repo_root(&cwd)
+                .context("Failed to get git repository root")?;
+
+            let changes = oyo_core::git::get_staged_changes(&repo_root)
+                .context("Failed to get staged changes")?;
+
+            if changes.is_empty() {
+                println!("No staged changes found.");
+                return Ok(());
+            }
+
+            let branch = oyo_core::git::get_current_branch(&repo_root).ok();
+
+            let diff = MultiFileDiff::from_git_staged(repo_root, changes)
+                .context("Failed to create diff from staged changes")?;
+
+            (diff, branch)
+        }
+        InputMode::GitRange { from, to } => {
+            let cwd = std::env::current_dir().unwrap_or_default();
+
+            if !oyo_core::git::is_git_repo(&cwd) {
+                anyhow::bail!(
+                    "Not in a git repository.\n\
+                     \n\
+                     Usage: oyo --range A..B\n\
+                     \n\
+                     Or run from a git repository."
+                );
+            }
+
+            let repo_root = oyo_core::git::get_repo_root(&cwd)
+                .context("Failed to get git repository root")?;
+
+            let changes = oyo_core::git::get_changes_between(&repo_root, &from, &to)
+                .context("Failed to get range changes")?;
+
+            if changes.is_empty() {
+                println!("No changes in range {}..{}.", from, to);
+                return Ok(());
+            }
+
+            let branch = oyo_core::git::get_current_branch(&repo_root).ok();
+
+            let diff = MultiFileDiff::from_git_range(repo_root, changes, from, to)
+                .context("Failed to create diff from range")?;
 
             (diff, branch)
         }
