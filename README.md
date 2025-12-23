@@ -141,7 +141,7 @@ jj diff -f zy -t w
 | `>` | Last step |
 | `gg` | Go to start (scroll-only in no-step mode) |
 | `G` | Go to end (scroll-only in no-step mode) |
-| `Space` | Toggle autoplay |
+| `Space` / `B` | Autoplay forward/reverse |
 | `Tab` | Toggle view mode |
 | `K` | Scroll up (supports count) |
 | `J` | Scroll down (supports count) |

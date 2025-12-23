@@ -72,6 +72,8 @@ pub struct App {
     pub animation_speed: u64,
     /// Whether autoplay is enabled
     pub autoplay: bool,
+    /// True when autoplay is running in reverse
+    pub autoplay_reverse: bool,
     /// Current scroll offset
     pub scroll_offset: usize,
     /// Per-file scroll offsets (to restore when switching files)
@@ -232,6 +234,7 @@ impl App {
             view_mode,
             animation_speed,
             autoplay,
+            autoplay_reverse: false,
             scroll_offset: 0,
             scroll_offsets: vec![0; file_count],
             files_visited: vec![false; file_count],
@@ -871,15 +874,26 @@ impl App {
     }
 
     pub fn next_step(&mut self) {
+        self.step_forward();
+    }
+
+    pub fn prev_step(&mut self) {
+        self.step_backward();
+    }
+
+    fn step_forward(&mut self) -> bool {
         if self.multi_diff.current_navigator().next() {
             if self.animation_enabled {
                 self.start_animation();
             }
             self.needs_scroll_to_active = true;
+            true
+        } else {
+            false
         }
     }
 
-    pub fn prev_step(&mut self) {
+    fn step_backward(&mut self) -> bool {
         if self.multi_diff.current_navigator().prev() {
             if self.animation_enabled {
                 self.start_animation();
@@ -887,6 +901,9 @@ impl App {
                 self.clear_active_on_next_render = true;
             }
             self.needs_scroll_to_active = true;
+            true
+        } else {
+            false
         }
     }
 
@@ -1647,7 +1664,22 @@ impl App {
     }
 
     pub fn toggle_autoplay(&mut self) {
-        self.autoplay = !self.autoplay;
+        if self.autoplay && !self.autoplay_reverse {
+            self.autoplay = false;
+        } else {
+            self.autoplay = true;
+            self.autoplay_reverse = false;
+        }
+        self.last_autoplay_tick = Instant::now();
+    }
+
+    pub fn toggle_autoplay_reverse(&mut self) {
+        if self.autoplay && self.autoplay_reverse {
+            self.autoplay = false;
+        } else {
+            self.autoplay = true;
+            self.autoplay_reverse = true;
+        }
         self.last_autoplay_tick = Instant::now();
     }
 
@@ -2150,14 +2182,13 @@ impl App {
         if self.stepping && self.autoplay && self.animation_phase == AnimationPhase::Idle {
             let autoplay_interval = Duration::from_millis(self.animation_speed * 2);
             if now.duration_since(self.last_autoplay_tick) >= autoplay_interval {
-                if !self.multi_diff.current_navigator().next() {
-                    // Reached the end, stop autoplay
-                    self.autoplay = false;
+                let moved = if self.autoplay_reverse {
+                    self.step_backward()
                 } else {
-                    if self.animation_enabled {
-                        self.start_animation();
-                    }
-                    self.needs_scroll_to_active = true;
+                    self.step_forward()
+                };
+                if !moved {
+                    self.autoplay = false;
                 }
                 self.last_autoplay_tick = now;
             }

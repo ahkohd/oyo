@@ -755,6 +755,12 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<()> 
                                 app.toggle_autoplay();
                             }
                         }
+                        KeyCode::Char('B') => {
+                            app.reset_count();
+                            if app.stepping {
+                                app.toggle_autoplay_reverse();
+                            }
+                        }
                         KeyCode::Tab => {
                             app.reset_count();
                             app.toggle_view_mode();

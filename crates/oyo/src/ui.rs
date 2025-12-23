@@ -157,7 +157,15 @@ fn draw_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
         };
         center_spans.push(Span::styled(query_text, query_style));
     } else if app.stepping {
-        let autoplay_marker = if app.autoplay { "▶" } else { " " };
+        let autoplay_marker = if app.autoplay {
+            if app.autoplay_reverse {
+                "◀"
+            } else {
+                "▶"
+            }
+        } else {
+            " "
+        };
         center_spans.push(Span::styled(autoplay_marker, arrow_style));
         center_spans.push(Span::raw(" "));
         center_spans.push(Span::styled(
@@ -669,7 +677,7 @@ fn draw_help_popover(frame: &mut Frame, app: &App) {
         help_line("S", "Toggle strikethrough".into()),
         Line::from(""),
         Line::from(Span::styled(" Playback", section_style)),
-        help_line("Space", "Toggle autoplay".into()),
+        help_line("Space / B", "Autoplay forward/reverse".into()),
         help_line("+ / -", format!("Speed ({}ms)", app.animation_speed)),
         help_line("a", "Toggle animation".into()),
         Line::from(""),
