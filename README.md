@@ -1,12 +1,22 @@
+<div align="center">
+
 # oyo
 
-Step through changes one at a time and watch the code transform, unlike traditional diff tools that show a static before/after.
+A Step-through diff viewer.
+
+<!-- Demo source: https://github.com/user-attachments/assets/dd284411-48cb-4015-b500-0246629c2493 -->
+https://github.com/user-attachments/assets/dd284411-48cb-4015-b500-0246629c2493
+
+</div>
+
+
+Step through changes or scroll the full diff, jump between hunks, and watch code transform instead of a static before/after.
 
 ## Features
 
 - **Step-through navigation**: Move through changes one at a time with keyboard shortcuts
-- **No-step mode**: Disable stepping to review all changes at once with scroll-only navigation
-- **Hunk navigation**: Jump between groups of related changes (hunks) with `h` and `l`
+- **No-step mode**: Review all changes at once with scroll + hunk navigation (scroll-only diff viewer)
+- **Hunk navigation**: Jump between groups of related changes (hunks) in step or no-step mode
 - **Animated transitions**: Smooth fade in/out animations as changes are applied
 - **Syntax highlighting**: Highlight code in no-step mode for easier review
 - **Three view modes**:
