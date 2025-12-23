@@ -105,7 +105,8 @@ fn draw_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
             .unwrap_or_default()
             .as_millis()
             / 500)
-            .is_multiple_of(2);
+            % 2
+            == 0;
         if flash {
             (
                 Style::default().fg(app.theme.warning),
