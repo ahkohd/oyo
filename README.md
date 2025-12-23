@@ -18,7 +18,7 @@ Step through changes or scroll the full diff, jump between hunks, and watch code
 - **No-step mode**: Review all changes at once with scroll + hunk navigation (scroll-only diff viewer)
 - **Hunk navigation**: Jump between groups of related changes (hunks) in step or no-step mode
 - **Animated transitions**: Smooth fade in/out animations as changes are applied
-- **Syntax highlighting**: Highlight code in no-step mode for easier review
+- **Syntax highlighting**: Toggle on/off for code-aware coloring (auto-enabled in no-step mode)
 - **Three view modes**:
   - **Single**: Watch the code morph from old to new state
   - **Split**: See old and new versions with synchronized stepping
