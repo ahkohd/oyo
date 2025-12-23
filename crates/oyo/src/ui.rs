@@ -10,6 +10,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
     Frame,
 };
+use unicode_width::UnicodeWidthStr;
 
 fn truncate_filename_keep_ext(name: &str, max_width: usize) -> String {
     if max_width == 0 {
@@ -61,6 +62,17 @@ fn truncate_filename_keep_ext(name: &str, max_width: usize) -> String {
         ""
     };
     format!("{head}...{tail}{ext}")
+}
+
+fn text_width(text: &str) -> usize {
+    UnicodeWidthStr::width(text)
+}
+
+fn spans_width(spans: &[Span]) -> usize {
+    spans
+        .iter()
+        .map(|span| text_width(span.content.as_ref()))
+        .sum()
 }
 
 /// Truncate a path to fit a given width, using /.../ for middle sections
@@ -272,12 +284,12 @@ fn draw_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
     right_spans.push(Span::raw(" "));
 
     // Build LEFT section: mode + scope (path + branch)
-    let center_width: usize = center_spans.iter().map(|s| s.content.len()).sum();
-    let right_width: usize = right_spans.iter().map(|s| s.content.len()).sum();
-    let left_fixed_width = mode.len() + 1;
-    let min_padding = 2;
-    let path_max_width = available_width
-        .saturating_sub(center_width + right_width + left_fixed_width + min_padding * 2);
+    let center_width = spans_width(&center_spans);
+    let right_width = spans_width(&right_spans);
+    let left_fixed_width = text_width(mode) + 1;
+    let max_scope_width =
+        available_width.saturating_sub(center_width + right_width + left_fixed_width);
+    let path_max_width = max_scope_width.min(available_width / 3);
     let scope_base = if available_width < 60 {
         scope_short
     } else {
@@ -298,19 +310,20 @@ fn draw_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
     ];
 
     // Calculate widths
-    let left_width: usize = left_spans.iter().map(|s| s.content.len()).sum();
+    let left_width = spans_width(&left_spans);
     // Calculate padding to center the middle section
 
     // Distribute padding: left_pad centers the center section, right_pad pushes right to edge
-    let center_start = available_width / 2 - center_width / 2;
-    let left_pad = center_start.saturating_sub(left_width);
-    let right_pad = available_width.saturating_sub(center_start + center_width + right_width);
+    let remaining = available_width.saturating_sub(left_width + center_width + right_width);
+    let left_pad = remaining / 2;
+    let right_pad = remaining.saturating_sub(left_pad);
+    let min_pad = 0;
 
     // Build final spans
     let mut spans = left_spans;
-    spans.push(Span::raw(" ".repeat(left_pad.max(1))));
+    spans.push(Span::raw(" ".repeat(left_pad.max(min_pad))));
     spans.extend(center_spans);
-    spans.push(Span::raw(" ".repeat(right_pad.max(1))));
+    spans.push(Span::raw(" ".repeat(right_pad.max(min_pad))));
     spans.extend(right_spans);
 
     let status_line = Line::from(spans);
