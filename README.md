@@ -27,6 +27,8 @@ Step through changes or scroll the full diff, jump between hunks, and watch code
 - **Word-level diffing**: See exactly which words changed within a line
 - **Autoplay**: Automatically step through all changes at a configurable speed
 - **Multi-file support**: Navigate between changed files with preserved positions
+- **Search**: Regex search with to jump between matches
+- **Line wrap**: Toggle wrapping for long lines
 - **Configurable**: XDG config file support for customization
 
 ## Installation
@@ -156,6 +158,7 @@ jj diff -f zy -t w
 | `y` / `Y` | Yank line/hunk to clipboard |
 | `/` | Search (diff pane, regex) |
 | `n` / `N` | Next/previous match |
+| `:line` / `:h<num>` / `:s<num>` | Go to line / hunk / step |
 | `<` | First applied step |
 | `>` | Last step |
 | `gg` | Go to start (scroll-only in no-step mode) |

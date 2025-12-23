@@ -149,11 +149,9 @@ where
             && word_width + whitespace_width + symbol_width > max_width;
 
         if word_found || untrimmed_overflow {
-            if pending_line_count > 0 || !trim {
-                if whitespace_count > 0 {
-                    line_width = line_width.saturating_add(whitespace_width);
-                    pending_line_count += whitespace_count;
-                }
+            if (pending_line_count > 0 || !trim) && whitespace_count > 0 {
+                line_width = line_width.saturating_add(whitespace_width);
+                pending_line_count += whitespace_count;
             }
             if word_count > 0 {
                 line_width = line_width.saturating_add(word_width);
@@ -208,10 +206,8 @@ where
     if pending_line_count == 0 && word_count == 0 && whitespace_count > 0 {
         rows += 1;
     }
-    if pending_line_count > 0 || !trim {
-        if whitespace_count > 0 {
-            pending_line_count += whitespace_count;
-        }
+    if (pending_line_count > 0 || !trim) && whitespace_count > 0 {
+        pending_line_count += whitespace_count;
     }
     if word_count > 0 {
         pending_line_count += word_count;

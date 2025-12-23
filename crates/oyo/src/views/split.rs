@@ -254,11 +254,9 @@ fn render_old_pane(frame: &mut Frame, app: &mut App, area: Rect) {
                 1
             };
             content_lines.push(Line::from(content_spans));
-            if app.line_wrap {
-                if wrap_count > 1 {
-                    for _ in 1..wrap_count {
-                        gutter_lines.push(Line::from(Span::raw(" ")));
-                    }
+            if app.line_wrap && wrap_count > 1 {
+                for _ in 1..wrap_count {
+                    gutter_lines.push(Line::from(Span::raw(" ")));
                 }
             }
             line_idx += 1;
@@ -272,11 +270,9 @@ fn render_old_pane(frame: &mut Frame, app: &mut App, area: Rect) {
                     };
                     gutter_lines.push(Line::from(Span::raw(" ")));
                     content_lines.push(Line::from(Span::raw("")));
-                    if app.line_wrap {
-                        if debug_wrap > 1 {
-                            for _ in 1..debug_wrap {
-                                gutter_lines.push(Line::from(Span::raw(" ")));
-                            }
+                    if app.line_wrap && debug_wrap > 1 {
+                        for _ in 1..debug_wrap {
+                            gutter_lines.push(Line::from(Span::raw(" ")));
                         }
                     }
                 }
@@ -509,12 +505,10 @@ fn render_new_pane(frame: &mut Frame, app: &mut App, area: Rect) {
 
             // Build marker line
             marker_lines.push(Line::from(Span::styled(active_marker, active_style)));
-            if app.line_wrap {
-                if wrap_count > 1 {
-                    for _ in 1..wrap_count {
-                        gutter_lines.push(Line::from(Span::raw(" ")));
-                        marker_lines.push(Line::from(Span::raw(" ")));
-                    }
+            if app.line_wrap && wrap_count > 1 {
+                for _ in 1..wrap_count {
+                    gutter_lines.push(Line::from(Span::raw(" ")));
+                    marker_lines.push(Line::from(Span::raw(" ")));
                 }
             }
 
@@ -532,12 +526,10 @@ fn render_new_pane(frame: &mut Frame, app: &mut App, area: Rect) {
                     gutter_lines.push(Line::from(Span::raw(" ")));
                     content_lines.push(Line::from(Span::styled(debug_text, debug_style)));
                     marker_lines.push(Line::from(Span::raw(" ")));
-                    if app.line_wrap {
-                        if debug_wrap > 1 {
-                            for _ in 1..debug_wrap {
-                                gutter_lines.push(Line::from(Span::raw(" ")));
-                                marker_lines.push(Line::from(Span::raw(" ")));
-                            }
+                    if app.line_wrap && debug_wrap > 1 {
+                        for _ in 1..debug_wrap {
+                            gutter_lines.push(Line::from(Span::raw(" ")));
+                            marker_lines.push(Line::from(Span::raw(" ")));
                         }
                     }
                 }

@@ -549,6 +549,21 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<()> 
                     }
                 }
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    if app.show_help {
+                        match key.code {
+                            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?') => {
+                                app.toggle_help();
+                            }
+                            KeyCode::Down | KeyCode::Char('j') => {
+                                app.help_scroll_down();
+                            }
+                            KeyCode::Up | KeyCode::Char('k') => {
+                                app.help_scroll_up();
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
                     if app.file_filter_active {
                         match key.code {
                             KeyCode::Esc | KeyCode::Enter => {
@@ -565,6 +580,35 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<()> 
                                     && !key.modifiers.contains(KeyModifiers::ALT) =>
                             {
                                 app.push_file_filter_char(c);
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
+                    if app.goto_active() {
+                        match key.code {
+                            KeyCode::Esc => {
+                                app.clear_goto();
+                            }
+                            KeyCode::Enter => {
+                                app.apply_goto();
+                                app.clear_goto();
+                            }
+                            KeyCode::Backspace => {
+                                if app.goto_query().is_empty() {
+                                    app.clear_goto();
+                                } else {
+                                    app.pop_goto_char();
+                                }
+                            }
+                            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                app.clear_goto_text();
+                            }
+                            KeyCode::Char(c)
+                                if !key.modifiers.contains(KeyModifiers::CONTROL)
+                                    && !key.modifiers.contains(KeyModifiers::ALT) =>
+                            {
+                                app.push_goto_char(c);
                             }
                             _ => {}
                         }
@@ -615,10 +659,14 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<()> 
                     if matches!(key.code, KeyCode::Esc)
                         && !app.show_help
                         && !app.show_path_popup
-                        && (app.search_active() || !app.search_query().is_empty())
+                        && (app.search_active()
+                            || !app.search_query().is_empty()
+                            || app.goto_active()
+                            || !app.goto_query().is_empty())
                     {
                         app.reset_count();
                         app.clear_search();
+                        app.clear_goto();
                         continue;
                     }
 
@@ -929,6 +977,12 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<()> 
                                 app.start_file_filter();
                             } else {
                                 app.start_search();
+                            }
+                        }
+                        KeyCode::Char(':') => {
+                            app.reset_count();
+                            if !app.file_list_focused {
+                                app.start_goto();
                             }
                         }
                         KeyCode::Char('n') => {

@@ -109,6 +109,10 @@ pub struct App {
     pub needs_scroll_to_active: bool,
     /// Whether to show the help popover
     pub show_help: bool,
+    /// Current scroll offset for help popover
+    pub help_scroll: usize,
+    /// Max scroll for help popover (computed during render)
+    pub help_max_scroll: usize,
     /// Git branch name (if in a git repo)
     pub git_branch: Option<String>,
     /// Auto-center on active change after stepping (like vim's zz)
@@ -185,6 +189,10 @@ pub struct App {
     search_target: Option<usize>,
     /// Cached search regex (case-insensitive)
     search_regex: Option<Regex>,
+    /// Goto query (":" command)
+    goto_query: String,
+    /// True when goto input is active
+    goto_active: bool,
     /// Snap animation frame when animations are disabled
     snap_frame: Option<AnimationFrame>,
     /// Start time of the current snap frame
@@ -276,6 +284,8 @@ impl App {
             zen_mode: false,
             needs_scroll_to_active: true, // Scroll to first change on startup
             show_help: false,
+            help_scroll: 0,
+            help_max_scroll: 0,
             git_branch,
             auto_center: true,
             animation_duration: 150,
@@ -314,6 +324,8 @@ impl App {
             needs_scroll_to_search: false,
             search_target: None,
             search_regex: None,
+            goto_query: String::new(),
+            goto_active: false,
             snap_frame: None,
             snap_frame_started_at: None,
             last_viewport_height: 0,
@@ -340,6 +352,9 @@ impl App {
 
     pub fn toggle_help(&mut self) {
         self.show_help = !self.show_help;
+        if self.show_help {
+            self.help_scroll = 0;
+        }
     }
 
     pub fn toggle_path_popup(&mut self) {
@@ -499,6 +514,36 @@ impl App {
         self.search_regex = None;
     }
 
+    pub fn start_goto(&mut self) {
+        self.goto_active = true;
+        self.goto_query.clear();
+    }
+
+    pub fn clear_goto(&mut self) {
+        self.goto_active = false;
+        self.goto_query.clear();
+    }
+
+    pub fn clear_goto_text(&mut self) {
+        self.goto_query.clear();
+    }
+
+    pub fn push_goto_char(&mut self, ch: char) {
+        self.goto_query.push(ch);
+    }
+
+    pub fn pop_goto_char(&mut self) {
+        self.goto_query.pop();
+    }
+
+    pub fn goto_active(&self) -> bool {
+        self.goto_active
+    }
+
+    pub fn goto_query(&self) -> &str {
+        &self.goto_query
+    }
+
     pub fn push_search_char(&mut self, ch: char) {
         self.search_query.push(ch);
         self.search_last_target = None;
@@ -578,6 +623,45 @@ impl App {
         self.search_last_target = Some(target);
         self.search_target = Some(target);
         self.needs_scroll_to_search = true;
+    }
+
+    pub fn apply_goto(&mut self) {
+        let query = self.goto_query.trim();
+        if query.is_empty() {
+            return;
+        }
+
+        let mut chars = query.chars();
+        let first = match chars.next() {
+            Some(ch) => ch,
+            None => return,
+        };
+
+        match first {
+            'h' | 'H' => {
+                let rest = chars
+                    .as_str()
+                    .trim_start_matches(|c: char| c == ':' || c.is_whitespace());
+                if let Ok(num) = rest.parse::<usize>() {
+                    self.goto_hunk_number(num);
+                }
+            }
+            's' | 'S' => {
+                let rest = chars
+                    .as_str()
+                    .trim_start_matches(|c: char| c == ':' || c.is_whitespace());
+                if let Ok(num) = rest.parse::<usize>() {
+                    self.goto_step_number(num);
+                }
+            }
+            _ => {
+                if query.chars().all(|c| c.is_ascii_digit()) {
+                    if let Ok(num) = query.parse::<usize>() {
+                        self.goto_line_number(num);
+                    }
+                }
+            }
+        }
     }
 
     pub fn highlight_search_spans(
@@ -1069,10 +1153,8 @@ impl App {
         if self.multi_diff.current_navigator().prev() {
             if self.animation_enabled {
                 self.start_animation();
-            } else {
-                if self.snap_frame.is_none() {
-                    self.clear_active_on_next_render = true;
-                }
+            } else if self.snap_frame.is_none() {
+                self.clear_active_on_next_render = true;
             }
             self.needs_scroll_to_active = true;
             true
@@ -1264,6 +1346,23 @@ impl App {
             (Some(o), Some(n)) => {
                 let old_dist = (o.idx as isize - self.scroll_offset as isize).abs();
                 let new_dist = (n.idx as isize - self.scroll_offset as isize).abs();
+                if old_dist < new_dist {
+                    Some(o)
+                } else {
+                    Some(n)
+                }
+            }
+            (Some(o), None) => Some(o),
+            (None, Some(n)) => Some(n),
+            (None, None) => None,
+        }
+    }
+
+    fn pick_split_index(&self, old: Option<usize>, new: Option<usize>) -> Option<usize> {
+        match (old, new) {
+            (Some(o), Some(n)) => {
+                let old_dist = (o as isize - self.scroll_offset as isize).abs();
+                let new_dist = (n as isize - self.scroll_offset as isize).abs();
                 if old_dist < new_dist {
                     Some(o)
                 } else {
@@ -1739,6 +1838,16 @@ impl App {
         self.zen_mode = !self.zen_mode;
     }
 
+    pub fn help_scroll_up(&mut self) {
+        self.help_scroll = self.help_scroll.saturating_sub(1);
+    }
+
+    pub fn help_scroll_down(&mut self) {
+        if self.help_scroll < self.help_max_scroll {
+            self.help_scroll += 1;
+        }
+    }
+
     pub fn toggle_file_panel(&mut self) {
         if self.file_panel_manually_set {
             // Already manually controlled, just toggle
@@ -1834,6 +1943,205 @@ impl App {
         self.animation_progress = 1.0;
         self.centered_once = false;
         self.needs_scroll_to_active = true;
+    }
+
+    fn goto_step_number(&mut self, step_number: usize) {
+        if !self.stepping {
+            return;
+        }
+        let total_steps = self.multi_diff.current_navigator().state().total_steps;
+        if total_steps == 0 {
+            return;
+        }
+        self.clear_peek();
+        let clamped = step_number.max(1).min(total_steps);
+        let target_step = clamped.saturating_sub(1);
+        self.multi_diff.current_navigator().goto(target_step);
+        self.animation_phase = AnimationPhase::Idle;
+        self.animation_progress = 1.0;
+        self.centered_once = false;
+        self.needs_scroll_to_active = true;
+    }
+
+    fn goto_hunk_number(&mut self, hunk_number: usize) {
+        let total_hunks = self.multi_diff.current_navigator().state().total_hunks;
+        if total_hunks == 0 {
+            return;
+        }
+        let clamped = hunk_number.max(1).min(total_hunks);
+        let hunk_idx = clamped - 1;
+        if self.stepping {
+            self.goto_hunk_index(hunk_idx);
+        } else {
+            self.goto_hunk_index_scroll(hunk_idx);
+        }
+    }
+
+    fn goto_hunk_index(&mut self, hunk_idx: usize) {
+        self.clear_peek();
+        self.multi_diff.current_navigator().goto_hunk(hunk_idx);
+        if self.animation_enabled {
+            self.start_animation();
+        } else {
+            self.clear_active_on_next_render = true;
+        }
+        self.needs_scroll_to_active = true;
+    }
+
+    fn goto_hunk_index_scroll(&mut self, hunk_idx: usize) {
+        let target = match self.view_mode {
+            ViewMode::Split => {
+                let (old_bounds, new_bounds) = self.compute_hunk_bounds_split();
+                let old = old_bounds.get(hunk_idx).copied().flatten();
+                let new = new_bounds.get(hunk_idx).copied().flatten();
+                self.pick_split_bounds(old, new).map(|b| (hunk_idx, b))
+            }
+            _ => {
+                let bounds = self.compute_hunk_bounds_single();
+                bounds
+                    .get(hunk_idx)
+                    .copied()
+                    .flatten()
+                    .map(|b| (hunk_idx, b))
+            }
+        };
+
+        if let Some((hidx, bound)) = target {
+            self.scroll_offset = bound.start.idx;
+            self.centered_once = false;
+            self.multi_diff
+                .current_navigator()
+                .set_cursor_hunk(hidx, bound.start.change_id);
+            self.multi_diff.current_navigator().set_hunk_scope(true);
+            if self.auto_center {
+                self.needs_scroll_to_active = true;
+            }
+        }
+    }
+
+    fn goto_line_number(&mut self, line_number: usize) {
+        self.clear_peek();
+        let view = self
+            .multi_diff
+            .current_navigator()
+            .current_view_with_frame(AnimationFrame::Idle);
+        let target_idx = match self.view_mode {
+            ViewMode::Split => {
+                let mut old_idx = 0usize;
+                let mut new_idx = 0usize;
+                let mut old_last = None;
+                let mut new_last = None;
+                let mut old_max_line = 0usize;
+                let mut new_max_line = 0usize;
+                let mut old_match = None;
+                let mut new_match = None;
+                for line in &view {
+                    if let Some(old_line) = line.old_line {
+                        old_max_line = old_max_line.max(old_line);
+                        if old_line == line_number {
+                            old_match = Some(old_idx);
+                        }
+                        old_idx += 1;
+                        old_last = Some(old_idx - 1);
+                    }
+                    if let Some(new_line) = line.new_line {
+                        new_max_line = new_max_line.max(new_line);
+                        if new_line == line_number {
+                            new_match = Some(new_idx);
+                        }
+                        new_idx += 1;
+                        new_last = Some(new_idx - 1);
+                    }
+                }
+                if line_number == 0 {
+                    let first_old = if old_idx > 0 { Some(0) } else { None };
+                    let first_new = if new_idx > 0 { Some(0) } else { None };
+                    self.pick_split_index(first_old, first_new)
+                } else {
+                    let max_line = old_max_line.max(new_max_line);
+                    if max_line > 0 && line_number > max_line {
+                        if old_max_line > new_max_line {
+                            old_last
+                        } else if new_max_line > old_max_line {
+                            new_last
+                        } else {
+                            self.pick_split_index(old_last, new_last)
+                        }
+                    } else {
+                        self.pick_split_index(old_match, new_match)
+                    }
+                }
+            }
+            ViewMode::Evolution => {
+                let mut target = None;
+                let mut last_idx = None;
+                let mut max_line = 0usize;
+                for (display_idx, line) in view
+                    .iter()
+                    .filter(|line| {
+                        !matches!(line.kind, LineKind::Deleted | LineKind::PendingDelete)
+                    })
+                    .enumerate()
+                {
+                    let line_num = line.new_line.or(line.old_line);
+                    if let Some(num) = line_num {
+                        max_line = max_line.max(num);
+                    }
+                    if line_num == Some(line_number) {
+                        target = Some(display_idx);
+                        break;
+                    }
+                    last_idx = Some(display_idx);
+                }
+                if line_number == 0 {
+                    last_idx.map(|_| 0)
+                } else if max_line > 0 && line_number > max_line {
+                    last_idx
+                } else {
+                    target
+                }
+            }
+            _ => {
+                let mut target = None;
+                let mut last_idx = None;
+                let mut max_line = 0usize;
+                for (display_idx, line) in view.iter().enumerate() {
+                    let line_num = line.old_line.or(line.new_line);
+                    if let Some(num) = line_num {
+                        max_line = max_line.max(num);
+                    }
+                    if line_num == Some(line_number) {
+                        target = Some(display_idx);
+                        break;
+                    }
+                    last_idx = Some(display_idx);
+                }
+                if line_number == 0 {
+                    last_idx.map(|_| 0)
+                } else if max_line > 0 && line_number > max_line {
+                    last_idx
+                } else {
+                    target
+                }
+            }
+        };
+
+        if let Some(idx) = target_idx {
+            let viewport_height = self.last_viewport_height.max(1);
+            if self.auto_center {
+                let half_viewport = viewport_height / 2;
+                self.scroll_offset = idx.saturating_sub(half_viewport);
+                self.centered_once = true;
+            } else {
+                self.scroll_offset = idx;
+                self.centered_once = false;
+            }
+            self.needs_scroll_to_active = false;
+            self.multi_diff.current_navigator().set_hunk_scope(false);
+            if !self.stepping {
+                self.set_cursor_for_current_scroll();
+            }
+        }
     }
 
     pub fn toggle_autoplay(&mut self) {
