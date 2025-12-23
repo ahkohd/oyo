@@ -181,9 +181,15 @@ pub struct App {
     search_target: Option<usize>,
     /// Cached search regex (case-insensitive)
     search_regex: Option<Regex>,
+    /// Snap animation frame when animations are disabled
+    snap_frame: Option<AnimationFrame>,
+    /// Start time of the current snap frame
+    snap_frame_started_at: Option<Instant>,
     /// Last known viewport height for the diff area
     pub last_viewport_height: usize,
 }
+
+const SNAP_PHASE_MS: u64 = 50;
 
 /// Pure helper: determine if overscroll should be allowed
 fn allow_overscroll_state(
@@ -302,6 +308,8 @@ impl App {
             needs_scroll_to_search: false,
             search_target: None,
             search_regex: None,
+            snap_frame: None,
+            snap_frame_started_at: None,
             last_viewport_height: 0,
         }
     }
@@ -1030,6 +1038,8 @@ impl App {
 
     fn step_forward(&mut self) -> bool {
         self.clear_peek();
+        self.snap_frame = None;
+        self.snap_frame_started_at = None;
         if self.multi_diff.current_navigator().next() {
             if self.animation_enabled {
                 self.start_animation();
@@ -1043,11 +1053,20 @@ impl App {
 
     fn step_backward(&mut self) -> bool {
         self.clear_peek();
+        self.snap_frame = None;
+        self.snap_frame_started_at = None;
+        if !self.animation_enabled {
+            self.snap_frame = Some(AnimationFrame::FadeOut);
+            self.snap_frame_started_at = Some(Instant::now());
+            self.clear_active_on_next_render = false;
+        }
         if self.multi_diff.current_navigator().prev() {
             if self.animation_enabled {
                 self.start_animation();
             } else {
-                self.clear_active_on_next_render = true;
+                if self.snap_frame.is_none() {
+                    self.clear_active_on_next_render = true;
+                }
             }
             self.needs_scroll_to_active = true;
             true
@@ -1055,6 +1074,7 @@ impl App {
             false
         }
     }
+
 
     /// Compute hunk starts for single/evolution view (display index + change id).
     fn compute_hunk_starts_single(&mut self) -> Vec<Option<HunkStart>> {
@@ -1742,6 +1762,9 @@ impl App {
 
     /// Convert CLI animation phase to core AnimationFrame for phase-aware rendering
     pub fn animation_frame(&self) -> AnimationFrame {
+        if let Some(frame) = self.snap_frame {
+            return frame;
+        }
         // Force FadeOut for one-frame render when animation disabled,
         // so backward insert-only changes produce ViewLines for extent markers
         if self.clear_active_on_next_render {
@@ -2190,10 +2213,15 @@ impl App {
         if !self.needs_scroll_to_active {
             return;
         }
+        if self.auto_center && self.snap_frame.is_some() {
+            return;
+        }
         self.needs_scroll_to_active = false;
 
+        let step_direction = self.multi_diff.current_step_direction();
+        let auto_center = self.auto_center;
         // If auto_center is enabled, always center on active change
-        if self.auto_center {
+        if auto_center {
             self.center_on_active(viewport_height);
             return;
         }
@@ -2203,7 +2231,6 @@ impl App {
             .multi_diff
             .current_navigator()
             .current_view_with_frame(frame);
-        let step_direction = self.multi_diff.current_step_direction();
 
         let (display_len, display_idx) = display_metrics(
             &view,
@@ -2229,6 +2256,10 @@ impl App {
                 self.scroll_offset = idx.saturating_sub(viewport_height.saturating_sub(margin + 1));
             }
         } else if display_len > 0 {
+            let state = self.multi_diff.current_navigator().state();
+            if self.view_mode == ViewMode::Evolution && self.stepping && state.current_step > 0 {
+                return;
+            }
             // No active line (step 0); snap to top so "first step" is visible.
             self.scroll_offset = 0;
         }
@@ -2255,6 +2286,10 @@ impl App {
             let half_viewport = viewport_height / 2;
             self.scroll_offset = idx.saturating_sub(half_viewport);
         } else if display_len > 0 {
+            let state = self.multi_diff.current_navigator().state();
+            if self.view_mode == ViewMode::Evolution && self.stepping && state.current_step > 0 {
+                return;
+            }
             // No active line (step 0); default to top of file.
             self.scroll_offset = 0;
         }
@@ -2269,6 +2304,27 @@ impl App {
     /// Called every frame to update animations and autoplay
     pub fn tick(&mut self) {
         let now = Instant::now();
+
+        if let Some(frame) = self.snap_frame {
+            let started_at = self.snap_frame_started_at.get_or_insert(now);
+            let phase_duration = Duration::from_millis(SNAP_PHASE_MS);
+            if now.duration_since(*started_at) >= phase_duration {
+                match frame {
+                    AnimationFrame::FadeOut => {
+                        self.snap_frame = Some(AnimationFrame::FadeIn);
+                        self.snap_frame_started_at = Some(now);
+                    }
+                    AnimationFrame::FadeIn | AnimationFrame::Idle => {
+                        self.snap_frame = None;
+                        self.snap_frame_started_at = None;
+                        let step_dir = self.multi_diff.current_navigator().state().step_direction;
+                        if step_dir == StepDirection::Backward {
+                            self.multi_diff.current_navigator().clear_active_change();
+                        }
+                    }
+                }
+            }
+        }
 
         // Update animation
         if self.animation_phase != AnimationPhase::Idle {

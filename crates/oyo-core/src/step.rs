@@ -130,6 +130,7 @@ impl DiffNavigator {
         &self.state
     }
 
+
     /// Get mutable access to step state (test-only)
     #[cfg(test)]
     pub fn state_mut(&mut self) -> &mut StepState {
