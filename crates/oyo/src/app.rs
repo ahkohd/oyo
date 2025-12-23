@@ -1,7 +1,7 @@
 //! Application state and logic
 
 use crate::color;
-use crate::config::{FileCountMode, ResolvedTheme, SyntaxMode};
+use crate::config::{FileCountMode, ModifiedStepMode, ResolvedTheme, SyntaxMode};
 use crate::syntax::{SyntaxCache, SyntaxEngine, SyntaxSide};
 use oyo_core::{
     AnimationFrame, Change, ChangeKind, LineKind, MultiFileDiff, StepDirection, StepState, ViewLine,
@@ -155,6 +155,8 @@ pub struct App {
     pub theme: ResolvedTheme,
     /// Whether stepping is enabled (false = no-step diff view)
     pub stepping: bool,
+    /// Single-pane modified line render mode while stepping
+    pub single_modified_step_mode: ModifiedStepMode,
     /// Syntax highlighting mode
     pub syntax_mode: SyntaxMode,
     /// Syntax highlighter (lazy initialized)
@@ -214,6 +216,7 @@ pub enum PeekScope {
 pub enum PeekMode {
     Old,
     Modified,
+    Mixed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -286,6 +289,7 @@ impl App {
             clear_active_on_next_render: false,
             theme: ResolvedTheme::default(),
             stepping: true,
+            single_modified_step_mode: ModifiedStepMode::Mixed,
             syntax_mode: SyntaxMode::Auto,
             syntax_engine: None,
             syntax_caches: vec![None; file_count],
@@ -361,28 +365,27 @@ impl App {
         if !self.stepping {
             return;
         }
-        let next = match self.peek_state {
-            None => Some(PeekState {
-                scope: PeekScope::Change,
-                mode: PeekMode::Modified,
-            }),
+        let base = self.base_modified_view_mode();
+        let current = match self.peek_state {
             Some(PeekState {
                 scope: PeekScope::Change,
-                mode: PeekMode::Modified,
-            }) => Some(PeekState {
-                scope: PeekScope::Change,
-                mode: PeekMode::Old,
-            }),
-            Some(PeekState {
-                scope: PeekScope::Change,
-                mode: PeekMode::Old,
-            }) => None,
-            _ => Some(PeekState {
-                scope: PeekScope::Change,
-                mode: PeekMode::Modified,
-            }),
+                mode,
+            }) => mode,
+            _ => base,
         };
-        self.peek_state = next;
+        let next = match current {
+            PeekMode::Modified => PeekMode::Old,
+            PeekMode::Old => PeekMode::Mixed,
+            PeekMode::Mixed => PeekMode::Modified,
+        };
+        if next == base {
+            self.peek_state = None;
+        } else {
+            self.peek_state = Some(PeekState {
+                scope: PeekScope::Change,
+                mode: next,
+            });
+        }
     }
 
     fn toggle_peek_hunk(&mut self) {
@@ -400,29 +403,56 @@ impl App {
         }
     }
 
+    fn base_modified_view_mode(&self) -> PeekMode {
+        if self.single_modified_step_mode == ModifiedStepMode::Modified {
+            PeekMode::Modified
+        } else {
+            PeekMode::Mixed
+        }
+    }
+
+    pub fn is_peek_override_for_line(&mut self, view_line: &ViewLine) -> bool {
+        if !self.stepping {
+            return false;
+        }
+        let Some(peek) = self.peek_state else {
+            return false;
+        };
+        match peek.scope {
+            PeekScope::Change => view_line.is_primary_active,
+            PeekScope::Hunk => {
+                let current_hunk = self.multi_diff.current_navigator().state().current_hunk;
+                view_line.hunk_index == Some(current_hunk)
+            }
+        }
+    }
+
     pub fn peek_mode_for_line(&mut self, view_line: &ViewLine) -> Option<PeekMode> {
-        let peek = self.peek_state?;
         if !self.stepping {
             return None;
         }
-        let mode = match peek.scope {
-            PeekScope::Change => {
-                if view_line.is_primary_active {
-                    Some(peek.mode)
-                } else {
-                    None
+        if let Some(peek) = self.peek_state {
+            match peek.scope {
+                PeekScope::Change => {
+                    if view_line.is_primary_active {
+                        return Some(peek.mode);
+                    }
+                }
+                PeekScope::Hunk => {
+                    let current_hunk = self.multi_diff.current_navigator().state().current_hunk;
+                    if view_line.hunk_index == Some(current_hunk) {
+                        return Some(PeekMode::Old);
+                    }
                 }
             }
-            PeekScope::Hunk => {
-                let current_hunk = self.multi_diff.current_navigator().state().current_hunk;
-                if view_line.hunk_index == Some(current_hunk) {
-                    Some(PeekMode::Old)
-                } else {
-                    None
-                }
-            }
-        };
-        mode
+            return None;
+        }
+        if view_line.is_primary_active
+            && matches!(view_line.kind, LineKind::Modified | LineKind::PendingModify)
+        {
+            return Some(self.base_modified_view_mode());
+        }
+        None
     }
 
     pub fn start_search(&mut self) {
@@ -606,6 +636,20 @@ impl App {
                         return Some(text);
                     }
                 }
+                PeekMode::Mixed => {
+                    let change = self
+                        .multi_diff
+                        .current_navigator()
+                        .diff()
+                        .changes
+                        .get(view_line.change_id);
+                    if let Some(change) = change {
+                        let text = inline_text_for_change(change);
+                        if !text.is_empty() {
+                            return Some(text);
+                        }
+                    }
+                }
             }
         }
         Some(view_line.content.clone())
@@ -729,6 +773,20 @@ impl App {
                 PeekMode::Modified => {
                     if let Some(text) = self.modified_only_text_for_line(view_line) {
                         return text;
+                    }
+                }
+                PeekMode::Mixed => {
+                    if let Some(change) = self
+                        .multi_diff
+                        .current_navigator()
+                        .diff()
+                        .changes
+                        .get(view_line.change_id)
+                    {
+                        let text = inline_text_for_change(change);
+                        if !text.is_empty() {
+                            return text;
+                        }
                     }
                 }
             }

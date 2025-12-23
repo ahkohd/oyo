@@ -2,6 +2,7 @@
 
 use super::{render_empty_state, spans_to_text, truncate_text};
 use crate::app::{App, AnimationPhase};
+use crate::config::ModifiedStepMode;
 use crate::color;
 use crate::syntax::SyntaxSide;
 use oyo_core::{Change, ChangeKind, LineKind, ViewSpan, ViewSpanKind};
@@ -111,12 +112,25 @@ fn build_inline_modified_spans(
     }
 }
 
-fn build_modified_only_spans(change: &Change, app: &App) -> Option<Vec<Span<'static>>> {
+fn build_modified_only_spans(
+    change: &Change,
+    app: &App,
+    use_animation: bool,
+) -> Option<Vec<Span<'static>>> {
     let mut spans = Vec::new();
+    let (phase, progress, backward) = if use_animation {
+        (
+            app.animation_phase,
+            app.animation_progress,
+            app.is_backward_animation(),
+        )
+    } else {
+        (AnimationPhase::Idle, 1.0, false)
+    };
     let modify_style = super::modify_style(
-        AnimationPhase::Idle,
-        1.0,
-        false,
+        phase,
+        progress,
+        backward,
         app.theme.modify_base(),
         app.theme.diff_context,
     );
@@ -355,14 +369,24 @@ pub fn render_single_pane(frame: &mut Frame, app: &mut App, area: Rect) {
             && !has_peek
             && matches!(view_line.kind, LineKind::Modified | LineKind::PendingModify)
         {
-            let is_modified_peek = peek_mode == Some(crate::app::PeekMode::Modified);
+            let peek_override = app.is_peek_override_for_line(view_line);
+            let is_modified_peek =
+                peek_override && peek_mode == Some(crate::app::PeekMode::Modified);
+            let default_modified_only =
+                app.single_modified_step_mode == ModifiedStepMode::Modified;
             let change = {
                 let nav = app.multi_diff.current_navigator();
                 nav.diff().changes.get(view_line.change_id).cloned()
             };
             if let Some(change) = change {
-                if is_modified_peek {
-                    if let Some(spans) = build_modified_only_spans(&change, app) {
+                let use_modified_only = if peek_override {
+                    is_modified_peek
+                } else {
+                    default_modified_only
+                };
+                if use_modified_only {
+                    let use_animation = !is_modified_peek;
+                    if let Some(spans) = build_modified_only_spans(&change, app, use_animation) {
                         content_spans = spans;
                         used_inline_modified = true;
                     }

@@ -428,6 +428,7 @@ fn main() -> Result<()> {
     app.scrollbar_visible = config.ui.scrollbar;
     app.strikethrough_deletions = config.ui.strikethrough_deletions;
     app.syntax_mode = config.ui.syntax;
+    app.single_modified_step_mode = config.ui.single.modified_step_mode;
     app.auto_step_on_enter = config.playback.auto_step_on_enter;
     app.auto_step_blank_files = config.playback.auto_step_blank_files;
     app.primary_marker = config.ui.primary_marker.clone();

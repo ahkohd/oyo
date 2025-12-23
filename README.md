@@ -200,6 +200,8 @@ scrollbar = false           # Show scrollbar (default: false)
 strikethrough_deletions = false # Show strikethrough on deleted text
 stepping = true             # Enable stepping (false = no-step mode)
 syntax = "auto"             # "auto" (no-step only), "on", or "off"
+# [ui.single]
+# modified_step_mode = "mixed" # "mixed" or "modified" (single-pane only)
 # theme = { name = "tokyonight" } # Built-ins listed below
 # Optional syntax tokens (fallbacks apply if omitted):
 # syntaxPlain, syntaxKeyword, syntaxString, syntaxNumber, syntaxComment,
