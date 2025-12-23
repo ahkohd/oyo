@@ -9,7 +9,7 @@ mod views;
 
 use anyhow::{Context, Result};
 use app::{App, ViewMode};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use crossterm::{
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
@@ -29,7 +29,11 @@ use std::time::Duration;
 #[derive(Parser, Debug)]
 #[command(name = "oyo")]
 #[command(author, version, about = "A step-through diff viewer")]
+#[command(args_conflicts_with_subcommands = true)]
 struct Args {
+    #[command(subcommand)]
+    command: Option<Command>,
+
     /// Files or directories to compare: old_file new_file
     /// Also works as a git external diff tool (git config diff.external oyo)
     #[arg(num_args = 0..)]
@@ -66,6 +70,12 @@ struct Args {
     /// Diff a git range (e.g. HEAD~1..HEAD)
     #[arg(long, value_name = "RANGE", conflicts_with = "staged")]
     range: Option<String>,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// List built-in themes
+    Themes,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -207,6 +217,12 @@ mod tests {
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    if let Some(Command::Themes) = args.command {
+        for name in config::builtin_theme_names() {
+            println!("{name}");
+        }
+        return Ok(());
+    }
     let mut config = config::Config::load();
 
     let input_mode = if args.paths.len() == 7 {

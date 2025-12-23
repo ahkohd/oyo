@@ -72,6 +72,9 @@ oyo old.rs new.rs --no-step
 # Staged changes (index vs HEAD)
 oyo --staged
 
+# List built-in themes
+oyo themes
+
 # Git range
 oyo --range HEAD~1..HEAD
 # or
@@ -243,12 +246,11 @@ Pick a built-in theme:
 theme = { name = "tokyonight" }
 ```
 
-Built-in themes:
-`aura`, `ayu`, `catppuccin`, `catppuccin-frappe`, `catppuccin-macchiato`, `cobalt2`,
-`cursor`, `dracula`, `everforest`, `flexoki`, `github`, `gruvbox`, `kanagawa`,
-`lucent-orng`, `material`, `matrix`, `mercury`, `monokai`, `nightowl`, `nord`,
-`one-dark`, `opencode`, `orng`, `palenight`, `rosepine`, `solarized`, `synthwave84`,
-`tokyonight`, `vercel`, `vesper`, `zenburn`.
+List built-in themes with:
+
+```bash
+oyo themes
+```
 
 Customize or create a theme by defining color tokens in config:
 

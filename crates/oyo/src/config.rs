@@ -265,6 +265,10 @@ const BUILTIN_THEMES: &[(&str, &str)] = &[
     ),
 ];
 
+pub fn builtin_theme_names() -> Vec<&'static str> {
+    BUILTIN_THEMES.iter().map(|(name, _)| *name).collect()
+}
+
 impl ThemeConfig {
     /// Check if config specifies light mode
     pub fn is_light_mode(&self) -> bool {
