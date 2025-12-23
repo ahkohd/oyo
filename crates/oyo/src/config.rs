@@ -32,7 +32,6 @@
 //! animation = false
 //! auto_step_on_enter = true
 //! auto_step_blank_files = true
-//! delay_modified_animation = 200
 //!
 //! [files]
 //! panel_visible = true
@@ -265,6 +264,10 @@ const BUILTIN_THEMES: &[(&str, &str)] = &[
         include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/themes/zenburn.json")),
     ),
 ];
+
+pub fn builtin_theme_names() -> Vec<&'static str> {
+    BUILTIN_THEMES.iter().map(|(name, _)| *name).collect()
+}
 
 impl ThemeConfig {
     /// Check if config specifies light mode
@@ -651,6 +654,8 @@ pub struct UiConfig {
     pub strikethrough_deletions: bool,
     /// Syntax highlighting: "auto", "on", or "off"
     pub syntax: SyntaxMode,
+    /// Single-pane view settings
+    pub single: SingleViewConfig,
     /// Enable stepping (default: true). If false, shows all changes (no-step behavior)
     pub stepping: bool,
     /// Marker for primary active line (left pane / single pane)
@@ -675,6 +680,7 @@ impl Default for UiConfig {
             scrollbar: false,
             strikethrough_deletions: false,
             syntax: SyntaxMode::Auto,
+            single: SingleViewConfig::default(),
             stepping: true,
             primary_marker: "▶".to_string(),
             primary_marker_right: None,
@@ -683,6 +689,31 @@ impl Default for UiConfig {
             theme: ThemeConfig::default(),
         }
     }
+}
+
+/// Single-pane configuration
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct SingleViewConfig {
+    /// How modified lines render while stepping: "mixed" or "modified"
+    pub modified_step_mode: ModifiedStepMode,
+}
+
+impl Default for SingleViewConfig {
+    fn default() -> Self {
+        Self {
+            modified_step_mode: ModifiedStepMode::Mixed,
+        }
+    }
+}
+
+/// Single-pane modified line rendering mode
+#[derive(Debug, Deserialize, Clone, Copy, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ModifiedStepMode {
+    #[default]
+    Mixed,
+    Modified,
 }
 
 /// Syntax highlighting mode
@@ -711,8 +742,6 @@ pub struct PlaybackConfig {
     pub auto_step_on_enter: bool,
     /// Auto-step when file would be blank at step 0 (new files)
     pub auto_step_blank_files: bool,
-    /// Delay (ms) before modified lines animate to new state (single view)
-    pub delay_modified_animation: u64,
 }
 
 impl Default for PlaybackConfig {
@@ -724,7 +753,6 @@ impl Default for PlaybackConfig {
             animation_duration: 150,
             auto_step_on_enter: true,
             auto_step_blank_files: true,
-            delay_modified_animation: 200,
         }
     }
 }

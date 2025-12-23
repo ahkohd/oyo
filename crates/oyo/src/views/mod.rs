@@ -8,7 +8,11 @@ pub use evolution::render_evolution;
 pub use single_pane::render_single_pane;
 pub use split::render_split;
 
+use std::collections::VecDeque;
+
 use ratatui::text::Span;
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 pub(crate) fn spans_to_text(spans: &[Span]) -> String {
     let mut out = String::new();
@@ -16,6 +20,202 @@ pub(crate) fn spans_to_text(spans: &[Span]) -> String {
         out.push_str(span.content.as_ref());
     }
     out
+}
+
+pub(crate) fn spans_width(spans: &[Span]) -> usize {
+    spans
+        .iter()
+        .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
+        .sum()
+}
+
+pub(crate) const TAB_WIDTH: usize = 8;
+
+pub(crate) fn expand_tabs_in_spans(spans: &[Span], tab_width: usize) -> Vec<Span<'static>> {
+    let mut out = Vec::new();
+    let mut col = 0usize;
+
+    for span in spans {
+        let mut buf = String::new();
+        for g in span.content.as_ref().graphemes(true) {
+            if g == "\n" {
+                buf.push('\n');
+                col = 0;
+                continue;
+            }
+            if g == "\t" {
+                let spaces = tab_width.saturating_sub(col % tab_width);
+                for _ in 0..spaces {
+                    buf.push(' ');
+                }
+                col = col.saturating_add(spaces);
+                continue;
+            }
+            buf.push_str(g);
+            col = col.saturating_add(UnicodeWidthStr::width(g));
+        }
+        if !buf.is_empty() {
+            out.push(Span::styled(buf, span.style));
+        }
+    }
+
+    out
+}
+
+pub(crate) fn expand_tabs_in_text(text: &str, tab_width: usize) -> String {
+    let mut out = String::new();
+    let mut col = 0usize;
+
+    for g in text.graphemes(true) {
+        if g == "\n" {
+            out.push('\n');
+            col = 0;
+            continue;
+        }
+        if g == "\t" {
+            let spaces = tab_width.saturating_sub(col % tab_width);
+            for _ in 0..spaces {
+                out.push(' ');
+            }
+            col = col.saturating_add(spaces);
+            continue;
+        }
+        out.push_str(g);
+        col = col.saturating_add(UnicodeWidthStr::width(g));
+    }
+
+    out
+}
+
+pub(crate) fn wrap_count_for_spans(spans: &[Span], wrap_width: usize) -> usize {
+    let graphemes = spans
+        .iter()
+        .flat_map(|span| graphemes_for_text(span.content.as_ref()));
+    wrap_count_for_graphemes(graphemes, wrap_width)
+}
+
+pub(crate) fn wrap_count_for_text(text: &str, wrap_width: usize) -> usize {
+    let expanded = expand_tabs_in_text(text, TAB_WIDTH);
+    let graphemes = graphemes_for_text(&expanded);
+    wrap_count_for_graphemes(graphemes, wrap_width)
+}
+
+struct GraphemeInfo {
+    width: u16,
+    is_whitespace: bool,
+}
+
+fn graphemes_for_text(text: &str) -> impl Iterator<Item = GraphemeInfo> + '_ {
+    text.graphemes(true).filter(|g| *g != "\n").map(|g| {
+        let is_whitespace =
+            g == "\u{200b}" || (g.chars().all(char::is_whitespace) && g != "\u{00a0}");
+        let width = UnicodeWidthStr::width(g).min(u16::MAX as usize) as u16;
+        GraphemeInfo {
+            width,
+            is_whitespace,
+        }
+    })
+}
+
+fn wrap_count_for_graphemes<I>(graphemes: I, wrap_width: usize) -> usize
+where
+    I: Iterator<Item = GraphemeInfo>,
+{
+    if wrap_width == 0 {
+        return 1;
+    }
+    let max_width = wrap_width.min(u16::MAX as usize) as u16;
+    let trim = false;
+    let mut rows = 0usize;
+    let mut line_width = 0u16;
+    let mut word_width = 0u16;
+    let mut word_count = 0usize;
+    let mut whitespace_width = 0u16;
+    let mut whitespace_count = 0usize;
+    let mut pending_line_count = 0usize;
+    let mut pending_whitespace: VecDeque<u16> = VecDeque::new();
+    let mut non_whitespace_previous = false;
+
+    for grapheme in graphemes {
+        let symbol_width = grapheme.width;
+        if symbol_width > max_width {
+            continue;
+        }
+
+        let is_whitespace = grapheme.is_whitespace;
+        let word_found = non_whitespace_previous && is_whitespace;
+        let untrimmed_overflow = pending_line_count == 0
+            && !trim
+            && word_width + whitespace_width + symbol_width > max_width;
+
+        if word_found || untrimmed_overflow {
+            if (pending_line_count > 0 || !trim) && whitespace_count > 0 {
+                line_width = line_width.saturating_add(whitespace_width);
+                pending_line_count += whitespace_count;
+            }
+            if word_count > 0 {
+                line_width = line_width.saturating_add(word_width);
+                pending_line_count += word_count;
+            }
+
+            pending_whitespace.clear();
+            whitespace_width = 0;
+            whitespace_count = 0;
+            word_width = 0;
+            word_count = 0;
+        }
+
+        let line_full = line_width >= max_width;
+        let pending_word_overflow =
+            symbol_width > 0 && line_width + whitespace_width + word_width >= max_width;
+
+        if line_full || pending_word_overflow {
+            rows += 1;
+            pending_line_count = 0;
+            let mut remaining_width = max_width.saturating_sub(line_width);
+            line_width = 0;
+
+            while let Some(width) = pending_whitespace.front().copied() {
+                if width > remaining_width {
+                    break;
+                }
+                whitespace_width = whitespace_width.saturating_sub(width);
+                remaining_width = remaining_width.saturating_sub(width);
+                pending_whitespace.pop_front();
+                whitespace_count = whitespace_count.saturating_sub(1);
+            }
+
+            if is_whitespace && whitespace_count == 0 {
+                non_whitespace_previous = !is_whitespace;
+                continue;
+            }
+        }
+
+        if is_whitespace {
+            whitespace_width = whitespace_width.saturating_add(symbol_width);
+            whitespace_count += 1;
+            pending_whitespace.push_back(symbol_width);
+        } else {
+            word_width = word_width.saturating_add(symbol_width);
+            word_count += 1;
+        }
+
+        non_whitespace_previous = !is_whitespace;
+    }
+
+    if pending_line_count == 0 && word_count == 0 && whitespace_count > 0 {
+        rows += 1;
+    }
+    if (pending_line_count > 0 || !trim) && whitespace_count > 0 {
+        pending_line_count += whitespace_count;
+    }
+    if word_count > 0 {
+        pending_line_count += word_count;
+    }
+    if pending_line_count > 0 {
+        rows += 1;
+    }
+    rows.max(1)
 }
 
 pub(crate) fn truncate_text(text: &str, max_width: usize) -> String {

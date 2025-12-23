@@ -9,11 +9,11 @@ mod views;
 
 use anyhow::{Context, Result};
 use app::{App, ViewMode};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use crossterm::{
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
-        MouseEventKind,
+        MouseButton, MouseEventKind,
     },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -29,7 +29,11 @@ use std::time::Duration;
 #[derive(Parser, Debug)]
 #[command(name = "oyo")]
 #[command(author, version, about = "A step-through diff viewer")]
+#[command(args_conflicts_with_subcommands = true)]
 struct Args {
+    #[command(subcommand)]
+    command: Option<Command>,
+
     /// Files or directories to compare: old_file new_file
     /// Also works as a git external diff tool (git config diff.external oyo)
     #[arg(num_args = 0..)]
@@ -66,6 +70,12 @@ struct Args {
     /// Diff a git range (e.g. HEAD~1..HEAD)
     #[arg(long, value_name = "RANGE", conflicts_with = "staged")]
     range: Option<String>,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// List built-in themes
+    Themes,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -207,6 +217,12 @@ mod tests {
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    if let Some(Command::Themes) = args.command {
+        for name in config::builtin_theme_names() {
+            println!("{name}");
+        }
+        return Ok(());
+    }
     let mut config = config::Config::load();
 
     let input_mode = if args.paths.len() == 7 {
@@ -421,7 +437,6 @@ fn main() -> Result<()> {
     app.zen_mode = config.ui.zen;
     app.animation_enabled = config.playback.animation;
     app.animation_duration = config.playback.animation_duration;
-    app.delay_modified_animation = config.playback.delay_modified_animation;
     app.file_panel_visible = config.files.panel_visible;
     app.file_count_mode = config.files.counts;
     app.auto_center = config.ui.auto_center;
@@ -429,6 +444,7 @@ fn main() -> Result<()> {
     app.scrollbar_visible = config.ui.scrollbar;
     app.strikethrough_deletions = config.ui.strikethrough_deletions;
     app.syntax_mode = config.ui.syntax;
+    app.single_modified_step_mode = config.ui.single.modified_step_mode;
     app.auto_step_on_enter = config.playback.auto_step_on_enter;
     app.auto_step_blank_files = config.playback.auto_step_blank_files;
     app.primary_marker = config.ui.primary_marker.clone();
@@ -511,6 +527,11 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<()> 
                     }
                     app.reset_count();
                     match me.kind {
+                        MouseEventKind::Down(MouseButton::Left) => {
+                            if app.handle_file_list_click(me.column, me.row) {
+                                continue;
+                            }
+                        }
                         MouseEventKind::ScrollUp => {
                             if app.file_list_focused {
                                 app.prev_file();
@@ -533,6 +554,21 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<()> 
                     }
                 }
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    if app.show_help {
+                        match key.code {
+                            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?') => {
+                                app.toggle_help();
+                            }
+                            KeyCode::Down | KeyCode::Char('j') => {
+                                app.help_scroll_down();
+                            }
+                            KeyCode::Up | KeyCode::Char('k') => {
+                                app.help_scroll_up();
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
                     if app.file_filter_active {
                         match key.code {
                             KeyCode::Esc | KeyCode::Enter => {
@@ -549,6 +585,35 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<()> 
                                     && !key.modifiers.contains(KeyModifiers::ALT) =>
                             {
                                 app.push_file_filter_char(c);
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
+                    if app.goto_active() {
+                        match key.code {
+                            KeyCode::Esc => {
+                                app.clear_goto();
+                            }
+                            KeyCode::Enter => {
+                                app.apply_goto();
+                                app.clear_goto();
+                            }
+                            KeyCode::Backspace => {
+                                if app.goto_query().is_empty() {
+                                    app.clear_goto();
+                                } else {
+                                    app.pop_goto_char();
+                                }
+                            }
+                            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                app.clear_goto_text();
+                            }
+                            KeyCode::Char(c)
+                                if !key.modifiers.contains(KeyModifiers::CONTROL)
+                                    && !key.modifiers.contains(KeyModifiers::ALT) =>
+                            {
+                                app.push_goto_char(c);
                             }
                             _ => {}
                         }
@@ -599,10 +664,14 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<()> 
                     if matches!(key.code, KeyCode::Esc)
                         && !app.show_help
                         && !app.show_path_popup
-                        && (app.search_active() || !app.search_query().is_empty())
+                        && (app.search_active()
+                            || !app.search_query().is_empty()
+                            || app.goto_active()
+                            || !app.goto_query().is_empty())
                     {
                         app.reset_count();
                         app.clear_search();
+                        app.clear_goto();
                         continue;
                     }
 
@@ -636,7 +705,9 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<()> 
                         KeyCode::Down | KeyCode::Char('j') => {
                             let count = app.take_count();
                             for _ in 0..count {
-                                if app.stepping {
+                                if app.file_list_focused {
+                                    app.next_file();
+                                } else if app.stepping {
                                     app.next_step();
                                 } else {
                                     app.scroll_down();
@@ -646,7 +717,9 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<()> 
                         KeyCode::Up | KeyCode::Char('k') => {
                             let count = app.take_count();
                             for _ in 0..count {
-                                if app.stepping {
+                                if app.file_list_focused {
+                                    app.prev_file();
+                                } else if app.stepping {
                                     app.prev_step();
                                 } else {
                                     app.scroll_up();
@@ -909,6 +982,12 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<()> 
                                 app.start_file_filter();
                             } else {
                                 app.start_search();
+                            }
+                        }
+                        KeyCode::Char(':') => {
+                            app.reset_count();
+                            if !app.file_list_focused {
+                                app.start_goto();
                             }
                         }
                         KeyCode::Char('n') => {

@@ -27,3 +27,5 @@ toml = { workspace = true }
 dirs = { workspace = true }
 syntect = "5.2"
 regex = { workspace = true }
+unicode-width = { workspace = true }
+unicode-segmentation = { workspace = true }

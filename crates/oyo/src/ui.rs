@@ -7,21 +7,92 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
+    widgets::{
+        Block, Borders, Clear, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation,
+        ScrollbarState,
+    },
     Frame,
 };
+use unicode_width::UnicodeWidthStr;
+
+fn truncate_filename_keep_ext(name: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    if name.len() <= max_width {
+        return name.to_string();
+    }
+    if max_width <= 3 {
+        return ".".repeat(max_width);
+    }
+
+    let (stem, ext) = match name.rfind('.') {
+        Some(idx) if idx > 0 && idx < name.len().saturating_sub(1) => (&name[..idx], &name[idx..]),
+        _ => (name, ""),
+    };
+    let ext_len = ext.len();
+    if ext_len >= max_width {
+        let suffix_len = max_width.saturating_sub(3);
+        return format!("...{}", &name[name.len().saturating_sub(suffix_len)..]);
+    }
+
+    if ext_len == 0 {
+        let stem_keep = max_width.saturating_sub(3);
+        let head_len = stem_keep.div_ceil(2);
+        let tail_len = stem_keep.saturating_sub(head_len);
+        let head = &stem[..head_len.min(stem.len())];
+        let tail = if tail_len > 0 && tail_len <= stem.len() {
+            &stem[stem.len().saturating_sub(tail_len)..]
+        } else {
+            ""
+        };
+        return format!("{head}...{tail}");
+    }
+
+    let max_stem_len = max_width.saturating_sub(ext_len);
+    if max_stem_len <= 3 {
+        let dots = ".".repeat(max_stem_len);
+        return format!("{dots}{ext}");
+    }
+
+    let stem_keep = max_stem_len.saturating_sub(3);
+    let head_len = stem_keep.div_ceil(2);
+    let tail_len = stem_keep.saturating_sub(head_len);
+    let head = &stem[..head_len.min(stem.len())];
+    let tail = if tail_len > 0 && tail_len <= stem.len() {
+        &stem[stem.len().saturating_sub(tail_len)..]
+    } else {
+        ""
+    };
+    format!("{head}...{tail}{ext}")
+}
+
+fn text_width(text: &str) -> usize {
+    UnicodeWidthStr::width(text)
+}
+
+fn spans_width(spans: &[Span]) -> usize {
+    spans
+        .iter()
+        .map(|span| text_width(span.content.as_ref()))
+        .sum()
+}
 
 /// Truncate a path to fit a given width, using /.../ for middle sections
 fn truncate_path(path: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
     if path.len() <= max_width {
         return path.to_string();
     }
+    if max_width <= 3 {
+        return ".".repeat(max_width);
+    }
 
     let parts: Vec<&str> = path.split('/').collect();
-    if parts.len() <= 2 {
-        // Just truncate from start if path is simple
-        let suffix_len = max_width.saturating_sub(3);
-        return format!("...{}", &path[path.len().saturating_sub(suffix_len)..]);
+    if parts.len() == 1 {
+        return truncate_filename_keep_ext(path, max_width);
     }
 
     // Keep first and last parts, abbreviate middle
@@ -29,14 +100,27 @@ fn truncate_path(path: &str, max_width: usize) -> String {
     let last = parts.last().unwrap_or(&"");
 
     // If just first + last fits with /.../, use that
-    let simple = format!("{}/.../{}", first, last);
-    if simple.len() <= max_width {
-        return simple;
+    let prefix = format!("{}/.../", first);
+    let available = max_width.saturating_sub(prefix.len());
+    if available > 0 {
+        let last_display = truncate_filename_keep_ext(last, available);
+        let simple = format!("{prefix}{last_display}");
+        if simple.len() <= max_width {
+            return simple;
+        }
     }
 
     // Otherwise just show .../filename
-    let suffix_len = max_width.saturating_sub(4);
-    format!(".../{}", &last[last.len().saturating_sub(suffix_len)..])
+    if max_width <= 4 {
+        return ".".repeat(max_width);
+    }
+    let prefix = ".../";
+    let available = max_width.saturating_sub(prefix.len());
+    if available == 0 {
+        return ".".repeat(max_width);
+    }
+    let last_display = truncate_filename_keep_ext(last, available);
+    format!("{prefix}{last_display}")
 }
 
 /// Main drawing function
@@ -139,10 +223,26 @@ fn draw_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
     let current_file = app.multi_diff.selected_index + 1;
     let file_text = format!("{}/{}", current_file, file_count);
 
-    // Build CENTER section: search prompt or step counter
+    // Build CENTER section: goto/search prompt or step counter
     let mut center_spans = Vec::new();
+    let show_goto = app.goto_active();
     let show_search = app.search_active();
-    if show_search {
+    if show_goto {
+        center_spans.push(Span::styled(":", Style::default().fg(app.theme.text_muted)));
+        center_spans.push(Span::raw(" "));
+        let query = app.goto_query();
+        let query_text = if app.goto_active() && query.is_empty() {
+            "Go to".to_string()
+        } else {
+            query.to_string()
+        };
+        let query_style = if app.goto_active() && query.is_empty() {
+            Style::default().fg(app.theme.text_muted)
+        } else {
+            Style::default().fg(app.theme.text)
+        };
+        center_spans.push(Span::styled(query_text, query_style));
+    } else if show_search {
         center_spans.push(Span::styled("/", Style::default().fg(app.theme.text_muted)));
         center_spans.push(Span::raw(" "));
         let query = app.search_query();
@@ -203,12 +303,12 @@ fn draw_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
     right_spans.push(Span::raw(" "));
 
     // Build LEFT section: mode + scope (path + branch)
-    let center_width: usize = center_spans.iter().map(|s| s.content.len()).sum();
-    let right_width: usize = right_spans.iter().map(|s| s.content.len()).sum();
-    let left_fixed_width = mode.len() + 1;
-    let min_padding = 2;
-    let path_max_width = available_width
-        .saturating_sub(center_width + right_width + left_fixed_width + min_padding * 2);
+    let center_width = spans_width(&center_spans);
+    let right_width = spans_width(&right_spans);
+    let left_fixed_width = text_width(mode) + 1;
+    let max_scope_width =
+        available_width.saturating_sub(center_width + right_width + left_fixed_width);
+    let path_max_width = max_scope_width.min(available_width / 3);
     let scope_base = if available_width < 60 {
         scope_short
     } else {
@@ -229,19 +329,20 @@ fn draw_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
     ];
 
     // Calculate widths
-    let left_width: usize = left_spans.iter().map(|s| s.content.len()).sum();
+    let left_width = spans_width(&left_spans);
     // Calculate padding to center the middle section
 
     // Distribute padding: left_pad centers the center section, right_pad pushes right to edge
-    let center_start = available_width / 2 - center_width / 2;
-    let left_pad = center_start.saturating_sub(left_width);
-    let right_pad = available_width.saturating_sub(center_start + center_width + right_width);
+    let remaining = available_width.saturating_sub(left_width + center_width + right_width);
+    let left_pad = remaining / 2;
+    let right_pad = remaining.saturating_sub(left_pad);
+    let min_pad = 0;
 
     // Build final spans
     let mut spans = left_spans;
-    spans.push(Span::raw(" ".repeat(left_pad.max(1))));
+    spans.push(Span::raw(" ".repeat(left_pad.max(min_pad))));
     spans.extend(center_spans);
-    spans.push(Span::raw(" ".repeat(right_pad.max(1))));
+    spans.push(Span::raw(" ".repeat(right_pad.max(min_pad))));
     spans.extend(right_spans);
 
     let status_line = Line::from(spans);
@@ -286,6 +387,9 @@ fn draw_content(frame: &mut Frame, app: &mut App, area: Rect) {
         draw_diff_view(frame, app, chunks[1]);
     } else {
         // Single file mode, file panel hidden, or viewport too narrow
+        app.file_list_area = None;
+        app.file_list_rows.clear();
+        app.file_filter_area = None;
         draw_diff_view(frame, app, area);
     }
 }
@@ -431,6 +535,7 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let filtered_indices = app.filtered_file_indices();
     let mut items = Vec::new();
+    let mut row_map: Vec<Option<usize>> = Vec::new();
     let mut remaining = list_area.height.saturating_sub(2) as usize;
     let mut current_group: Option<String> = None;
 
@@ -446,12 +551,13 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
         if current_group.as_deref() != Some(&group) {
             if current_group.is_some() && remaining > 0 {
                 items.push(ListItem::new(Line::raw("")));
+                row_map.push(None);
                 remaining -= 1;
                 if remaining == 0 {
                     break;
                 }
             }
-            let header_max = list_area.width.saturating_sub(2).max(1) as usize;
+            let header_max = list_area.width.saturating_sub(6).max(1) as usize;
             let header_text = truncate_path(&group, header_max);
             let header_line = Line::from(vec![
                 Span::raw("  "),
@@ -463,6 +569,7 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
                 ),
             ]);
             items.push(ListItem::new(header_line));
+            row_map.push(None);
             current_group = Some(group);
             remaining -= 1;
             if remaining == 0 {
@@ -511,25 +618,14 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
             0
         };
 
-        // Truncate filename to fit
+        // Truncate filename to fit (preserve extension)
         let file_name = file
             .display_name
             .rsplit('/')
             .next()
             .unwrap_or(&file.display_name);
-        let max_name_len = list_area.width.saturating_sub(4 + signs_len as u16).max(1) as usize;
-        let name = if file_name.len() > max_name_len {
-            if max_name_len == 1 {
-                "…".to_string()
-            } else {
-                format!(
-                    "…{}",
-                    &file_name[file_name.len().saturating_sub(max_name_len - 1)..]
-                )
-            }
-        } else {
-            file_name.to_string()
-        };
+        let max_name_len = list_area.width.saturating_sub(8 + signs_len as u16).max(1) as usize;
+        let name = truncate_filename_keep_ext(file_name, max_name_len);
 
         let mut icon_style = status_style;
         if let Some(bg) = selected_bg {
@@ -581,6 +677,7 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
         let line = Line::from(line_spans);
 
         items.push(ListItem::new(line));
+        row_map.push(Some(file_idx));
         remaining -= 1;
         idx += 1;
     }
@@ -591,6 +688,9 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 
     let file_list = List::new(items).block(block);
+
+    app.file_list_area = Some((list_area.x, list_area.y, list_area.width, list_area.height));
+    app.file_list_rows = row_map;
 
     frame.render_widget(file_list, list_area);
 
@@ -610,6 +710,12 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 
     if let Some(filter_area) = filter_area {
+        app.file_filter_area = Some((
+            filter_area.x,
+            filter_area.y,
+            filter_area.width,
+            filter_area.height,
+        ));
         let filter_bg = app
             .theme
             .background_element
@@ -642,6 +748,8 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
         }
         filter = filter.block(filter_block);
         frame.render_widget(filter, filter_area);
+    } else {
+        app.file_filter_area = None;
     }
 }
 
@@ -669,75 +777,228 @@ fn draw_zen_progress(frame: &mut Frame, app: &mut App) {
     frame.render_widget(text, progress_area);
 }
 
-fn draw_help_popover(frame: &mut Frame, app: &App) {
+fn draw_help_popover(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
 
     // Calculate popover size and position (centered)
-    let popup_width = 44u16.min(area.width.saturating_sub(4));
-    let base_height = if app.is_multi_file() { 31 } else { 26 };
-    let popup_height = (base_height as u16).min(area.height.saturating_sub(4));
-    let popup_x = (area.width.saturating_sub(popup_width)) / 2;
-    let popup_y = (area.height.saturating_sub(popup_height)) / 2;
-    let popup_area = Rect::new(popup_x, popup_y, popup_width, popup_height);
-
-    // Clear the area behind the popup
-    frame.render_widget(Clear, popup_area);
-
+    let popup_width = 61u16.min(area.width.saturating_sub(4));
     let key_style = Style::default().fg(app.theme.accent);
     let label_style = Style::default().fg(app.theme.text);
     let dim_style = Style::default().fg(app.theme.text_muted);
     let section_style = Style::default().fg(app.theme.primary);
 
-    // Helper to create a padded key-value line
-    let help_line = |key: &str, desc: String| -> Line {
-        Line::from(vec![
-            Span::styled(format!("  {:<12}", key), key_style),
-            Span::styled(desc, label_style),
-        ])
+    let mut help_keys = vec![
+        "j / k / ↑↓",
+        "h / l / ←→",
+        "b / e",
+        "p / P",
+        "y / Y",
+        "/",
+        "n / N",
+        ":<line>",
+        ":h<num>",
+        ":s<num>",
+        "< / >",
+        "gg / G",
+        "J / K",
+        "H / L",
+        "0 / $",
+        "^U / ^D",
+        "^G",
+        "z",
+        "w",
+        "t",
+        "T",
+        "s",
+        "S",
+        "Space / B",
+        "+ / -",
+        "a",
+        "Tab",
+        "Z",
+        "r",
+    ];
+    if app.is_multi_file() {
+        help_keys.extend_from_slice(&["[ / ]", "f", "Enter", "j / k / ↑↓", "/", "r"]);
+    }
+
+    let content_width = popup_width.saturating_sub(2) as usize;
+    let max_key_width = help_keys
+        .iter()
+        .map(|key| text_width(key))
+        .max()
+        .unwrap_or(0);
+    let min_desc_width = 16usize;
+    let max_key_pad = max_key_width.saturating_add(2).min(12);
+    let key_pad = max_key_pad.min(content_width.saturating_sub(min_desc_width).max(2));
+    let key_field_width = key_pad.saturating_sub(2);
+    let desc_width = content_width.saturating_sub(key_pad).max(1);
+    let indent = " ".repeat(key_pad + 5);
+
+    let wrap_text = |text: &str| -> Vec<String> {
+        if desc_width == 0 {
+            return vec![String::new()];
+        }
+        let mut lines = Vec::new();
+        let mut current = String::new();
+        let mut current_width = 0usize;
+
+        let push_chunk = |lines: &mut Vec<String>, chunk: &str| {
+            if !chunk.is_empty() {
+                lines.push(chunk.to_string());
+            }
+        };
+
+        let push_word = |lines: &mut Vec<String>, word: &str| {
+            let word_width = text_width(word);
+            if word_width <= desc_width {
+                push_chunk(lines, word);
+                return;
+            }
+
+            let mut chunk = String::new();
+            let mut chunk_width = 0usize;
+            for ch in word.chars() {
+                let ch_width = text_width(&ch.to_string());
+                if chunk_width + ch_width > desc_width && !chunk.is_empty() {
+                    lines.push(chunk.clone());
+                    chunk.clear();
+                    chunk_width = 0;
+                }
+                if ch_width <= desc_width {
+                    chunk.push(ch);
+                    chunk_width += ch_width;
+                }
+            }
+            if !chunk.is_empty() {
+                lines.push(chunk);
+            }
+        };
+
+        for word in text.split_whitespace() {
+            let word_width = text_width(word);
+            if current.is_empty() {
+                if word_width <= desc_width {
+                    current.push_str(word);
+                    current_width = word_width;
+                } else {
+                    push_word(&mut lines, word);
+                }
+                continue;
+            }
+
+            if current_width + 1 + word_width <= desc_width {
+                current.push(' ');
+                current.push_str(word);
+                current_width += 1 + word_width;
+            } else {
+                lines.push(current);
+                current = String::new();
+                current_width = 0;
+                if word_width <= desc_width {
+                    current.push_str(word);
+                    current_width = word_width;
+                } else {
+                    push_word(&mut lines, word);
+                }
+            }
+        }
+
+        if !current.is_empty() {
+            lines.push(current);
+        }
+        if lines.is_empty() {
+            lines.push(String::new());
+        }
+        lines
     };
 
-    let mut lines = vec![
-        Line::from(Span::styled(" Navigation", section_style)),
-        help_line("j / k / ↑↓", "Step forward/back".into()),
-        help_line("h / l / ←→", "Prev/next hunk".into()),
-        help_line("b / e", "Hunk begin/end".into()),
-        help_line("p / P", "Peek old (change/hunk)".into()),
-        help_line("y / Y", "Yank line/hunk".into()),
-        help_line("/", "Search (diff pane)".into()),
-        help_line("n / N", "Next/prev match".into()),
-        help_line("< / >", "First/last applied step".into()),
-        help_line("gg / G", "Go to start/end".into()),
-        help_line("J / K", "Scroll up/down".into()),
-        help_line("H / L", "Scroll left/right".into()),
-        help_line("0 / $", "Scroll to line start/end".into()),
-        help_line("^U / ^D", "Scroll half-page".into()),
-        help_line("^G", "Show full file path".into()),
-        help_line("z", "Center on active".into()),
-        help_line("w", "Toggle line wrap".into()),
-        help_line("t", "Toggle syntax highlight".into()),
-        help_line("T", "Toggle syntax scopes".into()),
-        help_line("s", "Toggle stepping".into()),
-        help_line("S", "Toggle strikethrough".into()),
-        Line::from(""),
-        Line::from(Span::styled(" Playback", section_style)),
-        help_line("Space / B", "Autoplay forward/reverse".into()),
-        help_line("+ / -", format!("Speed ({}ms)", app.animation_speed)),
-        help_line("a", "Toggle animation".into()),
-        Line::from(""),
-        Line::from(Span::styled(" View", section_style)),
-        help_line("Tab", "Cycle view mode".into()),
-        help_line("Z", "Zen mode".into()),
-        help_line("r", "Refresh from disk".into()),
-    ];
+    let truncate_key = |key: &str| -> String {
+        if key_field_width == 0 {
+            return String::new();
+        }
+        let mut out = String::new();
+        let mut width = 0usize;
+        for ch in key.chars() {
+            let ch_width = text_width(&ch.to_string());
+            if width + ch_width > key_field_width {
+                break;
+            }
+            out.push(ch);
+            width += ch_width;
+        }
+        out
+    };
+
+    let push_help_line = |lines: &mut Vec<Line>, key: &str, desc: &str| {
+        let key_text = format!(
+            "  {:<width$}     ",
+            truncate_key(key),
+            width = key_field_width
+        );
+        let wrapped = wrap_text(desc);
+        for (idx, line) in wrapped.into_iter().enumerate() {
+            let left = if idx == 0 {
+                key_text.clone()
+            } else {
+                indent.clone()
+            };
+            lines.push(Line::from(vec![
+                Span::styled(left, key_style),
+                Span::styled(line, label_style),
+            ]));
+        }
+    };
+
+    let mut lines = vec![Line::from(Span::styled(" Navigation", section_style))];
+    push_help_line(&mut lines, "j / k / ↑↓", "Step forward/back");
+    push_help_line(&mut lines, "h / l / ←→", "Prev/next hunk");
+    push_help_line(&mut lines, "b / e", "Hunk begin/end");
+    push_help_line(&mut lines, "p", "Peek change (modified -> old -> mixed)");
+    push_help_line(&mut lines, "P", "Peek old hunk");
+    push_help_line(&mut lines, "y / Y", "Yank line/hunk");
+    push_help_line(&mut lines, "/", "Search (diff pane)");
+    push_help_line(&mut lines, "n / N", "Next/prev match");
+    push_help_line(&mut lines, ":<line>", "Go to line");
+    push_help_line(&mut lines, ":h<num>", "Go to hunk");
+    push_help_line(&mut lines, ":s<num>", "Go to step");
+    push_help_line(&mut lines, "< / >", "First/last applied step");
+    push_help_line(&mut lines, "gg / G", "Go to start/end");
+    push_help_line(&mut lines, "J / K", "Scroll up/down");
+    push_help_line(&mut lines, "H / L", "Scroll left/right");
+    push_help_line(&mut lines, "0 / $", "Scroll to line start/end");
+    push_help_line(&mut lines, "^U / ^D", "Scroll half-page");
+    push_help_line(&mut lines, "^G", "Show full file path");
+    push_help_line(&mut lines, "z", "Center on active");
+    push_help_line(&mut lines, "w", "Toggle line wrap");
+    push_help_line(&mut lines, "t", "Toggle syntax highlight");
+    push_help_line(&mut lines, "T", "Toggle syntax scopes");
+    push_help_line(&mut lines, "s", "Toggle stepping");
+    push_help_line(&mut lines, "S", "Toggle strikethrough");
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(" Playback", section_style)));
+    push_help_line(&mut lines, "Space / B", "Autoplay forward/reverse");
+    push_help_line(
+        &mut lines,
+        "+ / -",
+        &format!("Speed ({}ms)", app.animation_speed),
+    );
+    push_help_line(&mut lines, "a", "Toggle animation");
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(" View", section_style)));
+    push_help_line(&mut lines, "Tab", "Cycle view mode");
+    push_help_line(&mut lines, "Z", "Zen mode");
+    push_help_line(&mut lines, "r", "Refresh from disk");
 
     if app.is_multi_file() {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(" Files", section_style)));
-        lines.push(help_line("[ / ]", "Prev/next file".into()));
-        lines.push(help_line("f", "Toggle file panel".into()));
-        lines.push(help_line("Enter", "Focus file list".into()));
-        lines.push(help_line("/", "Filter files (when focused)".into()));
-        lines.push(help_line("r", "Refresh all (when focused)".into()));
+        push_help_line(&mut lines, "[ / ]", "Prev/next file");
+        push_help_line(&mut lines, "f", "Toggle file panel");
+        push_help_line(&mut lines, "Enter", "Focus file list");
+        push_help_line(&mut lines, "j / k / ↑↓", "Move selection (focused)");
+        push_help_line(&mut lines, "/", "Filter files (when focused)");
+        push_help_line(&mut lines, "r", "Refresh all (when focused)");
     }
 
     lines.push(Line::from(""));
@@ -750,6 +1011,19 @@ fn draw_help_popover(frame: &mut Frame, app: &App) {
         Span::styled("Quit", label_style),
     ]));
 
+    let base_height = if app.is_multi_file() { 31 } else { 26 };
+    let min_height = (base_height as u16).min(area.height.saturating_sub(4));
+    let needed_height = (lines.len() as u16).saturating_add(2);
+    let popup_height = needed_height
+        .max(min_height)
+        .min(area.height.saturating_sub(4));
+    let popup_x = (area.width.saturating_sub(popup_width)) / 2;
+    let popup_y = (area.height.saturating_sub(popup_height)) / 2;
+    let popup_area = Rect::new(popup_x, popup_y, popup_width, popup_height);
+
+    // Clear the area behind the popup
+    frame.render_widget(Clear, popup_area);
+
     let mut block = Block::default()
         .borders(Borders::ALL)
         .title(" Help ")
@@ -759,11 +1033,33 @@ fn draw_help_popover(frame: &mut Frame, app: &App) {
         block = block.style(Style::default().bg(bg));
     }
 
+    let inner_height = popup_height.saturating_sub(2) as usize;
+    let max_scroll = lines.len().saturating_sub(inner_height);
+    app.help_max_scroll = max_scroll;
+    let scroll = app.help_scroll.min(max_scroll) as u16;
+    let total_lines = max_scroll + inner_height;
     let help_block = Paragraph::new(lines)
         .block(block)
-        .alignment(Alignment::Left);
+        .alignment(Alignment::Left)
+        .scroll((scroll, 0));
 
     frame.render_widget(help_block, popup_area);
+
+    // Render scrollbar if content overflows
+    if max_scroll > 0 {
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(Some("↑"))
+            .end_symbol(Some("↓"));
+        let mut scrollbar_state = ScrollbarState::new(total_lines).position(scroll as usize);
+        frame.render_stateful_widget(
+            scrollbar,
+            popup_area.inner(ratatui::layout::Margin {
+                vertical: 1,
+                horizontal: 0,
+            }),
+            &mut scrollbar_state,
+        );
+    }
 }
 
 fn draw_path_popup(frame: &mut Frame, app: &App) {

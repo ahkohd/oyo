@@ -27,6 +27,8 @@ Step through changes or scroll the full diff, jump between hunks, and watch code
 - **Word-level diffing**: See exactly which words changed within a line
 - **Autoplay**: Automatically step through all changes at a configurable speed
 - **Multi-file support**: Navigate between changed files with preserved positions
+- **Search**: Regex search with to jump between matches
+- **Line wrap**: Toggle wrapping for long lines
 - **Configurable**: XDG config file support for customization
 
 ## Installation
@@ -71,6 +73,9 @@ oyo old.rs new.rs --no-step
 
 # Staged changes (index vs HEAD)
 oyo --staged
+
+# List built-in themes
+oyo themes
 
 # Git range
 oyo --range HEAD~1..HEAD
@@ -143,16 +148,17 @@ jj diff -f zy -t w
 
 | Key | Action |
 |-----|--------|
-| `↓` / `j` | Next step (scrolls in no-step mode) |
-| `↑` / `k` | Previous step (scrolls in no-step mode) |
+| `↓` / `j` | Next step (scrolls in no-step mode; moves file selection when focused) |
+| `↑` / `k` | Previous step (scrolls in no-step mode; moves file selection when focused) |
 | `→` / `l` | Next hunk (scrolls in no-step mode) |
 | `←` / `h` | Previous hunk (scrolls in no-step mode) |
 | `b` | Jump to beginning of current hunk (scrolls in no-step mode) |
 | `e` | Jump to end of current hunk (scrolls in no-step mode) |
-| `p` / `P` | Peek old (change/hunk) |
+| `p` / `P` | Peek change (modified → old → mixed) / Peek old hunk |
 | `y` / `Y` | Yank line/hunk to clipboard |
 | `/` | Search (diff pane, regex) |
 | `n` / `N` | Next/previous match |
+| `:line` / `:h<num>` / `:s<num>` | Go to line / hunk / step |
 | `<` | First applied step |
 | `>` | Last step |
 | `gg` | Go to start (scroll-only in no-step mode) |
@@ -177,6 +183,7 @@ jj diff -f zy -t w
 | `S` | Toggle strikethrough |
 | `r` | Refresh file (or all files when file list focused) |
 | `f` | Toggle file panel |
+| `Enter` | Focus file list |
 | `]` | Next file (supports count) |
 | `[` | Previous file (supports count) |
 | `+` / `=` | Increase speed |
@@ -200,6 +207,8 @@ scrollbar = false           # Show scrollbar (default: false)
 strikethrough_deletions = false # Show strikethrough on deleted text
 stepping = true             # Enable stepping (false = no-step mode)
 syntax = "auto"             # "auto" (no-step only), "on", or "off"
+# [ui.single]
+# modified_step_mode = "mixed" # "mixed" or "modified" (single-pane only)
 # theme = { name = "tokyonight" } # Built-ins listed below
 # Optional syntax tokens (fallbacks apply if omitted):
 # syntaxPlain, syntaxKeyword, syntaxString, syntaxNumber, syntaxComment,
@@ -221,7 +230,6 @@ animation = false           # Enable fade animations
 animation_duration = 150    # Animation duration per phase (ms)
 auto_step_on_enter = true   # Auto-step to first change when entering a file
 auto_step_blank_files = true # Auto-step when file would be blank at step 0 (new files)
-delay_modified_animation = 200 # Delay before modified lines animate to new state (ms)
 
 [files]
 panel_visible = true        # Show file panel in multi-file mode
@@ -242,12 +250,11 @@ Pick a built-in theme:
 theme = { name = "tokyonight" }
 ```
 
-Built-in themes:
-`aura`, `ayu`, `catppuccin`, `catppuccin-frappe`, `catppuccin-macchiato`, `cobalt2`,
-`cursor`, `dracula`, `everforest`, `flexoki`, `github`, `gruvbox`, `kanagawa`,
-`lucent-orng`, `material`, `matrix`, `mercury`, `monokai`, `nightowl`, `nord`,
-`one-dark`, `opencode`, `orng`, `palenight`, `rosepine`, `solarized`, `synthwave84`,
-`tokyonight`, `vercel`, `vesper`, `zenburn`.
+List built-in themes with:
+
+```bash
+oyo themes
+```
 
 Customize or create a theme by defining color tokens in config:
 
