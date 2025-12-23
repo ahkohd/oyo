@@ -39,6 +39,12 @@ cargo install oyo
 
 ## Usage
 
+Optional theme override:
+
+```bash
+oyo --theme-name tokyonight
+```
+
 ### CLI
 
 ```bash

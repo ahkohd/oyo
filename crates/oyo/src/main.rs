@@ -51,6 +51,10 @@ struct Args {
     #[arg(long, value_enum)]
     theme_mode: Option<CliThemeMode>,
 
+    /// Theme name (overrides config)
+    #[arg(long)]
+    theme_name: Option<String>,
+
     /// Disable stepping (no-step diff view)
     #[arg(long)]
     no_step: bool,
@@ -203,7 +207,7 @@ mod tests {
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    let config = config::Config::load();
+    let mut config = config::Config::load();
 
     let input_mode = if args.paths.len() == 7 {
         detect_input_mode(&args.paths)
@@ -439,6 +443,10 @@ fn main() -> Result<()> {
         .extent_marker_right
         .clone()
         .unwrap_or_else(|| "▐".to_string());
+
+    if let Some(name) = args.theme_name.as_deref() {
+        config.ui.theme.name = Some(name.to_string());
+    }
 
     // Compute theme mode: CLI overrides config, default to dark
     let light_mode = match args.theme_mode {
