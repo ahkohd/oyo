@@ -13,7 +13,7 @@ use clap::{Parser, Subcommand};
 use crossterm::{
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
-        MouseEventKind,
+        MouseButton, MouseEventKind,
     },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -527,6 +527,11 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<()> 
                     }
                     app.reset_count();
                     match me.kind {
+                        MouseEventKind::Down(MouseButton::Left) => {
+                            if app.handle_file_list_click(me.column, me.row) {
+                                continue;
+                            }
+                        }
                         MouseEventKind::ScrollUp => {
                             if app.file_list_focused {
                                 app.prev_file();

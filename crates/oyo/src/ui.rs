@@ -7,7 +7,10 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
+    widgets::{
+        Block, Borders, Clear, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation,
+        ScrollbarState,
+    },
     Frame,
 };
 use unicode_width::UnicodeWidthStr;
@@ -384,6 +387,9 @@ fn draw_content(frame: &mut Frame, app: &mut App, area: Rect) {
         draw_diff_view(frame, app, chunks[1]);
     } else {
         // Single file mode, file panel hidden, or viewport too narrow
+        app.file_list_area = None;
+        app.file_list_rows.clear();
+        app.file_filter_area = None;
         draw_diff_view(frame, app, area);
     }
 }
@@ -529,6 +535,7 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let filtered_indices = app.filtered_file_indices();
     let mut items = Vec::new();
+    let mut row_map: Vec<Option<usize>> = Vec::new();
     let mut remaining = list_area.height.saturating_sub(2) as usize;
     let mut current_group: Option<String> = None;
 
@@ -544,6 +551,7 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
         if current_group.as_deref() != Some(&group) {
             if current_group.is_some() && remaining > 0 {
                 items.push(ListItem::new(Line::raw("")));
+                row_map.push(None);
                 remaining -= 1;
                 if remaining == 0 {
                     break;
@@ -561,6 +569,7 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
                 ),
             ]);
             items.push(ListItem::new(header_line));
+            row_map.push(None);
             current_group = Some(group);
             remaining -= 1;
             if remaining == 0 {
@@ -668,6 +677,7 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
         let line = Line::from(line_spans);
 
         items.push(ListItem::new(line));
+        row_map.push(Some(file_idx));
         remaining -= 1;
         idx += 1;
     }
@@ -678,6 +688,9 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 
     let file_list = List::new(items).block(block);
+
+    app.file_list_area = Some((list_area.x, list_area.y, list_area.width, list_area.height));
+    app.file_list_rows = row_map;
 
     frame.render_widget(file_list, list_area);
 
@@ -697,6 +710,12 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 
     if let Some(filter_area) = filter_area {
+        app.file_filter_area = Some((
+            filter_area.x,
+            filter_area.y,
+            filter_area.width,
+            filter_area.height,
+        ));
         let filter_bg = app
             .theme
             .background_element
@@ -729,6 +748,8 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
         }
         filter = filter.block(filter_block);
         frame.render_widget(filter, filter_area);
+    } else {
+        app.file_filter_area = None;
     }
 }
 
@@ -808,7 +829,7 @@ fn draw_help_popover(frame: &mut Frame, app: &mut App) {
         .max()
         .unwrap_or(0);
     let min_desc_width = 16usize;
-    let max_key_pad = max_key_width.saturating_add(2);
+    let max_key_pad = max_key_width.saturating_add(2).min(12);
     let key_pad = max_key_pad.min(content_width.saturating_sub(min_desc_width).max(2));
     let key_field_width = key_pad.saturating_sub(2);
     let desc_width = content_width.saturating_sub(key_pad).max(1);
@@ -910,7 +931,11 @@ fn draw_help_popover(frame: &mut Frame, app: &mut App) {
     };
 
     let push_help_line = |lines: &mut Vec<Line>, key: &str, desc: &str| {
-        let key_text = format!("  {:<width$}     ", truncate_key(key), width = key_field_width);
+        let key_text = format!(
+            "  {:<width$}     ",
+            truncate_key(key),
+            width = key_field_width
+        );
         let wrapped = wrap_text(desc);
         for (idx, line) in wrapped.into_iter().enumerate() {
             let left = if idx == 0 {
@@ -1025,8 +1050,7 @@ fn draw_help_popover(frame: &mut Frame, app: &mut App) {
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .begin_symbol(Some("↑"))
             .end_symbol(Some("↓"));
-        let mut scrollbar_state =
-            ScrollbarState::new(total_lines).position(scroll as usize);
+        let mut scrollbar_state = ScrollbarState::new(total_lines).position(scroll as usize);
         frame.render_stateful_widget(
             scrollbar,
             popup_area.inner(ratatui::layout::Margin {

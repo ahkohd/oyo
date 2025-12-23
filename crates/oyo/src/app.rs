@@ -95,6 +95,12 @@ pub struct App {
     pub file_panel_visible: bool,
     /// File list scroll offset
     pub file_list_scroll: usize,
+    /// File list view area (x, y, width, height)
+    pub file_list_area: Option<(u16, u16, u16, u16)>,
+    /// File list row mapping for mouse selection
+    pub file_list_rows: Vec<Option<usize>>,
+    /// File list filter input area (x, y, width, height)
+    pub file_filter_area: Option<(u16, u16, u16, u16)>,
     /// When to show per-file +/- counts in the file panel
     pub file_count_mode: FileCountMode,
     /// File list filter text
@@ -277,6 +283,9 @@ impl App {
             file_list_focused: false,
             file_panel_visible: true,
             file_list_scroll: 0,
+            file_list_area: None,
+            file_list_rows: Vec::new(),
+            file_filter_area: None,
             file_count_mode: FileCountMode::Active,
             file_filter: String::new(),
             file_filter_active: false,
@@ -1848,6 +1857,44 @@ impl App {
         }
     }
 
+    pub fn handle_file_list_click(&mut self, column: u16, row: u16) -> bool {
+        if let Some((x, y, width, height)) = self.file_filter_area {
+            let end_x = x.saturating_add(width);
+            let end_y = y.saturating_add(height);
+            if column >= x && column < end_x && row >= y && row < end_y {
+                self.file_list_focused = true;
+                self.start_file_filter();
+                return true;
+            }
+        }
+
+        let (x, y, width, height) = match self.file_list_area {
+            Some(area) => area,
+            None => return false,
+        };
+        let end_x = x.saturating_add(width);
+        let end_y = y.saturating_add(height);
+        if column < x || column >= end_x || row < y || row >= end_y {
+            return false;
+        }
+
+        let item_start = y.saturating_add(1);
+        if row < item_start {
+            self.file_list_focused = true;
+            return true;
+        }
+
+        let row_idx = (row - item_start) as usize;
+        if let Some(Some(file_idx)) = self.file_list_rows.get(row_idx) {
+            self.file_list_focused = true;
+            self.select_file(*file_idx);
+            return true;
+        }
+
+        self.file_list_focused = true;
+        true
+    }
+
     pub fn toggle_file_panel(&mut self) {
         if self.file_panel_manually_set {
             // Already manually controlled, just toggle
@@ -2345,7 +2392,6 @@ impl App {
         }
     }
 
-    #[allow(dead_code)]
     pub fn select_file(&mut self, index: usize) {
         let old_index = self.multi_diff.selected_index;
         self.scroll_offsets[old_index] = self.scroll_offset;
