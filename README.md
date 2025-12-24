@@ -269,36 +269,12 @@ accent = { dark = "accent" }
 syntaxKeyword = { dark = "#c099ff" }
 ```
 
-Supported tokens:
-`text`, `textMuted`, `primary`, `secondary`, `accent`, `error`, `warning`, `success`, `info`,
-`background`, `backgroundPanel`, `backgroundElement`, `border`, `borderActive`, `borderSubtle`,
-`diffAdded`, `diffRemoved`, `diffContext`, `diffLineNumber`, `diffExtMarker`,
-`syntaxPlain`, `syntaxKeyword`, `syntaxString`, `syntaxNumber`, `syntaxComment`, `syntaxAttribute`,
-`syntaxType`, `syntaxFunction`, `syntaxVariable`, `syntaxConstant`, `syntaxBuiltin`,
-`syntaxMacro`, `syntaxOperator`, `syntaxPunctuation`.
-
-You can also use `crates/oyo/themes/schema.json` as a reference when creating a theme file.
+Supported tokens are defined in [schema.json](crates/oyo/themes/schema.json).
 
 ## How It Works
 
-1. **Diff Computation**: The diff engine compares old and new content, producing a list of changes (insertions, deletions, modifications)
-
-1. **Change Ordering**: Changes are ordered sequentially as they appear in the file
-
-1. **Step Navigation**: The navigator tracks which changes have been "applied" at each step
-
-1. **View Rendering**: At each step, the view shows:
-   - Applied changes (fully styled)
-   - Active change (highlighted with animation)
-   - Pending changes (dimmed or hidden)
-
-## Inspiration
-
-Traditional diff tools show a static "before and after" view. Oyo was inspired by the idea of **watching edits happen** - like a time-lapse of the editing process. This is especially useful for:
-
-- **Code review**: Follow the logical progression of changes
-- **Learning**: Understand how experienced developers modify code
-- **Debugging**: See exactly when and where a change was introduced
+Stepping applies changes in file order. The view renders applied changes, highlights the
+active change, and keeps pending changes muted.
 
 ## Development
 
