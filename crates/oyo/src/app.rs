@@ -3204,6 +3204,7 @@ mod tests {
             old_line,
             new_line,
             is_active,
+            is_active_change: is_active,
             is_primary_active,
             show_hunk_extent: false,
             change_id: 0,

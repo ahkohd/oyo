@@ -1323,8 +1323,8 @@ mod tests {
         let diff = engine.diff_strings(old, new);
         let mut nav = DiffNavigator::new(diff, old.to_string(), new.to_string());
 
-        // Apply first hunk
-        nav.next_hunk();
+        // Apply first change (no hunk preview)
+        nav.next();
         assert_eq!(nav.state().current_step, 1);
 
         // Step back to start
@@ -1636,6 +1636,43 @@ mod tests {
         assert!(
             !nav.state().last_nav_was_hunk,
             "Markers should clear when stepping into different hunk"
+        );
+    }
+
+    #[test]
+    fn test_active_change_flag_in_hunk_preview() {
+        // Single hunk with 2 changes: hunk preview should mark all lines active,
+        // but only the first change is the active change.
+        let old = "line1\nline2\nline3\n";
+        let new = "LINE1\nLINE2\nline3\n";
+
+        let engine = DiffEngine::new();
+        let diff = engine.diff_strings(old, new);
+        assert_eq!(diff.hunks.len(), 1, "Expected a single hunk");
+        assert!(
+            diff.hunks[0].change_ids.len() >= 2,
+            "Expected 2 changes in the hunk"
+        );
+
+        let mut nav = DiffNavigator::new(diff, old.to_string(), new.to_string());
+        nav.next_hunk();
+
+        let view = nav.current_view_with_frame(AnimationFrame::FadeIn);
+        let active_changes: Vec<_> = view.iter().filter(|l| l.is_active_change).collect();
+        let active_lines: Vec<_> = view.iter().filter(|l| l.is_active).collect();
+
+        assert_eq!(active_changes.len(), 1, "Only one active change expected");
+        assert!(
+            active_lines.len() >= 2,
+            "All hunk lines should be active during preview"
+        );
+        assert!(
+            active_changes[0].is_primary_active,
+            "Active change should be primary"
+        );
+        assert!(
+            active_changes[0].content.contains("LINE1"),
+            "Active change should be the first change in the hunk"
         );
     }
 

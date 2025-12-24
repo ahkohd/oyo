@@ -8,6 +8,9 @@ pub use evolution::render_evolution;
 pub use single_pane::render_single_pane;
 pub use split::render_split;
 
+#[cfg(test)]
+mod tests;
+
 use std::collections::VecDeque;
 
 use oyo_core::LineKind;
