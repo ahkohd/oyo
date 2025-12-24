@@ -372,9 +372,9 @@ impl App {
 
     pub fn toggle_syntax(&mut self) {
         self.syntax_mode = match self.syntax_mode {
-            SyntaxMode::Auto => SyntaxMode::On,
+            SyntaxMode::Auto => SyntaxMode::Off,
             SyntaxMode::On => SyntaxMode::Off,
-            SyntaxMode::Off => SyntaxMode::Auto,
+            SyntaxMode::Off => SyntaxMode::On,
         };
         if matches!(self.syntax_mode, SyntaxMode::Off) {
             self.syntax_engine = None;
