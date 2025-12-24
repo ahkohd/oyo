@@ -2,117 +2,49 @@
   "$schema": "./schema.json",
   "defs": {
     "base": "#191724",
-    "surface": "#1f1d2e",
-    "overlay": "#26233a",
-    "muted": "#6e6a86",
-    "subtle": "#908caa",
-    "text": "#e0def4",
-    "love": "#eb6f92",
-    "gold": "#f6c177",
-    "rose": "#ebbcba",
-    "pine": "#31748f",
+    "dawnBase": "#faf4ed",
+    "dawnMuted": "#9893a5",
+    "dawnOverlay": "#f2e9e1",
+    "dawnSubtle": "#797593",
+    "dawnSurface": "#fffaf3",
+    "dawnText": "#575279",
     "foam": "#9ccfd8",
-    "iris": "#c4a7e7",
+    "gold": "#f6c177",
+    "highlightHigh": "#524f67",
     "highlightLow": "#21202e",
     "highlightMed": "#403d52",
-    "highlightHigh": "#524f67",
+    "iris": "#c4a7e7",
+    "love": "#eb6f92",
     "moonBase": "#232136",
-    "moonSurface": "#2a273f",
-    "moonOverlay": "#393552",
     "moonMuted": "#6e6a86",
+    "moonOverlay": "#393552",
     "moonSubtle": "#908caa",
+    "moonSurface": "#2a273f",
     "moonText": "#e0def4",
-    "dawnBase": "#faf4ed",
-    "dawnSurface": "#fffaf3",
-    "dawnOverlay": "#f2e9e1",
-    "dawnMuted": "#9893a5",
-    "dawnSubtle": "#797593",
-    "dawnText": "#575279"
+    "muted": "#6e6a86",
+    "overlay": "#26233a",
+    "pine": "#31748f",
+    "rose": "#ebbcba",
+    "subtle": "#908caa",
+    "surface": "#1f1d2e",
+    "text": "#e0def4"
   },
   "theme": {
-    "text": {
-      "dark": "#e0def4",
-      "light": "#575279"
-    },
-    "textMuted": {
-      "dark": "muted",
-      "light": "dawnMuted"
-    },
-    "primary": {
-      "dark": "foam",
-      "light": "pine"
-    },
-    "secondary": {
-      "dark": "iris",
-      "light": "#907aa9"
-    },
     "accent": {
       "dark": "rose",
       "light": "#d7827e"
-    },
-    "error": {
-      "dark": "love",
-      "light": "#b4637a"
-    },
-    "warning": {
-      "dark": "gold",
-      "light": "#ea9d34"
-    },
-    "success": {
-      "dark": "pine",
-      "light": "#286983"
-    },
-    "info": {
-      "dark": "foam",
-      "light": "#56949f"
-    },
-    "syntaxKeyword": {
-      "dark": "pine",
-      "light": "#286983"
-    },
-    "syntaxString": {
-      "dark": "gold",
-      "light": "#ea9d34"
-    },
-    "syntaxNumber": {
-      "dark": "iris",
-      "light": "#907aa9"
-    },
-    "syntaxComment": {
-      "dark": "muted",
-      "light": "dawnMuted"
-    },
-    "syntaxType": {
-      "dark": "foam",
-      "light": "#56949f"
-    },
-    "syntaxFunction": {
-      "dark": "rose",
-      "light": "#d7827e"
-    },
-    "syntaxVariable": {
-      "dark": "#e0def4",
-      "light": "#575279"
-    },
-    "syntaxOperator": {
-      "dark": "subtle",
-      "light": "dawnSubtle"
-    },
-    "syntaxPunctuation": {
-      "dark": "subtle",
-      "light": "dawnSubtle"
     },
     "background": {
       "dark": "base",
       "light": "dawnBase"
     },
-    "backgroundPanel": {
-      "dark": "surface",
-      "light": "dawnSurface"
-    },
     "backgroundElement": {
       "dark": "overlay",
       "light": "dawnOverlay"
+    },
+    "backgroundPanel": {
+      "dark": "surface",
+      "light": "dawnSurface"
     },
     "border": {
       "dark": "highlightMed",
@@ -130,10 +62,6 @@
       "dark": "pine",
       "light": "#286983"
     },
-    "diffRemoved": {
-      "dark": "love",
-      "light": "#b4637a"
-    },
     "diffContext": {
       "dark": "muted",
       "light": "dawnMuted"
@@ -142,17 +70,41 @@
       "dark": "muted",
       "light": "dawnMuted"
     },
-    "syntaxAttribute": {
-      "dark": "pine",
-      "light": "#286983"
+    "diffRemoved": {
+      "dark": "love",
+      "light": "#b4637a"
     },
-    "syntaxBuiltin": {
+    "error": {
+      "dark": "love",
+      "light": "#b4637a"
+    },
+    "info": {
       "dark": "foam",
       "light": "#56949f"
     },
-    "syntaxMacro": {
-      "dark": "rose",
-      "light": "#d7827e"
+    "primary": {
+      "dark": "foam",
+      "light": "pine"
+    },
+    "secondary": {
+      "dark": "iris",
+      "light": "#907aa9"
+    },
+    "success": {
+      "dark": "pine",
+      "light": "#286983"
+    },
+    "text": {
+      "dark": "#e0def4",
+      "light": "#575279"
+    },
+    "textMuted": {
+      "dark": "muted",
+      "light": "dawnMuted"
+    },
+    "warning": {
+      "dark": "gold",
+      "light": "#ea9d34"
     }
   }
 }

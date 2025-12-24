@@ -4,114 +4,46 @@
     "darkBg": "#0d1117",
     "darkBgAlt": "#010409",
     "darkBgPanel": "#161b22",
+    "darkBlue": "#58a6ff",
+    "darkCyan": "#39c5cf",
     "darkFg": "#c9d1d9",
     "darkFgMuted": "#8b949e",
-    "darkBlue": "#58a6ff",
     "darkGreen": "#3fb950",
-    "darkRed": "#f85149",
     "darkOrange": "#d29922",
-    "darkPurple": "#bc8cff",
     "darkPink": "#ff7b72",
+    "darkPurple": "#bc8cff",
+    "darkRed": "#f85149",
     "darkYellow": "#e3b341",
-    "darkCyan": "#39c5cf",
     "lightBg": "#ffffff",
     "lightBgAlt": "#f6f8fa",
     "lightBgPanel": "#f0f3f6",
+    "lightBlue": "#0969da",
+    "lightCyan": "#1b7c83",
     "lightFg": "#24292f",
     "lightFgMuted": "#57606a",
-    "lightBlue": "#0969da",
     "lightGreen": "#1a7f37",
-    "lightRed": "#cf222e",
     "lightOrange": "#bc4c00",
-    "lightPurple": "#8250df",
     "lightPink": "#bf3989",
-    "lightYellow": "#9a6700",
-    "lightCyan": "#1b7c83"
+    "lightPurple": "#8250df",
+    "lightRed": "#cf222e",
+    "lightYellow": "#9a6700"
   },
   "theme": {
-    "text": {
-      "dark": "darkFg",
-      "light": "lightFg"
-    },
-    "textMuted": {
-      "dark": "darkFgMuted",
-      "light": "lightFgMuted"
-    },
-    "primary": {
-      "dark": "darkBlue",
-      "light": "lightBlue"
-    },
-    "secondary": {
-      "dark": "darkPurple",
-      "light": "lightPurple"
-    },
     "accent": {
       "dark": "darkCyan",
       "light": "lightCyan"
-    },
-    "error": {
-      "dark": "darkRed",
-      "light": "lightRed"
-    },
-    "warning": {
-      "dark": "darkYellow",
-      "light": "lightYellow"
-    },
-    "success": {
-      "dark": "darkGreen",
-      "light": "lightGreen"
-    },
-    "info": {
-      "dark": "darkOrange",
-      "light": "lightOrange"
-    },
-    "syntaxKeyword": {
-      "dark": "darkPink",
-      "light": "lightRed"
-    },
-    "syntaxString": {
-      "dark": "darkCyan",
-      "light": "lightBlue"
-    },
-    "syntaxNumber": {
-      "dark": "darkBlue",
-      "light": "lightCyan"
-    },
-    "syntaxComment": {
-      "dark": "darkFgMuted",
-      "light": "lightFgMuted"
-    },
-    "syntaxType": {
-      "dark": "darkOrange",
-      "light": "lightOrange"
-    },
-    "syntaxFunction": {
-      "dark": "darkPurple",
-      "light": "lightPurple"
-    },
-    "syntaxVariable": {
-      "dark": "darkOrange",
-      "light": "lightOrange"
-    },
-    "syntaxOperator": {
-      "dark": "darkPink",
-      "light": "lightRed"
-    },
-    "syntaxPunctuation": {
-      "dark": "darkFg",
-      "light": "lightFg"
     },
     "background": {
       "dark": "darkBg",
       "light": "lightBg"
     },
-    "backgroundPanel": {
-      "dark": "darkBgAlt",
-      "light": "lightBgAlt"
-    },
     "backgroundElement": {
       "dark": "darkBgPanel",
       "light": "lightBgPanel"
+    },
+    "backgroundPanel": {
+      "dark": "darkBgAlt",
+      "light": "lightBgAlt"
     },
     "border": {
       "dark": "#30363d",
@@ -129,10 +61,6 @@
       "dark": "darkGreen",
       "light": "lightGreen"
     },
-    "diffRemoved": {
-      "dark": "darkRed",
-      "light": "lightRed"
-    },
     "diffContext": {
       "dark": "darkFgMuted",
       "light": "lightFgMuted"
@@ -141,17 +69,41 @@
       "dark": "#484f58",
       "light": "#afb8c1"
     },
-    "syntaxAttribute": {
-      "dark": "darkPink",
+    "diffRemoved": {
+      "dark": "darkRed",
       "light": "lightRed"
     },
-    "syntaxBuiltin": {
+    "error": {
+      "dark": "darkRed",
+      "light": "lightRed"
+    },
+    "info": {
       "dark": "darkOrange",
       "light": "lightOrange"
     },
-    "syntaxMacro": {
+    "primary": {
+      "dark": "darkBlue",
+      "light": "lightBlue"
+    },
+    "secondary": {
       "dark": "darkPurple",
       "light": "lightPurple"
+    },
+    "success": {
+      "dark": "darkGreen",
+      "light": "lightGreen"
+    },
+    "text": {
+      "dark": "darkFg",
+      "light": "lightFg"
+    },
+    "textMuted": {
+      "dark": "darkFgMuted",
+      "light": "lightFgMuted"
+    },
+    "warning": {
+      "dark": "darkYellow",
+      "light": "lightYellow"
     }
   }
 }

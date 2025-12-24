@@ -4,109 +4,41 @@
     "background": "#193549",
     "backgroundAlt": "#122738",
     "backgroundPanel": "#1f4662",
-    "foreground": "#ffffff",
-    "foregroundMuted": "#adb7c9",
-    "yellow": "#ffc600",
-    "yellowBright": "#ffe14c",
-    "orange": "#ff9d00",
-    "orangeBright": "#ffb454",
-    "mint": "#2affdf",
-    "mintBright": "#7efff5",
     "blue": "#0088ff",
     "blueBright": "#5cb7ff",
-    "pink": "#ff628c",
-    "pinkBright": "#ff86a5",
+    "foreground": "#ffffff",
+    "foregroundMuted": "#adb7c9",
     "green": "#9eff80",
     "greenBright": "#b9ff9f",
+    "mint": "#2affdf",
+    "mintBright": "#7efff5",
+    "orange": "#ff9d00",
+    "orangeBright": "#ffb454",
+    "pink": "#ff628c",
+    "pinkBright": "#ff86a5",
     "purple": "#9a5feb",
     "purpleBright": "#b88cfd",
     "red": "#ff0088",
-    "redBright": "#ff5fb3"
+    "redBright": "#ff5fb3",
+    "yellow": "#ffc600",
+    "yellowBright": "#ffe14c"
   },
   "theme": {
-    "text": {
-      "dark": "foreground",
-      "light": "#193549"
-    },
-    "textMuted": {
-      "dark": "foregroundMuted",
-      "light": "#5c6b7d"
-    },
-    "primary": {
-      "dark": "blue",
-      "light": "#0066cc"
-    },
-    "secondary": {
-      "dark": "purple",
-      "light": "#7c4dff"
-    },
     "accent": {
       "dark": "mint",
       "light": "#00acc1"
-    },
-    "error": {
-      "dark": "red",
-      "light": "#e91e63"
-    },
-    "warning": {
-      "dark": "yellow",
-      "light": "#ff9800"
-    },
-    "success": {
-      "dark": "green",
-      "light": "#4caf50"
-    },
-    "info": {
-      "dark": "orange",
-      "light": "#ff5722"
-    },
-    "syntaxKeyword": {
-      "dark": "orange",
-      "light": "#ff5722"
-    },
-    "syntaxString": {
-      "dark": "green",
-      "light": "#4caf50"
-    },
-    "syntaxNumber": {
-      "dark": "pink",
-      "light": "#e91e63"
-    },
-    "syntaxComment": {
-      "dark": "#0088ff",
-      "light": "#5c6b7d"
-    },
-    "syntaxType": {
-      "dark": "mint",
-      "light": "#00acc1"
-    },
-    "syntaxFunction": {
-      "dark": "yellow",
-      "light": "#ff9800"
-    },
-    "syntaxVariable": {
-      "dark": "foreground",
-      "light": "#193549"
-    },
-    "syntaxOperator": {
-      "dark": "orange",
-      "light": "#ff5722"
-    },
-    "syntaxPunctuation": {
-      "dark": "foreground",
-      "light": "#193549"
     },
     "background": {
       "dark": "#193549",
       "light": "#ffffff"
     },
-    "backgroundPanel": {
-      "dark": "#122738",
-      "light": "#f5f7fa"
-    },
     "backgroundElement": {
       "dark": "#1f4662",
       "light": "#e8ecf1"
+    },
+    "backgroundPanel": {
+      "dark": "#122738",
+      "light": "#f5f7fa"
     },
     "border": {
       "dark": "#1f4662",
@@ -124,10 +56,6 @@
       "dark": "green",
       "light": "#4caf50"
     },
-    "diffRemoved": {
-      "dark": "red",
-      "light": "#e91e63"
-    },
     "diffContext": {
       "dark": "foregroundMuted",
       "light": "#5c6b7d"
@@ -136,15 +64,39 @@
       "dark": "#2d5a7b",
       "light": "#b0bec5"
     },
-    "syntaxAttribute": {
+    "diffRemoved": {
+      "dark": "red",
+      "light": "#e91e63"
+    },
+    "error": {
+      "dark": "red",
+      "light": "#e91e63"
+    },
+    "info": {
       "dark": "orange",
       "light": "#ff5722"
     },
-    "syntaxBuiltin": {
-      "dark": "mint",
-      "light": "#00acc1"
+    "primary": {
+      "dark": "blue",
+      "light": "#0066cc"
     },
-    "syntaxMacro": {
+    "secondary": {
+      "dark": "purple",
+      "light": "#7c4dff"
+    },
+    "success": {
+      "dark": "green",
+      "light": "#4caf50"
+    },
+    "text": {
+      "dark": "foreground",
+      "light": "#193549"
+    },
+    "textMuted": {
+      "dark": "foregroundMuted",
+      "light": "#5c6b7d"
+    },
+    "warning": {
       "dark": "yellow",
       "light": "#ff9800"
     }

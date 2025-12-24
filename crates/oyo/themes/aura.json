@@ -1,81 +1,30 @@
 {
   "$schema": "./schema.json",
   "defs": {
+    "blue": "#82e2ff",
+    "cyan": "#61ffca",
     "darkBg": "#0f0f0f",
     "darkBgPanel": "#15141b",
     "darkBorder": "#2d2d2d",
-    "darkFgMuted": "#6d6d6d",
     "darkFg": "#edecee",
-    "purple": "#a277ff",
-    "pink": "#f694ff",
-    "blue": "#82e2ff",
-    "red": "#ff6767",
+    "darkFgMuted": "#6d6d6d",
+    "green": "#9dff65",
     "orange": "#ffca85",
-    "cyan": "#61ffca",
-    "green": "#9dff65"
+    "pink": "#f694ff",
+    "purple": "#a277ff",
+    "red": "#ff6767"
   },
   "theme": {
-    "text": {
-      "dark": "darkFg"
-    },
-    "textMuted": {
-      "dark": "darkFgMuted"
-    },
-    "primary": {
-      "dark": "purple"
-    },
-    "secondary": {
-      "dark": "pink"
-    },
     "accent": {
       "dark": "purple"
-    },
-    "error": {
-      "dark": "red"
-    },
-    "warning": {
-      "dark": "orange"
-    },
-    "success": {
-      "dark": "cyan"
-    },
-    "info": {
-      "dark": "purple"
-    },
-    "syntaxKeyword": {
-      "dark": "pink"
-    },
-    "syntaxString": {
-      "dark": "cyan"
-    },
-    "syntaxNumber": {
-      "dark": "green"
-    },
-    "syntaxComment": {
-      "dark": "darkFgMuted"
-    },
-    "syntaxType": {
-      "dark": "purple"
-    },
-    "syntaxFunction": {
-      "dark": "purple"
-    },
-    "syntaxVariable": {
-      "dark": "purple"
-    },
-    "syntaxOperator": {
-      "dark": "pink"
-    },
-    "syntaxPunctuation": {
-      "dark": "darkFg"
     },
     "background": {
       "dark": "darkBg"
     },
-    "backgroundPanel": {
+    "backgroundElement": {
       "dark": "darkBgPanel"
     },
-    "backgroundElement": {
+    "backgroundPanel": {
       "dark": "darkBgPanel"
     },
     "border": {
@@ -90,23 +39,38 @@
     "diffAdded": {
       "dark": "cyan"
     },
-    "diffRemoved": {
-      "dark": "red"
-    },
     "diffContext": {
       "dark": "darkFgMuted"
     },
     "diffLineNumber": {
       "dark": "darkBorder"
     },
-    "syntaxAttribute": {
+    "diffRemoved": {
+      "dark": "red"
+    },
+    "error": {
+      "dark": "red"
+    },
+    "info": {
+      "dark": "purple"
+    },
+    "primary": {
+      "dark": "purple"
+    },
+    "secondary": {
       "dark": "pink"
     },
-    "syntaxBuiltin": {
-      "dark": "purple"
+    "success": {
+      "dark": "cyan"
     },
-    "syntaxMacro": {
-      "dark": "purple"
+    "text": {
+      "dark": "darkFg"
+    },
+    "textMuted": {
+      "dark": "darkFgMuted"
+    },
+    "warning": {
+      "dark": "orange"
     }
   }
 }

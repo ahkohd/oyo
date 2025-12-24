@@ -25,7 +25,8 @@ clap = { workspace = true }
 tokio = { workspace = true }
 toml = { workspace = true }
 dirs = { workspace = true }
-syntect = "5.2"
+syntect = "5.3"
+two-face = "0.5.0-rc1"
 regex = { workspace = true }
 unicode-width = { workspace = true }
 unicode-segmentation = { workspace = true }

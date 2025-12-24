@@ -1,126 +1,58 @@
 {
   "$schema": "./schema.json",
   "defs": {
+    "darkAqua": "#689d6a",
+    "darkAquaBright": "#8ec07c",
     "darkBg0": "#282828",
     "darkBg1": "#3c3836",
     "darkBg2": "#504945",
     "darkBg3": "#665c54",
+    "darkBlue": "#458588",
+    "darkBlueBright": "#83a598",
     "darkFg0": "#fbf1c7",
     "darkFg1": "#ebdbb2",
     "darkGray": "#928374",
-    "darkRed": "#cc241d",
     "darkGreen": "#98971a",
-    "darkYellow": "#d79921",
-    "darkBlue": "#458588",
-    "darkPurple": "#b16286",
-    "darkAqua": "#689d6a",
-    "darkOrange": "#d65d0e",
-    "darkRedBright": "#fb4934",
     "darkGreenBright": "#b8bb26",
-    "darkYellowBright": "#fabd2f",
-    "darkBlueBright": "#83a598",
-    "darkPurpleBright": "#d3869b",
-    "darkAquaBright": "#8ec07c",
+    "darkOrange": "#d65d0e",
     "darkOrangeBright": "#fe8019",
+    "darkPurple": "#b16286",
+    "darkPurpleBright": "#d3869b",
+    "darkRed": "#cc241d",
+    "darkRedBright": "#fb4934",
+    "darkYellow": "#d79921",
+    "darkYellowBright": "#fabd2f",
+    "lightAqua": "#427b58",
     "lightBg0": "#fbf1c7",
     "lightBg1": "#ebdbb2",
     "lightBg2": "#d5c4a1",
     "lightBg3": "#bdae93",
+    "lightBlue": "#076678",
     "lightFg0": "#282828",
     "lightFg1": "#3c3836",
     "lightGray": "#7c6f64",
-    "lightRed": "#9d0006",
     "lightGreen": "#79740e",
-    "lightYellow": "#b57614",
-    "lightBlue": "#076678",
+    "lightOrange": "#af3a03",
     "lightPurple": "#8f3f71",
-    "lightAqua": "#427b58",
-    "lightOrange": "#af3a03"
+    "lightRed": "#9d0006",
+    "lightYellow": "#b57614"
   },
   "theme": {
-    "text": {
-      "dark": "darkFg1",
-      "light": "lightFg1"
-    },
-    "textMuted": {
-      "dark": "darkGray",
-      "light": "lightGray"
-    },
-    "primary": {
-      "dark": "darkBlueBright",
-      "light": "lightBlue"
-    },
-    "secondary": {
-      "dark": "darkPurpleBright",
-      "light": "lightPurple"
-    },
     "accent": {
       "dark": "darkAquaBright",
       "light": "lightAqua"
-    },
-    "error": {
-      "dark": "darkRedBright",
-      "light": "lightRed"
-    },
-    "warning": {
-      "dark": "darkOrangeBright",
-      "light": "lightOrange"
-    },
-    "success": {
-      "dark": "darkGreenBright",
-      "light": "lightGreen"
-    },
-    "info": {
-      "dark": "darkYellowBright",
-      "light": "lightYellow"
-    },
-    "syntaxKeyword": {
-      "dark": "darkRedBright",
-      "light": "lightRed"
-    },
-    "syntaxString": {
-      "dark": "darkYellowBright",
-      "light": "lightYellow"
-    },
-    "syntaxNumber": {
-      "dark": "darkPurpleBright",
-      "light": "lightPurple"
-    },
-    "syntaxComment": {
-      "dark": "darkGray",
-      "light": "lightGray"
-    },
-    "syntaxType": {
-      "dark": "darkAquaBright",
-      "light": "lightAqua"
-    },
-    "syntaxFunction": {
-      "dark": "darkGreenBright",
-      "light": "lightGreen"
-    },
-    "syntaxVariable": {
-      "dark": "darkBlueBright",
-      "light": "lightBlue"
-    },
-    "syntaxOperator": {
-      "dark": "darkOrangeBright",
-      "light": "lightOrange"
-    },
-    "syntaxPunctuation": {
-      "dark": "darkFg1",
-      "light": "lightFg1"
     },
     "background": {
       "dark": "darkBg0",
       "light": "lightBg0"
     },
-    "backgroundPanel": {
-      "dark": "darkBg1",
-      "light": "lightBg1"
-    },
     "backgroundElement": {
       "dark": "darkBg2",
       "light": "lightBg2"
+    },
+    "backgroundPanel": {
+      "dark": "darkBg1",
+      "light": "lightBg1"
     },
     "border": {
       "dark": "darkBg3",
@@ -138,10 +70,6 @@
       "dark": "darkGreen",
       "light": "lightGreen"
     },
-    "diffRemoved": {
-      "dark": "darkRed",
-      "light": "lightRed"
-    },
     "diffContext": {
       "dark": "darkGray",
       "light": "lightGray"
@@ -150,17 +78,41 @@
       "dark": "darkBg3",
       "light": "lightBg3"
     },
-    "syntaxAttribute": {
+    "diffRemoved": {
+      "dark": "darkRed",
+      "light": "lightRed"
+    },
+    "error": {
       "dark": "darkRedBright",
       "light": "lightRed"
     },
-    "syntaxBuiltin": {
-      "dark": "darkAquaBright",
-      "light": "lightAqua"
+    "info": {
+      "dark": "darkYellowBright",
+      "light": "lightYellow"
     },
-    "syntaxMacro": {
+    "primary": {
+      "dark": "darkBlueBright",
+      "light": "lightBlue"
+    },
+    "secondary": {
+      "dark": "darkPurpleBright",
+      "light": "lightPurple"
+    },
+    "success": {
       "dark": "darkGreenBright",
       "light": "lightGreen"
+    },
+    "text": {
+      "dark": "darkFg1",
+      "light": "lightFg1"
+    },
+    "textMuted": {
+      "dark": "darkGray",
+      "light": "lightGray"
+    },
+    "warning": {
+      "dark": "darkOrangeBright",
+      "light": "lightOrange"
     }
   }
 }

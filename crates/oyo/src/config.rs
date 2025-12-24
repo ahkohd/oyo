@@ -70,20 +70,6 @@ pub struct ThemeTokens {
     pub warning: Option<DarkLight>,
     pub success: Option<DarkLight>,
     pub info: Option<DarkLight>,
-    pub syntax_plain: Option<DarkLight>,
-    pub syntax_keyword: Option<DarkLight>,
-    pub syntax_string: Option<DarkLight>,
-    pub syntax_number: Option<DarkLight>,
-    pub syntax_comment: Option<DarkLight>,
-    pub syntax_attribute: Option<DarkLight>,
-    pub syntax_type: Option<DarkLight>,
-    pub syntax_function: Option<DarkLight>,
-    pub syntax_variable: Option<DarkLight>,
-    pub syntax_constant: Option<DarkLight>,
-    pub syntax_builtin: Option<DarkLight>,
-    pub syntax_macro: Option<DarkLight>,
-    pub syntax_operator: Option<DarkLight>,
-    pub syntax_punctuation: Option<DarkLight>,
     pub background: Option<DarkLight>,
     pub background_panel: Option<DarkLight>,
     pub background_element: Option<DarkLight>,
@@ -146,10 +132,6 @@ const BUILTIN_THEMES: &[(&str, &str)] = &[
         include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/themes/cobalt2.json")),
     ),
     (
-        "cursor",
-        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/themes/cursor.json")),
-    ),
-    (
         "dracula",
         include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/themes/dracula.json")),
     ),
@@ -177,23 +159,8 @@ const BUILTIN_THEMES: &[(&str, &str)] = &[
         include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/themes/kanagawa.json")),
     ),
     (
-        "lucent-orng",
-        include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/themes/lucent-orng.json"
-        )),
-    ),
-    (
         "material",
         include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/themes/material.json")),
-    ),
-    (
-        "matrix",
-        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/themes/matrix.json")),
-    ),
-    (
-        "mercury",
-        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/themes/mercury.json")),
     ),
     (
         "monokai",
@@ -210,14 +177,6 @@ const BUILTIN_THEMES: &[(&str, &str)] = &[
     (
         "one-dark",
         include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/themes/one-dark.json")),
-    ),
-    (
-        "opencode",
-        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/themes/opencode.json")),
-    ),
-    (
-        "orng",
-        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/themes/orng.json")),
     ),
     (
         "palenight",
@@ -250,14 +209,6 @@ const BUILTIN_THEMES: &[(&str, &str)] = &[
             env!("CARGO_MANIFEST_DIR"),
             "/themes/tokyonight.json"
         )),
-    ),
-    (
-        "vercel",
-        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/themes/vercel.json")),
-    ),
-    (
-        "vesper",
-        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/themes/vesper.json")),
     ),
     (
         "zenburn",
@@ -321,22 +272,6 @@ pub struct ResolvedTheme {
     pub warning: Color,
     pub success: Color,
     pub info: Color,
-
-    // Syntax
-    pub syntax_plain: Color,
-    pub syntax_keyword: Color,
-    pub syntax_string: Color,
-    pub syntax_number: Color,
-    pub syntax_comment: Color,
-    pub syntax_attribute: Color,
-    pub syntax_type: Color,
-    pub syntax_function: Color,
-    pub syntax_variable: Color,
-    pub syntax_constant: Color,
-    pub syntax_builtin: Color,
-    pub syntax_macro: Color,
-    pub syntax_operator: Color,
-    pub syntax_punctuation: Color,
 
     // Backgrounds (None = transparent)
     pub background: Option<Color>,
@@ -468,46 +403,6 @@ impl ThemeConfig {
             success: resolve(&tokens.success, Color::Green),
             info: resolve(&tokens.info, Color::Blue),
 
-            // Syntax (fallbacks align to existing UI colors)
-            syntax_plain: resolve(&tokens.syntax_plain, Color::Reset),
-            syntax_keyword: resolve(&tokens.syntax_keyword, resolve(&tokens.accent, Color::Cyan)),
-            syntax_string: resolve(
-                &tokens.syntax_string,
-                resolve(&tokens.success, Color::Green),
-            ),
-            syntax_number: resolve(
-                &tokens.syntax_number,
-                resolve(&tokens.warning, Color::Yellow),
-            ),
-            syntax_comment: resolve(
-                &tokens.syntax_comment,
-                resolve(&tokens.text_muted, Color::DarkGray),
-            ),
-            syntax_attribute: resolve(
-                &tokens.syntax_attribute,
-                resolve(&tokens.syntax_keyword, resolve(&tokens.accent, Color::Cyan)),
-            ),
-            syntax_type: resolve(&tokens.syntax_type, resolve(&tokens.primary, Color::Cyan)),
-            syntax_function: resolve(&tokens.syntax_function, resolve(&tokens.info, Color::Blue)),
-            syntax_variable: resolve(&tokens.syntax_variable, resolve(&tokens.error, Color::Red)),
-            syntax_constant: resolve(
-                &tokens.syntax_constant,
-                resolve(&tokens.secondary, Color::Cyan),
-            ),
-            syntax_builtin: resolve(
-                &tokens.syntax_builtin,
-                resolve(&tokens.syntax_type, resolve(&tokens.primary, Color::Cyan)),
-            ),
-            syntax_macro: resolve(
-                &tokens.syntax_macro,
-                resolve(&tokens.syntax_function, resolve(&tokens.info, Color::Blue)),
-            ),
-            syntax_operator: resolve(&tokens.syntax_operator, resolve(&tokens.text, Color::Reset)),
-            syntax_punctuation: resolve(
-                &tokens.syntax_punctuation,
-                resolve(&tokens.text_muted, Color::DarkGray),
-            ),
-
             // Backgrounds - transparent by default
             background: resolve_bg(&tokens.background),
             background_panel: resolve_bg(&tokens.background_panel),
@@ -558,48 +453,6 @@ fn merge_theme_tokens(base: &mut ThemeTokens, overlay: &ThemeTokens) {
     }
     if overlay.info.is_some() {
         base.info = overlay.info.clone();
-    }
-    if overlay.syntax_plain.is_some() {
-        base.syntax_plain = overlay.syntax_plain.clone();
-    }
-    if overlay.syntax_keyword.is_some() {
-        base.syntax_keyword = overlay.syntax_keyword.clone();
-    }
-    if overlay.syntax_string.is_some() {
-        base.syntax_string = overlay.syntax_string.clone();
-    }
-    if overlay.syntax_number.is_some() {
-        base.syntax_number = overlay.syntax_number.clone();
-    }
-    if overlay.syntax_comment.is_some() {
-        base.syntax_comment = overlay.syntax_comment.clone();
-    }
-    if overlay.syntax_attribute.is_some() {
-        base.syntax_attribute = overlay.syntax_attribute.clone();
-    }
-    if overlay.syntax_type.is_some() {
-        base.syntax_type = overlay.syntax_type.clone();
-    }
-    if overlay.syntax_function.is_some() {
-        base.syntax_function = overlay.syntax_function.clone();
-    }
-    if overlay.syntax_variable.is_some() {
-        base.syntax_variable = overlay.syntax_variable.clone();
-    }
-    if overlay.syntax_constant.is_some() {
-        base.syntax_constant = overlay.syntax_constant.clone();
-    }
-    if overlay.syntax_builtin.is_some() {
-        base.syntax_builtin = overlay.syntax_builtin.clone();
-    }
-    if overlay.syntax_macro.is_some() {
-        base.syntax_macro = overlay.syntax_macro.clone();
-    }
-    if overlay.syntax_operator.is_some() {
-        base.syntax_operator = overlay.syntax_operator.clone();
-    }
-    if overlay.syntax_punctuation.is_some() {
-        base.syntax_punctuation = overlay.syntax_punctuation.clone();
     }
     if overlay.background.is_some() {
         base.background = overlay.background.clone();
@@ -652,8 +505,8 @@ pub struct UiConfig {
     pub scrollbar: bool,
     /// Show strikethrough on deleted text
     pub strikethrough_deletions: bool,
-    /// Syntax highlighting: "auto", "on", or "off"
-    pub syntax: SyntaxMode,
+    /// Syntax highlighting configuration
+    pub syntax: SyntaxConfig,
     /// Single-pane view settings
     pub single: SingleViewConfig,
     /// Enable stepping (default: true). If false, shows all changes (no-step behavior)
@@ -679,7 +532,7 @@ impl Default for UiConfig {
             line_wrap: false,
             scrollbar: false,
             strikethrough_deletions: false,
-            syntax: SyntaxMode::Auto,
+            syntax: SyntaxConfig::default(),
             single: SingleViewConfig::default(),
             stepping: true,
             primary_marker: "▶".to_string(),
@@ -721,9 +574,51 @@ pub enum ModifiedStepMode {
 #[serde(rename_all = "lowercase")]
 pub enum SyntaxMode {
     #[default]
-    Auto,
     On,
     Off,
+}
+
+/// Syntax highlighting configuration
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(from = "SyntaxConfigDef")]
+pub struct SyntaxConfig {
+    pub mode: SyntaxMode,
+    pub theme: String,
+}
+
+impl Default for SyntaxConfig {
+    fn default() -> Self {
+        Self {
+            mode: SyntaxMode::On,
+            theme: String::new(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum SyntaxConfigDef {
+    Mode(SyntaxMode),
+    Detailed {
+        #[serde(default)]
+        mode: SyntaxMode,
+        theme: Option<String>,
+    },
+}
+
+impl From<SyntaxConfigDef> for SyntaxConfig {
+    fn from(def: SyntaxConfigDef) -> Self {
+        match def {
+            SyntaxConfigDef::Mode(mode) => Self {
+                mode,
+                ..Self::default()
+            },
+            SyntaxConfigDef::Detailed { mode, theme } => Self {
+                mode,
+                theme: theme.unwrap_or_default(),
+            },
+        }
+    }
 }
 
 /// Playback configuration

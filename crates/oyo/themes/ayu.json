@@ -1,93 +1,42 @@
 {
   "$schema": "./schema.json",
   "defs": {
+    "darkAccent": "#E6B450",
+    "darkAdded": "#7FD962",
     "darkBg": "#0B0E14",
     "darkBgAlt": "#0D1017",
-    "darkLine": "#11151C",
-    "darkPanel": "#0F131A",
-    "darkFg": "#BFBDB6",
-    "darkFgMuted": "#565B66",
-    "darkGutter": "#6C7380",
-    "darkTag": "#39BAE6",
-    "darkFunc": "#FFB454",
-    "darkEntity": "#59C2FF",
-    "darkString": "#AAD94C",
-    "darkRegexp": "#95E6CB",
-    "darkMarkup": "#F07178",
-    "darkKeyword": "#FF8F40",
-    "darkSpecial": "#E6B673",
     "darkComment": "#ACB6BF",
     "darkConstant": "#D2A6FF",
-    "darkOperator": "#F29668",
-    "darkAdded": "#7FD962",
-    "darkRemoved": "#F26D78",
-    "darkAccent": "#E6B450",
+    "darkEntity": "#59C2FF",
     "darkError": "#D95757",
-    "darkIndentActive": "#6C7380"
+    "darkFg": "#BFBDB6",
+    "darkFgMuted": "#565B66",
+    "darkFunc": "#FFB454",
+    "darkGutter": "#6C7380",
+    "darkIndentActive": "#6C7380",
+    "darkKeyword": "#FF8F40",
+    "darkLine": "#11151C",
+    "darkMarkup": "#F07178",
+    "darkOperator": "#F29668",
+    "darkPanel": "#0F131A",
+    "darkRegexp": "#95E6CB",
+    "darkRemoved": "#F26D78",
+    "darkSpecial": "#E6B673",
+    "darkString": "#AAD94C",
+    "darkTag": "#39BAE6"
   },
   "theme": {
-    "text": {
-      "dark": "darkFg"
-    },
-    "textMuted": {
-      "dark": "darkFgMuted"
-    },
-    "primary": {
-      "dark": "darkEntity"
-    },
-    "secondary": {
-      "dark": "darkConstant"
-    },
     "accent": {
       "dark": "darkAccent"
-    },
-    "error": {
-      "dark": "darkError"
-    },
-    "warning": {
-      "dark": "darkSpecial"
-    },
-    "success": {
-      "dark": "darkAdded"
-    },
-    "info": {
-      "dark": "darkTag"
-    },
-    "syntaxKeyword": {
-      "dark": "darkKeyword"
-    },
-    "syntaxString": {
-      "dark": "darkString"
-    },
-    "syntaxNumber": {
-      "dark": "darkConstant"
-    },
-    "syntaxComment": {
-      "dark": "darkComment"
-    },
-    "syntaxType": {
-      "dark": "darkSpecial"
-    },
-    "syntaxFunction": {
-      "dark": "darkFunc"
-    },
-    "syntaxVariable": {
-      "dark": "darkEntity"
-    },
-    "syntaxOperator": {
-      "dark": "darkOperator"
-    },
-    "syntaxPunctuation": {
-      "dark": "darkFg"
     },
     "background": {
       "dark": "darkBg"
     },
-    "backgroundPanel": {
-      "dark": "darkPanel"
-    },
     "backgroundElement": {
       "dark": "darkBgAlt"
+    },
+    "backgroundPanel": {
+      "dark": "darkPanel"
     },
     "border": {
       "dark": "darkGutter"
@@ -101,23 +50,38 @@
     "diffAdded": {
       "dark": "darkAdded"
     },
-    "diffRemoved": {
-      "dark": "darkRemoved"
-    },
     "diffContext": {
       "dark": "darkComment"
     },
     "diffLineNumber": {
       "dark": "darkGutter"
     },
-    "syntaxAttribute": {
-      "dark": "darkKeyword"
+    "diffRemoved": {
+      "dark": "darkRemoved"
     },
-    "syntaxBuiltin": {
+    "error": {
+      "dark": "darkError"
+    },
+    "info": {
+      "dark": "darkTag"
+    },
+    "primary": {
+      "dark": "darkEntity"
+    },
+    "secondary": {
+      "dark": "darkConstant"
+    },
+    "success": {
+      "dark": "darkAdded"
+    },
+    "text": {
+      "dark": "darkFg"
+    },
+    "textMuted": {
+      "dark": "darkFgMuted"
+    },
+    "warning": {
       "dark": "darkSpecial"
-    },
-    "syntaxMacro": {
-      "dark": "darkFunc"
     }
   }
 }

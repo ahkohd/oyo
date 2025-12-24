@@ -7,6 +7,7 @@ mod syntax;
 mod ui;
 mod views;
 
+use crate::syntax::{list_syntax_themes, SyntaxEngine};
 use anyhow::{Context, Result};
 use app::{App, ViewMode};
 use clap::{Parser, Subcommand};
@@ -59,6 +60,14 @@ struct Args {
     #[arg(long)]
     theme_name: Option<String>,
 
+    /// Syntax theme name or .tmTheme file (overrides config)
+    #[arg(long)]
+    syntax_theme: Option<String>,
+
+    /// Dump syntax scopes for a file and exit
+    #[arg(long, value_name = "FILE")]
+    dump_scopes: Option<PathBuf>,
+
     /// Disable stepping (no-step diff view)
     #[arg(long)]
     no_step: bool,
@@ -76,6 +85,8 @@ struct Args {
 enum Command {
     /// List built-in themes
     Themes,
+    /// List syntax themes
+    SyntaxThemes,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -217,13 +228,63 @@ mod tests {
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    if let Some(Command::Themes) = args.command {
-        for name in config::builtin_theme_names() {
-            println!("{name}");
+    if let Some(command) = args.command {
+        match command {
+            Command::Themes => {
+                for name in config::builtin_theme_names() {
+                    println!("{name}");
+                }
+            }
+            Command::SyntaxThemes => {
+                for name in list_syntax_themes() {
+                    println!("{name}");
+                }
+            }
         }
         return Ok(());
     }
     let mut config = config::Config::load();
+    if let Some(path) = args.dump_scopes.as_deref() {
+        if let Some(name) = args.theme_name.as_deref() {
+            config.ui.theme.name = Some(name.to_string());
+        }
+        if let Some(name) = args.syntax_theme.as_deref() {
+            config.ui.syntax.theme = name.to_string();
+        }
+        let light_mode = match args.theme_mode {
+            Some(CliThemeMode::Light) => true,
+            Some(CliThemeMode::Dark) => false,
+            None => config.ui.theme.is_light_mode(),
+        };
+        let content =
+            std::fs::read_to_string(path).context(format!("Failed to read: {}", path.display()))?;
+        let file_name = path.to_string_lossy();
+        let engine = SyntaxEngine::new(&config.ui.syntax.theme, light_mode);
+        println!("syntax: {}", engine.syntax_name_for_file(&file_name));
+        let mut entries: Vec<(String, usize)> = engine
+            .collect_scopes(&content, &file_name)
+            .into_iter()
+            .collect();
+        entries.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        for (scope, count) in entries {
+            println!("{count}\t{scope}");
+        }
+        return Ok(());
+    }
+
+    if let Some(name) = args.theme_name.as_deref() {
+        config.ui.theme.name = Some(name.to_string());
+    }
+    if let Some(name) = args.syntax_theme.as_deref() {
+        config.ui.syntax.theme = name.to_string();
+    }
+    if config.ui.syntax.theme.trim().is_empty() {
+        if let Some(name) = config.ui.theme.name.clone() {
+            config.ui.syntax.theme = name;
+        } else {
+            config.ui.syntax.theme = "ansi".to_string();
+        }
+    }
 
     let input_mode = if args.paths.len() == 7 {
         detect_input_mode(&args.paths)
@@ -443,7 +504,8 @@ fn main() -> Result<()> {
     app.line_wrap = config.ui.line_wrap;
     app.scrollbar_visible = config.ui.scrollbar;
     app.strikethrough_deletions = config.ui.strikethrough_deletions;
-    app.syntax_mode = config.ui.syntax;
+    app.syntax_mode = config.ui.syntax.mode;
+    app.syntax_theme = config.ui.syntax.theme.clone();
     app.single_modified_step_mode = config.ui.single.modified_step_mode;
     app.auto_step_on_enter = config.playback.auto_step_on_enter;
     app.auto_step_blank_files = config.playback.auto_step_blank_files;
@@ -460,10 +522,6 @@ fn main() -> Result<()> {
         .clone()
         .unwrap_or_else(|| "▐".to_string());
 
-    if let Some(name) = args.theme_name.as_deref() {
-        config.ui.theme.name = Some(name.to_string());
-    }
-
     // Compute theme mode: CLI overrides config, default to dark
     let light_mode = match args.theme_mode {
         Some(CliThemeMode::Light) => true,
@@ -471,6 +529,7 @@ fn main() -> Result<()> {
         None => config.ui.theme.is_light_mode(),
     };
     app.theme = config.ui.theme.resolve(light_mode);
+    app.theme_is_light = light_mode;
 
     // Override config with CLI flag
     if args.no_step {
@@ -916,11 +975,6 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<()> 
                             app.reset_count();
                             // Toggle syntax highlighting mode
                             app.toggle_syntax();
-                        }
-                        KeyCode::Char('T') => {
-                            app.reset_count();
-                            // Toggle syntax scope debug label
-                            app.toggle_syntax_scopes();
                         }
                         KeyCode::Char('s') => {
                             app.reset_count();

@@ -1,117 +1,49 @@
 {
   "$schema": "./schema.json",
   "defs": {
-    "frappeRosewater": "#f2d5cf",
-    "frappeFlamingo": "#eebebe",
-    "frappePink": "#f4b8e4",
-    "frappeMauve": "#ca9ee6",
-    "frappeRed": "#e78284",
-    "frappeMaroon": "#ea999c",
-    "frappePeach": "#ef9f76",
-    "frappeYellow": "#e5c890",
-    "frappeGreen": "#a6d189",
-    "frappeTeal": "#81c8be",
-    "frappeSky": "#99d1db",
-    "frappeSapphire": "#85c1dc",
-    "frappeBlue": "#8da4e2",
-    "frappeLavender": "#babbf1",
-    "frappeText": "#c6d0f5",
-    "frappeSubtext1": "#b5bfe2",
-    "frappeSubtext0": "#a5adce",
-    "frappeOverlay2": "#949cb8",
-    "frappeOverlay1": "#838ba7",
-    "frappeOverlay0": "#737994",
-    "frappeSurface2": "#626880",
-    "frappeSurface1": "#51576d",
-    "frappeSurface0": "#414559",
     "frappeBase": "#303446",
+    "frappeBlue": "#8da4e2",
+    "frappeCrust": "#232634",
+    "frappeFlamingo": "#eebebe",
+    "frappeGreen": "#a6d189",
+    "frappeLavender": "#babbf1",
     "frappeMantle": "#292c3c",
-    "frappeCrust": "#232634"
+    "frappeMaroon": "#ea999c",
+    "frappeMauve": "#ca9ee6",
+    "frappeOverlay0": "#737994",
+    "frappeOverlay1": "#838ba7",
+    "frappeOverlay2": "#949cb8",
+    "frappePeach": "#ef9f76",
+    "frappePink": "#f4b8e4",
+    "frappeRed": "#e78284",
+    "frappeRosewater": "#f2d5cf",
+    "frappeSapphire": "#85c1dc",
+    "frappeSky": "#99d1db",
+    "frappeSubtext0": "#a5adce",
+    "frappeSubtext1": "#b5bfe2",
+    "frappeSurface0": "#414559",
+    "frappeSurface1": "#51576d",
+    "frappeSurface2": "#626880",
+    "frappeTeal": "#81c8be",
+    "frappeText": "#c6d0f5",
+    "frappeYellow": "#e5c890"
   },
   "theme": {
-    "text": {
-      "dark": "frappeText",
-      "light": "frappeText"
-    },
-    "textMuted": {
-      "dark": "frappeSubtext1",
-      "light": "frappeSubtext1"
-    },
-    "primary": {
-      "dark": "frappeBlue",
-      "light": "frappeBlue"
-    },
-    "secondary": {
-      "dark": "frappeMauve",
-      "light": "frappeMauve"
-    },
     "accent": {
       "dark": "frappePink",
       "light": "frappePink"
-    },
-    "error": {
-      "dark": "frappeRed",
-      "light": "frappeRed"
-    },
-    "warning": {
-      "dark": "frappeYellow",
-      "light": "frappeYellow"
-    },
-    "success": {
-      "dark": "frappeGreen",
-      "light": "frappeGreen"
-    },
-    "info": {
-      "dark": "frappeTeal",
-      "light": "frappeTeal"
-    },
-    "syntaxKeyword": {
-      "dark": "frappeMauve",
-      "light": "frappeMauve"
-    },
-    "syntaxString": {
-      "dark": "frappeGreen",
-      "light": "frappeGreen"
-    },
-    "syntaxNumber": {
-      "dark": "frappePeach",
-      "light": "frappePeach"
-    },
-    "syntaxComment": {
-      "dark": "frappeOverlay2",
-      "light": "frappeOverlay2"
-    },
-    "syntaxType": {
-      "dark": "frappeYellow",
-      "light": "frappeYellow"
-    },
-    "syntaxFunction": {
-      "dark": "frappeBlue",
-      "light": "frappeBlue"
-    },
-    "syntaxVariable": {
-      "dark": "frappeRed",
-      "light": "frappeRed"
-    },
-    "syntaxOperator": {
-      "dark": "frappeSky",
-      "light": "frappeSky"
-    },
-    "syntaxPunctuation": {
-      "dark": "frappeText",
-      "light": "frappeText"
     },
     "background": {
       "dark": "frappeBase",
       "light": "frappeBase"
     },
-    "backgroundPanel": {
-      "dark": "frappeMantle",
-      "light": "frappeMantle"
-    },
     "backgroundElement": {
       "dark": "frappeCrust",
       "light": "frappeCrust"
+    },
+    "backgroundPanel": {
+      "dark": "frappeMantle",
+      "light": "frappeMantle"
     },
     "border": {
       "dark": "frappeSurface0",
@@ -129,10 +61,6 @@
       "dark": "frappeGreen",
       "light": "frappeGreen"
     },
-    "diffRemoved": {
-      "dark": "frappeRed",
-      "light": "frappeRed"
-    },
     "diffContext": {
       "dark": "frappeOverlay2",
       "light": "frappeOverlay2"
@@ -141,17 +69,41 @@
       "dark": "frappeSurface1",
       "light": "frappeSurface1"
     },
-    "syntaxAttribute": {
+    "diffRemoved": {
+      "dark": "frappeRed",
+      "light": "frappeRed"
+    },
+    "error": {
+      "dark": "frappeRed",
+      "light": "frappeRed"
+    },
+    "info": {
+      "dark": "frappeTeal",
+      "light": "frappeTeal"
+    },
+    "primary": {
+      "dark": "frappeBlue",
+      "light": "frappeBlue"
+    },
+    "secondary": {
       "dark": "frappeMauve",
       "light": "frappeMauve"
     },
-    "syntaxBuiltin": {
+    "success": {
+      "dark": "frappeGreen",
+      "light": "frappeGreen"
+    },
+    "text": {
+      "dark": "frappeText",
+      "light": "frappeText"
+    },
+    "textMuted": {
+      "dark": "frappeSubtext1",
+      "light": "frappeSubtext1"
+    },
+    "warning": {
       "dark": "frappeYellow",
       "light": "frappeYellow"
-    },
-    "syntaxMacro": {
-      "dark": "frappeBlue",
-      "light": "frappeBlue"
     }
   }
 }

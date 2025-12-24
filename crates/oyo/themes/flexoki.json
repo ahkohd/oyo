@@ -1,121 +1,53 @@
 {
   "$schema": "./schema.json",
   "defs": {
-    "black": "#100F0F",
-    "base950": "#1C1B1A",
-    "base900": "#282726",
-    "base850": "#343331",
-    "base800": "#403E3C",
-    "base700": "#575653",
-    "base600": "#6F6E69",
-    "base500": "#878580",
-    "base300": "#B7B5AC",
-    "base200": "#CECDC3",
-    "base150": "#DAD8CE",
     "base100": "#E6E4D9",
+    "base150": "#DAD8CE",
+    "base200": "#CECDC3",
+    "base300": "#B7B5AC",
     "base50": "#F2F0E5",
-    "paper": "#FFFCF0",
-    "red400": "#D14D41",
-    "red600": "#AF3029",
-    "orange400": "#DA702C",
-    "orange600": "#BC5215",
-    "yellow400": "#D0A215",
-    "yellow600": "#AD8301",
-    "green400": "#879A39",
-    "green600": "#66800B",
-    "cyan400": "#3AA99F",
-    "cyan600": "#24837B",
+    "base500": "#878580",
+    "base600": "#6F6E69",
+    "base700": "#575653",
+    "base800": "#403E3C",
+    "base850": "#343331",
+    "base900": "#282726",
+    "base950": "#1C1B1A",
+    "black": "#100F0F",
     "blue400": "#4385BE",
     "blue600": "#205EA6",
+    "cyan400": "#3AA99F",
+    "cyan600": "#24837B",
+    "green400": "#879A39",
+    "green600": "#66800B",
+    "magenta400": "#CE5D97",
+    "magenta600": "#A02F6F",
+    "orange400": "#DA702C",
+    "orange600": "#BC5215",
+    "paper": "#FFFCF0",
     "purple400": "#8B7EC8",
     "purple600": "#5E409D",
-    "magenta400": "#CE5D97",
-    "magenta600": "#A02F6F"
+    "red400": "#D14D41",
+    "red600": "#AF3029",
+    "yellow400": "#D0A215",
+    "yellow600": "#AD8301"
   },
   "theme": {
-    "text": {
-      "dark": "base200",
-      "light": "black"
-    },
-    "textMuted": {
-      "dark": "base600",
-      "light": "base600"
-    },
-    "primary": {
-      "dark": "orange400",
-      "light": "blue600"
-    },
-    "secondary": {
-      "dark": "blue400",
-      "light": "purple600"
-    },
     "accent": {
       "dark": "purple400",
       "light": "orange600"
-    },
-    "error": {
-      "dark": "red400",
-      "light": "red600"
-    },
-    "warning": {
-      "dark": "orange400",
-      "light": "orange600"
-    },
-    "success": {
-      "dark": "green400",
-      "light": "green600"
-    },
-    "info": {
-      "dark": "cyan400",
-      "light": "cyan600"
-    },
-    "syntaxKeyword": {
-      "dark": "green400",
-      "light": "green600"
-    },
-    "syntaxString": {
-      "dark": "cyan400",
-      "light": "cyan600"
-    },
-    "syntaxNumber": {
-      "dark": "purple400",
-      "light": "purple600"
-    },
-    "syntaxComment": {
-      "dark": "base600",
-      "light": "base600"
-    },
-    "syntaxType": {
-      "dark": "yellow400",
-      "light": "yellow600"
-    },
-    "syntaxFunction": {
-      "dark": "orange400",
-      "light": "orange600"
-    },
-    "syntaxVariable": {
-      "dark": "blue400",
-      "light": "blue600"
-    },
-    "syntaxOperator": {
-      "dark": "base300",
-      "light": "base600"
-    },
-    "syntaxPunctuation": {
-      "dark": "base300",
-      "light": "base600"
     },
     "background": {
       "dark": "black",
       "light": "paper"
     },
-    "backgroundPanel": {
-      "dark": "base950",
-      "light": "base50"
-    },
     "backgroundElement": {
       "dark": "base900",
       "light": "base100"
+    },
+    "backgroundPanel": {
+      "dark": "base950",
+      "light": "base50"
     },
     "border": {
       "dark": "base700",
@@ -133,10 +65,6 @@
       "dark": "green400",
       "light": "green600"
     },
-    "diffRemoved": {
-      "dark": "red400",
-      "light": "red600"
-    },
     "diffContext": {
       "dark": "base600",
       "light": "base600"
@@ -145,15 +73,39 @@
       "dark": "base600",
       "light": "base600"
     },
-    "syntaxAttribute": {
+    "diffRemoved": {
+      "dark": "red400",
+      "light": "red600"
+    },
+    "error": {
+      "dark": "red400",
+      "light": "red600"
+    },
+    "info": {
+      "dark": "cyan400",
+      "light": "cyan600"
+    },
+    "primary": {
+      "dark": "orange400",
+      "light": "blue600"
+    },
+    "secondary": {
+      "dark": "blue400",
+      "light": "purple600"
+    },
+    "success": {
       "dark": "green400",
       "light": "green600"
     },
-    "syntaxBuiltin": {
-      "dark": "yellow400",
-      "light": "yellow600"
+    "text": {
+      "dark": "base200",
+      "light": "black"
     },
-    "syntaxMacro": {
+    "textMuted": {
+      "dark": "base600",
+      "light": "base600"
+    },
+    "warning": {
       "dark": "orange400",
       "light": "orange600"
     }

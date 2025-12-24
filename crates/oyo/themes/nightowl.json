@@ -2,102 +2,34 @@
   "$schema": "./schema.json",
   "defs": {
     "nightOwlBg": "#011627",
-    "nightOwlFg": "#d6deeb",
     "nightOwlBlue": "#82AAFF",
     "nightOwlCyan": "#7fdbca",
+    "nightOwlFg": "#d6deeb",
+    "nightOwlGray": "#637777",
     "nightOwlGreen": "#c5e478",
-    "nightOwlYellow": "#ecc48d",
+    "nightOwlLightGray": "#89a4bb",
+    "nightOwlMuted": "#5f7e97",
     "nightOwlOrange": "#F78C6C",
-    "nightOwlRed": "#EF5350",
+    "nightOwlPanel": "#0b253a",
     "nightOwlPink": "#ff5874",
     "nightOwlPurple": "#c792ea",
-    "nightOwlMuted": "#5f7e97",
-    "nightOwlGray": "#637777",
-    "nightOwlLightGray": "#89a4bb",
-    "nightOwlPanel": "#0b253a"
+    "nightOwlRed": "#EF5350",
+    "nightOwlYellow": "#ecc48d"
   },
   "theme": {
-    "text": {
-      "dark": "nightOwlFg",
-      "light": "nightOwlFg"
-    },
-    "textMuted": {
-      "dark": "nightOwlMuted",
-      "light": "nightOwlMuted"
-    },
-    "primary": {
-      "dark": "nightOwlBlue",
-      "light": "nightOwlBlue"
-    },
-    "secondary": {
-      "dark": "nightOwlCyan",
-      "light": "nightOwlCyan"
-    },
     "accent": {
       "dark": "nightOwlPurple",
       "light": "nightOwlPurple"
-    },
-    "error": {
-      "dark": "nightOwlRed",
-      "light": "nightOwlRed"
-    },
-    "warning": {
-      "dark": "nightOwlYellow",
-      "light": "nightOwlYellow"
-    },
-    "success": {
-      "dark": "nightOwlGreen",
-      "light": "nightOwlGreen"
-    },
-    "info": {
-      "dark": "nightOwlBlue",
-      "light": "nightOwlBlue"
-    },
-    "syntaxKeyword": {
-      "dark": "nightOwlPurple",
-      "light": "nightOwlPurple"
-    },
-    "syntaxString": {
-      "dark": "nightOwlYellow",
-      "light": "nightOwlYellow"
-    },
-    "syntaxNumber": {
-      "dark": "nightOwlOrange",
-      "light": "nightOwlOrange"
-    },
-    "syntaxComment": {
-      "dark": "nightOwlGray",
-      "light": "nightOwlGray"
-    },
-    "syntaxType": {
-      "dark": "nightOwlGreen",
-      "light": "nightOwlGreen"
-    },
-    "syntaxFunction": {
-      "dark": "nightOwlBlue",
-      "light": "nightOwlBlue"
-    },
-    "syntaxVariable": {
-      "dark": "nightOwlFg",
-      "light": "nightOwlFg"
-    },
-    "syntaxOperator": {
-      "dark": "nightOwlCyan",
-      "light": "nightOwlCyan"
-    },
-    "syntaxPunctuation": {
-      "dark": "nightOwlFg",
-      "light": "nightOwlFg"
     },
     "background": {
       "dark": "nightOwlBg",
       "light": "nightOwlBg"
     },
-    "backgroundPanel": {
+    "backgroundElement": {
       "dark": "nightOwlPanel",
       "light": "nightOwlPanel"
     },
-    "backgroundElement": {
+    "backgroundPanel": {
       "dark": "nightOwlPanel",
       "light": "nightOwlPanel"
     },
@@ -117,10 +49,6 @@
       "dark": "nightOwlGreen",
       "light": "nightOwlGreen"
     },
-    "diffRemoved": {
-      "dark": "nightOwlRed",
-      "light": "nightOwlRed"
-    },
     "diffContext": {
       "dark": "nightOwlMuted",
       "light": "nightOwlMuted"
@@ -129,17 +57,41 @@
       "dark": "nightOwlMuted",
       "light": "nightOwlMuted"
     },
-    "syntaxAttribute": {
-      "dark": "nightOwlPurple",
-      "light": "nightOwlPurple"
+    "diffRemoved": {
+      "dark": "nightOwlRed",
+      "light": "nightOwlRed"
     },
-    "syntaxBuiltin": {
+    "error": {
+      "dark": "nightOwlRed",
+      "light": "nightOwlRed"
+    },
+    "info": {
+      "dark": "nightOwlBlue",
+      "light": "nightOwlBlue"
+    },
+    "primary": {
+      "dark": "nightOwlBlue",
+      "light": "nightOwlBlue"
+    },
+    "secondary": {
+      "dark": "nightOwlCyan",
+      "light": "nightOwlCyan"
+    },
+    "success": {
       "dark": "nightOwlGreen",
       "light": "nightOwlGreen"
     },
-    "syntaxMacro": {
-      "dark": "nightOwlBlue",
-      "light": "nightOwlBlue"
+    "text": {
+      "dark": "nightOwlFg",
+      "light": "nightOwlFg"
+    },
+    "textMuted": {
+      "dark": "nightOwlMuted",
+      "light": "nightOwlMuted"
+    },
+    "warning": {
+      "dark": "nightOwlYellow",
+      "light": "nightOwlYellow"
     }
   }
 }

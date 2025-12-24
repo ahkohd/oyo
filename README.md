@@ -74,9 +74,6 @@ oyo old.rs new.rs --no-step
 # Staged changes (index vs HEAD)
 oyo --staged
 
-# List built-in themes
-oyo themes
-
 # Git range
 oyo --range HEAD~1..HEAD
 # or
@@ -206,17 +203,17 @@ line_wrap = false           # Wrap long lines (default: false, uses horizontal s
 scrollbar = false           # Show scrollbar (default: false)
 strikethrough_deletions = false # Show strikethrough on deleted text
 stepping = true             # Enable stepping (false = no-step mode)
-syntax = "auto"             # "auto" (no-step only), "on", or "off"
+# Syntax highlighting:
+# - legacy: syntax = "on"    # "on" or "off"
+# - table:
+#   [ui.syntax]
+#   mode = "on"              # "on" or "off"
+#   theme = "tokyonight"     # builtin name or "custom.tmTheme" (from ~/.config/oyo/themes)
+#                             # default: ui.theme.name, fallback to "ansi"
+syntax = "on"
 # [ui.single]
 # modified_step_mode = "mixed" # "mixed" or "modified" (single-pane only)
 # theme = { name = "tokyonight" } # Built-ins listed below
-# Optional syntax tokens (fallbacks apply if omitted):
-# syntaxPlain, syntaxKeyword, syntaxString, syntaxNumber, syntaxComment,
-# syntaxType, syntaxFunction, syntaxVariable, syntaxConstant,
-# syntaxOperator, syntaxPunctuation
-# Example:
-# [ui.theme.theme]
-# syntaxKeyword = { dark = "darkPurple", light = "lightPurple" }
 primary_marker = "▶"        # Marker for primary active line (single-width char recommended)
 primary_marker_right = "◀"  # Right pane marker (optional, defaults to ◀)
 extent_marker = "▌"         # Left pane extent marker (Left Half Block)
@@ -241,35 +238,7 @@ Config is loaded from (in priority order):
 2. `~/.config/oyo/config.toml`
 3. Platform-specific (e.g., `~/Library/Application Support/oyo/config.toml` on macOS)
 
-## Themes
-
-Pick a built-in theme:
-
-```toml
-[ui]
-theme = { name = "tokyonight" }
-```
-
-List built-in themes with:
-
-```bash
-oyo themes
-```
-
-Customize or create a theme by defining color tokens in config:
-
-```toml
-[ui.theme.defs]
-accent = "#ff966c"
-bg = "#1a1b26"
-
-[ui.theme.theme]
-background = { dark = "bg" }
-accent = { dark = "accent" }
-syntaxKeyword = { dark = "#c099ff" }
-```
-
-Supported tokens are defined in [schema.json](crates/oyo/themes/schema.json).
+Theme and syntax theme configuration is documented in `THEME.md`.
 
 ## How It Works
 
