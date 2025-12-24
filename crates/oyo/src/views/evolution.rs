@@ -170,18 +170,23 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
             }
             LineKind::PendingDelete => {
                 // Fade the line number too during animation
-                if view_line.is_active && app.animation_phase != AnimationPhase::Idle {
-                    let t = crate::color::animation_t(
+                if view_line.is_active_change && app.animation_phase != AnimationPhase::Idle {
+                    let mut t = crate::color::animation_t_linear(
                         app.animation_phase,
                         app.animation_progress,
-                        app.is_backward_animation(),
                     );
-                    let rgb = crate::color::gradient_color(&app.theme.delete, t);
-                    Style::default().fg(Color::Rgb(rgb.r, rgb.g, rgb.b))
+                    if app.is_backward_animation() {
+                        t = 1.0 - t;
+                    }
+                    let t = crate::color::ease_out(t);
+                    let color = crate::color::lerp_rgb_color(
+                        app.theme.diff_line_number,
+                        app.theme.delete_base(),
+                        t,
+                    );
+                    Style::default().fg(color)
                 } else {
-                    // Use delete gradient base color
-                    let rgb = crate::color::gradient_color(&app.theme.delete, 0.5);
-                    Style::default().fg(Color::Rgb(rgb.r, rgb.g, rgb.b))
+                    Style::default().fg(app.theme.diff_line_number)
                 }
             }
             LineKind::Deleted => Style::default().fg(app.theme.text_muted),
