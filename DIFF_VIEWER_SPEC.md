@@ -121,7 +121,7 @@ Applies to single/split only (ignored in evolution):
 ```toml
 [ui]
 [ui.diff]
-bg = "none"           # none | text | line
+bg = "text"           # none | text | line
 fg = "theme"          # theme | syntax
 
 [ui.evo]

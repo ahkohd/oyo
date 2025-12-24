@@ -29,7 +29,7 @@
 //! [playback]
 //! speed = 200
 //! autoplay = false
-//! animation = false
+//! animation = true
 //! auto_step_on_enter = true
 //! auto_step_blank_files = true
 //!
@@ -634,7 +634,7 @@ impl Default for DiffConfig {
 }
 
 fn diff_bg_default() -> DiffBackgroundMode {
-    DiffBackgroundMode::None
+    DiffBackgroundMode::Text
 }
 
 fn diff_fg_default() -> DiffForegroundMode {
@@ -766,8 +766,8 @@ impl Default for PlaybackConfig {
         Self {
             speed: 200,
             autoplay: false,
-            animation: false,
-            animation_duration: 150,
+            animation: true,
+            animation_duration: 120,
             auto_step_on_enter: true,
             auto_step_blank_files: true,
         }
