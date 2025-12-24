@@ -78,6 +78,82 @@ fn spans_width(spans: &[Span]) -> usize {
         .sum()
 }
 
+fn truncate_to_width(text: &str, max_width: usize) -> String {
+    let mut out = String::new();
+    let mut width = 0usize;
+    for ch in text.chars() {
+        let ch_width = text_width(&ch.to_string());
+        if width + ch_width > max_width {
+            break;
+        }
+        out.push(ch);
+        width += ch_width;
+    }
+    out
+}
+
+fn clamp_spans_to_width<'a>(spans: &[Span<'a>], max_width: usize) -> Vec<Span<'a>> {
+    let mut out = Vec::new();
+    let mut remaining = max_width;
+    for span in spans {
+        if remaining == 0 {
+            break;
+        }
+        let width = text_width(span.content.as_ref());
+        if width <= remaining {
+            out.push(span.clone());
+            remaining -= width;
+        } else {
+            let truncated = truncate_to_width(span.content.as_ref(), remaining);
+            if !truncated.is_empty() {
+                out.push(Span::styled(truncated, span.style));
+            }
+            break;
+        }
+    }
+    out
+}
+
+fn pad_spans_left(spans: Vec<Span>, width: usize) -> Vec<Span> {
+    let current = spans_width(&spans);
+    if current >= width {
+        return spans;
+    }
+    let mut out = spans;
+    out.push(Span::raw(" ".repeat(width - current)));
+    out
+}
+
+fn pad_spans_center(spans: Vec<Span>, width: usize) -> Vec<Span> {
+    let current = spans_width(&spans);
+    if current >= width {
+        return spans;
+    }
+    let remaining = width - current;
+    let left = remaining / 2;
+    let right = remaining - left;
+    let mut out = Vec::new();
+    if left > 0 {
+        out.push(Span::raw(" ".repeat(left)));
+    }
+    out.extend(spans);
+    if right > 0 {
+        out.push(Span::raw(" ".repeat(right)));
+    }
+    out
+}
+
+fn pad_spans_right(spans: Vec<Span>, width: usize) -> Vec<Span> {
+    let current = spans_width(&spans);
+    if current >= width {
+        return spans;
+    }
+    let mut out = Vec::new();
+    out.push(Span::raw(" ".repeat(width - current)));
+    out.extend(spans);
+    out
+}
+
 /// Truncate a path to fit a given width, using /.../ for middle sections
 fn truncate_path(path: &str, max_width: usize) -> String {
     if max_width == 0 {
@@ -302,13 +378,12 @@ fn draw_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
     ));
     right_spans.push(Span::raw(" "));
 
-    // Build LEFT section: mode + scope (path + branch)
-    let center_width = spans_width(&center_spans);
-    let right_width = spans_width(&right_spans);
+    // Fixed-width footer layout: left/middle/right sections prevent shifting.
+    let left_width = (available_width * 4) / 10;
+    let center_width = (available_width * 2) / 10;
+    let right_width = available_width.saturating_sub(left_width + center_width);
     let left_fixed_width = text_width(mode) + 1;
-    let max_scope_width =
-        available_width.saturating_sub(center_width + right_width + left_fixed_width);
-    let path_max_width = max_scope_width.min(available_width / 3);
+    let path_max_width = left_width.saturating_sub(left_fixed_width);
     let scope_base = if available_width < 60 {
         scope_short
     } else {
@@ -328,21 +403,17 @@ fn draw_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
         Span::styled(display_scope, Style::default().fg(app.theme.text_muted)),
     ];
 
-    // Calculate widths
-    let left_width = spans_width(&left_spans);
-    // Calculate padding to center the middle section
-
-    // Distribute padding: left_pad centers the center section, right_pad pushes right to edge
-    let remaining = available_width.saturating_sub(left_width + center_width + right_width);
-    let left_pad = remaining / 2;
-    let right_pad = remaining.saturating_sub(left_pad);
-    let min_pad = 0;
+    let left_spans = clamp_spans_to_width(&left_spans, left_width);
+    let left_spans = pad_spans_left(left_spans, left_width);
+    let center_spans = clamp_spans_to_width(&center_spans, center_width);
+    let center_spans = pad_spans_center(center_spans, center_width);
+    let right_spans = clamp_spans_to_width(&right_spans, right_width);
+    let right_spans = pad_spans_right(right_spans, right_width);
 
     // Build final spans
-    let mut spans = left_spans;
-    spans.push(Span::raw(" ".repeat(left_pad.max(min_pad))));
+    let mut spans = Vec::new();
+    spans.extend(left_spans);
     spans.extend(center_spans);
-    spans.push(Span::raw(" ".repeat(right_pad.max(min_pad))));
     spans.extend(right_spans);
 
     let status_line = Line::from(spans);
