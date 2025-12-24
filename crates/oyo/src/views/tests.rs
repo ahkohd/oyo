@@ -110,3 +110,18 @@ fn test_evolution_full_preview_no_duplicate_modified_line() {
     assert!(rendered.contains("NEWEVO"));
     assert!(!rendered.contains("OLDEVO"));
 }
+
+#[test]
+fn test_evolution_deleted_active_fallback_marker() {
+    let old = "line1\nDEL\nline3\n";
+    let new = "line1\nline3\n";
+    let mut app = make_app(old, new, ViewMode::Evolution);
+    app.next_step(); // apply deletion
+    app.animation_phase = AnimationPhase::Idle;
+
+    let rendered = buffer_text(&render_buffer(&mut app, 60, 10)).join("\n");
+    assert!(
+        rendered.contains("▶"),
+        "cursor marker should remain visible when deleted line is hidden"
+    );
+}

@@ -7,7 +7,7 @@ use super::{
 };
 use crate::app::{AnimationPhase, App};
 use crate::syntax::SyntaxSide;
-use oyo_core::{LineKind, ViewSpanKind};
+use oyo_core::{LineKind, StepDirection, ViewLine, ViewSpanKind};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -75,36 +75,68 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
         .current_navigator()
         .state()
         .hunk_preview_mode;
+    let animation_phase = app.animation_phase;
+    let is_visible = |line: &ViewLine| -> bool {
+        match line.kind {
+            LineKind::Deleted => false,
+            LineKind::PendingDelete => {
+                if hunk_preview_mode {
+                    return false;
+                }
+                if !line.is_active_change {
+                    return false;
+                }
+                animation_phase != AnimationPhase::Idle
+            }
+            _ => true,
+        }
+    };
+    let step_direction = app.multi_diff.current_step_direction();
+    let primary_raw_idx = view_lines.iter().position(|line| line.is_primary_active);
+    let visible_indices: Vec<usize> = view_lines
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, line)| if is_visible(line) { Some(idx) } else { None })
+        .collect();
+    let fallback_primary = primary_raw_idx.and_then(|idx| {
+        if visible_indices.is_empty() {
+            return None;
+        }
+        if is_visible(&view_lines[idx]) {
+            return Some(idx);
+        }
+        let (mut before, mut after) = (None, None);
+        for &vis in &visible_indices {
+            if vis < idx {
+                before = Some(vis);
+            } else if vis > idx {
+                after = Some(vis);
+                break;
+            }
+        }
+        let prefer_after = !matches!(step_direction, StepDirection::Backward);
+        if prefer_after {
+            after.or(before)
+        } else {
+            before.or(after)
+        }
+    });
 
     let query = app.search_query().trim().to_ascii_lowercase();
     let has_query = !query.is_empty();
-    for view_line in view_lines.iter() {
+    for (raw_idx, view_line) in view_lines.iter().enumerate() {
         // Skip lines that are deleted or pending delete (they disappear in evolution view)
-        match view_line.kind {
-            LineKind::Deleted => continue,
-            LineKind::PendingDelete => {
-                if hunk_preview_mode {
-                    continue;
-                }
-                // Show pending deletes with fade animation, then they disappear
-                if !view_line.is_active_change {
-                    continue;
-                }
-                // Active pending delete: show during animation, hide when idle
-                if app.animation_phase == AnimationPhase::Idle {
-                    continue;
-                }
-                // Show it fading out during both phases
-            }
-            _ => {}
+        if !is_visible(view_line) {
+            continue;
         }
 
         if app.line_wrap {
             let display_idx = display_len;
-            if view_line.is_primary_active && primary_display_idx.is_none() {
+            let is_primary = view_line.is_primary_active || fallback_primary == Some(raw_idx);
+            if is_primary && primary_display_idx.is_none() {
                 primary_display_idx = Some(display_idx);
             }
-            if view_line.is_active && active_display_idx.is_none() {
+            if (view_line.is_active || is_primary) && active_display_idx.is_none() {
                 active_display_idx = Some(display_idx);
             }
         }
@@ -156,7 +188,8 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
         };
 
         // Gutter marker: primary marker for focus, extent marker for hunk nav, blank otherwise
-        let (active_marker, active_style) = if view_line.is_primary_active {
+        let is_primary = view_line.is_primary_active || fallback_primary == Some(raw_idx);
+        let (active_marker, active_style) = if is_primary {
             (
                 primary_marker.as_str(),
                 Style::default()
