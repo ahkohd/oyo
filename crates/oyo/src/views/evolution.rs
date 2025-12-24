@@ -70,6 +70,11 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
     let wrap_width = visible_width;
     let mut primary_display_idx: Option<usize> = None;
     let mut active_display_idx: Option<usize> = None;
+    let hunk_preview_mode = app
+        .multi_diff
+        .current_navigator()
+        .state()
+        .hunk_preview_mode;
 
     let query = app.search_query().trim().to_ascii_lowercase();
     let has_query = !query.is_empty();
@@ -78,8 +83,11 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
         match view_line.kind {
             LineKind::Deleted => continue,
             LineKind::PendingDelete => {
+                if hunk_preview_mode {
+                    continue;
+                }
                 // Show pending deletes with fade animation, then they disappear
-                if !view_line.is_active {
+                if !view_line.is_active_change {
                     continue;
                 }
                 // Active pending delete: show during animation, hide when idle
@@ -173,25 +181,36 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
             Span::styled(" ", Style::default()), // blank sign column (matches single-pane)
             Span::styled(" ", Style::default()),
         ];
+        // Evolution view ignores diff background modes to keep the morph view clean.
         gutter_lines.push(Line::from(gutter_spans));
 
         // Build content line (scrollable)
         let mut content_spans: Vec<Span<'static>> = Vec::new();
         let mut used_syntax = false;
-        let pure_context = matches!(view_line.kind, LineKind::Context)
-            && !view_line.has_changes
-            && !view_line.is_active
-            && view_line
-                .spans
-                .iter()
-                .all(|span| matches!(span.kind, ViewSpanKind::Equal));
-        if app.syntax_enabled() && pure_context {
-            let side = if view_line.new_line.is_some() {
-                SyntaxSide::New
-            } else {
-                SyntaxSide::Old
+        let allow_syntax = app.syntax_enabled()
+            && match app.evo_syntax {
+                crate::config::EvoSyntaxMode::Context => !view_line.has_changes,
+                crate::config::EvoSyntaxMode::Full => !view_line.is_active_change,
             };
-            let line_num = view_line.new_line.or(view_line.old_line);
+        if allow_syntax {
+            let use_old = match view_line.kind {
+                LineKind::Deleted | LineKind::PendingDelete => true,
+                LineKind::Inserted
+                | LineKind::Modified
+                | LineKind::PendingInsert
+                | LineKind::PendingModify => false,
+                LineKind::Context => view_line.has_changes,
+            };
+            let side = if use_old {
+                SyntaxSide::Old
+            } else {
+                SyntaxSide::New
+            };
+            let line_num = if use_old {
+                view_line.old_line.or(view_line.new_line)
+            } else {
+                view_line.new_line.or(view_line.old_line)
+            };
             if let Some(spans) = app.syntax_spans_for_line(side, line_num) {
                 content_spans = spans;
                 used_syntax = true;
@@ -228,6 +247,8 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
                 }
             }
         }
+
+        // Evolution view ignores diff background modes to keep the morph view clean.
 
         let line_text = spans_to_text(&content_spans);
         let is_active_match = app.search_target() == Some(display_idx)
@@ -363,6 +384,9 @@ fn get_evolution_span_style(
     let theme = &app.theme;
     // Check if this is a modification line - use modify gradient instead of insert
     let is_modification = matches!(line_kind, LineKind::Modified | LineKind::PendingModify);
+    let added_bg = None;
+    let removed_bg = None;
+    let modified_bg = None;
 
     match span_kind {
         ViewSpanKind::Equal => Style::default().fg(theme.diff_context),
@@ -375,6 +399,7 @@ fn get_evolution_span_style(
                     false,
                     theme.modify_base(),
                     theme.diff_context,
+                    modified_bg,
                 )
             } else {
                 // Pure insertion: use insert colors
@@ -384,6 +409,7 @@ fn get_evolution_span_style(
                     false,
                     theme.insert_base(),
                     theme.diff_context,
+                    added_bg,
                 )
             }
         }
@@ -400,9 +426,14 @@ fn get_evolution_span_style(
                         app.is_backward_animation(),
                         theme.modify_base(),
                         theme.diff_context,
+                        modified_bg,
                     )
                 } else {
-                    Style::default().fg(theme.modify_dim())
+                    let mut style = Style::default().fg(theme.modify_dim());
+                    if let Some(bg) = modified_bg {
+                        style = style.bg(bg);
+                    }
+                    style
                 }
             } else if is_active {
                 super::insert_style(
@@ -411,9 +442,14 @@ fn get_evolution_span_style(
                     app.is_backward_animation(),
                     theme.insert_base(),
                     theme.diff_context,
+                    added_bg,
                 )
             } else {
-                Style::default().fg(theme.insert_dim())
+                let mut style = Style::default().fg(theme.insert_dim());
+                if let Some(bg) = added_bg {
+                    style = style.bg(bg);
+                }
+                style
             }
         }
         ViewSpanKind::PendingDelete => {
@@ -425,6 +461,7 @@ fn get_evolution_span_style(
                         app.is_backward_animation(),
                         theme.modify_base(),
                         theme.diff_context,
+                        modified_bg,
                     )
                 } else {
                     super::delete_style(
@@ -434,6 +471,7 @@ fn get_evolution_span_style(
                         app.strikethrough_deletions,
                         theme.delete_base(),
                         theme.diff_context,
+                        removed_bg,
                     )
                 }
             } else {

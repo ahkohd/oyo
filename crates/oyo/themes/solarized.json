@@ -51,6 +51,10 @@
       "dark": "green",
       "light": "green"
     },
+    "diffAddedBg": {
+      "dark": "#073642",
+      "light": "#eee8d5"
+    },
     "diffContext": {
       "dark": "base01",
       "light": "base1"
@@ -59,9 +63,17 @@
       "dark": "base01",
       "light": "base1"
     },
+    "diffModifiedBg": {
+      "dark": "#1d3a2d",
+      "light": "#f1e5bf"
+    },
     "diffRemoved": {
       "dark": "red",
       "light": "red"
+    },
+    "diffRemovedBg": {
+      "dark": "#073642",
+      "light": "#eee8d5"
     },
     "error": {
       "dark": "red",

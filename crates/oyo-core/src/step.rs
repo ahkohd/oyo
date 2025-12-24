@@ -51,6 +51,9 @@ pub struct StepState {
     /// True after hunkdown (full preview mode), cleared on first step
     #[serde(default)]
     pub hunk_preview_mode: bool,
+    /// True if preview was entered via hunkup (backward navigation)
+    #[serde(default)]
+    pub preview_from_backward: bool,
 }
 
 impl StepState {
@@ -67,6 +70,7 @@ impl StepState {
             total_hunks,
             last_nav_was_hunk: false,
             hunk_preview_mode: false,
+            preview_from_backward: false,
         }
     }
 
@@ -201,6 +205,12 @@ impl DiffNavigator {
 
     /// Dissolve preview mode on step down: keep first change, apply second
     fn dissolve_preview_for_step_down(&mut self) -> bool {
+        if self.state.preview_from_backward {
+            self.state.hunk_preview_mode = false;
+            self.state.preview_from_backward = false;
+            return self.next();
+        }
+
         let hunk = &self.diff.hunks[self.state.current_hunk];
 
         // If hunk has only one change, stepping down exits the hunk
@@ -228,6 +238,7 @@ impl DiffNavigator {
         self.state.active_change = Some(second_change);
         self.state.step_direction = StepDirection::Forward;
         self.state.hunk_preview_mode = false;
+        self.state.preview_from_backward = false;
         self.state.animating_hunk = None;
         // Preserve extent markers - we're still in the hunk scope
         self.state.last_nav_was_hunk = true;
@@ -283,12 +294,17 @@ impl DiffNavigator {
 
     /// Dissolve preview mode on step up: unapply all changes in hunk and exit
     fn dissolve_preview_for_step_up(&mut self) -> bool {
+        if self.state.preview_from_backward {
+            self.state.hunk_preview_mode = false;
+            self.state.preview_from_backward = false;
+            return self.prev();
+        }
+
         let current_hunk_idx = self.state.current_hunk;
         let hunk = &self.diff.hunks[current_hunk_idx];
 
         // Set animating hunk for backward fade animation
         self.state.animating_hunk = Some(current_hunk_idx);
-        self.state.active_change = hunk.change_ids.first().copied();
 
         // Unapply all changes in this hunk
         for &change_id in &hunk.change_ids {
@@ -304,7 +320,10 @@ impl DiffNavigator {
         }
 
         self.state.step_direction = StepDirection::Backward;
+        // Keep cursor logic aligned with the destination hunk (bottom-most applied change)
+        self.state.active_change = self.state.applied_changes.last().copied();
         self.state.hunk_preview_mode = false;
+        self.state.preview_from_backward = false;
         self.state.last_nav_was_hunk = false; // Exiting hunk
 
         true
@@ -335,6 +354,7 @@ impl DiffNavigator {
         self.state.current_hunk = 0;
         self.state.last_nav_was_hunk = false; // Clear hunk nav flag on goto
         self.state.hunk_preview_mode = false; // Clear preview mode on goto
+        self.state.preview_from_backward = false;
 
         // Apply changes up to target step
         for _ in 0..target_step {
@@ -371,6 +391,7 @@ impl DiffNavigator {
 
         self.state.step_direction = StepDirection::Forward;
         self.state.hunk_preview_mode = false; // Will be set to true after applying
+        self.state.preview_from_backward = false;
 
         let current_hunk = &self.diff.hunks[self.state.current_hunk];
         let has_applied_in_current = current_hunk
@@ -395,6 +416,7 @@ impl DiffNavigator {
             if moved {
                 self.state.last_nav_was_hunk = true;
                 self.state.hunk_preview_mode = true;
+                self.state.preview_from_backward = false;
             }
 
             return moved;
@@ -402,6 +424,7 @@ impl DiffNavigator {
 
         // Current hunk has applied changes - complete it first, exit preview mode
         self.state.hunk_preview_mode = false;
+        self.state.preview_from_backward = false;
         let mut completed_any = false;
         for &change_id in &current_hunk.change_ids {
             if !self.state.applied_changes.contains(&change_id) {
@@ -445,6 +468,7 @@ impl DiffNavigator {
         if moved {
             self.state.last_nav_was_hunk = true;
             self.state.hunk_preview_mode = true;
+            self.state.preview_from_backward = false;
         }
 
         moved
@@ -462,6 +486,7 @@ impl DiffNavigator {
 
         // Clear preview mode
         self.state.hunk_preview_mode = false;
+        self.state.preview_from_backward = false;
 
         // On hunk 0, only proceed if there are applied changes to unapply
         if self.state.current_hunk == 0 {
@@ -525,9 +550,17 @@ impl DiffNavigator {
 
         // Animation state cleared by CLI after animation completes
 
-        // Set or clear extent markers based on whether we landed at step 0
+        // Enter preview mode when we land in a previous hunk
         if moved {
-            self.state.last_nav_was_hunk = !self.state.is_at_start();
+            let entered_prev_hunk = self.state.current_hunk != current_hunk_idx;
+            if entered_prev_hunk {
+                self.state.hunk_preview_mode = true;
+                self.state.preview_from_backward = true;
+                self.state.last_nav_was_hunk = true;
+            } else {
+                // Set or clear extent markers based on whether we landed at step 0
+                self.state.last_nav_was_hunk = !self.state.is_at_start();
+            }
         }
 
         moved
@@ -566,6 +599,7 @@ impl DiffNavigator {
         self.state.step_direction = StepDirection::Forward;
         self.state.last_nav_was_hunk = true;
         self.state.hunk_preview_mode = true;
+        self.state.preview_from_backward = false;
     }
 
     /// Jump to first change of current hunk, unapplying all but first
@@ -608,6 +642,7 @@ impl DiffNavigator {
 
         self.state.active_change = Some(first_change);
         self.state.hunk_preview_mode = false;
+        self.state.preview_from_backward = false;
         self.state.last_nav_was_hunk = true;
         true
     }
@@ -645,6 +680,7 @@ impl DiffNavigator {
 
         self.state.active_change = last_change;
         self.state.hunk_preview_mode = false;
+        self.state.preview_from_backward = false;
         self.state.last_nav_was_hunk = true;
         true
     }
@@ -785,6 +821,7 @@ impl DiffNavigator {
                     change,
                     is_applied,
                     is_active,
+                    is_active_change,
                     is_primary_active,
                     show_hunk_extent,
                     frame,
@@ -800,6 +837,7 @@ impl DiffNavigator {
                         change.id,
                         is_applied,
                         is_active,
+                        is_active_change,
                         is_primary_active,
                         show_hunk_extent,
                         frame,
@@ -834,6 +872,7 @@ impl DiffNavigator {
         change: &Change,
         is_applied: bool,
         is_active: bool,
+        is_active_change: bool,
         is_primary_active: bool,
         show_hunk_extent: bool,
         frame: AnimationFrame,
@@ -967,6 +1006,7 @@ impl DiffNavigator {
             old_line,
             new_line,
             is_active,
+            is_active_change,
             is_primary_active,
             show_hunk_extent,
             change_id: change.id,
@@ -982,6 +1022,7 @@ impl DiffNavigator {
         change_id: usize,
         is_applied: bool,
         is_active: bool,
+        is_active_change: bool,
         is_primary_active: bool,
         show_hunk_extent: bool,
         frame: AnimationFrame,
@@ -1064,6 +1105,7 @@ impl DiffNavigator {
             old_line: span.old_line,
             new_line: span.new_line,
             is_active,
+            is_active_change,
             is_primary_active,
             show_hunk_extent,
             change_id,
@@ -1113,6 +1155,8 @@ pub struct ViewLine {
     pub new_line: Option<usize>,
     /// Part of the active hunk (for animation styling)
     pub is_active: bool,
+    /// The active change itself (not just part of a hunk preview)
+    pub is_active_change: bool,
     /// The primary focus line within the hunk (for gutter marker)
     pub is_primary_active: bool,
     /// Show extent marker (true only during hunk navigation)

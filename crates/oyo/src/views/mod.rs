@@ -10,6 +10,7 @@ pub use split::render_split;
 
 use std::collections::VecDeque;
 
+use oyo_core::LineKind;
 use ratatui::text::Span;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
@@ -27,6 +28,90 @@ pub(crate) fn spans_width(spans: &[Span]) -> usize {
         .iter()
         .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
         .sum()
+}
+
+pub(crate) fn diff_line_bg(kind: LineKind, theme: &ResolvedTheme) -> Option<Color> {
+    match kind {
+        LineKind::Inserted | LineKind::PendingInsert => theme.diff_added_bg,
+        LineKind::Deleted | LineKind::PendingDelete => theme.diff_removed_bg,
+        LineKind::Modified | LineKind::PendingModify => theme.diff_modified_bg,
+        _ => None,
+    }
+}
+
+pub(crate) fn apply_line_bg(
+    spans: Vec<Span<'static>>,
+    bg: Color,
+    visible_width: usize,
+    line_wrap: bool,
+) -> Vec<Span<'static>> {
+    let mut out: Vec<Span<'static>> = spans
+        .into_iter()
+        .map(|span| Span::styled(span.content, span.style.bg(bg)))
+        .collect();
+
+    if !line_wrap {
+        let pad = visible_width.saturating_sub(spans_width(&out));
+        if pad > 0 {
+            out.push(Span::styled(" ".repeat(pad), Style::default().bg(bg)));
+        }
+    }
+
+    out
+}
+
+pub(crate) fn apply_spans_bg(spans: Vec<Span<'static>>, bg: Color) -> Vec<Span<'static>> {
+    spans
+        .into_iter()
+        .map(|span| Span::styled(span.content, span.style.bg(bg)))
+        .collect()
+}
+
+pub(crate) fn clear_leading_ws_bg(spans: Vec<Span<'static>>) -> Vec<Span<'static>> {
+    let mut out = Vec::new();
+    let mut at_line_start = true;
+
+    for span in spans {
+        if !at_line_start {
+            out.push(span);
+            continue;
+        }
+
+        let text = span.content.as_ref();
+        if text.is_empty() {
+            continue;
+        }
+
+        let mut ws_len = 0usize;
+        for (idx, ch) in text.char_indices() {
+            if ch.is_whitespace() {
+                ws_len = idx + ch.len_utf8();
+            } else {
+                break;
+            }
+        }
+
+        if ws_len == 0 {
+            out.push(span);
+            at_line_start = false;
+            continue;
+        }
+
+        let (ws, rest) = text.split_at(ws_len);
+        if !ws.is_empty() {
+            let ws_style = Style {
+                bg: None,
+                ..span.style
+            };
+            out.push(Span::styled(ws.to_string(), ws_style));
+        }
+        if !rest.is_empty() {
+            out.push(Span::styled(rest.to_string(), span.style));
+            at_line_start = false;
+        }
+    }
+
+    out
 }
 
 pub(crate) const TAB_WIDTH: usize = 8;
@@ -248,27 +333,7 @@ pub fn insert_style(
     backward: bool,
     base: Color,
     from: Color,
-) -> Style {
-    let color = if phase == AnimationPhase::Idle {
-        base
-    } else {
-        let t = color::animation_t_linear(phase, progress);
-        let eased = color::ease_out(t);
-        let (start, end) = if backward { (base, from) } else { (from, base) };
-        color::lerp_rgb_color(start, end, eased)
-    };
-
-    Style::default().fg(color)
-}
-
-/// Compute animation style for deletions using smooth fade (no pulse)
-pub fn delete_style(
-    phase: AnimationPhase,
-    progress: f32,
-    backward: bool,
-    strikethrough: bool,
-    base: Color,
-    from: Color,
+    bg: Option<Color>,
 ) -> Style {
     let color = if phase == AnimationPhase::Idle {
         base
@@ -280,6 +345,35 @@ pub fn delete_style(
     };
 
     let mut style = Style::default().fg(color);
+    if let Some(bg) = bg {
+        style = style.bg(bg);
+    }
+    style
+}
+
+/// Compute animation style for deletions using smooth fade (no pulse)
+pub fn delete_style(
+    phase: AnimationPhase,
+    progress: f32,
+    backward: bool,
+    strikethrough: bool,
+    base: Color,
+    from: Color,
+    bg: Option<Color>,
+) -> Style {
+    let color = if phase == AnimationPhase::Idle {
+        base
+    } else {
+        let t = color::animation_t_linear(phase, progress);
+        let eased = color::ease_out(t);
+        let (start, end) = if backward { (base, from) } else { (from, base) };
+        color::lerp_rgb_color(start, end, eased)
+    };
+
+    let mut style = Style::default().fg(color);
+    if let Some(bg) = bg {
+        style = style.bg(bg);
+    }
 
     // Strikethrough timing based on raw progress
     if strikethrough && should_strikethrough(phase, progress, backward) {
@@ -295,6 +389,7 @@ pub fn modify_style(
     backward: bool,
     base: Color,
     from: Color,
+    bg: Option<Color>,
 ) -> Style {
     let color = if phase == AnimationPhase::Idle {
         base
@@ -305,7 +400,11 @@ pub fn modify_style(
         color::lerp_rgb_color(start, end, eased)
     };
 
-    Style::default().fg(color)
+    let mut style = Style::default().fg(color);
+    if let Some(bg) = bg {
+        style = style.bg(bg);
+    }
+    style
 }
 
 /// Determine if strikethrough should be shown based on animation progress

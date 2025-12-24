@@ -34,10 +34,13 @@
         "borderActive": { "$ref": "#/$defs/darkLight" },
         "borderSubtle": { "$ref": "#/$defs/darkLight" },
         "diffAdded": { "$ref": "#/$defs/darkLight" },
+        "diffAddedBg": { "$ref": "#/$defs/darkLight" },
         "diffRemoved": { "$ref": "#/$defs/darkLight" },
+        "diffRemovedBg": { "$ref": "#/$defs/darkLight" },
         "diffContext": { "$ref": "#/$defs/darkLight" },
         "diffLineNumber": { "$ref": "#/$defs/darkLight" },
-        "diffExtMarker": { "$ref": "#/$defs/darkLight" }
+        "diffExtMarker": { "$ref": "#/$defs/darkLight" },
+        "diffModifiedBg": { "$ref": "#/$defs/darkLight" }
       },
       "required": []
     }

@@ -60,7 +60,7 @@ oyo themes
 | tokyonight | ✓ | ✓ (day) |
 | zenburn | ✓ | — |
 
-UI theme tokens are defined in `crates/oyo/themes/schema.json`.
+UI theme tokens are defined in [schema.json](crates/oyo/themes/schema.json).
 
 ## Syntax Themes
 

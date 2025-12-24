@@ -360,6 +360,19 @@ pub fn color_to_rgb(color: Color) -> Option<Rgb> {
     }
 }
 
+/// Blend two colors using alpha (0.0 = bg, 1.0 = fg).
+pub fn blend_colors(bg: Color, fg: Color, alpha: f32) -> Option<Color> {
+    let bg = color_to_rgb(bg)?;
+    let fg = color_to_rgb(fg)?;
+    let a = alpha.clamp(0.0, 1.0);
+    let blend = |b: u8, f: u8| -> u8 { (b as f32 * (1.0 - a) + f as f32 * a).round() as u8 };
+    Some(Color::Rgb(
+        blend(bg.r, fg.r),
+        blend(bg.g, fg.g),
+        blend(bg.b, fg.b),
+    ))
+}
+
 /// Build AnimationGradient from a ratatui Color
 /// For ANSI colors, uses sensible hex defaults
 pub fn gradient_from_color(color: Color) -> AnimationGradient {

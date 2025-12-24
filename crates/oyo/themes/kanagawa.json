@@ -55,6 +55,10 @@
       "dark": "lotusGreen",
       "light": "lotusGreen"
     },
+    "diffAddedBg": {
+      "dark": "#252E25",
+      "light": "#EAF3E4"
+    },
     "diffContext": {
       "dark": "fujiGray",
       "light": "lightGray"
@@ -63,9 +67,17 @@
       "dark": "sumiInk3",
       "light": "#C7BEB4"
     },
+    "diffModifiedBg": {
+      "dark": "#3c3530",
+      "light": "#eedec8"
+    },
     "diffRemoved": {
       "dark": "dragonRed",
       "light": "dragonRed"
+    },
+    "diffRemovedBg": {
+      "dark": "#362020",
+      "light": "#FBE6E6"
     },
     "error": {
       "dark": "dragonRed",

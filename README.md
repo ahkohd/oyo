@@ -176,6 +176,7 @@ jj diff -f zy -t w
 | `a` | Toggle animations |
 | `w` | Toggle line wrap |
 | `t` | Toggle syntax highlight |
+| `E` | Toggle evo syntax (context/full) |
 | `s` | Toggle stepping (no-step mode) |
 | `S` | Toggle strikethrough |
 | `r` | Refresh file (or all files when file list focused) |
@@ -203,6 +204,11 @@ line_wrap = false           # Wrap long lines (default: false, uses horizontal s
 scrollbar = false           # Show scrollbar (default: false)
 strikethrough_deletions = false # Show strikethrough on deleted text
 stepping = true             # Enable stepping (false = no-step mode)
+# [ui.diff]
+# bg = "none"               # "none", "text", or "line"
+# fg = "theme"              # "theme" or "syntax"
+# [ui.evo]
+# syntax = "context"         # "context" (non-diff only) or "full" (diff + context)
 # Syntax highlighting:
 # - legacy: syntax = "on"    # "on" or "off"
 # - table:

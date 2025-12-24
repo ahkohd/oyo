@@ -39,14 +39,23 @@
     "diffAdded": {
       "dark": "cyan"
     },
+    "diffAddedBg": {
+      "dark": "#354933"
+    },
     "diffContext": {
       "dark": "darkFgMuted"
     },
     "diffLineNumber": {
       "dark": "darkBorder"
     },
+    "diffModifiedBg": {
+      "dark": "#352d22"
+    },
     "diffRemoved": {
       "dark": "red"
+    },
+    "diffRemovedBg": {
+      "dark": "#3f191a"
     },
     "error": {
       "dark": "red"

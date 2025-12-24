@@ -1,7 +1,10 @@
 //! Application state and logic
 
 use crate::color;
-use crate::config::{FileCountMode, ModifiedStepMode, ResolvedTheme, SyntaxMode};
+use crate::config::{
+    DiffBackgroundMode, DiffForegroundMode, FileCountMode, ModifiedStepMode, ResolvedTheme,
+    SyntaxMode,
+};
 use crate::syntax::{SyntaxCache, SyntaxEngine, SyntaxSide};
 use oyo_core::{
     AnimationFrame, Change, ChangeKind, LineKind, MultiFileDiff, StepDirection, StepState, ViewLine,
@@ -171,8 +174,14 @@ pub struct App {
     pub theme_is_light: bool,
     /// Whether stepping is enabled (false = no-step diff view)
     pub stepping: bool,
+    /// Diff background rendering mode
+    pub diff_bg: DiffBackgroundMode,
+    /// Diff foreground rendering mode
+    pub diff_fg: DiffForegroundMode,
     /// Single-pane modified line render mode while stepping
     pub single_modified_step_mode: ModifiedStepMode,
+    /// Syntax scope in evolution view
+    pub evo_syntax: crate::config::EvoSyntaxMode,
     /// Syntax highlighting mode
     pub syntax_mode: SyntaxMode,
     /// Syntax theme selection
@@ -325,7 +334,10 @@ impl App {
             theme: ResolvedTheme::default(),
             theme_is_light: false,
             stepping: true,
+            diff_bg: DiffBackgroundMode::None,
+            diff_fg: DiffForegroundMode::Theme,
             single_modified_step_mode: ModifiedStepMode::Mixed,
+            evo_syntax: crate::config::EvoSyntaxMode::Context,
             syntax_mode: SyntaxMode::On,
             syntax_theme: "ansi".to_string(),
             syntax_engine: None,
@@ -385,6 +397,13 @@ impl App {
             self.syntax_engine = None;
             self.syntax_caches = vec![None; self.multi_diff.file_count()];
         }
+    }
+
+    pub fn toggle_evo_syntax(&mut self) {
+        self.evo_syntax = match self.evo_syntax {
+            crate::config::EvoSyntaxMode::Context => crate::config::EvoSyntaxMode::Full,
+            crate::config::EvoSyntaxMode::Full => crate::config::EvoSyntaxMode::Context,
+        };
     }
 
     pub fn toggle_peek_old_change(&mut self) {

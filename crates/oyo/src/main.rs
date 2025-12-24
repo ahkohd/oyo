@@ -504,9 +504,12 @@ fn main() -> Result<()> {
     app.line_wrap = config.ui.line_wrap;
     app.scrollbar_visible = config.ui.scrollbar;
     app.strikethrough_deletions = config.ui.strikethrough_deletions;
+    app.diff_bg = config.ui.diff.bg;
+    app.diff_fg = config.ui.diff.fg;
     app.syntax_mode = config.ui.syntax.mode;
     app.syntax_theme = config.ui.syntax.theme.clone();
     app.single_modified_step_mode = config.ui.single.modified_step_mode;
+    app.evo_syntax = config.ui.evo.syntax;
     app.auto_step_on_enter = config.playback.auto_step_on_enter;
     app.auto_step_blank_files = config.playback.auto_step_blank_files;
     app.primary_marker = config.ui.primary_marker.clone();
@@ -975,6 +978,12 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<()> 
                             app.reset_count();
                             // Toggle syntax highlighting mode
                             app.toggle_syntax();
+                        }
+                        KeyCode::Char('E') => {
+                            app.reset_count();
+                            if app.view_mode == ViewMode::Evolution {
+                                app.toggle_evo_syntax();
+                            }
                         }
                         KeyCode::Char('s') => {
                             app.reset_count();
