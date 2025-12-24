@@ -140,6 +140,17 @@ impl DiffNavigator {
         &mut self.state
     }
 
+    /// Replace the current step state (used to restore stepping mode)
+    pub fn set_state(&mut self, state: StepState) -> bool {
+        if state.total_steps != self.state.total_steps
+            || state.total_hunks != self.state.total_hunks
+        {
+            return false;
+        }
+        self.state = state;
+        true
+    }
+
     /// Get the diff result
     pub fn diff(&self) -> &DiffResult {
         &self.diff
@@ -867,6 +878,7 @@ impl DiffNavigator {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn build_word_level_line(
         &self,
         change: &Change,

@@ -662,33 +662,23 @@ pub enum ModifiedStepMode {
 }
 
 /// Diff background rendering mode
-#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum DiffBackgroundMode {
     #[serde(alias = "off")]
     None,
+    #[default]
     Text,
     Line,
 }
 
-impl Default for DiffBackgroundMode {
-    fn default() -> Self {
-        DiffBackgroundMode::Text
-    }
-}
-
 /// Diff foreground rendering mode
-#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum DiffForegroundMode {
+    #[default]
     Theme,
     Syntax,
-}
-
-impl Default for DiffForegroundMode {
-    fn default() -> Self {
-        DiffForegroundMode::Theme
-    }
 }
 
 /// Syntax highlighting mode

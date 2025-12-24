@@ -70,11 +70,7 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
     let wrap_width = visible_width;
     let mut primary_display_idx: Option<usize> = None;
     let mut active_display_idx: Option<usize> = None;
-    let hunk_preview_mode = app
-        .multi_diff
-        .current_navigator()
-        .state()
-        .hunk_preview_mode;
+    let hunk_preview_mode = app.multi_diff.current_navigator().state().hunk_preview_mode;
     let animation_phase = app.animation_phase;
     let is_visible = |line: &ViewLine| -> bool {
         match line.kind {
