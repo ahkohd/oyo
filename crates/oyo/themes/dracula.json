@@ -2,102 +2,34 @@
   "$schema": "./schema.json",
   "defs": {
     "background": "#282a36",
-    "currentLine": "#44475a",
-    "selection": "#44475a",
-    "foreground": "#f8f8f2",
     "comment": "#6272a4",
+    "currentLine": "#44475a",
     "cyan": "#8be9fd",
+    "foreground": "#f8f8f2",
     "green": "#50fa7b",
     "orange": "#ffb86c",
     "pink": "#ff79c6",
     "purple": "#bd93f9",
     "red": "#ff5555",
+    "selection": "#44475a",
     "yellow": "#f1fa8c"
   },
   "theme": {
-    "text": {
-      "dark": "foreground",
-      "light": "#282a36"
-    },
-    "textMuted": {
-      "dark": "comment",
-      "light": "#6272a4"
-    },
-    "primary": {
-      "dark": "purple",
-      "light": "purple"
-    },
-    "secondary": {
-      "dark": "pink",
-      "light": "pink"
-    },
     "accent": {
       "dark": "cyan",
       "light": "cyan"
-    },
-    "error": {
-      "dark": "red",
-      "light": "red"
-    },
-    "warning": {
-      "dark": "yellow",
-      "light": "yellow"
-    },
-    "success": {
-      "dark": "green",
-      "light": "green"
-    },
-    "info": {
-      "dark": "orange",
-      "light": "orange"
-    },
-    "syntaxKeyword": {
-      "dark": "pink",
-      "light": "pink"
-    },
-    "syntaxString": {
-      "dark": "yellow",
-      "light": "yellow"
-    },
-    "syntaxNumber": {
-      "dark": "purple",
-      "light": "purple"
-    },
-    "syntaxComment": {
-      "dark": "comment",
-      "light": "#6272a4"
-    },
-    "syntaxType": {
-      "dark": "cyan",
-      "light": "cyan"
-    },
-    "syntaxFunction": {
-      "dark": "green",
-      "light": "green"
-    },
-    "syntaxVariable": {
-      "dark": "foreground",
-      "light": "#282a36"
-    },
-    "syntaxOperator": {
-      "dark": "pink",
-      "light": "pink"
-    },
-    "syntaxPunctuation": {
-      "dark": "foreground",
-      "light": "#282a36"
     },
     "background": {
       "dark": "#282a36",
       "light": "#f8f8f2"
     },
-    "backgroundPanel": {
-      "dark": "#21222c",
-      "light": "#e8e8e2"
-    },
     "backgroundElement": {
       "dark": "currentLine",
       "light": "#d8d8d2"
+    },
+    "backgroundPanel": {
+      "dark": "#21222c",
+      "light": "#e8e8e2"
     },
     "border": {
       "dark": "currentLine",
@@ -115,10 +47,6 @@
       "dark": "green",
       "light": "green"
     },
-    "diffRemoved": {
-      "dark": "red",
-      "light": "red"
-    },
     "diffContext": {
       "dark": "comment",
       "light": "#6272a4"
@@ -127,17 +55,41 @@
       "dark": "currentLine",
       "light": "#c8c8c2"
     },
-    "syntaxAttribute": {
+    "diffRemoved": {
+      "dark": "red",
+      "light": "red"
+    },
+    "error": {
+      "dark": "red",
+      "light": "red"
+    },
+    "info": {
+      "dark": "orange",
+      "light": "orange"
+    },
+    "primary": {
+      "dark": "purple",
+      "light": "purple"
+    },
+    "secondary": {
       "dark": "pink",
       "light": "pink"
     },
-    "syntaxBuiltin": {
-      "dark": "cyan",
-      "light": "cyan"
-    },
-    "syntaxMacro": {
+    "success": {
       "dark": "green",
       "light": "green"
+    },
+    "text": {
+      "dark": "foreground",
+      "light": "#282a36"
+    },
+    "textMuted": {
+      "dark": "comment",
+      "light": "#6272a4"
+    },
+    "warning": {
+      "dark": "yellow",
+      "light": "yellow"
     }
   }
 }

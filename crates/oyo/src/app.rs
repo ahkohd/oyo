@@ -167,12 +167,16 @@ pub struct App {
     pub clear_active_on_next_render: bool,
     /// Resolved theme (colors, gradients)
     pub theme: ResolvedTheme,
+    /// Whether the UI theme is in light mode
+    pub theme_is_light: bool,
     /// Whether stepping is enabled (false = no-step diff view)
     pub stepping: bool,
     /// Single-pane modified line render mode while stepping
     pub single_modified_step_mode: ModifiedStepMode,
     /// Syntax highlighting mode
     pub syntax_mode: SyntaxMode,
+    /// Syntax theme selection
+    pub syntax_theme: String,
     /// Syntax highlighter (lazy initialized)
     syntax_engine: Option<SyntaxEngine>,
     /// Per-file syntax cache (old/new spans)
@@ -319,9 +323,11 @@ impl App {
             extent_marker_right: "▐".to_string(),
             clear_active_on_next_render: false,
             theme: ResolvedTheme::default(),
+            theme_is_light: false,
             stepping: true,
             single_modified_step_mode: ModifiedStepMode::Mixed,
-            syntax_mode: SyntaxMode::Auto,
+            syntax_mode: SyntaxMode::On,
+            syntax_theme: "ansi".to_string(),
             syntax_engine: None,
             syntax_caches: vec![None; file_count],
             show_syntax_scopes: false,
@@ -372,7 +378,6 @@ impl App {
 
     pub fn toggle_syntax(&mut self) {
         self.syntax_mode = match self.syntax_mode {
-            SyntaxMode::Auto => SyntaxMode::Off,
             SyntaxMode::On => SyntaxMode::Off,
             SyntaxMode::Off => SyntaxMode::On,
         };
@@ -380,11 +385,6 @@ impl App {
             self.syntax_engine = None;
             self.syntax_caches = vec![None; self.multi_diff.file_count()];
         }
-    }
-
-    pub fn toggle_syntax_scopes(&mut self) {
-        self.show_syntax_scopes = !self.show_syntax_scopes;
-        self.syntax_scope_cache = None;
     }
 
     pub fn toggle_peek_old_change(&mut self) {
@@ -948,7 +948,6 @@ impl App {
         match self.syntax_mode {
             SyntaxMode::On => true,
             SyntaxMode::Off => false,
-            SyntaxMode::Auto => !self.stepping,
         }
     }
 
@@ -1007,7 +1006,7 @@ impl App {
             SyntaxSide::New => nav.new_content(),
         };
         if self.syntax_engine.is_none() {
-            self.syntax_engine = Some(SyntaxEngine::new(&self.theme));
+            self.syntax_engine = Some(SyntaxEngine::new(&self.syntax_theme, self.theme_is_light));
         }
         let engine = self.syntax_engine.as_ref()?;
         let scopes = engine.scopes_for_line(content, &file_name, line_num - 1);
@@ -1040,7 +1039,8 @@ impl App {
                 (nav.old_content().to_string(), nav.new_content().to_string())
             };
             if self.syntax_engine.is_none() {
-                self.syntax_engine = Some(SyntaxEngine::new(&self.theme));
+                self.syntax_engine =
+                    Some(SyntaxEngine::new(&self.syntax_theme, self.theme_is_light));
             }
             let engine = self.syntax_engine.as_ref()?;
             self.syntax_caches[idx] = Some(SyntaxCache::new(

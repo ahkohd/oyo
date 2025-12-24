@@ -1,7 +1,15 @@
 {
   "$schema": "./schema.json",
   "defs": {
+    "darkCyan": "#86e1fc",
+    "darkGreen": "#c3e88d",
+    "darkOrange": "#ff966c",
+    "darkPurple": "#c099ff",
+    "darkRed": "#ff757f",
     "darkStep1": "#1a1b26",
+    "darkStep10": "#89b4fa",
+    "darkStep11": "#828bb8",
+    "darkStep12": "#c8d3f5",
     "darkStep2": "#1e2030",
     "darkStep3": "#222436",
     "darkStep4": "#292e42",
@@ -10,16 +18,16 @@
     "darkStep7": "#737aa2",
     "darkStep8": "#9099b2",
     "darkStep9": "#82aaff",
-    "darkStep10": "#89b4fa",
-    "darkStep11": "#828bb8",
-    "darkStep12": "#c8d3f5",
-    "darkRed": "#ff757f",
-    "darkOrange": "#ff966c",
     "darkYellow": "#ffc777",
-    "darkGreen": "#c3e88d",
-    "darkCyan": "#86e1fc",
-    "darkPurple": "#c099ff",
+    "lightCyan": "#007197",
+    "lightGreen": "#587539",
+    "lightOrange": "#b15c00",
+    "lightPurple": "#9854f1",
+    "lightRed": "#f52a65",
     "lightStep1": "#e1e2e7",
+    "lightStep10": "#1a6ce7",
+    "lightStep11": "#8990a3",
+    "lightStep12": "#3760bf",
     "lightStep2": "#d5d6db",
     "lightStep3": "#c8c9ce",
     "lightStep4": "#b9bac1",
@@ -28,106 +36,22 @@
     "lightStep7": "#737a8c",
     "lightStep8": "#5a607d",
     "lightStep9": "#2e7de9",
-    "lightStep10": "#1a6ce7",
-    "lightStep11": "#8990a3",
-    "lightStep12": "#3760bf",
-    "lightRed": "#f52a65",
-    "lightOrange": "#b15c00",
-    "lightYellow": "#8c6c3e",
-    "lightGreen": "#587539",
-    "lightCyan": "#007197",
-    "lightPurple": "#9854f1"
+    "lightYellow": "#8c6c3e"
   },
   "theme": {
-    "text": {
-      "dark": "darkStep12",
-      "light": "lightStep12"
-    },
-    "textMuted": {
-      "dark": "darkStep11",
-      "light": "lightStep11"
-    },
-    "primary": {
-      "dark": "darkStep9",
-      "light": "lightStep9"
-    },
-    "secondary": {
-      "dark": "darkPurple",
-      "light": "lightPurple"
-    },
     "accent": {
       "dark": "darkOrange",
       "light": "lightOrange"
-    },
-    "error": {
-      "dark": "darkRed",
-      "light": "lightRed"
-    },
-    "warning": {
-      "dark": "darkOrange",
-      "light": "lightOrange"
-    },
-    "success": {
-      "dark": "darkGreen",
-      "light": "lightGreen"
-    },
-    "info": {
-      "dark": "darkStep9",
-      "light": "lightStep9"
-    },
-    "syntaxPlain": {
-      "dark": "darkStep12",
-      "light": "lightStep12"
-    },
-    "syntaxKeyword": {
-      "dark": "darkPurple",
-      "light": "lightPurple"
-    },
-    "syntaxString": {
-      "dark": "darkGreen",
-      "light": "lightGreen"
-    },
-    "syntaxNumber": {
-      "dark": "darkOrange",
-      "light": "lightOrange"
-    },
-    "syntaxComment": {
-      "dark": "darkStep11",
-      "light": "lightStep11"
-    },
-    "syntaxType": {
-      "dark": "darkYellow",
-      "light": "lightYellow"
-    },
-    "syntaxFunction": {
-      "dark": "darkStep9",
-      "light": "lightStep9"
-    },
-    "syntaxVariable": {
-      "dark": "darkRed",
-      "light": "lightRed"
-    },
-    "syntaxConstant": {
-      "dark": "darkPurple",
-      "light": "lightPurple"
-    },
-    "syntaxOperator": {
-      "dark": "darkCyan",
-      "light": "lightCyan"
-    },
-    "syntaxPunctuation": {
-      "dark": "darkStep12",
-      "light": "lightStep12"
     },
     "background": {
       "dark": "darkStep1",
       "light": "lightStep1"
     },
-    "backgroundPanel": {
+    "backgroundElement": {
       "dark": "darkStep2",
       "light": "lightStep2"
     },
-    "backgroundElement": {
+    "backgroundPanel": {
       "dark": "darkStep2",
       "light": "lightStep2"
     },
@@ -147,11 +71,11 @@
       "dark": "#4fd6be",
       "light": "#1e725c"
     },
-    "diffRemoved": {
-      "dark": "#c53b53",
-      "light": "#c53b53"
-    },
     "diffContext": {
+      "dark": "#828bb8",
+      "light": "#7086b5"
+    },
+    "diffExtMarker": {
       "dark": "#828bb8",
       "light": "#7086b5"
     },
@@ -159,21 +83,41 @@
       "dark": "darkStep6",
       "light": "lightStep6"
     },
-    "diffExtMarker": {
-      "dark": "#828bb8",
-      "light": "#7086b5"
+    "diffRemoved": {
+      "dark": "#c53b53",
+      "light": "#c53b53"
     },
-    "syntaxAttribute": {
+    "error": {
+      "dark": "darkRed",
+      "light": "lightRed"
+    },
+    "info": {
+      "dark": "darkStep9",
+      "light": "lightStep9"
+    },
+    "primary": {
+      "dark": "darkStep9",
+      "light": "lightStep9"
+    },
+    "secondary": {
       "dark": "darkPurple",
       "light": "lightPurple"
     },
-    "syntaxBuiltin": {
-      "dark": "darkYellow",
-      "light": "lightYellow"
+    "success": {
+      "dark": "darkGreen",
+      "light": "lightGreen"
     },
-    "syntaxMacro": {
-      "dark": "darkStep9",
-      "light": "lightStep9"
+    "text": {
+      "dark": "darkStep12",
+      "light": "lightStep12"
+    },
+    "textMuted": {
+      "dark": "darkStep11",
+      "light": "lightStep11"
+    },
+    "warning": {
+      "dark": "darkOrange",
+      "light": "lightOrange"
     }
   }
 }

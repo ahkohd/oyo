@@ -4,112 +4,44 @@
     "darkBg": "#282c34",
     "darkBgAlt": "#21252b",
     "darkBgPanel": "#353b45",
+    "darkBlue": "#61afef",
+    "darkCyan": "#56b6c2",
     "darkFg": "#abb2bf",
     "darkFgMuted": "#5c6370",
-    "darkPurple": "#c678dd",
-    "darkBlue": "#61afef",
-    "darkRed": "#e06c75",
     "darkGreen": "#98c379",
-    "darkYellow": "#e5c07b",
     "darkOrange": "#d19a66",
-    "darkCyan": "#56b6c2",
+    "darkPurple": "#c678dd",
+    "darkRed": "#e06c75",
+    "darkYellow": "#e5c07b",
     "lightBg": "#fafafa",
     "lightBgAlt": "#f0f0f1",
     "lightBgPanel": "#eaeaeb",
+    "lightBlue": "#4078f2",
+    "lightCyan": "#0184bc",
     "lightFg": "#383a42",
     "lightFgMuted": "#a0a1a7",
-    "lightPurple": "#a626a4",
-    "lightBlue": "#4078f2",
-    "lightRed": "#e45649",
     "lightGreen": "#50a14f",
-    "lightYellow": "#c18401",
     "lightOrange": "#986801",
-    "lightCyan": "#0184bc"
+    "lightPurple": "#a626a4",
+    "lightRed": "#e45649",
+    "lightYellow": "#c18401"
   },
   "theme": {
-    "text": {
-      "dark": "darkFg",
-      "light": "lightFg"
-    },
-    "textMuted": {
-      "dark": "darkFgMuted",
-      "light": "lightFgMuted"
-    },
-    "primary": {
-      "dark": "darkBlue",
-      "light": "lightBlue"
-    },
-    "secondary": {
-      "dark": "darkPurple",
-      "light": "lightPurple"
-    },
     "accent": {
       "dark": "darkCyan",
       "light": "lightCyan"
-    },
-    "error": {
-      "dark": "darkRed",
-      "light": "lightRed"
-    },
-    "warning": {
-      "dark": "darkYellow",
-      "light": "lightYellow"
-    },
-    "success": {
-      "dark": "darkGreen",
-      "light": "lightGreen"
-    },
-    "info": {
-      "dark": "darkOrange",
-      "light": "lightOrange"
-    },
-    "syntaxKeyword": {
-      "dark": "darkPurple",
-      "light": "lightPurple"
-    },
-    "syntaxString": {
-      "dark": "darkGreen",
-      "light": "lightGreen"
-    },
-    "syntaxNumber": {
-      "dark": "darkOrange",
-      "light": "lightOrange"
-    },
-    "syntaxComment": {
-      "dark": "darkFgMuted",
-      "light": "lightFgMuted"
-    },
-    "syntaxType": {
-      "dark": "darkYellow",
-      "light": "lightYellow"
-    },
-    "syntaxFunction": {
-      "dark": "darkBlue",
-      "light": "lightBlue"
-    },
-    "syntaxVariable": {
-      "dark": "darkRed",
-      "light": "lightRed"
-    },
-    "syntaxOperator": {
-      "dark": "darkCyan",
-      "light": "lightCyan"
-    },
-    "syntaxPunctuation": {
-      "dark": "darkFg",
-      "light": "lightFg"
     },
     "background": {
       "dark": "darkBg",
       "light": "lightBg"
     },
-    "backgroundPanel": {
-      "dark": "darkBgAlt",
-      "light": "lightBgAlt"
-    },
     "backgroundElement": {
       "dark": "darkBgPanel",
       "light": "lightBgPanel"
+    },
+    "backgroundPanel": {
+      "dark": "darkBgAlt",
+      "light": "lightBgAlt"
     },
     "border": {
       "dark": "#393f4a",
@@ -127,10 +59,6 @@
       "dark": "darkGreen",
       "light": "lightGreen"
     },
-    "diffRemoved": {
-      "dark": "darkRed",
-      "light": "lightRed"
-    },
     "diffContext": {
       "dark": "darkFgMuted",
       "light": "lightFgMuted"
@@ -139,17 +67,41 @@
       "dark": "#495162",
       "light": "#c9c9ca"
     },
-    "syntaxAttribute": {
+    "diffRemoved": {
+      "dark": "darkRed",
+      "light": "lightRed"
+    },
+    "error": {
+      "dark": "darkRed",
+      "light": "lightRed"
+    },
+    "info": {
+      "dark": "darkOrange",
+      "light": "lightOrange"
+    },
+    "primary": {
+      "dark": "darkBlue",
+      "light": "lightBlue"
+    },
+    "secondary": {
       "dark": "darkPurple",
       "light": "lightPurple"
     },
-    "syntaxBuiltin": {
+    "success": {
+      "dark": "darkGreen",
+      "light": "lightGreen"
+    },
+    "text": {
+      "dark": "darkFg",
+      "light": "lightFg"
+    },
+    "textMuted": {
+      "dark": "darkFgMuted",
+      "light": "lightFgMuted"
+    },
+    "warning": {
       "dark": "darkYellow",
       "light": "lightYellow"
-    },
-    "syntaxMacro": {
-      "dark": "darkBlue",
-      "light": "lightBlue"
     }
   }
 }

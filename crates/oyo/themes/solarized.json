@@ -1,107 +1,39 @@
 {
   "$schema": "./schema.json",
   "defs": {
-    "base03": "#002b36",
-    "base02": "#073642",
-    "base01": "#586e75",
-    "base00": "#657b83",
     "base0": "#839496",
+    "base00": "#657b83",
+    "base01": "#586e75",
+    "base02": "#073642",
+    "base03": "#002b36",
     "base1": "#93a1a1",
     "base2": "#eee8d5",
     "base3": "#fdf6e3",
-    "yellow": "#b58900",
-    "orange": "#cb4b16",
-    "red": "#dc322f",
-    "magenta": "#d33682",
-    "violet": "#6c71c4",
     "blue": "#268bd2",
     "cyan": "#2aa198",
-    "green": "#859900"
+    "green": "#859900",
+    "magenta": "#d33682",
+    "orange": "#cb4b16",
+    "red": "#dc322f",
+    "violet": "#6c71c4",
+    "yellow": "#b58900"
   },
   "theme": {
-    "text": {
-      "dark": "base0",
-      "light": "base00"
-    },
-    "textMuted": {
-      "dark": "base01",
-      "light": "base1"
-    },
-    "primary": {
-      "dark": "blue",
-      "light": "blue"
-    },
-    "secondary": {
-      "dark": "violet",
-      "light": "violet"
-    },
     "accent": {
       "dark": "cyan",
       "light": "cyan"
-    },
-    "error": {
-      "dark": "red",
-      "light": "red"
-    },
-    "warning": {
-      "dark": "yellow",
-      "light": "yellow"
-    },
-    "success": {
-      "dark": "green",
-      "light": "green"
-    },
-    "info": {
-      "dark": "orange",
-      "light": "orange"
-    },
-    "syntaxKeyword": {
-      "dark": "green",
-      "light": "green"
-    },
-    "syntaxString": {
-      "dark": "cyan",
-      "light": "cyan"
-    },
-    "syntaxNumber": {
-      "dark": "magenta",
-      "light": "magenta"
-    },
-    "syntaxComment": {
-      "dark": "base01",
-      "light": "base1"
-    },
-    "syntaxType": {
-      "dark": "yellow",
-      "light": "yellow"
-    },
-    "syntaxFunction": {
-      "dark": "blue",
-      "light": "blue"
-    },
-    "syntaxVariable": {
-      "dark": "cyan",
-      "light": "cyan"
-    },
-    "syntaxOperator": {
-      "dark": "green",
-      "light": "green"
-    },
-    "syntaxPunctuation": {
-      "dark": "base0",
-      "light": "base00"
     },
     "background": {
       "dark": "base03",
       "light": "base3"
     },
-    "backgroundPanel": {
-      "dark": "base02",
-      "light": "base2"
-    },
     "backgroundElement": {
       "dark": "#073642",
       "light": "#eee8d5"
+    },
+    "backgroundPanel": {
+      "dark": "base02",
+      "light": "base2"
     },
     "border": {
       "dark": "base02",
@@ -119,10 +51,6 @@
       "dark": "green",
       "light": "green"
     },
-    "diffRemoved": {
-      "dark": "red",
-      "light": "red"
-    },
     "diffContext": {
       "dark": "base01",
       "light": "base1"
@@ -131,17 +59,41 @@
       "dark": "base01",
       "light": "base1"
     },
-    "syntaxAttribute": {
+    "diffRemoved": {
+      "dark": "red",
+      "light": "red"
+    },
+    "error": {
+      "dark": "red",
+      "light": "red"
+    },
+    "info": {
+      "dark": "orange",
+      "light": "orange"
+    },
+    "primary": {
+      "dark": "blue",
+      "light": "blue"
+    },
+    "secondary": {
+      "dark": "violet",
+      "light": "violet"
+    },
+    "success": {
       "dark": "green",
       "light": "green"
     },
-    "syntaxBuiltin": {
+    "text": {
+      "dark": "base0",
+      "light": "base00"
+    },
+    "textMuted": {
+      "dark": "base01",
+      "light": "base1"
+    },
+    "warning": {
       "dark": "yellow",
       "light": "yellow"
-    },
-    "syntaxMacro": {
-      "dark": "blue",
-      "light": "blue"
     }
   }
 }

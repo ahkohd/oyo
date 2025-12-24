@@ -1,111 +1,43 @@
 {
   "$schema": "./schema.json",
   "defs": {
+    "carpYellow": "#C38D9D",
+    "crystalBlue": "#7E9CD8",
+    "dragonRed": "#E82424",
+    "fujiGray": "#727169",
+    "fujiWhite": "#DCD7BA",
+    "lightBg": "#F2E9DE",
+    "lightGray": "#9E9389",
+    "lightPaper": "#EAE4D7",
+    "lightText": "#54433A",
+    "lotusGreen": "#98BB6C",
+    "oldWhite": "#C8C093",
+    "oniViolet": "#957FB8",
+    "roninYellow": "#D7A657",
+    "sakuraPink": "#D27E99",
     "sumiInk0": "#1F1F28",
     "sumiInk1": "#2A2A37",
     "sumiInk2": "#363646",
     "sumiInk3": "#54546D",
-    "fujiWhite": "#DCD7BA",
-    "oldWhite": "#C8C093",
-    "fujiGray": "#727169",
-    "oniViolet": "#957FB8",
-    "crystalBlue": "#7E9CD8",
-    "carpYellow": "#C38D9D",
-    "sakuraPink": "#D27E99",
     "waveAqua": "#76946A",
-    "roninYellow": "#D7A657",
-    "dragonRed": "#E82424",
-    "lotusGreen": "#98BB6C",
-    "waveBlue": "#2D4F67",
-    "lightBg": "#F2E9DE",
-    "lightPaper": "#EAE4D7",
-    "lightText": "#54433A",
-    "lightGray": "#9E9389"
+    "waveBlue": "#2D4F67"
   },
   "theme": {
-    "text": {
-      "dark": "fujiWhite",
-      "light": "lightText"
-    },
-    "textMuted": {
-      "dark": "fujiGray",
-      "light": "lightGray"
-    },
-    "primary": {
-      "dark": "crystalBlue",
-      "light": "waveBlue"
-    },
-    "secondary": {
-      "dark": "oniViolet",
-      "light": "oniViolet"
-    },
     "accent": {
       "dark": "sakuraPink",
       "light": "sakuraPink"
-    },
-    "error": {
-      "dark": "dragonRed",
-      "light": "dragonRed"
-    },
-    "warning": {
-      "dark": "roninYellow",
-      "light": "roninYellow"
-    },
-    "success": {
-      "dark": "lotusGreen",
-      "light": "lotusGreen"
-    },
-    "info": {
-      "dark": "waveAqua",
-      "light": "waveAqua"
-    },
-    "syntaxKeyword": {
-      "dark": "oniViolet",
-      "light": "oniViolet"
-    },
-    "syntaxString": {
-      "dark": "lotusGreen",
-      "light": "lotusGreen"
-    },
-    "syntaxNumber": {
-      "dark": "roninYellow",
-      "light": "roninYellow"
-    },
-    "syntaxComment": {
-      "dark": "fujiGray",
-      "light": "lightGray"
-    },
-    "syntaxType": {
-      "dark": "carpYellow",
-      "light": "carpYellow"
-    },
-    "syntaxFunction": {
-      "dark": "crystalBlue",
-      "light": "waveBlue"
-    },
-    "syntaxVariable": {
-      "dark": "fujiWhite",
-      "light": "lightText"
-    },
-    "syntaxOperator": {
-      "dark": "sakuraPink",
-      "light": "sakuraPink"
-    },
-    "syntaxPunctuation": {
-      "dark": "fujiWhite",
-      "light": "lightText"
     },
     "background": {
       "dark": "sumiInk0",
       "light": "lightBg"
     },
-    "backgroundPanel": {
-      "dark": "sumiInk1",
-      "light": "lightPaper"
-    },
     "backgroundElement": {
       "dark": "sumiInk2",
       "light": "#E3DCD2"
+    },
+    "backgroundPanel": {
+      "dark": "sumiInk1",
+      "light": "lightPaper"
     },
     "border": {
       "dark": "sumiInk3",
@@ -123,10 +55,6 @@
       "dark": "lotusGreen",
       "light": "lotusGreen"
     },
-    "diffRemoved": {
-      "dark": "dragonRed",
-      "light": "dragonRed"
-    },
     "diffContext": {
       "dark": "fujiGray",
       "light": "lightGray"
@@ -135,17 +63,41 @@
       "dark": "sumiInk3",
       "light": "#C7BEB4"
     },
-    "syntaxAttribute": {
+    "diffRemoved": {
+      "dark": "dragonRed",
+      "light": "dragonRed"
+    },
+    "error": {
+      "dark": "dragonRed",
+      "light": "dragonRed"
+    },
+    "info": {
+      "dark": "waveAqua",
+      "light": "waveAqua"
+    },
+    "primary": {
+      "dark": "crystalBlue",
+      "light": "waveBlue"
+    },
+    "secondary": {
       "dark": "oniViolet",
       "light": "oniViolet"
     },
-    "syntaxBuiltin": {
-      "dark": "carpYellow",
-      "light": "carpYellow"
+    "success": {
+      "dark": "lotusGreen",
+      "light": "lotusGreen"
     },
-    "syntaxMacro": {
-      "dark": "crystalBlue",
-      "light": "waveBlue"
+    "text": {
+      "dark": "fujiWhite",
+      "light": "lightText"
+    },
+    "textMuted": {
+      "dark": "fujiGray",
+      "light": "lightGray"
+    },
+    "warning": {
+      "dark": "roninYellow",
+      "light": "roninYellow"
     }
   }
 }

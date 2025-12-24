@@ -4,116 +4,48 @@
     "darkBg": "#263238",
     "darkBgAlt": "#1e272c",
     "darkBgPanel": "#37474f",
+    "darkBlue": "#82aaff",
+    "darkCyan": "#89ddff",
     "darkFg": "#eeffff",
     "darkFgMuted": "#546e7a",
-    "darkRed": "#f07178",
-    "darkPink": "#f78c6c",
-    "darkOrange": "#ffcb6b",
-    "darkYellow": "#ffcb6b",
     "darkGreen": "#c3e88d",
-    "darkCyan": "#89ddff",
-    "darkBlue": "#82aaff",
+    "darkOrange": "#ffcb6b",
+    "darkPink": "#f78c6c",
     "darkPurple": "#c792ea",
+    "darkRed": "#f07178",
     "darkViolet": "#bb80b3",
+    "darkYellow": "#ffcb6b",
     "lightBg": "#fafafa",
     "lightBgAlt": "#f5f5f5",
     "lightBgPanel": "#e7e7e8",
+    "lightBlue": "#6182b8",
+    "lightCyan": "#39adb5",
     "lightFg": "#263238",
     "lightFgMuted": "#90a4ae",
-    "lightRed": "#e53935",
-    "lightPink": "#ec407a",
-    "lightOrange": "#f4511e",
-    "lightYellow": "#ffb300",
     "lightGreen": "#91b859",
-    "lightCyan": "#39adb5",
-    "lightBlue": "#6182b8",
+    "lightOrange": "#f4511e",
+    "lightPink": "#ec407a",
     "lightPurple": "#7c4dff",
-    "lightViolet": "#945eb8"
+    "lightRed": "#e53935",
+    "lightViolet": "#945eb8",
+    "lightYellow": "#ffb300"
   },
   "theme": {
-    "text": {
-      "dark": "darkFg",
-      "light": "lightFg"
-    },
-    "textMuted": {
-      "dark": "darkFgMuted",
-      "light": "lightFgMuted"
-    },
-    "primary": {
-      "dark": "darkBlue",
-      "light": "lightBlue"
-    },
-    "secondary": {
-      "dark": "darkPurple",
-      "light": "lightPurple"
-    },
     "accent": {
       "dark": "darkCyan",
       "light": "lightCyan"
-    },
-    "error": {
-      "dark": "darkRed",
-      "light": "lightRed"
-    },
-    "warning": {
-      "dark": "darkYellow",
-      "light": "lightYellow"
-    },
-    "success": {
-      "dark": "darkGreen",
-      "light": "lightGreen"
-    },
-    "info": {
-      "dark": "darkOrange",
-      "light": "lightOrange"
-    },
-    "syntaxKeyword": {
-      "dark": "darkPurple",
-      "light": "lightPurple"
-    },
-    "syntaxString": {
-      "dark": "darkGreen",
-      "light": "lightGreen"
-    },
-    "syntaxNumber": {
-      "dark": "darkOrange",
-      "light": "lightOrange"
-    },
-    "syntaxComment": {
-      "dark": "darkFgMuted",
-      "light": "lightFgMuted"
-    },
-    "syntaxType": {
-      "dark": "darkYellow",
-      "light": "lightYellow"
-    },
-    "syntaxFunction": {
-      "dark": "darkBlue",
-      "light": "lightBlue"
-    },
-    "syntaxVariable": {
-      "dark": "darkFg",
-      "light": "lightFg"
-    },
-    "syntaxOperator": {
-      "dark": "darkCyan",
-      "light": "lightCyan"
-    },
-    "syntaxPunctuation": {
-      "dark": "darkFg",
-      "light": "lightFg"
     },
     "background": {
       "dark": "darkBg",
       "light": "lightBg"
     },
-    "backgroundPanel": {
-      "dark": "darkBgAlt",
-      "light": "lightBgAlt"
-    },
     "backgroundElement": {
       "dark": "darkBgPanel",
       "light": "lightBgPanel"
+    },
+    "backgroundPanel": {
+      "dark": "darkBgAlt",
+      "light": "lightBgAlt"
     },
     "border": {
       "dark": "#37474f",
@@ -131,10 +63,6 @@
       "dark": "darkGreen",
       "light": "lightGreen"
     },
-    "diffRemoved": {
-      "dark": "darkRed",
-      "light": "lightRed"
-    },
     "diffContext": {
       "dark": "darkFgMuted",
       "light": "lightFgMuted"
@@ -143,17 +71,41 @@
       "dark": "#37474f",
       "light": "#cfd8dc"
     },
-    "syntaxAttribute": {
+    "diffRemoved": {
+      "dark": "darkRed",
+      "light": "lightRed"
+    },
+    "error": {
+      "dark": "darkRed",
+      "light": "lightRed"
+    },
+    "info": {
+      "dark": "darkOrange",
+      "light": "lightOrange"
+    },
+    "primary": {
+      "dark": "darkBlue",
+      "light": "lightBlue"
+    },
+    "secondary": {
       "dark": "darkPurple",
       "light": "lightPurple"
     },
-    "syntaxBuiltin": {
+    "success": {
+      "dark": "darkGreen",
+      "light": "lightGreen"
+    },
+    "text": {
+      "dark": "darkFg",
+      "light": "lightFg"
+    },
+    "textMuted": {
+      "dark": "darkFgMuted",
+      "light": "lightFgMuted"
+    },
+    "warning": {
       "dark": "darkYellow",
       "light": "lightYellow"
-    },
-    "syntaxMacro": {
-      "dark": "darkBlue",
-      "light": "lightBlue"
     }
   }
 }
