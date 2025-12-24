@@ -195,7 +195,7 @@ fn render_old_pane(frame: &mut Frame, app: &mut App, area: Rect) {
             let mut used_syntax = false;
             let pure_context = matches!(view_line.kind, LineKind::Context)
                 && !view_line.has_changes
-                && !view_line.is_active
+                && !view_line.is_active_change
                 && view_line
                     .spans
                     .iter()
@@ -206,17 +206,10 @@ fn render_old_pane(frame: &mut Frame, app: &mut App, area: Rect) {
                 preview_mode && view_line.hunk_index == Some(preview_hunk) && wants_diff_syntax;
             let preview_modified = in_preview_hunk
                 && matches!(view_line.kind, LineKind::Modified | LineKind::PendingModify);
-            let can_use_diff_syntax = wants_diff_syntax
-                && !matches!(
-                    view_line.kind,
-                    LineKind::PendingInsert
-                        | LineKind::PendingModify
-                        | LineKind::PendingDelete
-                        | LineKind::Modified
-                );
+            let can_use_diff_syntax = wants_diff_syntax;
             if app.syntax_enabled()
                 && !preview_modified
-                && (!view_line.is_active || in_preview_hunk)
+                && !view_line.is_active_change
                 && (pure_context || can_use_diff_syntax || in_preview_hunk)
             {
                 if let Some(spans) = app.syntax_spans_for_line(SyntaxSide::Old, Some(old_line_num))
@@ -516,7 +509,7 @@ fn render_new_pane(frame: &mut Frame, app: &mut App, area: Rect) {
             let mut used_syntax = false;
             let pure_context = matches!(view_line.kind, LineKind::Context)
                 && !view_line.has_changes
-                && !view_line.is_active
+                && !view_line.is_active_change
                 && view_line
                     .spans
                     .iter()
@@ -527,17 +520,10 @@ fn render_new_pane(frame: &mut Frame, app: &mut App, area: Rect) {
                 preview_mode && view_line.hunk_index == Some(preview_hunk) && wants_diff_syntax;
             let preview_modified = in_preview_hunk
                 && matches!(view_line.kind, LineKind::Modified | LineKind::PendingModify);
-            let can_use_diff_syntax = wants_diff_syntax
-                && !matches!(
-                    view_line.kind,
-                    LineKind::PendingInsert
-                        | LineKind::PendingModify
-                        | LineKind::PendingDelete
-                        | LineKind::Modified
-                );
+            let can_use_diff_syntax = wants_diff_syntax;
             if app.syntax_enabled()
                 && !preview_modified
-                && (!view_line.is_active || in_preview_hunk)
+                && !view_line.is_active_change
                 && (pure_context || can_use_diff_syntax || in_preview_hunk)
             {
                 let use_old = view_line.kind == LineKind::Context && view_line.has_changes;

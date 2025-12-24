@@ -430,23 +430,15 @@ pub fn render_single_pane(frame: &mut Frame, app: &mut App, area: Rect) {
 
         let pure_context = matches!(view_line.kind, LineKind::Context)
             && !view_line.has_changes
-            && !view_line.is_active
+            && !view_line.is_active_change
             && view_line
                 .spans
                 .iter()
                 .all(|span| matches!(span.kind, ViewSpanKind::Equal));
-        let can_use_diff_syntax = wants_diff_syntax
-            && !has_peek
-            && !matches!(
-                view_line.kind,
-                LineKind::PendingInsert
-                    | LineKind::PendingModify
-                    | LineKind::PendingDelete
-                    | LineKind::Modified
-            );
+        let can_use_diff_syntax = wants_diff_syntax && !has_peek;
         if !used_inline_modified
             && app.syntax_enabled()
-            && (!view_line.is_active || in_preview_hunk)
+            && !view_line.is_active_change
             && (pure_context || can_use_diff_syntax || in_preview_hunk)
         {
             let use_old = view_line.kind == LineKind::Context && view_line.has_changes;
