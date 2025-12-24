@@ -1042,6 +1042,9 @@ fn draw_help_popover(frame: &mut Frame, app: &mut App) {
     push_help_line(&mut lines, "z", "Center on active");
     push_help_line(&mut lines, "w", "Toggle line wrap");
     push_help_line(&mut lines, "t", "Toggle syntax highlight");
+    if app.view_mode == ViewMode::Evolution {
+        push_help_line(&mut lines, "E", "Toggle evo syntax (context/full)");
+    }
     push_help_line(&mut lines, "s", "Toggle stepping");
     push_help_line(&mut lines, "S", "Toggle strikethrough");
     lines.push(Line::from(""));

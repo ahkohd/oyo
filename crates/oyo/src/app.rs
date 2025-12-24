@@ -1,7 +1,10 @@
 //! Application state and logic
 
 use crate::color;
-use crate::config::{FileCountMode, ModifiedStepMode, ResolvedTheme, SyntaxMode};
+use crate::config::{
+    DiffBackgroundMode, DiffForegroundMode, FileCountMode, ModifiedStepMode, ResolvedTheme,
+    SyntaxMode,
+};
 use crate::syntax::{SyntaxCache, SyntaxEngine, SyntaxSide};
 use oyo_core::{
     AnimationFrame, Change, ChangeKind, LineKind, MultiFileDiff, StepDirection, StepState, ViewLine,
@@ -61,6 +64,13 @@ struct HunkBounds {
     end: HunkStart,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct NoStepState {
+    current_hunk: usize,
+    cursor_change: Option<usize>,
+    last_nav_was_hunk: bool,
+}
+
 /// The main application state
 pub struct App {
     /// Multi-file diff manager
@@ -75,8 +85,12 @@ pub struct App {
     pub autoplay_reverse: bool,
     /// Current scroll offset
     pub scroll_offset: usize,
-    /// Per-file scroll offsets (to restore when switching files)
-    scroll_offsets: Vec<usize>,
+    /// Per-file scroll offsets when stepping
+    scroll_offsets_step: Vec<usize>,
+    /// Per-file scroll offsets when not stepping
+    scroll_offsets_no_step: Vec<usize>,
+    /// Tracks if a file has a saved no-step scroll position
+    no_step_visited: Vec<bool>,
     /// Tracks which files have been visited (for auto-step on first visit)
     files_visited: Vec<bool>,
     /// Whether to quit
@@ -131,8 +145,10 @@ pub struct App {
     pub pending_g_prefix: bool,
     /// Horizontal scroll offset (for long lines)
     pub horizontal_scroll: usize,
-    /// Per-file horizontal scroll offsets
-    horizontal_scrolls: Vec<usize>,
+    /// Per-file horizontal scroll offsets when stepping
+    horizontal_scrolls_step: Vec<usize>,
+    /// Per-file horizontal scroll offsets when not stepping
+    horizontal_scrolls_no_step: Vec<usize>,
     /// Line wrap mode (when true, horizontal scroll is ignored)
     pub line_wrap: bool,
     /// Cached wrapped display length (for line wrap centering)
@@ -171,8 +187,14 @@ pub struct App {
     pub theme_is_light: bool,
     /// Whether stepping is enabled (false = no-step diff view)
     pub stepping: bool,
+    /// Diff background rendering mode
+    pub diff_bg: DiffBackgroundMode,
+    /// Diff foreground rendering mode
+    pub diff_fg: DiffForegroundMode,
     /// Single-pane modified line render mode while stepping
     pub single_modified_step_mode: ModifiedStepMode,
+    /// Syntax scope in evolution view
+    pub evo_syntax: crate::config::EvoSyntaxMode,
     /// Syntax highlighting mode
     pub syntax_mode: SyntaxMode,
     /// Syntax theme selection
@@ -187,6 +209,14 @@ pub struct App {
     syntax_scope_cache: Option<SyntaxScopeCache>,
     /// Peek old/new state (stepping-only)
     peek_state: Option<PeekState>,
+    /// Saved peek state for stepping mode (when toggled off)
+    step_peek_state: Option<PeekState>,
+    /// Saved step state per file (to restore after toggling off)
+    step_state_snapshots: Vec<Option<StepState>>,
+    /// Saved no-step cursor/marker state per file
+    no_step_state_snapshots: Vec<Option<NoStepState>>,
+    /// View mode to restore when stepping is enabled
+    step_view_mode: ViewMode,
     /// Search query (diff pane)
     search_query: String,
     /// True when search input is active
@@ -277,7 +307,9 @@ impl App {
             autoplay,
             autoplay_reverse: false,
             scroll_offset: 0,
-            scroll_offsets: vec![0; file_count],
+            scroll_offsets_step: vec![0; file_count],
+            scroll_offsets_no_step: vec![0; file_count],
+            no_step_visited: vec![false; file_count],
             files_visited: vec![false; file_count],
             should_quit: false,
             animation_phase: AnimationPhase::Idle,
@@ -305,7 +337,8 @@ impl App {
             pending_count: None,
             pending_g_prefix: false,
             horizontal_scroll: 0,
-            horizontal_scrolls: vec![0; file_count],
+            horizontal_scrolls_step: vec![0; file_count],
+            horizontal_scrolls_no_step: vec![0; file_count],
             line_wrap: false,
             last_wrap_display_len: None,
             last_wrap_active_idx: None,
@@ -325,7 +358,10 @@ impl App {
             theme: ResolvedTheme::default(),
             theme_is_light: false,
             stepping: true,
+            diff_bg: DiffBackgroundMode::None,
+            diff_fg: DiffForegroundMode::Theme,
             single_modified_step_mode: ModifiedStepMode::Mixed,
+            evo_syntax: crate::config::EvoSyntaxMode::Context,
             syntax_mode: SyntaxMode::On,
             syntax_theme: "ansi".to_string(),
             syntax_engine: None,
@@ -333,6 +369,10 @@ impl App {
             show_syntax_scopes: false,
             syntax_scope_cache: None,
             peek_state: None,
+            step_peek_state: None,
+            step_state_snapshots: vec![None; file_count],
+            no_step_state_snapshots: vec![None; file_count],
+            step_view_mode: view_mode,
             search_query: String::new(),
             search_active: false,
             search_last_target: None,
@@ -385,6 +425,13 @@ impl App {
             self.syntax_engine = None;
             self.syntax_caches = vec![None; self.multi_diff.file_count()];
         }
+    }
+
+    pub fn toggle_evo_syntax(&mut self) {
+        self.evo_syntax = match self.evo_syntax {
+            crate::config::EvoSyntaxMode::Context => crate::config::EvoSyntaxMode::Full,
+            crate::config::EvoSyntaxMode::Full => crate::config::EvoSyntaxMode::Context,
+        };
     }
 
     pub fn toggle_peek_old_change(&mut self) {
@@ -1816,26 +1863,49 @@ impl App {
             self.view_mode = ViewMode::SinglePane;
         }
 
-        let old_scroll = self.scroll_offset;
         self.peek_state = None;
         self.multi_diff.current_navigator().goto_end();
         self.multi_diff.current_navigator().clear_active_change();
         self.animation_phase = AnimationPhase::Idle;
         self.animation_progress = 1.0;
-        self.scroll_offset = old_scroll;
         self.needs_scroll_to_active = false;
-        self.set_cursor_for_current_scroll();
+        let index = self.multi_diff.selected_index;
+        if !self.restore_no_step_state_snapshot(index) {
+            self.set_cursor_for_current_scroll();
+            self.multi_diff.current_navigator().set_hunk_scope(false);
+        }
     }
 
     pub fn toggle_stepping(&mut self) {
-        self.stepping = !self.stepping;
-        if !self.stepping {
+        let current_index = self.multi_diff.selected_index;
+        if self.stepping {
+            // Turning OFF stepping: snapshot state and scroll, then enter no-step.
+            self.save_scroll_position_for(current_index);
+            self.save_step_state_snapshot(current_index);
+            self.step_peek_state = self.peek_state.take();
+            self.step_view_mode = self.view_mode;
+            self.stepping = false;
+            if !self.no_step_visited[current_index] {
+                self.scroll_offsets_no_step[current_index] = self.scroll_offset;
+                self.horizontal_scrolls_no_step[current_index] = self.horizontal_scroll;
+                self.no_step_visited[current_index] = true;
+            }
+            self.restore_scroll_position_for(current_index);
             self.enter_no_step_mode();
         } else {
-            // Turning ON stepping
-            // Reset to clean slate (start)
-            self.peek_state = None;
-            self.goto_start();
+            // Turning ON stepping: restore snapshot and scroll.
+            self.save_no_step_state_snapshot(current_index);
+            self.save_scroll_position_for(current_index);
+            self.stepping = true;
+            self.peek_state = self.step_peek_state.take();
+            self.view_mode = self.step_view_mode;
+            if !self.restore_step_state_snapshot(current_index) {
+                self.goto_start();
+            }
+            self.restore_scroll_position_for(current_index);
+            self.animation_phase = AnimationPhase::Idle;
+            self.animation_progress = 1.0;
+            self.needs_scroll_to_active = false;
         }
     }
 
@@ -2344,11 +2414,12 @@ impl App {
         // Save current scroll positions
         let old_index = self.multi_diff.selected_index;
         if self.multi_diff.next_file() {
-            self.scroll_offsets[old_index] = self.scroll_offset;
-            self.horizontal_scrolls[old_index] = self.horizontal_scroll;
+            if !self.stepping {
+                self.save_no_step_state_snapshot(old_index);
+            }
+            self.save_scroll_position_for(old_index);
             // Restore scroll positions for new file
-            self.scroll_offset = self.scroll_offsets[self.multi_diff.selected_index];
-            self.horizontal_scroll = self.horizontal_scrolls[self.multi_diff.selected_index];
+            self.restore_scroll_position_for(self.multi_diff.selected_index);
             self.animation_phase = AnimationPhase::Idle;
             self.animation_progress = 1.0;
             self.reset_search_for_file_switch();
@@ -2378,11 +2449,12 @@ impl App {
         // Save current scroll positions
         let old_index = self.multi_diff.selected_index;
         if self.multi_diff.prev_file() {
-            self.scroll_offsets[old_index] = self.scroll_offset;
-            self.horizontal_scrolls[old_index] = self.horizontal_scroll;
+            if !self.stepping {
+                self.save_no_step_state_snapshot(old_index);
+            }
+            self.save_scroll_position_for(old_index);
             // Restore scroll positions for new file
-            self.scroll_offset = self.scroll_offsets[self.multi_diff.selected_index];
-            self.horizontal_scroll = self.horizontal_scrolls[self.multi_diff.selected_index];
+            self.restore_scroll_position_for(self.multi_diff.selected_index);
             self.animation_phase = AnimationPhase::Idle;
             self.animation_progress = 1.0;
             self.reset_search_for_file_switch();
@@ -2394,11 +2466,12 @@ impl App {
 
     pub fn select_file(&mut self, index: usize) {
         let old_index = self.multi_diff.selected_index;
-        self.scroll_offsets[old_index] = self.scroll_offset;
-        self.horizontal_scrolls[old_index] = self.horizontal_scroll;
+        if !self.stepping {
+            self.save_no_step_state_snapshot(old_index);
+        }
+        self.save_scroll_position_for(old_index);
         self.multi_diff.select_file(index);
-        self.scroll_offset = self.scroll_offsets[self.multi_diff.selected_index];
-        self.horizontal_scroll = self.horizontal_scrolls[self.multi_diff.selected_index];
+        self.restore_scroll_position_for(self.multi_diff.selected_index);
         self.animation_phase = AnimationPhase::Idle;
         self.animation_progress = 1.0;
         self.reset_search_for_file_switch();
@@ -2444,6 +2517,25 @@ impl App {
     pub fn handle_file_enter(&mut self) {
         let idx = self.multi_diff.selected_index;
 
+        if !self.stepping {
+            if !self.files_visited[idx] {
+                self.files_visited[idx] = true;
+            }
+            // If in no-step mode, ensure full content is shown immediately
+            self.ensure_step_state_snapshot(idx);
+            self.multi_diff.current_navigator().goto_end();
+            self.multi_diff.current_navigator().clear_active_change();
+            self.animation_phase = AnimationPhase::Idle;
+            self.animation_progress = 1.0;
+            if !self.restore_no_step_state_snapshot(idx) {
+                self.set_cursor_for_current_scroll();
+                self.multi_diff.current_navigator().set_hunk_scope(false);
+            }
+            self.no_step_visited[idx] = true;
+            // Don't mess with scroll_offset here; it might have been restored by next_file/prev_file
+            return;
+        }
+
         // Only process on first visit to this file
         if self.files_visited[idx] {
             return;
@@ -2451,17 +2543,6 @@ impl App {
 
         // Mark as visited
         self.files_visited[idx] = true;
-
-        // If in no-step mode, ensure full content is shown immediately
-        if !self.stepping {
-            self.multi_diff.current_navigator().goto_end();
-            self.multi_diff.current_navigator().clear_active_change();
-            self.animation_phase = AnimationPhase::Idle;
-            self.animation_progress = 1.0;
-            self.set_cursor_for_current_scroll();
-            // Don't mess with scroll_offset here; it might have been restored by next_file/prev_file
-            return;
-        }
 
         let state = self.multi_diff.current_navigator().state();
         let at_step_0 = state.current_step == 0;
@@ -2481,6 +2562,108 @@ impl App {
         if self.auto_step_on_enter && self.view_mode != ViewMode::Evolution {
             self.next_step();
         }
+    }
+
+    fn active_scroll_buffers(&self) -> (&Vec<usize>, &Vec<usize>) {
+        if self.stepping {
+            (&self.scroll_offsets_step, &self.horizontal_scrolls_step)
+        } else {
+            (
+                &self.scroll_offsets_no_step,
+                &self.horizontal_scrolls_no_step,
+            )
+        }
+    }
+
+    fn active_scroll_buffers_mut(&mut self) -> (&mut Vec<usize>, &mut Vec<usize>) {
+        if self.stepping {
+            (
+                &mut self.scroll_offsets_step,
+                &mut self.horizontal_scrolls_step,
+            )
+        } else {
+            (
+                &mut self.scroll_offsets_no_step,
+                &mut self.horizontal_scrolls_no_step,
+            )
+        }
+    }
+
+    fn save_scroll_position_for(&mut self, index: usize) {
+        let scroll_offset = self.scroll_offset;
+        let horizontal_scroll = self.horizontal_scroll;
+        let (scrolls, horizontals) = self.active_scroll_buffers_mut();
+        if let Some(slot) = scrolls.get_mut(index) {
+            *slot = scroll_offset;
+        }
+        if let Some(slot) = horizontals.get_mut(index) {
+            *slot = horizontal_scroll;
+        }
+    }
+
+    fn restore_scroll_position_for(&mut self, index: usize) {
+        let (scrolls, horizontals) = self.active_scroll_buffers();
+        let scroll_value = scrolls.get(index).copied();
+        let horizontal_value = horizontals.get(index).copied();
+        if let Some(value) = scroll_value {
+            self.scroll_offset = value;
+        }
+        if let Some(value) = horizontal_value {
+            self.horizontal_scroll = value;
+        }
+    }
+
+    fn save_step_state_snapshot(&mut self, index: usize) {
+        let state = self.multi_diff.current_navigator().state().clone();
+        if let Some(slot) = self.step_state_snapshots.get_mut(index) {
+            *slot = Some(state);
+        }
+    }
+
+    fn restore_step_state_snapshot(&mut self, index: usize) -> bool {
+        let Some(snapshot) = self.step_state_snapshots.get(index).and_then(|s| s.clone()) else {
+            return false;
+        };
+        self.multi_diff.current_navigator().set_state(snapshot)
+    }
+
+    fn ensure_step_state_snapshot(&mut self, index: usize) {
+        let needs_snapshot = self
+            .step_state_snapshots
+            .get(index)
+            .map(|slot| slot.is_none())
+            .unwrap_or(false);
+        if !needs_snapshot {
+            return;
+        }
+        let state = self.multi_diff.current_navigator().state().clone();
+        if let Some(slot) = self.step_state_snapshots.get_mut(index) {
+            *slot = Some(state);
+        }
+    }
+
+    fn save_no_step_state_snapshot(&mut self, index: usize) {
+        let state = self.multi_diff.current_navigator().state();
+        if let Some(slot) = self.no_step_state_snapshots.get_mut(index) {
+            *slot = Some(NoStepState {
+                current_hunk: state.current_hunk,
+                cursor_change: state.cursor_change,
+                last_nav_was_hunk: state.last_nav_was_hunk,
+            });
+        }
+    }
+
+    fn restore_no_step_state_snapshot(&mut self, index: usize) -> bool {
+        let Some(snapshot) = self.no_step_state_snapshots.get(index).and_then(|s| *s) else {
+            return false;
+        };
+        self.multi_diff
+            .current_navigator()
+            .set_cursor_hunk(snapshot.current_hunk, snapshot.cursor_change);
+        self.multi_diff
+            .current_navigator()
+            .set_hunk_scope(snapshot.last_nav_was_hunk);
+        true
     }
 
     pub fn is_multi_file(&self) -> bool {
@@ -2840,10 +3023,15 @@ impl App {
         if self.multi_diff.refresh_all_from_git() {
             // Reset scroll states for all files
             let file_count = self.multi_diff.file_count();
-            self.scroll_offsets = vec![0; file_count];
-            self.horizontal_scrolls = vec![0; file_count];
+            self.scroll_offsets_step = vec![0; file_count];
+            self.scroll_offsets_no_step = vec![0; file_count];
+            self.horizontal_scrolls_step = vec![0; file_count];
+            self.horizontal_scrolls_no_step = vec![0; file_count];
+            self.no_step_visited = vec![false; file_count];
             self.files_visited = vec![false; file_count];
             self.syntax_caches = vec![None; file_count];
+            self.step_state_snapshots = vec![None; file_count];
+            self.no_step_state_snapshots = vec![None; file_count];
             self.scroll_offset = 0;
             self.horizontal_scroll = 0;
             self.needs_scroll_to_active = true;
@@ -3185,6 +3373,7 @@ mod tests {
             old_line,
             new_line,
             is_active,
+            is_active_change: is_active,
             is_primary_active,
             show_hunk_extent: false,
             change_id: 0,
@@ -3400,5 +3589,24 @@ mod tests {
         let start_state = app.multi_diff.current_navigator().state();
         assert_eq!(start_state.current_hunk, 0);
         assert!(start_state.cursor_change.is_some());
+    }
+
+    #[test]
+    fn test_toggle_stepping_restores_no_step_cursor_scope() {
+        let mut app = make_app_with_two_hunks();
+        app.next_hunk_scroll();
+
+        let before = app.multi_diff.current_navigator().state().clone();
+        assert!(before.last_nav_was_hunk);
+        assert!(before.cursor_change.is_some());
+
+        app.toggle_stepping(); // go to stepping
+        assert!(app.stepping);
+        app.toggle_stepping(); // back to no-step
+
+        let after = app.multi_diff.current_navigator().state();
+        assert_eq!(after.current_hunk, before.current_hunk);
+        assert_eq!(after.cursor_change, before.cursor_change);
+        assert!(after.last_nav_was_hunk);
     }
 }

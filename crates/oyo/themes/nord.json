@@ -51,6 +51,10 @@
       "dark": "nord14",
       "light": "nord14"
     },
+    "diffAddedBg": {
+      "dark": "#3B4252",
+      "light": "#E5E9F0"
+    },
     "diffContext": {
       "dark": "#8B95A7",
       "light": "nord3"
@@ -59,9 +63,17 @@
       "dark": "nord2",
       "light": "nord4"
     },
+    "diffModifiedBg": {
+      "dark": "#484148",
+      "light": "#e8dedf"
+    },
     "diffRemoved": {
       "dark": "nord11",
       "light": "nord11"
+    },
+    "diffRemovedBg": {
+      "dark": "#3B4252",
+      "light": "#E5E9F0"
     },
     "error": {
       "dark": "nord11",

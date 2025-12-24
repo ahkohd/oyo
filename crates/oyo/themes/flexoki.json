@@ -65,6 +65,10 @@
       "dark": "green400",
       "light": "green600"
     },
+    "diffAddedBg": {
+      "dark": "#1A2D1A",
+      "light": "#D5E5D5"
+    },
     "diffContext": {
       "dark": "base600",
       "light": "base600"
@@ -73,9 +77,17 @@
       "dark": "base600",
       "light": "base600"
     },
+    "diffModifiedBg": {
+      "dark": "#301f14",
+      "light": "#f4e1cd"
+    },
     "diffRemoved": {
       "dark": "red400",
       "light": "red600"
+    },
+    "diffRemovedBg": {
+      "dark": "#2D1A1A",
+      "light": "#F7D8DB"
     },
     "error": {
       "dark": "red400",

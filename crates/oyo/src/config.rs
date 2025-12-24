@@ -29,7 +29,7 @@
 //! [playback]
 //! speed = 200
 //! autoplay = false
-//! animation = false
+//! animation = true
 //! auto_step_on_enter = true
 //! auto_step_blank_files = true
 //!
@@ -77,10 +77,13 @@ pub struct ThemeTokens {
     pub border_active: Option<DarkLight>,
     pub border_subtle: Option<DarkLight>,
     pub diff_added: Option<DarkLight>,
+    pub diff_added_bg: Option<DarkLight>,
     pub diff_removed: Option<DarkLight>,
+    pub diff_removed_bg: Option<DarkLight>,
     pub diff_context: Option<DarkLight>,
     pub diff_line_number: Option<DarkLight>,
     pub diff_ext_marker: Option<DarkLight>,
+    pub diff_modified_bg: Option<DarkLight>,
 }
 
 /// Theme configuration (defs + tokens)
@@ -288,6 +291,9 @@ pub struct ResolvedTheme {
     pub diff_context: Color,
     pub diff_line_number: Color,
     pub diff_ext_marker: Color,
+    pub diff_added_bg: Option<Color>,
+    pub diff_removed_bg: Option<Color>,
+    pub diff_modified_bg: Option<Color>,
 
     // Animation gradients (derived from diff colors)
     pub insert: AnimationGradient,
@@ -390,6 +396,18 @@ impl ThemeConfig {
         let diff_removed = resolve(&tokens.diff_removed, Color::Red);
         let warning = resolve(&tokens.warning, Color::Yellow);
 
+        let background = resolve_bg(&tokens.background);
+        let background_panel = resolve_bg(&tokens.background_panel);
+        let background_element = resolve_bg(&tokens.background_element);
+        let base_bg = background.or(background_panel).or(background_element);
+
+        let diff_added_bg = resolve_bg(&tokens.diff_added_bg)
+            .or_else(|| base_bg.and_then(|bg| color::blend_colors(bg, diff_added, 0.18)));
+        let diff_removed_bg = resolve_bg(&tokens.diff_removed_bg)
+            .or_else(|| base_bg.and_then(|bg| color::blend_colors(bg, diff_removed, 0.18)));
+        let diff_modified_bg = resolve_bg(&tokens.diff_modified_bg)
+            .or_else(|| base_bg.and_then(|bg| color::blend_colors(bg, warning, 0.16)));
+
         ResolvedTheme {
             // Core UI - ANSI defaults for terminal palette compatibility
             text: resolve(&tokens.text, Color::Reset),
@@ -404,9 +422,9 @@ impl ThemeConfig {
             info: resolve(&tokens.info, Color::Blue),
 
             // Backgrounds - transparent by default
-            background: resolve_bg(&tokens.background),
-            background_panel: resolve_bg(&tokens.background_panel),
-            background_element: resolve_bg(&tokens.background_element),
+            background,
+            background_panel,
+            background_element,
 
             // Borders
             border: resolve(&tokens.border, Color::DarkGray),
@@ -417,6 +435,9 @@ impl ThemeConfig {
             diff_context: resolve(&tokens.diff_context, Color::Reset),
             diff_line_number: resolve(&tokens.diff_line_number, Color::DarkGray),
             diff_ext_marker: resolve(&tokens.diff_ext_marker, Color::DarkGray),
+            diff_added_bg,
+            diff_removed_bg,
+            diff_modified_bg,
 
             // Animation gradients derived from diff colors
             insert: color::gradient_from_color(diff_added),
@@ -475,8 +496,14 @@ fn merge_theme_tokens(base: &mut ThemeTokens, overlay: &ThemeTokens) {
     if overlay.diff_added.is_some() {
         base.diff_added = overlay.diff_added.clone();
     }
+    if overlay.diff_added_bg.is_some() {
+        base.diff_added_bg = overlay.diff_added_bg.clone();
+    }
     if overlay.diff_removed.is_some() {
         base.diff_removed = overlay.diff_removed.clone();
+    }
+    if overlay.diff_removed_bg.is_some() {
+        base.diff_removed_bg = overlay.diff_removed_bg.clone();
     }
     if overlay.diff_context.is_some() {
         base.diff_context = overlay.diff_context.clone();
@@ -486,6 +513,9 @@ fn merge_theme_tokens(base: &mut ThemeTokens, overlay: &ThemeTokens) {
     }
     if overlay.diff_ext_marker.is_some() {
         base.diff_ext_marker = overlay.diff_ext_marker.clone();
+    }
+    if overlay.diff_modified_bg.is_some() {
+        base.diff_modified_bg = overlay.diff_modified_bg.clone();
     }
 }
 
@@ -509,6 +539,10 @@ pub struct UiConfig {
     pub syntax: SyntaxConfig,
     /// Single-pane view settings
     pub single: SingleViewConfig,
+    /// Evolution view settings
+    pub evo: EvoViewConfig,
+    /// Diff styling settings
+    pub diff: DiffConfig,
     /// Enable stepping (default: true). If false, shows all changes (no-step behavior)
     pub stepping: bool,
     /// Marker for primary active line (left pane / single pane)
@@ -534,6 +568,8 @@ impl Default for UiConfig {
             strikethrough_deletions: false,
             syntax: SyntaxConfig::default(),
             single: SingleViewConfig::default(),
+            evo: EvoViewConfig::default(),
+            diff: DiffConfig::default(),
             stepping: true,
             primary_marker: "▶".to_string(),
             primary_marker_right: None,
@@ -560,6 +596,62 @@ impl Default for SingleViewConfig {
     }
 }
 
+/// Evolution view configuration
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct EvoViewConfig {
+    /// Syntax scope in evolution view: "context" or "full"
+    pub syntax: EvoSyntaxMode,
+}
+
+impl Default for EvoViewConfig {
+    fn default() -> Self {
+        Self {
+            syntax: EvoSyntaxMode::Context,
+        }
+    }
+}
+
+/// Diff styling configuration
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct DiffConfig {
+    /// Diff background mode: "none", "text", or "line"
+    #[serde(default = "diff_bg_default")]
+    pub bg: DiffBackgroundMode,
+    /// Diff foreground mode: "theme" or "syntax"
+    #[serde(default = "diff_fg_default")]
+    pub fg: DiffForegroundMode,
+}
+
+impl Default for DiffConfig {
+    fn default() -> Self {
+        Self {
+            bg: diff_bg_default(),
+            fg: diff_fg_default(),
+        }
+    }
+}
+
+fn diff_bg_default() -> DiffBackgroundMode {
+    DiffBackgroundMode::Text
+}
+
+fn diff_fg_default() -> DiffForegroundMode {
+    DiffForegroundMode::Theme
+}
+
+/// Evolution view syntax scope
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum EvoSyntaxMode {
+    /// Syntax highlight only non-diff context lines
+    #[default]
+    Context,
+    /// Syntax highlight all non-active lines (including diffs)
+    Full,
+}
+
 /// Single-pane modified line rendering mode
 #[derive(Debug, Deserialize, Clone, Copy, Default, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -567,6 +659,26 @@ pub enum ModifiedStepMode {
     #[default]
     Mixed,
     Modified,
+}
+
+/// Diff background rendering mode
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DiffBackgroundMode {
+    #[serde(alias = "off")]
+    None,
+    #[default]
+    Text,
+    Line,
+}
+
+/// Diff foreground rendering mode
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DiffForegroundMode {
+    #[default]
+    Theme,
+    Syntax,
 }
 
 /// Syntax highlighting mode
@@ -644,8 +756,8 @@ impl Default for PlaybackConfig {
         Self {
             speed: 200,
             autoplay: false,
-            animation: false,
-            animation_duration: 150,
+            animation: true,
+            animation_duration: 120,
             auto_step_on_enter: true,
             auto_step_blank_files: true,
         }

@@ -47,6 +47,10 @@
       "dark": "green",
       "light": "green"
     },
+    "diffAddedBg": {
+      "dark": "#1a3a1a",
+      "light": "#e0ffe0"
+    },
     "diffContext": {
       "dark": "comment",
       "light": "#6272a4"
@@ -55,9 +59,17 @@
       "dark": "currentLine",
       "light": "#c8c8c2"
     },
+    "diffModifiedBg": {
+      "dark": "#484b44",
+      "light": "#f7f8e2"
+    },
     "diffRemoved": {
       "dark": "red",
       "light": "red"
+    },
+    "diffRemovedBg": {
+      "dark": "#3a1a1a",
+      "light": "#ffe0e0"
     },
     "error": {
       "dark": "red",

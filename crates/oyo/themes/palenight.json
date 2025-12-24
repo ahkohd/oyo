@@ -50,6 +50,10 @@
       "dark": "green",
       "light": "#91b859"
     },
+    "diffAddedBg": {
+      "dark": "#2e3c2b",
+      "light": "#e8f5e9"
+    },
     "diffContext": {
       "dark": "comment",
       "light": "#8796b0"
@@ -58,9 +62,17 @@
       "dark": "#444760",
       "light": "#cfd8dc"
     },
+    "diffModifiedBg": {
+      "dark": "#4b4645",
+      "light": "#fbefd2"
+    },
     "diffRemoved": {
       "dark": "red",
       "light": "#e53935"
+    },
+    "diffRemovedBg": {
+      "dark": "#3c2b2b",
+      "light": "#ffebee"
     },
     "error": {
       "dark": "red",

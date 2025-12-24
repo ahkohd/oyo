@@ -50,14 +50,23 @@
     "diffAdded": {
       "dark": "darkAdded"
     },
+    "diffAddedBg": {
+      "dark": "#20303b"
+    },
     "diffContext": {
       "dark": "darkComment"
     },
     "diffLineNumber": {
       "dark": "darkGutter"
     },
+    "diffModifiedBg": {
+      "dark": "#2e2923"
+    },
     "diffRemoved": {
       "dark": "darkRemoved"
+    },
+    "diffRemovedBg": {
+      "dark": "#37222c"
     },
     "error": {
       "dark": "darkError"

@@ -196,30 +196,6 @@ pub fn gradient_color(gradient: &AnimationGradient, t: f32) -> Rgb {
     hsl_to_rgb(hsl)
 }
 
-/// Compute animation t value for gradient lookup
-/// FadeOut: linear 0.0 → 0.5 (neutral → base)
-/// FadeIn: pulse 0.5 → 1.0 → 0.5 (base → bright → base)
-/// Idle: 0.5 (base)
-/// Backward: reverses the spectrum (1.0 - t)
-pub fn animation_t(phase: AnimationPhase, progress: f32, backward: bool) -> f32 {
-    let p = progress.clamp(0.0, 1.0);
-
-    let t = match phase {
-        AnimationPhase::FadeOut => 0.5 * ease_in_out(p),
-        AnimationPhase::FadeIn => {
-            let pulse = (std::f32::consts::PI * p).sin();
-            0.5 + 0.5 * (pulse * pulse)
-        }
-        AnimationPhase::Idle => 0.5,
-    };
-
-    if backward {
-        1.0 - t
-    } else {
-        t
-    }
-}
-
 /// Compute a linear animation t value across both phases (0.0 → 1.0)
 pub fn animation_t_linear(phase: AnimationPhase, progress: f32) -> f32 {
     let p = progress.clamp(0.0, 1.0);
@@ -228,12 +204,6 @@ pub fn animation_t_linear(phase: AnimationPhase, progress: f32) -> f32 {
         AnimationPhase::FadeIn => 0.5 + p * 0.5,
         AnimationPhase::Idle => 1.0,
     }
-}
-
-/// Ease-in-out curve (smoothstep)
-pub fn ease_in_out(t: f32) -> f32 {
-    let t = t.clamp(0.0, 1.0);
-    t * t * (3.0 - 2.0 * t)
 }
 
 /// Ease-out curve: fast start, slow end
@@ -358,6 +328,19 @@ pub fn color_to_rgb(color: Color) -> Option<Rgb> {
         Color::Rgb(r, g, b) => Some(Rgb { r, g, b }),
         _ => None,
     }
+}
+
+/// Blend two colors using alpha (0.0 = bg, 1.0 = fg).
+pub fn blend_colors(bg: Color, fg: Color, alpha: f32) -> Option<Color> {
+    let bg = color_to_rgb(bg)?;
+    let fg = color_to_rgb(fg)?;
+    let a = alpha.clamp(0.0, 1.0);
+    let blend = |b: u8, f: u8| -> u8 { (b as f32 * (1.0 - a) + f as f32 * a).round() as u8 };
+    Some(Color::Rgb(
+        blend(bg.r, fg.r),
+        blend(bg.g, fg.g),
+        blend(bg.b, fg.b),
+    ))
 }
 
 /// Build AnimationGradient from a ratatui Color
