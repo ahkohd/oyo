@@ -199,6 +199,29 @@ fn truncate_path(path: &str, max_width: usize) -> String {
     format!("{prefix}{last_display}")
 }
 
+fn truncate_text(text: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    if max_width <= 3 {
+        return ".".repeat(max_width);
+    }
+    if text.len() <= max_width {
+        return text.to_string();
+    }
+    let mut acc = String::new();
+    let mut width = 0usize;
+    for ch in text.chars() {
+        let ch_width = UnicodeWidthStr::width(ch.to_string().as_str());
+        if width + ch_width > max_width.saturating_sub(3) {
+            break;
+        }
+        acc.push(ch);
+        width += ch_width;
+    }
+    format!("{acc}...")
+}
+
 /// Main drawing function
 pub fn draw(frame: &mut Frame, app: &mut App) {
     if app.zen_mode {
@@ -552,18 +575,27 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
                 .map(|s| s.to_string())
         })
         .unwrap_or_else(|| ".".to_string());
-    let root_label = "Root ";
-    let root_max_width = header_area
-        .width
-        .saturating_sub((root_label.len() + 1) as u16) as usize;
-    let root_display = truncate_path(&root_path, root_max_width);
+    let header_max_width = header_area.width.saturating_sub(1) as usize;
+    let range_display = app.multi_diff.git_range_display();
+    let header_text = if let Some((from, to)) = range_display {
+        truncate_text(&format!("{root_path} • {from}..{to}"), header_max_width)
+    } else {
+        let root_label = "Root ";
+        let root_max_width = header_area
+            .width
+            .saturating_sub((root_label.len() + 1) as u16) as usize;
+        format!(
+            "{}{}",
+            root_label,
+            truncate_path(&root_path, root_max_width)
+        )
+    };
 
     let header_lines = vec![
         Line::raw(""),
         Line::from(vec![
             Span::raw(" "),
-            Span::styled(root_label, Style::default().fg(app.theme.text_muted)),
-            Span::styled(root_display, Style::default().fg(app.theme.text_muted)),
+            Span::styled(header_text, Style::default().fg(app.theme.text_muted)),
         ]),
         Line::raw(""),
         Line::from(vec![
