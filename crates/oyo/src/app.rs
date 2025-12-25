@@ -1757,6 +1757,33 @@ impl App {
         Some((applied, total))
     }
 
+    pub fn pending_insert_only_in_current_hunk(&mut self) -> usize {
+        let nav = self.multi_diff.current_navigator();
+        let state = nav.state();
+        let hunk = match nav.current_hunk() {
+            Some(hunk) => hunk,
+            None => return 0,
+        };
+
+        let mut pending = 0usize;
+        for change_id in &hunk.change_ids {
+            if state.applied_changes.contains(change_id) {
+                continue;
+            }
+            if let Some(change) = nav.diff().changes.iter().find(|c| c.id == *change_id) {
+                let is_insert_only = change
+                    .spans
+                    .iter()
+                    .all(|span| span.kind == ChangeKind::Insert);
+                if is_insert_only {
+                    pending += 1;
+                }
+            }
+        }
+
+        pending
+    }
+
     /// Jump to first change of current hunk
     pub fn goto_hunk_start(&mut self) {
         self.clear_peek();

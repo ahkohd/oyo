@@ -33,6 +33,10 @@ pub(crate) fn spans_width(spans: &[Span]) -> usize {
         .sum()
 }
 
+pub(crate) fn pending_tail_text(count: usize) -> String {
+    format!("... +{} more", count)
+}
+
 pub(crate) fn diff_line_bg(kind: LineKind, theme: &ResolvedTheme) -> Option<Color> {
     match kind {
         LineKind::Inserted | LineKind::PendingInsert => theme.diff_added_bg,
