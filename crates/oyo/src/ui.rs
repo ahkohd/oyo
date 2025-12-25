@@ -317,8 +317,13 @@ fn draw_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
         None
     };
     let hunk_step_text = if app.stepping {
-        app.hunk_step_info()
-            .map(|(current, total)| format!("{}/{}", current, total))
+        app.hunk_step_info().and_then(|(current, total)| {
+            if current > 0 {
+                Some(format!("{}/{}", current, total))
+            } else {
+                None
+            }
+        })
     } else {
         None
     };
