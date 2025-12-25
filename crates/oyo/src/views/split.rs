@@ -2,8 +2,8 @@
 
 use super::{
     apply_line_bg, apply_spans_bg, clear_leading_ws_bg, diff_line_bg, expand_tabs_in_spans,
-    render_empty_state, spans_to_text, spans_width, truncate_text, wrap_count_for_spans,
-    wrap_count_for_text, TAB_WIDTH,
+    pad_spans_bg, render_empty_state, slice_spans, spans_to_text, spans_width, truncate_text,
+    wrap_count_for_spans, wrap_count_for_text, TAB_WIDTH,
 };
 use crate::app::{AnimationPhase, App};
 use crate::config::{DiffBackgroundMode, DiffForegroundMode};
@@ -318,9 +318,7 @@ fn render_old_pane(frame: &mut Frame, app: &mut App, area: Rect) {
                 && line_text.to_ascii_lowercase().contains(&query);
             content_spans = app.highlight_search_spans(content_spans, &line_text, is_active_match);
 
-            if app.line_wrap {
-                content_spans = expand_tabs_in_spans(&content_spans, TAB_WIDTH);
-            }
+            content_spans = expand_tabs_in_spans(&content_spans, TAB_WIDTH);
 
             let line_width = spans_width(&content_spans);
             max_line_width = max_line_width.max(line_width);
@@ -330,7 +328,16 @@ fn render_old_pane(frame: &mut Frame, app: &mut App, area: Rect) {
             } else {
                 1
             };
-            content_lines.push(Line::from(content_spans));
+            let mut display_spans = content_spans;
+            if !app.line_wrap {
+                display_spans = slice_spans(&display_spans, app.horizontal_scroll, visible_width);
+                if app.diff_bg == DiffBackgroundMode::Line {
+                    if let Some(bg) = diff_line_bg(bg_kind, &app.theme) {
+                        display_spans = pad_spans_bg(display_spans, bg, visible_width);
+                    }
+                }
+            }
+            content_lines.push(Line::from(display_spans));
             if app.line_wrap && wrap_count > 1 {
                 for _ in 1..wrap_count {
                     gutter_lines.push(Line::from(Span::raw(" ")));
@@ -389,7 +396,7 @@ fn render_old_pane(frame: &mut Frame, app: &mut App, area: Rect) {
                 .wrap(Wrap { trim: false })
                 .scroll((app.scroll_offset as u16, 0))
         } else {
-            Paragraph::new(content_lines).scroll((0, app.horizontal_scroll as u16))
+            Paragraph::new(content_lines)
         };
         if let Some(style) = bg_style {
             content_paragraph = content_paragraph.style(style);
@@ -633,16 +640,23 @@ fn render_new_pane(frame: &mut Frame, app: &mut App, area: Rect) {
                 && line_text.to_ascii_lowercase().contains(&query);
             content_spans = app.highlight_search_spans(content_spans, &line_text, is_active_match);
 
-            if app.line_wrap {
-                content_spans = expand_tabs_in_spans(&content_spans, TAB_WIDTH);
-            }
+            content_spans = expand_tabs_in_spans(&content_spans, TAB_WIDTH);
 
             let wrap_count = if app.line_wrap {
                 wrap_count_for_spans(&content_spans, visible_width)
             } else {
                 1
             };
-            content_lines.push(Line::from(content_spans));
+            let mut display_spans = content_spans;
+            if !app.line_wrap {
+                display_spans = slice_spans(&display_spans, app.horizontal_scroll, visible_width);
+                if app.diff_bg == DiffBackgroundMode::Line {
+                    if let Some(bg) = diff_line_bg(bg_kind, &app.theme) {
+                        display_spans = pad_spans_bg(display_spans, bg, visible_width);
+                    }
+                }
+            }
+            content_lines.push(Line::from(display_spans));
 
             // Build marker line
             marker_lines.push(Line::from(Span::styled(active_marker, active_style)));
@@ -707,7 +721,7 @@ fn render_new_pane(frame: &mut Frame, app: &mut App, area: Rect) {
                 .wrap(Wrap { trim: false })
                 .scroll((app.scroll_offset as u16, 0))
         } else {
-            Paragraph::new(content_lines).scroll((0, app.horizontal_scroll as u16))
+            Paragraph::new(content_lines)
         };
         if let Some(style) = bg_style {
             content_paragraph = content_paragraph.style(style);

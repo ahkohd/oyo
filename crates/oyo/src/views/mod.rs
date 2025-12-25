@@ -175,6 +175,69 @@ pub(crate) fn expand_tabs_in_text(text: &str, tab_width: usize) -> String {
     out
 }
 
+pub(crate) fn slice_spans(
+    spans: &[Span<'static>],
+    start_col: usize,
+    width: usize,
+) -> Vec<Span<'static>> {
+    if width == 0 {
+        return Vec::new();
+    }
+    let end_col = start_col.saturating_add(width);
+    let mut out = Vec::new();
+    let mut col = 0usize;
+
+    for span in spans {
+        if span.content.is_empty() {
+            continue;
+        }
+        let mut buf = String::new();
+        for g in span.content.as_ref().graphemes(true) {
+            if g == "\n" {
+                col = 0;
+                continue;
+            }
+            let g_width = UnicodeWidthStr::width(g);
+            let next_col = col.saturating_add(g_width);
+            if next_col <= start_col {
+                col = next_col;
+                continue;
+            }
+            if col >= end_col {
+                break;
+            }
+            buf.push_str(g);
+            col = next_col;
+            if col >= end_col {
+                break;
+            }
+        }
+        if !buf.is_empty() {
+            out.push(Span::styled(buf, span.style));
+        }
+        if col >= end_col {
+            break;
+        }
+    }
+
+    out
+}
+
+pub(crate) fn pad_spans_bg(
+    mut spans: Vec<Span<'static>>,
+    bg: Color,
+    width: usize,
+) -> Vec<Span<'static>> {
+    let current_width = spans_width(&spans);
+    if current_width < width {
+        spans.push(Span::styled(
+            " ".repeat(width - current_width),
+            Style::default().bg(bg),
+        ));
+    }
+    spans
+}
+
 pub(crate) fn wrap_count_for_spans(spans: &[Span], wrap_width: usize) -> usize {
     let graphemes = spans
         .iter()

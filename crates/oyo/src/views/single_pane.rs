@@ -2,8 +2,8 @@
 
 use super::{
     apply_line_bg, apply_spans_bg, clear_leading_ws_bg, diff_line_bg, expand_tabs_in_spans,
-    render_empty_state, spans_to_text, spans_width, truncate_text, wrap_count_for_spans,
-    wrap_count_for_text, TAB_WIDTH,
+    pad_spans_bg, render_empty_state, slice_spans, spans_to_text, spans_width, truncate_text,
+    wrap_count_for_spans, wrap_count_for_text, TAB_WIDTH,
 };
 use crate::app::{AnimationPhase, App};
 use crate::color;
@@ -618,9 +618,7 @@ pub fn render_single_pane(frame: &mut Frame, app: &mut App, area: Rect) {
             }
         }
 
-        if app.line_wrap {
-            content_spans = expand_tabs_in_spans(&content_spans, TAB_WIDTH);
-        }
+        content_spans = expand_tabs_in_spans(&content_spans, TAB_WIDTH);
 
         // Track max line width for horizontal scroll clamping
         let line_width = spans_width(&content_spans);
@@ -635,7 +633,17 @@ pub fn render_single_pane(frame: &mut Frame, app: &mut App, area: Rect) {
             display_len += wrap_count;
         }
 
-        content_lines.push(Line::from(content_spans));
+        let mut display_spans = content_spans;
+        if !app.line_wrap {
+            display_spans = slice_spans(&display_spans, app.horizontal_scroll, visible_width);
+            if app.diff_bg == DiffBackgroundMode::Line {
+                if let Some(bg) = diff_line_bg(view_line.kind, &app.theme) {
+                    display_spans = pad_spans_bg(display_spans, bg, visible_width);
+                }
+            }
+        }
+
+        content_lines.push(Line::from(display_spans));
         if app.line_wrap && wrap_count > 1 {
             for _ in 1..wrap_count {
                 gutter_lines.push(Line::from(Span::raw(" ")));
@@ -706,7 +714,7 @@ pub fn render_single_pane(frame: &mut Frame, app: &mut App, area: Rect) {
                 .wrap(Wrap { trim: false })
                 .scroll((app.scroll_offset as u16, 0))
         } else {
-            Paragraph::new(content_lines).scroll((0, app.horizontal_scroll as u16))
+            Paragraph::new(content_lines)
         };
         if let Some(style) = bg_style {
             content_paragraph = content_paragraph.style(style);
