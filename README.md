@@ -15,20 +15,22 @@ Step through changes or scroll the full diff, jump between hunks, and watch code
 ## Features
 
 - **Step-through navigation**: Move through changes one at a time with keyboard shortcuts
-- **No-step mode**: Review all changes at once with scroll + hunk navigation (scroll-only diff viewer)
 - **Hunk navigation**: Jump between groups of related changes (hunks) in step or no-step mode
-- **Animated transitions**: Smooth fade in/out animations as changes are applied
-- **Syntax highlighting**: Toggle on/off for code-aware coloring (auto-enabled in no-step mode)
+- **No-step mode**: Review all changes at once with scroll + hunk navigation (scroll-only diff viewer)
 - **Three view modes**:
   - **Single**: Watch the code morph from old to new state
   - **Split**: See old and new versions with synchronized stepping
   - **Evolution**: Watch the file evolve, deletions simply disappear
-- **Git integration**: Works as a git external diff tool or standalone
 - **Word-level diffing**: See exactly which words changed within a line
-- **Autoplay**: Automatically step through all changes at a configurable speed
 - **Multi-file support**: Navigate between changed files with preserved positions
 - **Search**: Regex search with to jump between matches
+- **Syntax highlighting**: Toggle on/off for code-aware coloring (auto-enabled in no-step mode)
 - **Line wrap**: Toggle wrapping for long lines
+- **Animated transitions**: Smooth fade in/out animations as changes are applied
+- **Playback**: Automatically step through all changes at a configurable speed
+- **Git integration**: Works as a git external diff tool or standalone
+- **Commit picker**: Browse recent commits and pick ranges interactively (`oyo view`)
+- **Themes**: Built-in themes plus `.tmTheme` syntax themes (configurable)
 - **Configurable**: XDG config file support for customization
 
 ## Installation
@@ -55,6 +57,9 @@ oyo
 
 # Compare two files
 oyo old.rs new.rs
+
+# Commit picker
+oyo view
 
 # Split view
 oyo old.rs new.rs --view split

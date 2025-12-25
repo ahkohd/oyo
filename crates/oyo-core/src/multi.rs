@@ -48,6 +48,7 @@ pub struct MultiFileDiff {
 enum GitDiffMode {
     Uncommitted,
     Staged,
+    IndexRange { from: String, to_index: bool },
     Range { from: String, to: String },
 }
 
@@ -154,6 +155,76 @@ impl MultiFileDiff {
             navigators,
             repo_root: Some(repo_root),
             git_mode: Some(GitDiffMode::Staged),
+            old_contents,
+            new_contents,
+        })
+    }
+
+    /// Create from a git range where one side is the staged index
+    pub fn from_git_index_range(
+        repo_root: PathBuf,
+        changes: Vec<ChangedFile>,
+        from: String,
+        to_index: bool,
+    ) -> Result<Self, MultiDiffError> {
+        let mut files = Vec::new();
+        let mut old_contents = Vec::new();
+        let mut new_contents = Vec::new();
+        let engine = DiffEngine::new().with_word_level(true);
+
+        for change in changes {
+            let old_path = change
+                .old_path
+                .clone()
+                .unwrap_or_else(|| change.path.clone());
+            let (old_content, new_content) = if to_index {
+                let old_content = match change.status {
+                    FileStatus::Added | FileStatus::Untracked => String::new(),
+                    _ => crate::git::get_file_at_commit(&repo_root, &from, &old_path)
+                        .unwrap_or_default(),
+                };
+                let new_content = match change.status {
+                    FileStatus::Deleted => String::new(),
+                    _ => crate::git::get_staged_content(&repo_root, &change.path)
+                        .unwrap_or_default(),
+                };
+                (old_content, new_content)
+            } else {
+                let old_content = match change.status {
+                    FileStatus::Added | FileStatus::Untracked => String::new(),
+                    _ => crate::git::get_staged_content(&repo_root, &old_path).unwrap_or_default(),
+                };
+                let new_content = match change.status {
+                    FileStatus::Deleted => String::new(),
+                    _ => crate::git::get_file_at_commit(&repo_root, &from, &change.path)
+                        .unwrap_or_default(),
+                };
+                (old_content, new_content)
+            };
+
+            let diff = engine.diff_strings(&old_content, &new_content);
+
+            files.push(FileEntry {
+                display_name: change.path.display().to_string(),
+                path: change.path,
+                old_path: change.old_path,
+                status: change.status,
+                insertions: diff.insertions,
+                deletions: diff.deletions,
+            });
+
+            old_contents.push(old_content);
+            new_contents.push(new_content);
+        }
+
+        let navigators: Vec<Option<DiffNavigator>> = (0..files.len()).map(|_| None).collect();
+
+        Ok(Self {
+            files,
+            selected_index: 0,
+            navigators,
+            repo_root: Some(repo_root),
+            git_mode: Some(GitDiffMode::IndexRange { from, to_index }),
             old_contents,
             new_contents,
         })
@@ -392,6 +463,25 @@ impl MultiFileDiff {
         self.repo_root.is_some()
     }
 
+    /// Return a display-friendly git range for header usage (if applicable).
+    pub fn git_range_display(&self) -> Option<(String, String)> {
+        let mode = self.git_mode.as_ref()?;
+        match mode {
+            GitDiffMode::Range { from, to } => {
+                Some((format_ref(from), format_ref(to)))
+            }
+            GitDiffMode::IndexRange { from, to_index } => {
+                let staged = "STAGED".to_string();
+                if *to_index {
+                    Some((format_ref(from), staged))
+                } else {
+                    Some((staged, format_ref(from)))
+                }
+            }
+            _ => None,
+        }
+    }
+
     /// Get the step direction of current navigator (if loaded)
     pub fn current_step_direction(&self) -> StepDirection {
         if let Some(Some(nav)) = self.navigators.get(self.selected_index) {
@@ -447,6 +537,9 @@ impl MultiFileDiff {
             GitDiffMode::Staged => crate::git::get_staged_changes(&repo_root),
             GitDiffMode::Range { ref from, ref to } => {
                 crate::git::get_changes_between(&repo_root, from, to)
+            }
+            GitDiffMode::IndexRange { ref from, to_index } => {
+                crate::git::get_changes_between_index(&repo_root, from, !to_index)
             }
         };
         let changes = match changes {
@@ -507,6 +600,33 @@ impl MultiFileDiff {
                                 .unwrap_or_default(),
                         };
                         (old_content, new_content)
+                    }
+                    GitDiffMode::IndexRange { ref from, to_index } => {
+                        if to_index {
+                            let old_content = match change.status {
+                                FileStatus::Added | FileStatus::Untracked => String::new(),
+                                _ => crate::git::get_file_at_commit(&repo_root, from, &old_path)
+                                    .unwrap_or_default(),
+                            };
+                            let new_content = match change.status {
+                                FileStatus::Deleted => String::new(),
+                                _ => crate::git::get_staged_content(&repo_root, &change.path)
+                                    .unwrap_or_default(),
+                            };
+                            (old_content, new_content)
+                        } else {
+                            let old_content = match change.status {
+                                FileStatus::Added | FileStatus::Untracked => String::new(),
+                                _ => crate::git::get_staged_content(&repo_root, &old_path)
+                                    .unwrap_or_default(),
+                            };
+                            let new_content = match change.status {
+                                FileStatus::Deleted => String::new(),
+                                _ => crate::git::get_file_at_commit(&repo_root, from, &change.path)
+                                    .unwrap_or_default(),
+                            };
+                            (old_content, new_content)
+                        }
                     }
                 };
 
@@ -586,6 +706,33 @@ impl MultiFileDiff {
                 };
                 (old_content, new_content)
             }
+            (Some(repo_root), Some(GitDiffMode::IndexRange { from, to_index })) => {
+                if *to_index {
+                    let old_content = match file.status {
+                        FileStatus::Added | FileStatus::Untracked => String::new(),
+                        _ => crate::git::get_file_at_commit(repo_root, from, &old_path)
+                            .unwrap_or_default(),
+                    };
+                    let new_content = match file.status {
+                        FileStatus::Deleted => String::new(),
+                        _ => crate::git::get_staged_content(repo_root, &file.path)
+                            .unwrap_or_default(),
+                    };
+                    (old_content, new_content)
+                } else {
+                    let old_content = match file.status {
+                        FileStatus::Added | FileStatus::Untracked => String::new(),
+                        _ => crate::git::get_staged_content(repo_root, &old_path)
+                            .unwrap_or_default(),
+                    };
+                    let new_content = match file.status {
+                        FileStatus::Deleted => String::new(),
+                        _ => crate::git::get_file_at_commit(repo_root, from, &file.path)
+                            .unwrap_or_default(),
+                    };
+                    (old_content, new_content)
+                }
+            }
             _ => {
                 let new_content = std::fs::read_to_string(&file.path).unwrap_or_default();
                 (self.old_contents[idx].clone(), new_content)
@@ -634,4 +781,16 @@ fn collect_files(
         }
     }
     Ok(())
+}
+
+fn format_ref(reference: &str) -> String {
+    match reference {
+        "HEAD" => "HEAD".to_string(),
+        "INDEX" => "STAGED".to_string(),
+        _ => shorten_hash(reference),
+    }
+}
+
+fn shorten_hash(hash: &str) -> String {
+    hash.chars().take(7).collect()
 }
