@@ -201,6 +201,9 @@ pub fn render_single_pane(frame: &mut Frame, app: &mut App, area: Rect) {
         app.ensure_active_visible_if_needed(visible_height);
     }
     let animation_frame = app.animation_frame();
+    app.multi_diff
+        .current_navigator()
+        .set_show_hunk_extent_while_stepping(app.stepping);
     let view_lines = app
         .multi_diff
         .current_navigator()

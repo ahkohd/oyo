@@ -1740,6 +1740,23 @@ impl App {
         (state.current_hunk + 1, state.total_hunks) // 1-indexed for display
     }
 
+    pub fn hunk_step_info(&mut self) -> Option<(usize, usize)> {
+        let nav = self.multi_diff.current_navigator();
+        let state = nav.state();
+        let hunk = nav.current_hunk()?;
+        let total = hunk.change_ids.len();
+        if total == 0 {
+            return None;
+        }
+        let mut applied = 0usize;
+        for id in &hunk.change_ids {
+            if state.applied_changes.contains(id) {
+                applied += 1;
+            }
+        }
+        Some((applied, total))
+    }
+
     /// Jump to first change of current hunk
     pub fn goto_hunk_start(&mut self) {
         self.clear_peek();

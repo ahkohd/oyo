@@ -54,6 +54,9 @@ pub struct StepState {
     /// True if preview was entered via hunkup (backward navigation)
     #[serde(default)]
     pub preview_from_backward: bool,
+    /// Show hunk extent markers while stepping (set by UI)
+    #[serde(default)]
+    pub show_hunk_extent_while_stepping: bool,
 }
 
 impl StepState {
@@ -71,6 +74,7 @@ impl StepState {
             last_nav_was_hunk: false,
             hunk_preview_mode: false,
             preview_from_backward: false,
+            show_hunk_extent_while_stepping: false,
         }
     }
 
@@ -726,6 +730,10 @@ impl DiffNavigator {
         &self.diff.hunks
     }
 
+    pub fn set_show_hunk_extent_while_stepping(&mut self, enabled: bool) {
+        self.state.show_hunk_extent_while_stepping = enabled;
+    }
+
     // ==================== End Hunk Navigation ====================
 
     /// Check if a change belongs to the hunk currently being animated
@@ -812,7 +820,9 @@ impl DiffNavigator {
             let is_active = is_active_change || is_in_hunk;
             // Show extent marker if animating hunk OR (last nav was hunk AND change in current hunk)
             let show_hunk_extent = is_in_hunk
-                || (self.state.last_nav_was_hunk && self.is_change_in_current_hunk(change.id));
+                || (self.is_change_in_current_hunk(change.id)
+                    && (self.state.last_nav_was_hunk
+                        || self.state.show_hunk_extent_while_stepping));
 
             // Fallback: if primary_change_id is None but we're in an animating hunk,
             // first active line becomes primary
