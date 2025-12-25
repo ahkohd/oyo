@@ -249,7 +249,7 @@ Config is loaded from (in priority order):
 2. `~/.config/oyo/config.toml`
 3. Platform-specific (e.g., `~/Library/Application Support/oyo/config.toml` on macOS)
 
-Theme and syntax theme configuration is documented in `THEME.md`.
+Theme and syntax theme configuration is documented in [THEME.md](./docs/THEME.md).
 
 ## How It Works
 
