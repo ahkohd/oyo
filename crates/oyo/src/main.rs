@@ -57,15 +57,15 @@ struct Args {
     autoplay: bool,
 
     /// Theme mode: dark or light
-    #[arg(long, value_enum)]
+    #[arg(long, value_enum, global = true)]
     theme_mode: Option<CliThemeMode>,
 
     /// Theme name (overrides config)
-    #[arg(long)]
+    #[arg(long, global = true)]
     theme_name: Option<String>,
 
     /// Syntax theme name or .tmTheme file (overrides config)
-    #[arg(long)]
+    #[arg(long, global = true)]
     syntax_theme: Option<String>,
 
     /// Dump syntax scopes for a file and exit
