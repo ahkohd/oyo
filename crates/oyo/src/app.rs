@@ -3587,6 +3587,18 @@ mod tests {
         app
     }
 
+    fn make_app_with_single_hunk_two_changes() -> App {
+        let old = "one\ntwo\nthree\nfour".to_string();
+        let new = "ONE\nTWO\nthree\nfour".to_string();
+        let multi_diff = MultiFileDiff::from_file_pair(
+            std::path::PathBuf::from("a.txt"),
+            std::path::PathBuf::from("a.txt"),
+            old,
+            new,
+        );
+        App::new(multi_diff, ViewMode::SinglePane, 0, false, None)
+    }
+
     #[test]
     fn test_no_step_prev_hunk_from_bottom_advances() {
         let mut app = make_app_with_two_hunks();
@@ -3687,5 +3699,17 @@ mod tests {
         assert_eq!(after.current_hunk, before.current_hunk);
         assert_eq!(after.cursor_change, before.cursor_change);
         assert!(after.last_nav_was_hunk);
+    }
+
+    #[test]
+    fn test_hunk_step_info_counts_applied_changes() {
+        let mut app = make_app_with_single_hunk_two_changes();
+        assert_eq!(app.hunk_step_info(), Some((0, 2)));
+
+        app.next_step();
+        assert_eq!(app.hunk_step_info(), Some((1, 2)));
+
+        app.next_step();
+        assert_eq!(app.hunk_step_info(), Some((2, 2)));
     }
 }

@@ -2032,6 +2032,26 @@ mod tests {
     }
 
     #[test]
+    fn test_hunk_extent_while_stepping() {
+        // When stepping (not hunk-nav), extent markers should still show
+        // if explicitly enabled by the UI.
+        let old = "one\ntwo\nthree\nfour\n";
+        let new = "ONE\nTWO\nthree\nfour\n";
+        let diff = DiffEngine::new().diff_strings(old, new);
+        let mut nav = DiffNavigator::new(diff, old.to_string(), new.to_string());
+
+        nav.next();
+        nav.set_show_hunk_extent_while_stepping(true);
+        let view = nav.current_view_with_frame(AnimationFrame::Idle);
+
+        let extent = view.iter().filter(|l| l.show_hunk_extent).count();
+        assert!(
+            extent > 0,
+            "Extent markers should show while stepping when enabled"
+        );
+    }
+
+    #[test]
     fn test_primary_active_fallback_when_active_change_none() {
         // When active_change is None but animating_hunk is set,
         // the first line in the hunk should become primary and be active
