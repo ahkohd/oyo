@@ -435,7 +435,10 @@ pub fn render_single_pane(frame: &mut Frame, app: &mut App, area: Rect) {
                 .spans
                 .iter()
                 .all(|span| matches!(span.kind, ViewSpanKind::Equal));
-        let can_use_diff_syntax = wants_diff_syntax && !has_peek;
+        let can_use_diff_syntax = wants_diff_syntax
+            && !has_peek
+            && (app.stepping
+                || !matches!(view_line.kind, LineKind::Modified | LineKind::PendingModify));
         if !used_inline_modified
             && app.syntax_enabled()
             && !view_line.is_active_change
