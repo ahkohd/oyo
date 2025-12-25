@@ -8,7 +8,7 @@ mod syntax;
 mod ui;
 mod views;
 
-use crate::dashboard::{Dashboard, DashboardSelection};
+use crate::dashboard::{Dashboard, DashboardConfig, DashboardSelection};
 use crate::syntax::{list_syntax_themes, SyntaxEngine};
 use anyhow::{Context, Result};
 use app::{App, ViewMode};
@@ -378,8 +378,9 @@ fn build_diff_from_input_mode(
                     (to.clone(), false)
                 };
                 let reverse = !to_index;
-                let changes = oyo_core::git::get_changes_between_index(&repo_root, &commit, reverse)
-                    .context("Failed to get index range changes")?;
+                let changes =
+                    oyo_core::git::get_changes_between_index(&repo_root, &commit, reverse)
+                        .context("Failed to get index range changes")?;
                 if changes.is_empty() {
                     return Ok(None);
                 }
@@ -397,8 +398,9 @@ fn build_diff_from_input_mode(
                 if changes.is_empty() {
                     return Ok(None);
                 }
-                let diff = MultiFileDiff::from_git_range(repo_root.clone(), changes.clone(), from, to)
-                    .context("Failed to create diff from range")?;
+                let diff =
+                    MultiFileDiff::from_git_range(repo_root.clone(), changes.clone(), from, to)
+                        .context("Failed to create diff from range")?;
                 (changes, diff)
             };
             if changes.is_empty() {
@@ -534,24 +536,24 @@ fn main() -> Result<()> {
         let repo_root =
             oyo_core::git::get_repo_root(&cwd).context("Failed to get git repository root")?;
         let branch = oyo_core::git::get_current_branch(&repo_root).ok();
-        let commits =
-            oyo_core::git::get_recent_commits(&repo_root, limit).context("Failed to get commits")?;
+        let commits = oyo_core::git::get_recent_commits(&repo_root, limit)
+            .context("Failed to get commits")?;
         let working_changes = oyo_core::git::get_uncommitted_changes(&repo_root)
             .context("Failed to get uncommitted changes")?;
         let staged_changes = oyo_core::git::get_staged_changes(&repo_root)
             .context("Failed to get staged changes")?;
 
         let theme = config.ui.theme.resolve(light_mode);
-        let mut dashboard = Dashboard::new(
-            repo_root.clone(),
-            branch.clone(),
+        let mut dashboard = Dashboard::new(DashboardConfig {
+            repo_root: repo_root.clone(),
+            branch: branch.clone(),
             commits,
-            working_changes.len(),
-            staged_changes.len(),
+            working_files: working_changes.len(),
+            staged_files: staged_changes.len(),
             theme,
-            config.ui.primary_marker.clone(),
-            config.ui.extent_marker.clone(),
-        );
+            primary_marker: config.ui.primary_marker.clone(),
+            extent_marker: config.ui.extent_marker.clone(),
+        });
 
         let mut terminal = setup_terminal()?;
         let selection = run_dashboard(&mut terminal, &mut dashboard)?;
@@ -660,9 +662,7 @@ fn main() -> Result<()> {
     let empty_message = match &input_mode {
         InputMode::GitUncommitted => Some("No uncommitted changes found.".to_string()),
         InputMode::GitStaged => Some("No staged changes found.".to_string()),
-        InputMode::GitRange { from, to } => {
-            Some(format!("No changes in range {}..{}.", from, to))
-        }
+        InputMode::GitRange { from, to } => Some(format!("No changes in range {}..{}.", from, to)),
         _ => Some("No changes found.".to_string()),
     };
     let (multi_diff, git_branch) = match build_diff_from_input_mode(input_mode)? {
@@ -1286,9 +1286,7 @@ fn run_dashboard<B: Backend>(
                             KeyCode::Esc | KeyCode::Enter => {
                                 dashboard.stop_filter();
                             }
-                            KeyCode::Char('u')
-                                if key.modifiers.contains(KeyModifiers::CONTROL) =>
-                            {
+                            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                                 dashboard.clear_filter();
                             }
                             KeyCode::Backspace => {

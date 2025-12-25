@@ -234,10 +234,7 @@ pub fn get_changes_between_index(
 }
 
 /// Get recent commits with short stats
-pub fn get_recent_commits(
-    repo_path: &Path,
-    limit: usize,
-) -> Result<Vec<CommitEntry>, GitError> {
+pub fn get_recent_commits(repo_path: &Path, limit: usize) -> Result<Vec<CommitEntry>, GitError> {
     let format = "%H%x1f%h%x1f%P%x1f%an%x1f%ad%x1f%s";
     let output = Command::new("git")
         .arg("-C")

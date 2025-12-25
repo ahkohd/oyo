@@ -185,8 +185,9 @@ impl MultiFileDiff {
                 };
                 let new_content = match change.status {
                     FileStatus::Deleted => String::new(),
-                    _ => crate::git::get_staged_content(&repo_root, &change.path)
-                        .unwrap_or_default(),
+                    _ => {
+                        crate::git::get_staged_content(&repo_root, &change.path).unwrap_or_default()
+                    }
                 };
                 (old_content, new_content)
             } else {
@@ -467,9 +468,7 @@ impl MultiFileDiff {
     pub fn git_range_display(&self) -> Option<(String, String)> {
         let mode = self.git_mode.as_ref()?;
         match mode {
-            GitDiffMode::Range { from, to } => {
-                Some((format_ref(from), format_ref(to)))
-            }
+            GitDiffMode::Range { from, to } => Some((format_ref(from), format_ref(to))),
             GitDiffMode::IndexRange { from, to_index } => {
                 let staged = "STAGED".to_string();
                 if *to_index {
@@ -722,8 +721,9 @@ impl MultiFileDiff {
                 } else {
                     let old_content = match file.status {
                         FileStatus::Added | FileStatus::Untracked => String::new(),
-                        _ => crate::git::get_staged_content(repo_root, &old_path)
-                            .unwrap_or_default(),
+                        _ => {
+                            crate::git::get_staged_content(repo_root, &old_path).unwrap_or_default()
+                        }
                     };
                     let new_content = match file.status {
                         FileStatus::Deleted => String::new(),

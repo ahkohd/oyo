@@ -68,40 +68,54 @@ pub struct Dashboard {
     last_list_area: Rect,
 }
 
+#[derive(Debug, Clone)]
+pub struct DashboardConfig {
+    pub repo_root: PathBuf,
+    pub branch: Option<String>,
+    pub commits: Vec<CommitEntry>,
+    pub working_files: usize,
+    pub staged_files: usize,
+    pub theme: ResolvedTheme,
+    pub primary_marker: String,
+    pub extent_marker: String,
+}
+
+struct RenderLineContext<'a> {
+    width: usize,
+    stats_width: usize,
+    detail: bool,
+    range_marker: Option<RangeMarker>,
+    marker_width: usize,
+    theme: &'a ResolvedTheme,
+    head_meta: Option<&'a (String, String)>,
+}
+
 impl Dashboard {
-    pub fn new(
-        repo_root: PathBuf,
-        branch: Option<String>,
-        commits: Vec<CommitEntry>,
-        working_files: usize,
-        staged_files: usize,
-        theme: ResolvedTheme,
-        primary_marker: String,
-        extent_marker: String,
-    ) -> Self {
+    pub fn new(config: DashboardConfig) -> Self {
         let mut entries = Vec::new();
-        let head_meta = commits
+        let head_meta = config
+            .commits
             .first()
             .map(|commit| (commit.author.clone(), commit.date.clone()));
         entries.push(DashboardEntry {
             kind: EntryKind::WorkingTree {
-                files: working_files,
+                files: config.working_files,
             },
         });
         entries.push(DashboardEntry {
             kind: EntryKind::Staged {
-                files: staged_files,
+                files: config.staged_files,
             },
         });
-        for commit in commits {
+        for commit in config.commits {
             entries.push(DashboardEntry {
                 kind: EntryKind::Commit(commit),
             });
         }
         let filtered = (0..entries.len()).collect();
         Self {
-            repo_root,
-            branch,
+            repo_root: config.repo_root,
+            branch: config.branch,
             head_meta,
             entries,
             filtered,
@@ -110,9 +124,9 @@ impl Dashboard {
             filter: String::new(),
             filter_active: false,
             pinned_from: None,
-            theme,
-            primary_marker,
-            extent_marker,
+            theme: config.theme,
+            primary_marker: config.primary_marker,
+            extent_marker: config.extent_marker,
             last_list_area: Rect::default(),
         }
     }
@@ -173,12 +187,12 @@ impl Dashboard {
 
     pub fn page_up(&mut self, view_height: usize) {
         let delta = view_height.saturating_sub(1) as isize;
-        self.move_selection(-(delta as isize), view_height);
+        self.move_selection(-delta, view_height);
     }
 
     pub fn page_down(&mut self, view_height: usize) {
         let delta = view_height.saturating_sub(1) as isize;
-        self.move_selection(delta as isize, view_height);
+        self.move_selection(delta, view_height);
     }
 
     pub fn toggle_pin(&mut self) {
@@ -302,8 +316,7 @@ impl Dashboard {
         if self.last_list_area.height > 0 {
             return self.last_list_area.height as usize;
         }
-        height
-            .saturating_sub(HEADER_HEIGHT + FOOTER_HEIGHT) as usize
+        height.saturating_sub(HEADER_HEIGHT + FOOTER_HEIGHT) as usize
     }
 
     fn current_entry(&self) -> Option<&DashboardEntry> {
@@ -376,18 +389,15 @@ impl Dashboard {
             return;
         }
         let rows = self.display_rows();
-        let Some(display_idx) = rows
-            .iter()
-            .position(|row| {
-                matches!(
-                    row,
-                    DisplayRow::Entry {
-                        idx,
-                        detail: false
-                    } if *idx == self.selected
-                )
-            })
-        else {
+        let Some(display_idx) = rows.iter().position(|row| {
+            matches!(
+                row,
+                DisplayRow::Entry {
+                    idx,
+                    detail: false
+                } if *idx == self.selected
+            )
+        }) else {
             self.scroll = 0;
             return;
         };
@@ -407,7 +417,10 @@ impl Dashboard {
             .file_name()
             .and_then(|s| s.to_str())
             .unwrap_or(".");
-        let branch = self.branch.clone().unwrap_or_else(|| "DETACHED".to_string());
+        let branch = self
+            .branch
+            .clone()
+            .unwrap_or_else(|| "DETACHED".to_string());
         let mut lines = vec![
             Line::from(vec![Span::styled(
                 format!("{repo_name}@{branch}"),
@@ -426,7 +439,10 @@ impl Dashboard {
             let to_label = match self.current_entry().map(|entry| &entry.kind) {
                 Some(EntryKind::Commit(commit)) => shorten_hash(&commit.id),
                 Some(EntryKind::WorkingTree { .. }) | Some(EntryKind::Staged { .. }) => {
-                    if matches!(self.current_entry().map(|entry| &entry.kind), Some(EntryKind::Staged { .. })) {
+                    if matches!(
+                        self.current_entry().map(|entry| &entry.kind),
+                        Some(EntryKind::Staged { .. })
+                    ) {
                         "STAGED".to_string()
                     } else {
                         HEAD_REF.to_string()
@@ -542,10 +558,12 @@ impl Dashboard {
                     matches!(self.entries[*entry_idx].kind, EntryKind::Staged { .. })
                 });
             }
-            self.filtered.iter().position(|entry_idx| match &self.entries[*entry_idx].kind {
-                EntryKind::Commit(commit) => commit.id == *pinned_id,
-                _ => false,
-            })
+            self.filtered
+                .iter()
+                .position(|entry_idx| match &self.entries[*entry_idx].kind {
+                    EntryKind::Commit(commit) => commit.id == *pinned_id,
+                    _ => false,
+                })
         });
         let pinned_display_idx = pinned_filtered_idx.and_then(|idx| {
             rows.iter().position(|row| {
@@ -570,14 +588,13 @@ impl Dashboard {
 
         let start = self.scroll.min(rows.len());
         let end = (start + height).min(rows.len());
-        for row_idx in start..end {
+        for (row_idx, row) in rows.iter().enumerate().take(end).skip(start) {
             let DisplayRow::Entry {
                 idx: filtered_idx,
                 detail,
-            } = rows[row_idx];
+            } = *row;
             let entry_idx = self.filtered[filtered_idx];
             let entry = &self.entries[entry_idx];
-            let selected = filtered_idx == self.selected;
             let range_marker = range_marker_for_row(
                 row_idx,
                 selected_display_idx,
@@ -587,20 +604,15 @@ impl Dashboard {
                 &self.primary_marker,
                 &self.extent_marker,
             );
-                    let line = entry.render_line(
-                        content_width,
-                        selected,
-                        None,
-                        None,
-                        None,
-                        stats_width,
-                        detail,
-                        range_marker,
-                        marker_width,
-                        &self.theme,
-                        self.pinned_from.as_deref(),
-                        self.head_meta.as_ref(),
-                    );
+            let line = entry.render_line(RenderLineContext {
+                width: content_width,
+                stats_width,
+                detail,
+                range_marker,
+                marker_width,
+                theme: &self.theme,
+                head_meta: self.head_meta.as_ref(),
+            });
             lines.push(line);
         }
 
@@ -650,39 +662,26 @@ impl DashboardEntry {
         }
     }
 
-    fn render_line(
-        &self,
-        width: usize,
-        _selected: bool,
-        _selected_bg: Option<ratatui::style::Color>,
-        _pinned_bg: Option<ratatui::style::Color>,
-        _range_bg: Option<ratatui::style::Color>,
-        stats_width: usize,
-        detail: bool,
-        range_marker: Option<RangeMarker>,
-        marker_width: usize,
-        theme: &ResolvedTheme,
-        _pinned_from: Option<&str>,
-        head_meta: Option<&(String, String)>,
-    ) -> Line<'static> {
+    fn render_line(&self, ctx: RenderLineContext<'_>) -> Line<'static> {
         let mut spans = Vec::new();
 
-        spans.extend(range_marker_spans(range_marker, marker_width));
+        spans.extend(range_marker_spans(ctx.range_marker, ctx.marker_width));
 
         match &self.kind {
             EntryKind::WorkingTree { files } => {
-                if detail {
-                    let meta = head_meta
+                if ctx.detail {
+                    let meta = ctx
+                        .head_meta
                         .map(|(author, date)| format!("{author} • {date}"))
                         .unwrap_or_else(|| "Working tree changes".to_string());
                     spans.push(Span::styled(
                         "  ",
-                        Style::default().fg(theme.text_muted),
+                        Style::default().fg(ctx.theme.text_muted),
                     ));
                     spans.push(Span::styled(
-                        truncate_text(&meta, width.saturating_sub(2)),
+                        truncate_text(&meta, ctx.width.saturating_sub(2)),
                         Style::default()
-                            .fg(theme.text_muted)
+                            .fg(ctx.theme.text_muted)
                             .add_modifier(Modifier::DIM),
                     ));
                     return Line::from(spans);
@@ -693,25 +692,26 @@ impl DashboardEntry {
                     format!("Working tree ({files} files)")
                 };
                 let style = if *files == 0 {
-                    Style::default().fg(theme.text_muted)
+                    Style::default().fg(ctx.theme.text_muted)
                 } else {
-                    Style::default().fg(theme.accent)
+                    Style::default().fg(ctx.theme.accent)
                 };
-                spans.push(Span::styled(truncate_text(&label, width), style));
+                spans.push(Span::styled(truncate_text(&label, ctx.width), style));
             }
             EntryKind::Staged { files } => {
-                if detail {
-                    let meta = head_meta
+                if ctx.detail {
+                    let meta = ctx
+                        .head_meta
                         .map(|(author, date)| format!("{author} • {date}"))
                         .unwrap_or_else(|| "Staged changes".to_string());
                     spans.push(Span::styled(
                         "  ",
-                        Style::default().fg(theme.text_muted),
+                        Style::default().fg(ctx.theme.text_muted),
                     ));
                     spans.push(Span::styled(
-                        truncate_text(&meta, width.saturating_sub(2)),
+                        truncate_text(&meta, ctx.width.saturating_sub(2)),
                         Style::default()
-                            .fg(theme.text_muted)
+                            .fg(ctx.theme.text_muted)
                             .add_modifier(Modifier::DIM),
                     ));
                     return Line::from(spans);
@@ -722,23 +722,23 @@ impl DashboardEntry {
                     format!("Staged ({files} files)")
                 };
                 let style = if *files == 0 {
-                    Style::default().fg(theme.text_muted)
+                    Style::default().fg(ctx.theme.text_muted)
                 } else {
-                    Style::default().fg(theme.primary)
+                    Style::default().fg(ctx.theme.primary)
                 };
-                spans.push(Span::styled(truncate_text(&label, width), style));
+                spans.push(Span::styled(truncate_text(&label, ctx.width), style));
             }
             EntryKind::Commit(commit) => {
-                if detail {
+                if ctx.detail {
                     let meta = format!("{} • {}", commit.author, commit.date);
                     spans.push(Span::styled(
                         "  ",
-                        Style::default().fg(theme.text_muted),
+                        Style::default().fg(ctx.theme.text_muted),
                     ));
                     spans.push(Span::styled(
-                        truncate_text(&meta, width.saturating_sub(2)),
+                        truncate_text(&meta, ctx.width.saturating_sub(2)),
                         Style::default()
-                            .fg(theme.text_muted)
+                            .fg(ctx.theme.text_muted)
                             .add_modifier(Modifier::DIM),
                     ));
                 } else {
@@ -746,12 +746,12 @@ impl DashboardEntry {
                     if let Some(stats) = commit.stats {
                         right_text = format_diff_stats(stats.insertions, stats.deletions);
                     }
-                    let right_width = if stats_width == 0 {
+                    let right_width = if ctx.stats_width == 0 {
                         0
                     } else {
-                        stats_width.saturating_add(1)
+                        ctx.stats_width.saturating_add(1)
                     };
-                    let left_max = width.saturating_sub(right_width);
+                    let left_max = ctx.width.saturating_sub(right_width);
 
                     let short_width = text_width(&commit.short_id);
                     let mut summary_width = left_max.saturating_sub(short_width + 1);
@@ -762,19 +762,18 @@ impl DashboardEntry {
 
                     let summary = truncate_text(&commit.summary, summary_width);
                     let short_id = truncate_text(&commit.short_id, short_width);
-                    spans.push(Span::styled(short_id, Style::default().fg(theme.info)));
+                    spans.push(Span::styled(short_id, Style::default().fg(ctx.theme.info)));
                     spans.push(Span::raw(" "));
-                    spans.push(Span::styled(summary, Style::default().fg(theme.text)));
+                    spans.push(Span::styled(summary, Style::default().fg(ctx.theme.text)));
 
                     if right_width > 0 {
-                        let content_used =
-                            spans_width(&spans).saturating_sub(marker_width + 1);
+                        let content_used = spans_width(&spans).saturating_sub(ctx.marker_width + 1);
                         let pad = left_max.saturating_sub(content_used);
                         spans.push(Span::raw(" ".repeat(pad)));
-                        let right_text = pad_to_width(&right_text, stats_width);
+                        let right_text = pad_to_width(&right_text, ctx.stats_width);
                         spans.push(Span::styled(
                             right_text,
-                            Style::default().fg(theme.text_muted),
+                            Style::default().fg(ctx.theme.text_muted),
                         ));
                     }
                 }
@@ -843,7 +842,7 @@ fn format_number(value: usize) -> String {
     for (idx, ch) in chars.iter().enumerate() {
         out.push(*ch);
         let remaining = len - idx - 1;
-        if remaining > 0 && remaining % 3 == 0 {
+        if remaining > 0 && remaining.is_multiple_of(3) {
             out.push(',');
         }
     }
@@ -851,7 +850,11 @@ fn format_number(value: usize) -> String {
 }
 
 fn format_diff_stats(insertions: usize, deletions: usize) -> String {
-    format!("+{} -{}", format_number(insertions), format_number(deletions))
+    format!(
+        "+{} -{}",
+        format_number(insertions),
+        format_number(deletions)
+    )
 }
 
 fn centered_width(area: Rect, max_width: u16) -> Rect {
@@ -911,9 +914,13 @@ fn range_marker_for_row(
             return Some(RangeMarker {
                 symbol: primary_marker.to_string(),
                 style: if is_pinned {
-                    Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(theme.primary).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(theme.primary)
+                        .add_modifier(Modifier::BOLD)
                 },
             });
         }
@@ -931,7 +938,9 @@ fn range_marker_for_row(
         if row_idx == pinned_idx && !detail {
             return Some(RangeMarker {
                 symbol: primary_marker.to_string(),
-                style: Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+                style: Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
             });
         }
         if let Some(selected_idx) = selected_idx {
