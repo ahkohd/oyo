@@ -2,8 +2,8 @@
 //! Deleted lines simply disappear, showing the file as it evolves
 
 use super::{
-    expand_tabs_in_spans, render_empty_state, slice_spans, spans_to_text, spans_width,
-    truncate_text, wrap_count_for_spans, wrap_count_for_text, TAB_WIDTH,
+    expand_tabs_in_spans, pending_tail_text, render_empty_state, slice_spans, spans_to_text,
+    spans_width, truncate_text, wrap_count_for_spans, wrap_count_for_text, TAB_WIDTH,
 };
 use crate::app::{AnimationPhase, App};
 use crate::syntax::SyntaxSide;
@@ -37,6 +37,9 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
         app.ensure_active_visible_if_needed(visible_height);
     }
     let animation_frame = app.animation_frame();
+    app.multi_diff
+        .current_navigator()
+        .set_show_hunk_extent_while_stepping(app.stepping);
     let view_lines = app
         .multi_diff
         .current_navigator()
@@ -55,6 +58,21 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
         display_len = len;
     }
     let debug_target = app.syntax_scope_target(&view_lines);
+    let pending_insert_only = if app.stepping {
+        app.pending_insert_only_in_current_hunk()
+    } else {
+        0
+    };
+    let current_hunk = app.multi_diff.current_navigator().state().current_hunk;
+    let tail_change_id = if pending_insert_only > 0 {
+        view_lines
+            .iter()
+            .rev()
+            .find(|line| line.hunk_index == Some(current_hunk))
+            .map(|line| line.change_id)
+    } else {
+        None
+    };
 
     // Split area into gutter (fixed) and content (scrollable)
     let chunks = Layout::default()
@@ -316,6 +334,46 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
         if app.line_wrap && wrap_count > 1 {
             for _ in 1..wrap_count {
                 gutter_lines.push(Line::from(Span::raw(" ")));
+            }
+        }
+
+        if pending_insert_only > 0 && tail_change_id == Some(view_line.change_id) {
+            let virtual_text = pending_tail_text(pending_insert_only);
+            let virtual_style = Style::default()
+                .fg(app.theme.text_muted)
+                .add_modifier(Modifier::ITALIC);
+            let mut virtual_spans = vec![Span::styled(virtual_text.clone(), virtual_style)];
+            virtual_spans = expand_tabs_in_spans(&virtual_spans, TAB_WIDTH);
+
+            let virtual_width = spans_width(&virtual_spans);
+            max_line_width = max_line_width.max(virtual_width);
+
+            let virtual_wrap = if app.line_wrap {
+                wrap_count_for_spans(&virtual_spans, wrap_width)
+            } else {
+                1
+            };
+            if app.line_wrap {
+                display_len += virtual_wrap;
+            }
+
+            let mut display_virtual = virtual_spans;
+            if !app.line_wrap {
+                display_virtual =
+                    slice_spans(&display_virtual, app.horizontal_scroll, visible_width);
+            }
+            content_lines.push(Line::from(display_virtual));
+            gutter_lines.push(Line::from(vec![
+                Span::raw(" "),
+                Span::raw("    "),
+                Span::raw(" "),
+                Span::raw(" "),
+                Span::raw(" "),
+            ]));
+            if app.line_wrap && virtual_wrap > 1 {
+                for _ in 1..virtual_wrap {
+                    gutter_lines.push(Line::from(Span::raw(" ")));
+                }
             }
         }
 

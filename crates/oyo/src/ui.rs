@@ -316,6 +316,17 @@ fn draw_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
     } else {
         None
     };
+    let hunk_step_text = if app.stepping {
+        app.hunk_step_info().and_then(|(current, total)| {
+            if current > 0 {
+                Some(format!("{}/{}", current, total))
+            } else {
+                None
+            }
+        })
+    } else {
+        None
+    };
 
     // File counter (at the end)
     let file_count = app.multi_diff.file_count();
@@ -389,8 +400,13 @@ fn draw_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
     ];
     if let Some(ref hunk) = hunk_text {
         right_spans.push(Span::raw("  "));
+        let hunk_label = if let Some(ref hunk_step) = hunk_step_text {
+            format!("hunk {} · {}", hunk, hunk_step)
+        } else {
+            format!("hunk {}", hunk)
+        };
         right_spans.push(Span::styled(
-            format!("hunk {}", hunk),
+            hunk_label,
             Style::default().fg(app.theme.text_muted),
         ));
     }

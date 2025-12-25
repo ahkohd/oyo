@@ -1740,6 +1740,50 @@ impl App {
         (state.current_hunk + 1, state.total_hunks) // 1-indexed for display
     }
 
+    pub fn hunk_step_info(&mut self) -> Option<(usize, usize)> {
+        let nav = self.multi_diff.current_navigator();
+        let state = nav.state();
+        let hunk = nav.current_hunk()?;
+        let total = hunk.change_ids.len();
+        if total == 0 {
+            return None;
+        }
+        let mut applied = 0usize;
+        for id in &hunk.change_ids {
+            if state.applied_changes.contains(id) {
+                applied += 1;
+            }
+        }
+        Some((applied, total))
+    }
+
+    pub fn pending_insert_only_in_current_hunk(&mut self) -> usize {
+        let nav = self.multi_diff.current_navigator();
+        let state = nav.state();
+        let hunk = match nav.current_hunk() {
+            Some(hunk) => hunk,
+            None => return 0,
+        };
+
+        let mut pending = 0usize;
+        for change_id in &hunk.change_ids {
+            if state.applied_changes.contains(change_id) {
+                continue;
+            }
+            if let Some(change) = nav.diff().changes.iter().find(|c| c.id == *change_id) {
+                let is_insert_only = change
+                    .spans
+                    .iter()
+                    .all(|span| span.kind == ChangeKind::Insert);
+                if is_insert_only {
+                    pending += 1;
+                }
+            }
+        }
+
+        pending
+    }
+
     /// Jump to first change of current hunk
     pub fn goto_hunk_start(&mut self) {
         self.clear_peek();
@@ -3570,6 +3614,18 @@ mod tests {
         app
     }
 
+    fn make_app_with_single_hunk_two_changes() -> App {
+        let old = "one\ntwo\nthree\nfour".to_string();
+        let new = "ONE\nTWO\nthree\nfour".to_string();
+        let multi_diff = MultiFileDiff::from_file_pair(
+            std::path::PathBuf::from("a.txt"),
+            std::path::PathBuf::from("a.txt"),
+            old,
+            new,
+        );
+        App::new(multi_diff, ViewMode::SinglePane, 0, false, None)
+    }
+
     #[test]
     fn test_no_step_prev_hunk_from_bottom_advances() {
         let mut app = make_app_with_two_hunks();
@@ -3670,5 +3726,17 @@ mod tests {
         assert_eq!(after.current_hunk, before.current_hunk);
         assert_eq!(after.cursor_change, before.cursor_change);
         assert!(after.last_nav_was_hunk);
+    }
+
+    #[test]
+    fn test_hunk_step_info_counts_applied_changes() {
+        let mut app = make_app_with_single_hunk_two_changes();
+        assert_eq!(app.hunk_step_info(), Some((0, 2)));
+
+        app.next_step();
+        assert_eq!(app.hunk_step_info(), Some((1, 2)));
+
+        app.next_step();
+        assert_eq!(app.hunk_step_info(), Some((2, 2)));
     }
 }
