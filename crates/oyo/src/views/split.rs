@@ -86,6 +86,16 @@ pub fn render_split(frame: &mut Frame, app: &mut App, area: Rect) {
         );
         app.clamp_scroll(display_len, visible_height, app.allow_overscroll());
     }
+    if !app.line_wrap {
+        let old_width = chunks[0]
+            .width
+            .saturating_sub(GUTTER_WIDTH + OLD_BORDER_WIDTH) as usize;
+        let new_width = chunks[1]
+            .width
+            .saturating_sub(NEW_GUTTER_WIDTH + NEW_MARKER_WIDTH) as usize;
+        app.clamp_horizontal_scroll_cached(old_width.min(new_width));
+    }
+    app.reset_current_max_line_width();
 
     render_old_pane(frame, app, chunks[0]);
     render_new_pane(frame, app, chunks[1]);
@@ -412,6 +422,8 @@ fn render_old_pane(frame: &mut Frame, app: &mut App, area: Rect) {
         border = border.style(style);
     }
     frame.render_widget(border, border_area);
+
+    app.update_current_max_line_width(max_line_width);
 }
 
 fn render_new_pane(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -452,6 +464,7 @@ fn render_new_pane(frame: &mut Frame, app: &mut App, area: Rect) {
     let mut line_idx = 0;
     let query = app.search_query().trim().to_ascii_lowercase();
     let has_query = !query.is_empty();
+    let mut max_line_width: usize = 0;
 
     for view_line in view_lines.iter() {
         if let Some(new_line_num) = view_line.new_line {
@@ -642,6 +655,9 @@ fn render_new_pane(frame: &mut Frame, app: &mut App, area: Rect) {
 
             content_spans = expand_tabs_in_spans(&content_spans, TAB_WIDTH);
 
+            let line_width = spans_width(&content_spans);
+            max_line_width = max_line_width.max(line_width);
+
             let wrap_count = if app.line_wrap {
                 wrap_count_for_spans(&content_spans, visible_width)
             } else {
@@ -739,6 +755,8 @@ fn render_new_pane(frame: &mut Frame, app: &mut App, area: Rect) {
         marker_paragraph = marker_paragraph.style(style);
     }
     frame.render_widget(marker_paragraph, marker_area);
+
+    app.update_current_max_line_width(max_line_width);
 }
 
 fn split_wrap_display_metrics(

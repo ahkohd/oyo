@@ -187,6 +187,9 @@ fn build_modified_only_spans(
 pub fn render_single_pane(frame: &mut Frame, app: &mut App, area: Rect) {
     let visible_height = area.height as usize;
     let visible_width = area.width.saturating_sub(GUTTER_WIDTH) as usize;
+    if !app.line_wrap {
+        app.clamp_horizontal_scroll_cached(visible_width);
+    }
 
     // Clone markers to avoid borrow conflicts
     let primary_marker = app.primary_marker.clone();
@@ -681,9 +684,9 @@ pub fn render_single_pane(frame: &mut Frame, app: &mut App, area: Rect) {
         );
         app.clamp_scroll(display_len, visible_height, app.allow_overscroll());
     }
-
     // Clamp horizontal scroll
     app.clamp_horizontal_scroll(max_line_width, visible_width);
+    app.set_current_max_line_width(max_line_width);
 
     // Background style (if set)
     let bg_style = app.theme.background.map(|bg| Style::default().bg(bg));

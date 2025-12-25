@@ -183,6 +183,10 @@ pub(crate) fn slice_spans(
     if width == 0 {
         return Vec::new();
     }
+    let line_width = spans_width(spans);
+    if start_col >= line_width {
+        return Vec::new();
+    }
     let end_col = start_col.saturating_add(width);
     let mut out = Vec::new();
     let mut col = 0usize;

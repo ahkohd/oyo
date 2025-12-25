@@ -149,6 +149,10 @@ pub struct App {
     horizontal_scrolls_step: Vec<usize>,
     /// Per-file horizontal scroll offsets when not stepping
     horizontal_scrolls_no_step: Vec<usize>,
+    /// Cached max line width per file (stepping)
+    max_line_widths_step: Vec<usize>,
+    /// Cached max line width per file (no-step)
+    max_line_widths_no_step: Vec<usize>,
     /// Line wrap mode (when true, horizontal scroll is ignored)
     pub line_wrap: bool,
     /// Cached wrapped display length (for line wrap centering)
@@ -339,6 +343,8 @@ impl App {
             horizontal_scroll: 0,
             horizontal_scrolls_step: vec![0; file_count],
             horizontal_scrolls_no_step: vec![0; file_count],
+            max_line_widths_step: vec![0; file_count],
+            max_line_widths_no_step: vec![0; file_count],
             line_wrap: false,
             last_wrap_display_len: None,
             last_wrap_active_idx: None,
@@ -2366,8 +2372,62 @@ impl App {
     /// Clamp horizontal scroll so we don't scroll too far right
     pub fn clamp_horizontal_scroll(&mut self, max_line_width: usize, viewport_width: usize) {
         if !self.line_wrap {
-            let max_scroll = max_line_width.saturating_sub(viewport_width / 2);
+            let max_scroll = max_line_width.saturating_sub(viewport_width);
             self.horizontal_scroll = self.horizontal_scroll.min(max_scroll);
+        }
+    }
+
+    pub fn clamp_horizontal_scroll_cached(&mut self, viewport_width: usize) {
+        if self.line_wrap {
+            return;
+        }
+        let max_line_width = self.current_max_line_width();
+        if max_line_width == 0 {
+            return;
+        }
+        let max_scroll = max_line_width.saturating_sub(viewport_width);
+        self.horizontal_scroll = self.horizontal_scroll.min(max_scroll);
+    }
+
+    pub fn reset_current_max_line_width(&mut self) {
+        let idx = self.multi_diff.selected_index;
+        if self.stepping {
+            if let Some(slot) = self.max_line_widths_step.get_mut(idx) {
+                *slot = 0;
+            }
+        } else if let Some(slot) = self.max_line_widths_no_step.get_mut(idx) {
+            *slot = 0;
+        }
+    }
+
+    pub fn set_current_max_line_width(&mut self, max_line_width: usize) {
+        let idx = self.multi_diff.selected_index;
+        if self.stepping {
+            if let Some(slot) = self.max_line_widths_step.get_mut(idx) {
+                *slot = max_line_width;
+            }
+        } else if let Some(slot) = self.max_line_widths_no_step.get_mut(idx) {
+            *slot = max_line_width;
+        }
+    }
+
+    pub fn update_current_max_line_width(&mut self, max_line_width: usize) {
+        let idx = self.multi_diff.selected_index;
+        if self.stepping {
+            if let Some(slot) = self.max_line_widths_step.get_mut(idx) {
+                *slot = (*slot).max(max_line_width);
+            }
+        } else if let Some(slot) = self.max_line_widths_no_step.get_mut(idx) {
+            *slot = (*slot).max(max_line_width);
+        }
+    }
+
+    fn current_max_line_width(&self) -> usize {
+        let idx = self.multi_diff.selected_index;
+        if self.stepping {
+            self.max_line_widths_step.get(idx).copied().unwrap_or(0)
+        } else {
+            self.max_line_widths_no_step.get(idx).copied().unwrap_or(0)
         }
     }
 
@@ -3027,6 +3087,8 @@ impl App {
             self.scroll_offsets_no_step = vec![0; file_count];
             self.horizontal_scrolls_step = vec![0; file_count];
             self.horizontal_scrolls_no_step = vec![0; file_count];
+            self.max_line_widths_step = vec![0; file_count];
+            self.max_line_widths_no_step = vec![0; file_count];
             self.no_step_visited = vec![false; file_count];
             self.files_visited = vec![false; file_count];
             self.syntax_caches = vec![None; file_count];
