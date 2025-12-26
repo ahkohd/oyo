@@ -29,7 +29,7 @@ mode = "light" # or "dark"
 List built-in UI themes:
 
 ```bash
-oyo themes
+oy themes
 ```
 
 ### Built-in UI Themes
@@ -94,7 +94,7 @@ theme = "tokyonight-day"
 ### List syntax themes
 
 ```bash
-oyo syntax-themes
+oy syntax-themes
 ```
 
 This lists:
@@ -128,8 +128,8 @@ If the file can't be loaded, `oyo` falls back to `ansi`.
 ### CLI overrides
 
 ```bash
-oyo --theme-name tokyonight --theme-mode light
-oyo --syntax-theme tokyonight-day
+oy --theme-name tokyonight --theme-mode light
+oy --syntax-theme tokyonight-day
 ```
 
 Note: syntax theme backgrounds are stripped to preserve the UI/diff background.

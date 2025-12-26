@@ -11,7 +11,7 @@ keywords = ["diff", "tui", "git", "cli", "viewer"]
 categories = ["command-line-utilities", "development-tools"]
 
 [[bin]]
-name = "oyo"
+name = "oy"
 path = "src/main.rs"
 
 [dependencies]
