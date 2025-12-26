@@ -834,6 +834,7 @@ fn spans_width(spans: &[Span<'static>]) -> usize {
         .sum()
 }
 
+#[allow(clippy::manual_is_multiple_of)]
 fn format_number(value: usize) -> String {
     let s = value.to_string();
     let mut out = String::with_capacity(s.len() + s.len() / 3);
@@ -842,7 +843,7 @@ fn format_number(value: usize) -> String {
     for (idx, ch) in chars.iter().enumerate() {
         out.push(*ch);
         let remaining = len - idx - 1;
-        if remaining > 0 && remaining.is_multiple_of(3) {
+        if remaining > 0 && remaining % 3 == 0 {
             out.push(',');
         }
     }
