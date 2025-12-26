@@ -1283,14 +1283,37 @@ fn run_dashboard<B: Backend>(
                     let list_height = dashboard.list_height(terminal.size()?.height);
                     if dashboard.filter_active() {
                         match key.code {
-                            KeyCode::Esc | KeyCode::Enter => {
+                            KeyCode::Esc => {
                                 dashboard.stop_filter();
+                            }
+                            KeyCode::Enter => {
+                                if let Some(selection) = dashboard.selection() {
+                                    return Ok(Some(selection));
+                                }
                             }
                             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                                 dashboard.clear_filter();
                             }
                             KeyCode::Backspace => {
                                 dashboard.pop_filter_char();
+                            }
+                            KeyCode::Char('j') | KeyCode::Down => {
+                                dashboard.move_selection(1, list_height);
+                            }
+                            KeyCode::Char('k') | KeyCode::Up => {
+                                dashboard.move_selection(-1, list_height);
+                            }
+                            KeyCode::PageDown => {
+                                dashboard.page_down(list_height);
+                            }
+                            KeyCode::PageUp => {
+                                dashboard.page_up(list_height);
+                            }
+                            KeyCode::Char('g') | KeyCode::Home => {
+                                dashboard.select_first(list_height);
+                            }
+                            KeyCode::Char('G') | KeyCode::End => {
+                                dashboard.select_last(list_height);
                             }
                             KeyCode::Char(ch) => {
                                 dashboard.push_filter_char(ch);
