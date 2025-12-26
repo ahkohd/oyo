@@ -4,8 +4,8 @@
 
 A Step-through diff viewer.
 
-<!-- Demo source: https://github.com/user-attachments/assets/dd284411-48cb-4015-b500-0246629c2493 -->
-https://github.com/user-attachments/assets/dd284411-48cb-4015-b500-0246629c2493
+<!-- Demo source: https://github.com/user-attachments/assets/0f43b54b-69fe-4cf3-9221-a7749872342b -->
+https://github.com/user-attachments/assets/0f43b54b-69fe-4cf3-9221-a7749872342b
 
 </div>
 
