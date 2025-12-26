@@ -32,7 +32,7 @@ use std::time::Duration;
 const INDEX_REF: &str = "INDEX";
 
 #[derive(Parser, Debug)]
-#[command(name = "oyo")]
+#[command(name = "oy")]
 #[command(author, version, about = "A step-through diff viewer")]
 #[command(args_conflicts_with_subcommands = true)]
 struct Args {
@@ -40,7 +40,7 @@ struct Args {
     command: Option<Command>,
 
     /// Files or directories to compare: old_file new_file
-    /// Also works as a git external diff tool (git config diff.external oyo)
+    /// Also works as a git external diff tool (git config diff.external oy)
     #[arg(num_args = 0..)]
     paths: Vec<PathBuf>,
 
@@ -151,7 +151,7 @@ enum InputMode {
 }
 
 /// Detect if we're being called as a git external diff tool
-/// Git calls: oyo path old-file old-hex old-mode new-file new-hex new-mode
+/// Git calls: oy path old-file old-hex old-mode new-file new-hex new-mode
 fn detect_input_mode(paths: &[PathBuf]) -> InputMode {
     if paths.len() == 7 {
         // Git external diff format
@@ -313,7 +313,7 @@ fn build_diff_from_input_mode(
                 anyhow::bail!(
                     "Not in a git repository.\n\
                      \n\
-                     Usage: oyo <old_file> <new_file>\n\
+                     Usage: oy <old_file> <new_file>\n\
                      \n\
                      Or run from a git repository to diff uncommitted changes."
                 );
@@ -337,7 +337,7 @@ fn build_diff_from_input_mode(
                 anyhow::bail!(
                     "Not in a git repository.\n\
                      \n\
-                     Usage: oyo --staged\n\
+                     Usage: oy --staged\n\
                      \n\
                      Or run from a git repository."
                 );
@@ -361,7 +361,7 @@ fn build_diff_from_input_mode(
                 anyhow::bail!(
                     "Not in a git repository.\n\
                      \n\
-                     Usage: oyo --range A..B\n\
+                     Usage: oy --range A..B\n\
                      \n\
                      Or run from a git repository."
                 );
@@ -411,7 +411,7 @@ fn build_diff_from_input_mode(
         }
         InputMode::None => {
             anyhow::bail!(
-                "Usage: oyo <old_file> <new_file>\n\
+                "Usage: oy <old_file> <new_file>\n\
                  \n\
                  Or run from a git repository to diff uncommitted changes."
             );

@@ -1,4 +1,4 @@
-//! Git range picker dashboard for oyo view
+//! Git range picker dashboard for oy view
 
 use crate::config::ResolvedTheme;
 use oyo_core::git::CommitEntry;

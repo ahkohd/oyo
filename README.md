@@ -29,7 +29,7 @@ Step through changes or scroll the full diff, jump between hunks, and watch code
 - **Animated transitions**: Smooth fade in/out animations as changes are applied
 - **Playback**: Automatically step through all changes at a configurable speed
 - **Git integration**: Works as a git external diff tool or standalone
-- **Commit picker**: Browse recent commits and pick ranges interactively (`oyo view`)
+- **Commit picker**: Browse recent commits and pick ranges interactively (`oy view`)
 - **Themes**: Built-in themes plus `.tmTheme` syntax themes (configurable)
 - **Configurable**: XDG config file support for customization
 
@@ -46,77 +46,77 @@ cargo install oyo
 Optional theme override:
 
 ```bash
-oyo --theme-name tokyonight
+oy --theme-name tokyonight
 ```
 
 ### CLI
 
 ```bash
 # Diff uncommitted changes in current git repo
-oyo
+oy
 
 # Compare two files
-oyo old.rs new.rs
+oy old.rs new.rs
 
 # Commit picker
-oyo view
+oy view
 
 # Split view
-oyo old.rs new.rs --view split
+oy old.rs new.rs --view split
 
 # Evolution view
-oyo old.rs new.rs --view evolution
+oy old.rs new.rs --view evolution
 
 # Autoplay mode
-oyo old.rs new.rs --autoplay
+oy old.rs new.rs --autoplay
 
 # Custom autoplay speed (100ms between steps)
-oyo old.rs new.rs --speed 100
+oy old.rs new.rs --speed 100
 
 # No-step mode
-oyo old.rs new.rs --no-step
+oy old.rs new.rs --no-step
 
 # Staged changes (index vs HEAD)
-oyo --staged
+oy --staged
 
 # Git range
-oyo --range HEAD~1..HEAD
+oy --range HEAD~1..HEAD
 # or
-oyo --range main...feature
+oy --range main...feature
 ```
 
 ### Git Integration
 
-`oyo` supports git external diff (7-arg interface) and `git difftool`. For most workflows,
+`oy` supports git external diff (7-arg interface) and `git difftool`. For most workflows,
 `difftool` is smoother; `diff.external` will open a TUI per file.
 
 ```bash
 # One-off (recommended)
-git difftool -y --tool=oyo
+git difftool -y --tool=oy
 ```
 
 Recommended `~/.gitconfig`:
 
 ```gitconfig
-[difftool "oyo"]
-    cmd = oyo "$LOCAL" "$REMOTE"
+[difftool "oy"]
+    cmd = oy "$LOCAL" "$REMOTE"
 
 [difftool]
     prompt = false
 
 [alias]
-    d = difftool -y --tool=oyo
-    oyo = "!oyo"
+    d = difftool -y --tool=oy
+    oy = "!oy"
 ```
 
 External diff setup (optional):
 
 ```bash
-git config --global diff.external oyo
+git config --global diff.external oy
 ```
 
 Note: keep your pager (e.g., `less`, `moar`, `moor`) for normal `git diff` output.
-Do not set `core.pager` to `oyo`. Also avoid `interactive.diffFilter` — it expects
+Do not set `core.pager` to `oy`. Also avoid `interactive.diffFilter` — it expects
 a stdin filter, not a TUI.
 
 ### Jujutsu (jj)
@@ -126,17 +126,17 @@ In `~/.config/jj/config.toml`:
 ```toml
 [ui]
 paginate = "never"
-diff-formatter = ["oyo", "$left", "$right"]
+diff-formatter = ["oy", "$left", "$right"]
 ```
 
-To use `jj diff --tool=oyo`:
+To use `jj diff --tool=oy`:
 
 ```toml
-[diff-tools.oyo]
-command = ["oyo", "$left", "$right"]
+[diff-tools.oy]
+command = ["oy", "$left", "$right"]
 ```
 
-Note: do not set your `ui.pager` to `oyo`.
+Note: do not set your `ui.pager` to `oy`.
 
 Example range diff:
 
@@ -266,5 +266,5 @@ cargo build
 cargo test
 
 # Run CLI in development
-cargo run --bin oyo -- old.rs new.rs
+cargo run --bin oy -- old.rs new.rs
 ```
