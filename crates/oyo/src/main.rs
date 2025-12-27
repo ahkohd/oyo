@@ -73,7 +73,7 @@ struct Args {
     dump_scopes: Option<PathBuf>,
 
     /// Disable stepping (no-step diff view)
-    #[arg(long)]
+    #[arg(long, global = true)]
     no_step: bool,
 
     /// Show staged changes (index vs HEAD)
