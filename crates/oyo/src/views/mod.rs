@@ -121,7 +121,10 @@ pub(crate) fn clear_leading_ws_bg(
         };
         if !ws.is_empty() {
             let ws_style = if should_clear {
-                Style { bg: None, ..span.style }
+                Style {
+                    bg: None,
+                    ..span.style
+                }
             } else {
                 span.style
             };

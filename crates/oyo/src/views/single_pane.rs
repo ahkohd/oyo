@@ -838,9 +838,7 @@ fn get_span_style(kind: ViewSpanKind, line_kind: LineKind, is_active: bool, app:
     let theme = &app.theme;
     let is_modification = matches!(line_kind, LineKind::Modified | LineKind::PendingModify);
     let text_bg = app.diff_bg == DiffBackgroundMode::Text;
-    let modified_bg = if text_bg
-        || (app.diff_bg == DiffBackgroundMode::Line && is_modification)
-    {
+    let modified_bg = if text_bg || (app.diff_bg == DiffBackgroundMode::Line && is_modification) {
         theme.diff_modified_bg
     } else {
         None

@@ -6,6 +6,7 @@
 //! ```toml
 //! [ui]
 //! zen = false
+//! topbar = true
 //! auto_center = true
 //! view_mode = "single"
 //! line_wrap = false
@@ -529,6 +530,8 @@ fn merge_theme_tokens(base: &mut ThemeTokens, overlay: &ThemeTokens) {
 pub struct UiConfig {
     /// Start in zen mode (minimal UI)
     pub zen: bool,
+    /// Show top bar in diff view
+    pub topbar: bool,
     /// Auto-center on active change after stepping (like vim's zz)
     pub auto_center: bool,
     /// Default view mode: "single", "split", or "evolution"
@@ -569,6 +572,7 @@ impl Default for UiConfig {
     fn default() -> Self {
         Self {
             zen: false,
+            topbar: true,
             auto_center: true,
             view_mode: None,
             line_wrap: false,

@@ -204,6 +204,7 @@ Create a config file at `~/.config/oyo/config.toml`:
 ```toml
 [ui]
 auto_center = true          # Auto-center on active change (default: true)
+topbar = true               # Show top bar in diff view (default: true)
 view_mode = "single"        # Default: "single", "split", or "evolution"
 line_wrap = false           # Wrap long lines (default: false, uses horizontal scroll)
 scrollbar = false           # Show scrollbar (default: false)

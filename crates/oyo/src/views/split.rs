@@ -228,7 +228,7 @@ fn render_old_pane(frame: &mut Frame, app: &mut App, area: Rect) {
         let old_present = view_line.old_line.is_some();
         let new_present = view_line.new_line.is_some()
             && !matches!(view_line.kind, LineKind::Deleted | LineKind::PendingDelete);
-        if !old_present && !(app.split_align_lines && new_present) {
+        if !(old_present || (app.split_align_lines && new_present)) {
             continue;
         }
 
@@ -251,22 +251,14 @@ fn render_old_pane(frame: &mut Frame, app: &mut App, area: Rect) {
             let marker_fill = align_fill_gutter_span(app, 1);
             let gutter_fill = align_fill_gutter_span(app, 4);
             let sign_fill = align_fill_gutter_span(app, 1);
-            gutter_lines.push(Line::from(vec![
-                marker_fill,
-                gutter_fill,
-                sign_fill,
-            ]));
+            gutter_lines.push(Line::from(vec![marker_fill, gutter_fill, sign_fill]));
             content_lines.push(Line::from(fill_span.clone()));
             if app.line_wrap && wrap_count > 1 {
                 for _ in 1..wrap_count {
                     let marker_fill = align_fill_gutter_span(app, 1);
                     let gutter_fill = align_fill_gutter_span(app, 4);
                     let sign_fill = align_fill_gutter_span(app, 1);
-                    gutter_lines.push(Line::from(vec![
-                        marker_fill,
-                        gutter_fill,
-                        sign_fill,
-                    ]));
+                    gutter_lines.push(Line::from(vec![marker_fill, gutter_fill, sign_fill]));
                     content_lines.push(Line::from(fill_span.clone()));
                 }
             }
@@ -442,8 +434,7 @@ fn render_old_pane(frame: &mut Frame, app: &mut App, area: Rect) {
             }
 
             if app.diff_bg == DiffBackgroundMode::Text {
-                content_spans =
-                    clear_leading_ws_bg(content_spans, Some(app.theme.diff_context));
+                content_spans = clear_leading_ws_bg(content_spans, Some(app.theme.diff_context));
             }
 
             let line_text = spans_to_text(&content_spans);
@@ -647,7 +638,7 @@ fn render_new_pane(frame: &mut Frame, app: &mut App, area: Rect) {
         let old_present = view_line.old_line.is_some();
         let new_present = view_line.new_line.is_some()
             && !matches!(view_line.kind, LineKind::Deleted | LineKind::PendingDelete);
-        if !new_present && !(app.split_align_lines && old_present) {
+        if !(new_present || (app.split_align_lines && old_present)) {
             continue;
         }
 
@@ -846,8 +837,7 @@ fn render_new_pane(frame: &mut Frame, app: &mut App, area: Rect) {
             }
 
             if app.diff_bg == DiffBackgroundMode::Text {
-                content_spans =
-                    clear_leading_ws_bg(content_spans, Some(app.theme.diff_context));
+                content_spans = clear_leading_ws_bg(content_spans, Some(app.theme.diff_context));
             }
 
             let line_text = spans_to_text(&content_spans);
@@ -1013,8 +1003,8 @@ fn split_wrap_display_metrics(
 
     for line in view {
         let old_present = line.old_line.is_some();
-        let new_present =
-            line.new_line.is_some() && !matches!(line.kind, LineKind::Deleted | LineKind::PendingDelete);
+        let new_present = line.new_line.is_some()
+            && !matches!(line.kind, LineKind::Deleted | LineKind::PendingDelete);
 
         let old_wrap = if old_present {
             split_old_line_wrap_count(app, line, old_width)

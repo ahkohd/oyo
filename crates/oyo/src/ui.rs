@@ -226,19 +226,32 @@ fn truncate_text(text: &str, max_width: usize) -> String {
 pub fn draw(frame: &mut Frame, app: &mut App) {
     if app.zen_mode {
         // Zen mode: just the content with minimal progress indicator
-        draw_content(frame, app, frame.area());
+        draw_content(frame, app, frame.area(), false);
         draw_zen_progress(frame, app);
     } else {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(0),    // Main content
-                Constraint::Length(1), // Status bar
-            ])
+            .constraints(if app.topbar {
+                vec![
+                    Constraint::Length(1), // Top bar
+                    Constraint::Min(0),    // Main content
+                    Constraint::Length(1), // Status bar
+                ]
+            } else {
+                vec![
+                    Constraint::Min(0),    // Main content
+                    Constraint::Length(1), // Status bar
+                ]
+            })
             .split(frame.area());
 
-        draw_content(frame, app, chunks[0]);
-        draw_status_bar(frame, app, chunks[1]);
+        if app.topbar {
+            draw_content(frame, app, chunks[1], true);
+            draw_status_bar(frame, app, chunks[2]);
+        } else {
+            draw_content(frame, app, chunks[0], false);
+            draw_status_bar(frame, app, chunks[1]);
+        }
     }
 
     // Draw help popover if active
@@ -457,14 +470,73 @@ fn draw_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let status_line = Line::from(spans);
     let mut paragraph = Paragraph::new(status_line);
-    if let Some(bg) = app.theme.background_element.or(app.theme.background) {
+    if let Some(bg) = app.theme.background {
         paragraph = paragraph.style(Style::default().bg(bg));
     }
     frame.render_widget(paragraph, area);
 }
 
-fn draw_content(frame: &mut Frame, app: &mut App, area: Rect) {
-    app.last_viewport_height = area.height as usize;
+fn draw_top_bar(frame: &mut Frame, app: &mut App, area: Rect) {
+    let (insertions, deletions) = app.stats();
+    let file = app.multi_diff.current_file();
+    let available_width = area.width as usize;
+    let right_width = text_width(&format!("-{}  +{}", deletions, insertions));
+    let left_max = available_width.saturating_sub(right_width + 2);
+
+    let (name_text, status_style) = if let Some(file) = file {
+        let file_name = file
+            .display_name
+            .rsplit('/')
+            .next()
+            .unwrap_or(&file.display_name);
+        let name = truncate_filename_keep_ext(file_name, left_max.saturating_sub(3));
+        let status_style = match file.status {
+            FileStatus::Added | FileStatus::Untracked => Style::default().fg(app.theme.success),
+            FileStatus::Deleted => Style::default().fg(app.theme.error),
+            FileStatus::Modified => Style::default().fg(app.theme.warning),
+            FileStatus::Renamed => Style::default().fg(app.theme.info),
+        };
+        (name, status_style)
+    } else {
+        (String::new(), Style::default().fg(app.theme.text_muted))
+    };
+
+    let mut left_spans = vec![
+        Span::raw(" "),
+        Span::styled("■", status_style),
+        Span::raw(" "),
+        Span::styled(name_text, Style::default().fg(app.theme.text)),
+    ];
+    left_spans = clamp_spans_to_width(&left_spans, left_max);
+    left_spans = pad_spans_left(left_spans, left_max);
+
+    let right_spans = vec![
+        Span::styled(
+            format!("-{}", deletions),
+            Style::default().fg(app.theme.error),
+        ),
+        Span::raw("  "),
+        Span::styled(
+            format!("+{}", insertions),
+            Style::default().fg(app.theme.success),
+        ),
+        Span::raw(" "),
+    ];
+    let right_spans = clamp_spans_to_width(&right_spans, right_width + 1);
+    let right_spans = pad_spans_right(right_spans, right_width + 1);
+
+    let mut spans = Vec::new();
+    spans.extend(left_spans);
+    spans.extend(right_spans);
+
+    let mut paragraph = Paragraph::new(Line::from(spans));
+    if let Some(bg) = app.theme.background {
+        paragraph = paragraph.style(Style::default().bg(bg));
+    }
+    frame.render_widget(paragraph, area);
+}
+
+fn draw_content(frame: &mut Frame, app: &mut App, area: Rect, show_topbar: bool) {
     // Auto-hide file panel if viewport is too narrow (need at least 50 cols for diff view)
     // But respect user's manual toggle preference
     let min_width_for_panel = 85; // 35 (panel) + 50 (diff view)
@@ -494,13 +566,35 @@ fn draw_content(frame: &mut Frame, app: &mut App, area: Rect) {
             .split(area);
 
         draw_file_list(frame, app, chunks[0]);
-        draw_diff_view(frame, app, chunks[1]);
+        if show_topbar {
+            let diff_chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(1), Constraint::Min(0)])
+                .split(chunks[1]);
+            draw_top_bar(frame, app, diff_chunks[0]);
+            app.last_viewport_height = diff_chunks[1].height as usize;
+            draw_diff_view(frame, app, diff_chunks[1]);
+        } else {
+            app.last_viewport_height = chunks[1].height as usize;
+            draw_diff_view(frame, app, chunks[1]);
+        }
     } else {
         // Single file mode, file panel hidden, or viewport too narrow
         app.file_list_area = None;
         app.file_list_rows.clear();
         app.file_filter_area = None;
-        draw_diff_view(frame, app, area);
+        if show_topbar {
+            let diff_chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(1), Constraint::Min(0)])
+                .split(area);
+            draw_top_bar(frame, app, diff_chunks[0]);
+            app.last_viewport_height = diff_chunks[1].height as usize;
+            draw_diff_view(frame, app, diff_chunks[1]);
+        } else {
+            app.last_viewport_height = area.height as usize;
+            draw_diff_view(frame, app, area);
+        }
     }
 }
 

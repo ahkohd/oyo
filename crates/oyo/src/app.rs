@@ -137,6 +137,8 @@ pub struct App {
     pub git_branch: Option<String>,
     /// Auto-center on active change after stepping (like vim's zz)
     pub auto_center: bool,
+    /// Show top bar in diff view
+    pub topbar: bool,
     /// Animation duration in milliseconds (how long fade effects take)
     pub animation_duration: u64,
     /// Pending count for vim-style commands (e.g., 10j = scroll down 10 lines)
@@ -343,6 +345,7 @@ impl App {
             help_max_scroll: 0,
             git_branch,
             auto_center: true,
+            topbar: true,
             animation_duration: 150,
             pending_count: None,
             pending_g_prefix: false,
@@ -3363,7 +3366,9 @@ pub fn display_metrics(
             (view.len(), idx)
         }
         ViewMode::Evolution => evolution_display_metrics(view, animation_phase),
-        ViewMode::Split => split_display_metrics(view, scroll_offset, step_direction, split_align_lines),
+        ViewMode::Split => {
+            split_display_metrics(view, scroll_offset, step_direction, split_align_lines)
+        }
     }
 }
 
