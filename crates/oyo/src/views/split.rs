@@ -6,6 +6,7 @@ use super::{
     truncate_text, wrap_count_for_spans, wrap_count_for_text, TAB_WIDTH,
 };
 use crate::app::{AnimationPhase, App};
+use crate::color;
 use crate::config::{DiffBackgroundMode, DiffForegroundMode};
 use crate::syntax::SyntaxSide;
 use oyo_core::{
@@ -13,7 +14,7 @@ use oyo_core::{
 };
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Wrap},
     Frame,
@@ -30,6 +31,24 @@ fn split_new_bg_kind(kind: LineKind) -> LineKind {
     match kind {
         LineKind::Modified | LineKind::PendingModify => LineKind::Inserted,
         _ => kind,
+    }
+}
+
+fn line_num_style_for_kind(kind: LineKind, app: &App) -> Style {
+    let insert_base = color::gradient_color(&app.theme.insert, 0.5);
+    let delete_base = color::gradient_color(&app.theme.delete, 0.5);
+    let modify_base = color::gradient_color(&app.theme.modify, 0.5);
+    match kind {
+        LineKind::Inserted | LineKind::PendingInsert => {
+            Style::default().fg(Color::Rgb(insert_base.r, insert_base.g, insert_base.b))
+        }
+        LineKind::Deleted | LineKind::PendingDelete => {
+            Style::default().fg(Color::Rgb(delete_base.r, delete_base.g, delete_base.b))
+        }
+        LineKind::Modified | LineKind::PendingModify => {
+            Style::default().fg(Color::Rgb(modify_base.r, modify_base.g, modify_base.b))
+        }
+        LineKind::Context => Style::default().fg(app.theme.diff_line_number),
     }
 }
 
@@ -169,6 +188,7 @@ fn render_old_pane(frame: &mut Frame, app: &mut App, area: Rect) {
 
             let line_num_str = format!("{:4}", old_line_num);
             let bg_kind = split_old_bg_kind(view_line.kind);
+            let line_num_style = line_num_style_for_kind(bg_kind, app);
             let line_bg_gutter = if app.diff_bg == DiffBackgroundMode::Line {
                 diff_line_bg(bg_kind, &app.theme)
             } else {
@@ -195,10 +215,7 @@ fn render_old_pane(frame: &mut Frame, app: &mut App, area: Rect) {
             // Build gutter line
             let mut gutter_spans = vec![
                 Span::styled(active_marker, active_style),
-                Span::styled(
-                    line_num_str,
-                    Style::default().fg(app.theme.diff_line_number),
-                ),
+                Span::styled(line_num_str, line_num_style),
                 Span::styled(" ", Style::default()),
             ];
             if let Some(bg) = line_bg_gutter {
@@ -554,6 +571,7 @@ fn render_new_pane(frame: &mut Frame, app: &mut App, area: Rect) {
 
             let line_num_str = format!("{:4}", new_line_num);
             let bg_kind = split_new_bg_kind(view_line.kind);
+            let line_num_style = line_num_style_for_kind(bg_kind, app);
             let line_bg_gutter = if app.diff_bg == DiffBackgroundMode::Line {
                 diff_line_bg(bg_kind, &app.theme)
             } else {
@@ -579,10 +597,7 @@ fn render_new_pane(frame: &mut Frame, app: &mut App, area: Rect) {
 
             // Build gutter line
             let mut gutter_spans = vec![
-                Span::styled(
-                    line_num_str,
-                    Style::default().fg(app.theme.diff_line_number),
-                ),
+                Span::styled(line_num_str, line_num_style),
                 Span::styled(" ", Style::default()),
             ];
             if let Some(bg) = line_bg_gutter {
