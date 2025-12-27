@@ -212,7 +212,7 @@ strikethrough_deletions = false # Show strikethrough on deleted text
 gutter_signs = true         # Show +/- sign column (single/evolution)
 stepping = true             # Enable stepping (false = no-step mode)
 # [ui.diff]
-# bg = "none"               # "none", "text", or "line"
+# bg = "none"               # "none", "text", "word", or "line"
 # fg = "theme"              # "theme" or "syntax"
 # extent_marker = "neutral" # "neutral" or "diff"
 # extent_marker_scope = "progress" # "progress" or "hunk"

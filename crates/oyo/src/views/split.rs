@@ -433,7 +433,9 @@ fn render_old_pane(frame: &mut Frame, app: &mut App, area: Rect) {
                 content_spans = apply_line_bg(content_spans, bg, visible_width, app.line_wrap);
             }
 
-            if app.diff_bg == DiffBackgroundMode::Text && used_syntax {
+            if matches!(app.diff_bg, DiffBackgroundMode::Text | DiffBackgroundMode::Word)
+                && used_syntax
+            {
                 if let Some(bg) = diff_line_bg(bg_kind, &app.theme) {
                     content_spans = apply_spans_bg(content_spans, bg);
                 }
@@ -441,6 +443,8 @@ fn render_old_pane(frame: &mut Frame, app: &mut App, area: Rect) {
 
             if app.diff_bg == DiffBackgroundMode::Text {
                 content_spans = clear_leading_ws_bg(content_spans, Some(app.theme.diff_context));
+            } else if app.diff_bg == DiffBackgroundMode::Word {
+                content_spans = clear_leading_ws_bg(content_spans, None);
             }
 
             let line_text = spans_to_text(&content_spans);
@@ -842,7 +846,9 @@ fn render_new_pane(frame: &mut Frame, app: &mut App, area: Rect) {
                 content_spans = apply_line_bg(content_spans, bg, visible_width, app.line_wrap);
             }
 
-            if app.diff_bg == DiffBackgroundMode::Text && used_syntax {
+            if matches!(app.diff_bg, DiffBackgroundMode::Text | DiffBackgroundMode::Word)
+                && used_syntax
+            {
                 if let Some(bg) = diff_line_bg(bg_kind, &app.theme) {
                     content_spans = apply_spans_bg(content_spans, bg);
                 }
@@ -850,6 +856,8 @@ fn render_new_pane(frame: &mut Frame, app: &mut App, area: Rect) {
 
             if app.diff_bg == DiffBackgroundMode::Text {
                 content_spans = clear_leading_ws_bg(content_spans, Some(app.theme.diff_context));
+            } else if app.diff_bg == DiffBackgroundMode::Word {
+                content_spans = clear_leading_ws_bg(content_spans, None);
             }
 
             let line_text = spans_to_text(&content_spans);
@@ -1160,7 +1168,7 @@ fn get_old_span_style(
     app: &App,
 ) -> Style {
     let theme = &app.theme;
-    let use_bg = app.diff_bg == DiffBackgroundMode::Text
+    let use_bg = matches!(app.diff_bg, DiffBackgroundMode::Text | DiffBackgroundMode::Word)
         || (app.diff_bg == DiffBackgroundMode::Line
             && matches!(line_kind, LineKind::Modified | LineKind::PendingModify));
     let removed_bg = if use_bg { theme.diff_removed_bg } else { None };
@@ -1239,7 +1247,7 @@ fn get_new_span_style(
     app: &App,
 ) -> Style {
     let theme = &app.theme;
-    let use_bg = app.diff_bg == DiffBackgroundMode::Text
+    let use_bg = matches!(app.diff_bg, DiffBackgroundMode::Text | DiffBackgroundMode::Word)
         || (app.diff_bg == DiffBackgroundMode::Line
             && matches!(line_kind, LineKind::Modified | LineKind::PendingModify));
     let added_bg = if use_bg { theme.diff_added_bg } else { None };

@@ -649,7 +649,7 @@ impl Default for EvoViewConfig {
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 pub struct DiffConfig {
-    /// Diff background mode: "none", "text", or "line"
+    /// Diff background mode: "none", "text", "word", or "line"
     #[serde(default = "diff_bg_default")]
     pub bg: DiffBackgroundMode,
     /// Diff foreground mode: "theme" or "syntax"
@@ -717,6 +717,7 @@ pub enum DiffBackgroundMode {
     None,
     #[default]
     Text,
+    Word,
     Line,
 }
 

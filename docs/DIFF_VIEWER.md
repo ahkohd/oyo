@@ -106,8 +106,9 @@ Inline word-level diffs remain visible after stepping through a modified line.
 Applies to single/split only (ignored in evolution):
 
 - `none`: no diff background.
-- `text`: background on changed spans only (no leading whitespace, no gutter,
-  no cursor/ext markers).
+- `text`: background on changed spans (including whitespace), no gutter,
+  no cursor/ext markers.
+- `word`: like `text`, but leading whitespace is not highlighted.
 - `line`: full-line background including gutter (line numbers/signs), but
   cursor/ext markers do not take background.
 
@@ -128,7 +129,7 @@ Applies to single/split only (ignored in evolution):
 ```toml
 [ui]
 [ui.diff]
-bg = "text"           # none | text | line
+bg = "text"           # none | text | word | line
 fg = "theme"          # theme | syntax
 extent_marker = "neutral" # neutral | diff
 extent_marker_scope = "progress" # progress | hunk

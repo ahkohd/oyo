@@ -41,7 +41,7 @@ fn build_inline_modified_spans(
     };
     let use_bg = matches!(
         app.diff_bg,
-        DiffBackgroundMode::Text | DiffBackgroundMode::Line
+        DiffBackgroundMode::Text | DiffBackgroundMode::Word | DiffBackgroundMode::Line
     );
     let added_bg = if use_bg {
         app.theme.diff_added_bg
@@ -149,7 +149,7 @@ fn build_modified_only_spans(
     };
     let use_bg = matches!(
         app.diff_bg,
-        DiffBackgroundMode::Text | DiffBackgroundMode::Line
+        DiffBackgroundMode::Text | DiffBackgroundMode::Word | DiffBackgroundMode::Line
     );
     let modified_bg = if use_bg {
         app.theme.diff_modified_bg
@@ -642,7 +642,9 @@ pub fn render_single_pane(frame: &mut Frame, app: &mut App, area: Rect) {
             content_spans = apply_line_bg(content_spans, bg, visible_width, app.line_wrap);
         }
 
-        if app.diff_bg == DiffBackgroundMode::Text && used_syntax {
+        if matches!(app.diff_bg, DiffBackgroundMode::Text | DiffBackgroundMode::Word)
+            && used_syntax
+        {
             if let Some(bg) = diff_line_bg(view_line.kind, &app.theme) {
                 content_spans = apply_spans_bg(content_spans, bg);
             }
@@ -650,6 +652,8 @@ pub fn render_single_pane(frame: &mut Frame, app: &mut App, area: Rect) {
 
         if app.diff_bg == DiffBackgroundMode::Text {
             content_spans = clear_leading_ws_bg(content_spans, Some(app.theme.diff_context));
+        } else if app.diff_bg == DiffBackgroundMode::Word {
+            content_spans = clear_leading_ws_bg(content_spans, None);
         }
 
         let line_text = spans_to_text(&content_spans);
@@ -843,7 +847,7 @@ fn get_span_style(kind: ViewSpanKind, line_kind: LineKind, is_active: bool, app:
     let backward = app.is_backward_animation();
     let theme = &app.theme;
     let is_modification = matches!(line_kind, LineKind::Modified | LineKind::PendingModify);
-    let text_bg = app.diff_bg == DiffBackgroundMode::Text;
+    let text_bg = matches!(app.diff_bg, DiffBackgroundMode::Text | DiffBackgroundMode::Word);
     let modified_bg = if text_bg || (app.diff_bg == DiffBackgroundMode::Line && is_modification) {
         theme.diff_modified_bg
     } else {
