@@ -269,32 +269,17 @@ pub fn render_single_pane(frame: &mut Frame, app: &mut App, area: Rect) {
         let delete_base = color::gradient_color(&app.theme.delete, 0.5);
         let modify_base = color::gradient_color(&app.theme.modify, 0.5);
 
-        let (line_prefix, line_num_style) = match view_line.kind {
-            LineKind::Context => (" ", Style::default().fg(app.theme.diff_line_number)),
-            LineKind::Inserted => (
-                "+",
-                Style::default().fg(Color::Rgb(insert_base.r, insert_base.g, insert_base.b)),
-            ),
-            LineKind::Deleted => (
-                "-",
-                Style::default().fg(Color::Rgb(delete_base.r, delete_base.g, delete_base.b)),
-            ),
-            LineKind::Modified => (
-                "~",
-                Style::default().fg(Color::Rgb(modify_base.r, modify_base.g, modify_base.b)),
-            ),
-            LineKind::PendingDelete => (
-                "-",
-                Style::default().fg(Color::Rgb(delete_base.r, delete_base.g, delete_base.b)),
-            ),
-            LineKind::PendingInsert => (
-                "+",
-                Style::default().fg(Color::Rgb(insert_base.r, insert_base.g, insert_base.b)),
-            ),
-            LineKind::PendingModify => (
-                "~",
-                Style::default().fg(Color::Rgb(modify_base.r, modify_base.g, modify_base.b)),
-            ),
+        let line_num_style = match view_line.kind {
+            LineKind::Context => Style::default().fg(app.theme.diff_line_number),
+            LineKind::Inserted | LineKind::PendingInsert => {
+                Style::default().fg(Color::Rgb(insert_base.r, insert_base.g, insert_base.b))
+            }
+            LineKind::Deleted | LineKind::PendingDelete => {
+                Style::default().fg(Color::Rgb(delete_base.r, delete_base.g, delete_base.b))
+            }
+            LineKind::Modified | LineKind::PendingModify => {
+                Style::default().fg(Color::Rgb(modify_base.r, modify_base.g, modify_base.b))
+            }
         };
 
         let line_bg_gutter = if app.diff_bg == DiffBackgroundMode::Line {
@@ -304,52 +289,65 @@ pub fn render_single_pane(frame: &mut Frame, app: &mut App, area: Rect) {
         };
 
         // Sign column should fade with the line animation
-        let sign_style = match view_line.kind {
-            LineKind::Context => Style::default().fg(app.theme.diff_line_number),
+        let (mut line_prefix, mut sign_style) = match view_line.kind {
+            LineKind::Context => (" ", Style::default().fg(app.theme.diff_line_number)),
             LineKind::Inserted | LineKind::PendingInsert => {
                 if view_line.is_active {
-                    super::insert_style(
-                        app.animation_phase,
-                        app.animation_progress,
-                        app.is_backward_animation(),
-                        app.theme.insert_base(),
-                        app.theme.diff_context,
-                        None,
+                    (
+                        "+",
+                        super::insert_style(
+                            app.animation_phase,
+                            app.animation_progress,
+                            app.is_backward_animation(),
+                            app.theme.insert_base(),
+                            app.theme.diff_context,
+                            None,
+                        ),
                     )
                 } else {
-                    Style::default().fg(app.theme.insert_base())
+                    ("+", Style::default().fg(app.theme.insert_base()))
                 }
             }
             LineKind::Deleted | LineKind::PendingDelete => {
                 if view_line.is_active {
-                    super::delete_style(
-                        app.animation_phase,
-                        app.animation_progress,
-                        app.is_backward_animation(),
-                        false,
-                        app.theme.delete_base(),
-                        app.theme.diff_context,
-                        None,
+                    (
+                        "-",
+                        super::delete_style(
+                            app.animation_phase,
+                            app.animation_progress,
+                            app.is_backward_animation(),
+                            false,
+                            app.theme.delete_base(),
+                            app.theme.diff_context,
+                            None,
+                        ),
                     )
                 } else {
-                    Style::default().fg(app.theme.delete_base())
+                    ("-", Style::default().fg(app.theme.delete_base()))
                 }
             }
             LineKind::Modified | LineKind::PendingModify => {
                 if view_line.is_active {
-                    super::modify_style(
-                        app.animation_phase,
-                        app.animation_progress,
-                        app.is_backward_animation(),
-                        app.theme.modify_base(),
-                        app.theme.diff_context,
-                        None,
+                    (
+                        "~",
+                        super::modify_style(
+                            app.animation_phase,
+                            app.animation_progress,
+                            app.is_backward_animation(),
+                            app.theme.modify_base(),
+                            app.theme.diff_context,
+                            None,
+                        ),
                     )
                 } else {
-                    Style::default().fg(app.theme.modify_base())
+                    ("~", Style::default().fg(app.theme.modify_base()))
                 }
             }
         };
+        if !app.gutter_signs {
+            line_prefix = " ";
+            sign_style = Style::default();
+        }
 
         // Gutter marker: primary marker for focus, extent marker for hunk nav, blank otherwise
         let (active_marker, active_style) = if view_line.is_primary_active {

@@ -163,6 +163,8 @@ pub struct App {
     pub scrollbar_visible: bool,
     /// Show strikethrough on deleted text
     pub strikethrough_deletions: bool,
+    /// Show +/- sign column in the gutter (single/evolution)
+    pub gutter_signs: bool,
     /// Whether user has manually toggled the file panel (overrides auto-hide)
     pub file_panel_manually_set: bool,
     /// Whether to show the file path popup (Ctrl+G)
@@ -350,6 +352,7 @@ impl App {
             last_wrap_active_idx: None,
             scrollbar_visible: false,
             strikethrough_deletions: false,
+            gutter_signs: true,
             file_panel_manually_set: false,
             show_path_popup: false,
             file_panel_auto_hidden: false,

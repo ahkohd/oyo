@@ -224,6 +224,7 @@ fn apply_config_to_app(app: &mut App, config: &config::Config, args: &Args, ligh
     app.line_wrap = config.ui.line_wrap;
     app.scrollbar_visible = config.ui.scrollbar;
     app.strikethrough_deletions = config.ui.strikethrough_deletions;
+    app.gutter_signs = config.ui.gutter_signs;
     app.diff_bg = config.ui.diff.bg;
     app.diff_fg = config.ui.diff.fg;
     app.syntax_mode = config.ui.syntax.mode;
@@ -710,6 +711,7 @@ fn main() -> Result<()> {
     app.line_wrap = config.ui.line_wrap;
     app.scrollbar_visible = config.ui.scrollbar;
     app.strikethrough_deletions = config.ui.strikethrough_deletions;
+    app.gutter_signs = config.ui.gutter_signs;
     app.diff_bg = config.ui.diff.bg;
     app.diff_fg = config.ui.diff.fg;
     app.syntax_mode = config.ui.syntax.mode;

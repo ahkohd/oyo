@@ -228,12 +228,11 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
         };
 
         // Build gutter line (fixed, no horizontal scroll)
-        // Matches single-pane: marker(1) + line_num(4) + space(1) + blank_sign(1) + space(1) = 8
         let gutter_spans = vec![
             Span::styled(active_marker, active_style),
             Span::styled(line_num_str, line_num_style),
             Span::styled(" ", Style::default()),
-            Span::styled(" ", Style::default()), // blank sign column (matches single-pane)
+            Span::styled(" ", Style::default()),
             Span::styled(" ", Style::default()),
         ];
         // Evolution view ignores diff background modes to keep the morph view clean.

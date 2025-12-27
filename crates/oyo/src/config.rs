@@ -11,6 +11,7 @@
 //! line_wrap = false
 //! scrollbar = false
 //! strikethrough_deletions = false
+//! gutter_signs = true
 //! primary_marker = "▶"
 //! primary_marker_right = "◀"
 //! extent_marker = "▌"
@@ -535,6 +536,8 @@ pub struct UiConfig {
     pub scrollbar: bool,
     /// Show strikethrough on deleted text
     pub strikethrough_deletions: bool,
+    /// Show +/- sign column in the gutter (single/evolution)
+    pub gutter_signs: bool,
     /// Syntax highlighting configuration
     pub syntax: SyntaxConfig,
     /// Single-pane view settings
@@ -566,6 +569,7 @@ impl Default for UiConfig {
             line_wrap: false,
             scrollbar: false,
             strikethrough_deletions: false,
+            gutter_signs: true,
             syntax: SyntaxConfig::default(),
             single: SingleViewConfig::default(),
             evo: EvoViewConfig::default(),

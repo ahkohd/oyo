@@ -208,6 +208,7 @@ view_mode = "single"        # Default: "single", "split", or "evolution"
 line_wrap = false           # Wrap long lines (default: false, uses horizontal scroll)
 scrollbar = false           # Show scrollbar (default: false)
 strikethrough_deletions = false # Show strikethrough on deleted text
+gutter_signs = true         # Show +/- sign column (single/evolution)
 stepping = true             # Enable stepping (false = no-step mode)
 # [ui.diff]
 # bg = "none"               # "none", "text", or "line"
