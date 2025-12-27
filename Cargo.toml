@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/oyo-core", "crates/oyo"]
 
 [workspace.package]
-version = "0.1.13"
+version = "0.1.14"
 edition = "2021"
 authors = ["Victor Aremu <me@victorare.mu>"]
 license = "MIT"
