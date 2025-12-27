@@ -442,7 +442,8 @@ fn render_old_pane(frame: &mut Frame, app: &mut App, area: Rect) {
             }
 
             if app.diff_bg == DiffBackgroundMode::Text {
-                content_spans = clear_leading_ws_bg(content_spans);
+                content_spans =
+                    clear_leading_ws_bg(content_spans, Some(app.theme.diff_context));
             }
 
             let line_text = spans_to_text(&content_spans);
@@ -845,7 +846,8 @@ fn render_new_pane(frame: &mut Frame, app: &mut App, area: Rect) {
             }
 
             if app.diff_bg == DiffBackgroundMode::Text {
-                content_spans = clear_leading_ws_bg(content_spans);
+                content_spans =
+                    clear_leading_ws_bg(content_spans, Some(app.theme.diff_context));
             }
 
             let line_text = spans_to_text(&content_spans);

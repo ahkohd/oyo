@@ -81,7 +81,10 @@ pub(crate) fn apply_spans_bg(spans: Vec<Span<'static>>, bg: Color) -> Vec<Span<'
         .collect()
 }
 
-pub(crate) fn clear_leading_ws_bg(spans: Vec<Span<'static>>) -> Vec<Span<'static>> {
+pub(crate) fn clear_leading_ws_bg(
+    spans: Vec<Span<'static>>,
+    clear_when_fg: Option<Color>,
+) -> Vec<Span<'static>> {
     let mut out = Vec::new();
     let mut at_line_start = true;
 
@@ -112,10 +115,15 @@ pub(crate) fn clear_leading_ws_bg(spans: Vec<Span<'static>>) -> Vec<Span<'static
         }
 
         let (ws, rest) = text.split_at(ws_len);
+        let should_clear = match clear_when_fg {
+            Some(fg) => span.style.fg == Some(fg),
+            None => true,
+        };
         if !ws.is_empty() {
-            let ws_style = Style {
-                bg: None,
-                ..span.style
+            let ws_style = if should_clear {
+                Style { bg: None, ..span.style }
+            } else {
+                span.style
             };
             out.push(Span::styled(ws.to_string(), ws_style));
         }
