@@ -12,6 +12,9 @@
 //! scrollbar = false
 //! strikethrough_deletions = false
 //! gutter_signs = true
+//! # [ui.split]
+//! # align_lines = false
+//! # align_fill = "╱"
 //! primary_marker = "▶"
 //! primary_marker_right = "◀"
 //! extent_marker = "▌"
@@ -542,6 +545,8 @@ pub struct UiConfig {
     pub syntax: SyntaxConfig,
     /// Single-pane view settings
     pub single: SingleViewConfig,
+    /// Split view settings
+    pub split: SplitViewConfig,
     /// Evolution view settings
     pub evo: EvoViewConfig,
     /// Diff styling settings
@@ -572,6 +577,7 @@ impl Default for UiConfig {
             gutter_signs: true,
             syntax: SyntaxConfig::default(),
             single: SingleViewConfig::default(),
+            split: SplitViewConfig::default(),
             evo: EvoViewConfig::default(),
             diff: DiffConfig::default(),
             stepping: true,
@@ -580,6 +586,25 @@ impl Default for UiConfig {
             extent_marker: "▌".to_string(),
             extent_marker_right: None,
             theme: ThemeConfig::default(),
+        }
+    }
+}
+
+/// Split view configuration
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct SplitViewConfig {
+    /// Insert blank rows for missing lines to keep panes vertically aligned
+    pub align_lines: bool,
+    /// Fill character for aligned blank rows (empty = no marker)
+    pub align_fill: String,
+}
+
+impl Default for SplitViewConfig {
+    fn default() -> Self {
+        Self {
+            align_lines: false,
+            align_fill: "╱".to_string(),
         }
     }
 }

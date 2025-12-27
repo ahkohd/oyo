@@ -230,6 +230,8 @@ fn apply_config_to_app(app: &mut App, config: &config::Config, args: &Args, ligh
     app.syntax_mode = config.ui.syntax.mode;
     app.syntax_theme = config.ui.syntax.theme.clone();
     app.single_modified_step_mode = config.ui.single.modified_step_mode;
+    app.split_align_lines = config.ui.split.align_lines;
+    app.split_align_fill = config.ui.split.align_fill.clone();
     app.evo_syntax = config.ui.evo.syntax;
     app.auto_step_on_enter = config.playback.auto_step_on_enter;
     app.auto_step_blank_files = config.playback.auto_step_blank_files;
@@ -717,6 +719,8 @@ fn main() -> Result<()> {
     app.syntax_mode = config.ui.syntax.mode;
     app.syntax_theme = config.ui.syntax.theme.clone();
     app.single_modified_step_mode = config.ui.single.modified_step_mode;
+    app.split_align_lines = config.ui.split.align_lines;
+    app.split_align_fill = config.ui.split.align_fill.clone();
     app.evo_syntax = config.ui.evo.syntax;
     app.auto_step_on_enter = config.playback.auto_step_on_enter;
     app.auto_step_blank_files = config.playback.auto_step_blank_files;

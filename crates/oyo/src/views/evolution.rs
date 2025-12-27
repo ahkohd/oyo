@@ -53,6 +53,7 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
             app.animation_phase,
             app.scroll_offset,
             step_direction,
+            app.split_align_lines,
         );
         app.clamp_scroll(len, visible_height, app.allow_overscroll());
         display_len = len;

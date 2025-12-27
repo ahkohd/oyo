@@ -213,6 +213,9 @@ stepping = true             # Enable stepping (false = no-step mode)
 # [ui.diff]
 # bg = "none"               # "none", "text", or "line"
 # fg = "theme"              # "theme" or "syntax"
+# [ui.split]
+# align_lines = false       # Insert blanks to keep split panes aligned
+# align_fill = "╱"          # Fill character for aligned blanks (empty = no marker)
 # [ui.evo]
 # syntax = "context"         # "context" (non-diff only) or "full" (diff + context)
 # Syntax highlighting:

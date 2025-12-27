@@ -52,6 +52,53 @@ fn line_num_style_for_kind(kind: LineKind, app: &App) -> Style {
     }
 }
 
+fn align_fill_span(app: &App, width: usize) -> Span<'static> {
+    if width == 0 || app.split_align_fill.is_empty() {
+        return Span::raw("");
+    }
+    let full_len = if app.line_wrap {
+        width
+    } else {
+        width.saturating_add(app.horizontal_scroll)
+    };
+    let mut out = String::with_capacity(full_len);
+    for ch in app.split_align_fill.chars().cycle().take(full_len) {
+        out.push(ch);
+    }
+    let text = if app.line_wrap {
+        out
+    } else {
+        out.chars()
+            .skip(app.horizontal_scroll)
+            .take(width)
+            .collect()
+    };
+    let mut fg = color::dim_color(app.theme.text_muted);
+    if let Some(bg) = app.theme.background {
+        if let Some(blended) = color::blend_colors(bg, fg, 0.5) {
+            fg = blended;
+        }
+    }
+    Span::styled(text, Style::default().fg(fg).add_modifier(Modifier::DIM))
+}
+
+fn align_fill_gutter_span(app: &App, width: usize) -> Span<'static> {
+    if width == 0 || app.split_align_fill.is_empty() {
+        return Span::raw(" ".repeat(width));
+    }
+    let mut out = String::with_capacity(width);
+    for ch in app.split_align_fill.chars().cycle().take(width) {
+        out.push(ch);
+    }
+    let mut fg = color::dim_color(app.theme.text_muted);
+    if let Some(bg) = app.theme.background {
+        if let Some(blended) = color::blend_colors(bg, fg, 0.5) {
+            fg = blended;
+        }
+    }
+    Span::styled(out, Style::default().fg(fg).add_modifier(Modifier::DIM))
+}
+
 /// Width of the fixed line number gutter
 const GUTTER_WIDTH: u16 = 6; // "▶1234 " or " 1234 "
 const OLD_BORDER_WIDTH: u16 = 1;
@@ -95,6 +142,7 @@ pub fn render_split(frame: &mut Frame, app: &mut App, area: Rect) {
             new_width,
             app.scroll_offset,
             step_direction,
+            app.split_align_lines,
         );
         app.ensure_active_visible_if_needed_wrapped(visible_height, display_len, active_idx);
         app.clamp_scroll(display_len, visible_height, app.allow_overscroll());
@@ -105,6 +153,7 @@ pub fn render_split(frame: &mut Frame, app: &mut App, area: Rect) {
             app.animation_phase,
             app.scroll_offset,
             step_direction,
+            app.split_align_lines,
         );
         app.clamp_scroll(display_len, visible_height, app.allow_overscroll());
     }
@@ -176,16 +225,64 @@ fn render_old_pane(frame: &mut Frame, app: &mut App, area: Rect) {
     let mut max_line_width: usize = 0;
 
     for view_line in view_lines.iter() {
-        if let Some(old_line_num) = view_line.old_line {
-            // When wrapping, we need all lines
-            if !app.line_wrap && line_idx < app.scroll_offset {
-                line_idx += 1;
-                continue;
-            }
-            if !app.line_wrap && gutter_lines.len() >= visible_height {
-                break;
-            }
+        let old_present = view_line.old_line.is_some();
+        let new_present = view_line.new_line.is_some()
+            && !matches!(view_line.kind, LineKind::Deleted | LineKind::PendingDelete);
+        if !old_present && !(app.split_align_lines && new_present) {
+            continue;
+        }
 
+        // When wrapping, we need all lines
+        if !app.line_wrap && line_idx < app.scroll_offset {
+            line_idx += 1;
+            continue;
+        }
+        if !app.line_wrap && gutter_lines.len() >= visible_height {
+            break;
+        }
+
+        if !old_present {
+            let wrap_count = if app.line_wrap {
+                split_new_line_wrap_count(app, view_line, visible_width)
+            } else {
+                1
+            };
+            let fill_span = align_fill_span(app, visible_width);
+            let marker_fill = align_fill_gutter_span(app, 1);
+            let gutter_fill = align_fill_gutter_span(app, 4);
+            let sign_fill = if app.gutter_signs {
+                align_fill_gutter_span(app, 1)
+            } else {
+                Span::raw(" ")
+            };
+            gutter_lines.push(Line::from(vec![
+                marker_fill,
+                gutter_fill,
+                sign_fill,
+            ]));
+            content_lines.push(Line::from(fill_span.clone()));
+            if app.line_wrap && wrap_count > 1 {
+                for _ in 1..wrap_count {
+                    let marker_fill = align_fill_gutter_span(app, 1);
+                    let gutter_fill = align_fill_gutter_span(app, 4);
+                    let sign_fill = if app.gutter_signs {
+                        align_fill_gutter_span(app, 1)
+                    } else {
+                        Span::raw(" ")
+                    };
+                    gutter_lines.push(Line::from(vec![
+                        marker_fill,
+                        gutter_fill,
+                        sign_fill,
+                    ]));
+                    content_lines.push(Line::from(fill_span.clone()));
+                }
+            }
+            line_idx += 1;
+            continue;
+        }
+
+        if let Some(old_line_num) = view_line.old_line {
             let line_num_str = format!("{:4}", old_line_num);
             let bg_kind = split_old_bg_kind(view_line.kind);
             let line_num_style = line_num_style_for_kind(bg_kind, app);
@@ -554,21 +651,56 @@ fn render_new_pane(frame: &mut Frame, app: &mut App, area: Rect) {
     let mut max_line_width: usize = 0;
 
     for view_line in view_lines.iter() {
+        let old_present = view_line.old_line.is_some();
+        let new_present = view_line.new_line.is_some()
+            && !matches!(view_line.kind, LineKind::Deleted | LineKind::PendingDelete);
+        if !new_present && !(app.split_align_lines && old_present) {
+            continue;
+        }
+
+        // When wrapping, we need all lines
+        if !app.line_wrap && line_idx < app.scroll_offset {
+            line_idx += 1;
+            continue;
+        }
+        if !app.line_wrap && gutter_lines.len() >= visible_height {
+            break;
+        }
+
+        if !new_present {
+            let wrap_count = if app.line_wrap {
+                split_old_line_wrap_count(app, view_line, visible_width)
+            } else {
+                1
+            };
+            let fill_span = align_fill_span(app, visible_width);
+            let gutter_fill = align_fill_gutter_span(app, 4);
+            let sign_fill = if app.gutter_signs {
+                align_fill_gutter_span(app, 1)
+            } else {
+                Span::raw(" ")
+            };
+            gutter_lines.push(Line::from(vec![gutter_fill, sign_fill]));
+            content_lines.push(Line::from(fill_span.clone()));
+            marker_lines.push(Line::from(Span::raw(" ")));
+            if app.line_wrap && wrap_count > 1 {
+                for _ in 1..wrap_count {
+                    let gutter_fill = align_fill_gutter_span(app, 4);
+                    let sign_fill = if app.gutter_signs {
+                        align_fill_gutter_span(app, 1)
+                    } else {
+                        Span::raw(" ")
+                    };
+                    gutter_lines.push(Line::from(vec![gutter_fill, sign_fill]));
+                    content_lines.push(Line::from(fill_span.clone()));
+                    marker_lines.push(Line::from(Span::raw(" ")));
+                }
+            }
+            line_idx += 1;
+            continue;
+        }
+
         if let Some(new_line_num) = view_line.new_line {
-            // Skip lines that represent deletions (they don't exist in new file)
-            if matches!(view_line.kind, LineKind::Deleted | LineKind::PendingDelete) {
-                continue;
-            }
-
-            // When wrapping, we need all lines
-            if !app.line_wrap && line_idx < app.scroll_offset {
-                line_idx += 1;
-                continue;
-            }
-            if !app.line_wrap && gutter_lines.len() >= visible_height {
-                break;
-            }
-
             let line_num_str = format!("{:4}", new_line_num);
             let bg_kind = split_new_bg_kind(view_line.kind);
             let line_num_style = line_num_style_for_kind(bg_kind, app);
@@ -884,6 +1016,7 @@ fn split_wrap_display_metrics(
     new_width: usize,
     scroll_offset: usize,
     step_direction: StepDirection,
+    align_lines: bool,
 ) -> (usize, Option<usize>) {
     let mut old_len = 0usize;
     let mut new_len = 0usize;
@@ -893,26 +1026,44 @@ fn split_wrap_display_metrics(
     let mut new_fallback_idx: Option<usize> = None;
 
     for line in view {
-        if line.old_line.is_some() {
-            if line.is_primary_active {
-                old_primary_idx = Some(old_len);
-            } else if line.is_active && old_fallback_idx.is_none() {
-                old_fallback_idx = Some(old_len);
+        let old_present = line.old_line.is_some();
+        let new_present =
+            line.new_line.is_some() && !matches!(line.kind, LineKind::Deleted | LineKind::PendingDelete);
+
+        let old_wrap = if old_present {
+            split_old_line_wrap_count(app, line, old_width)
+        } else if align_lines && new_present {
+            split_new_line_wrap_count(app, line, old_width)
+        } else {
+            0
+        };
+        let new_wrap = if new_present {
+            split_new_line_wrap_count(app, line, new_width)
+        } else if align_lines && old_present {
+            split_old_line_wrap_count(app, line, new_width)
+        } else {
+            0
+        };
+
+        if old_wrap > 0 {
+            if old_present {
+                if line.is_primary_active {
+                    old_primary_idx = Some(old_len);
+                } else if line.is_active && old_fallback_idx.is_none() {
+                    old_fallback_idx = Some(old_len);
+                }
             }
-            let wrap_count = split_old_line_wrap_count(app, line, old_width);
-            old_len += wrap_count;
+            old_len += old_wrap;
         }
-        if line.new_line.is_some() {
-            if matches!(line.kind, LineKind::Deleted | LineKind::PendingDelete) {
-                continue;
+        if new_wrap > 0 {
+            if new_present {
+                if line.is_primary_active {
+                    new_primary_idx = Some(new_len);
+                } else if line.is_active && new_fallback_idx.is_none() {
+                    new_fallback_idx = Some(new_len);
+                }
             }
-            if line.is_primary_active {
-                new_primary_idx = Some(new_len);
-            } else if line.is_active && new_fallback_idx.is_none() {
-                new_fallback_idx = Some(new_len);
-            }
-            let wrap_count = split_new_line_wrap_count(app, line, new_width);
-            new_len += wrap_count;
+            new_len += new_wrap;
         }
     }
 
