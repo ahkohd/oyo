@@ -4,6 +4,17 @@
 
 ### bg = false
 
+#### highlight = "none"
+
+```toml
+[ui.diff]
+fg = "theme"
+bg = false
+highlight = "none"
+```
+
+![fg=theme, bg=false, highlight=none](../assets/fg_theme_bg_false_hi_none.png)
+
 #### highlight = "word"
 
 ```toml
@@ -25,17 +36,6 @@ highlight = "text"
 ```
 
 ![fg=theme, bg=false, highlight=text](../assets/diff_fg_theme_bg_false_hi_text.png)
-
-#### highlight = "none"
-
-```toml
-[ui.diff]
-fg = "theme"
-bg = false
-highlight = "none"
-```
-
-![fg=theme, bg=false, highlight=none](../assets/fg_theme_bg_false_hi_none.png)
 
 ### bg = true
 
