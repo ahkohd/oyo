@@ -278,6 +278,10 @@ Config is loaded from (in priority order):
 
 Theme and syntax theme configuration is documented in [THEME.md](./docs/THEME.md).
 
+[![diff preview](./assets/fg_syntax_bg_true_hi_word.png)](./docs/DIFF_PREVIEWS.md)
+
+*Diff styling previews are available in [DIFF_PREVIEWS.md](./docs/DIFF_PREVIEWS.md).*
+
 ## How It Works
 
 Stepping applies changes in file order. The view renders applied changes, highlights the
