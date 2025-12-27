@@ -277,6 +277,9 @@ Config is loaded from (in priority order):
 3. Platform-specific (e.g., `~/Library/Application Support/oyo/config.toml` on macOS)
 
 Theme and syntax theme configuration is documented in [THEME.md](./docs/THEME.md).
+Diff styling previews are available in [DIFF_PREVIEWS.md](./docs/DIFF_PREVIEWS.md).
+
+[![diff preview](./assets/fg_syntax_bg_true_hi_word.png)](./docs/DIFF_PREVIEWS.md)
 
 ## How It Works
 
