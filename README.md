@@ -2,21 +2,50 @@
 
 # oyo
 
-A Step-through diff viewer.
+A diff viewer that works **two ways**:
+**step through changes** or **review a classic scrollable diff**.
+
 
 <!-- Demo source: https://github.com/user-attachments/assets/0f43b54b-69fe-4cf3-9221-a7749872342b -->
 https://github.com/user-attachments/assets/0f43b54b-69fe-4cf3-9221-a7749872342b
 
 </div>
 
+**oyo** extends traditional diffs with an optional step-through mode. Use it like a normal diff viewer with scrolling and hunk navigation, or step through changes one at a time and watch the code evolve. You can switch between both modes at any time.
 
-Step through changes or scroll the full diff, jump between hunks, and watch code transform instead of a static before/after.
+## Two ways to use oyo
+
+### 1. Classic diff (scroll-only)
+Review all changes at once, scroll freely, and jump between hunks, just like a traditional diff viewer.
+
+- Scroll the full diff
+- Jump between hunks
+- Vim-style navigation
+- No stepping required
+
+Enable with:
+- `--no-step`
+- Toggle in-app with `s`
+- Set `stepping = false` in config
+
+### 2. Step-through review (default)
+Apply changes incrementally and watch the file transform from old → new.
+
+- Step change-by-change
+- See precise evolution of the code
+- Useful for large refactors or careful reviews
+
+oyo does **not** replace classic diffs, it adds a new way to review them.
+
 
 ## Features
 
-- **Step-through navigation**: Move through changes one at a time with keyboard shortcuts
-- **Hunk navigation**: Jump between groups of related changes (hunks) in step or no-step mode
-- **No-step mode**: Review all changes at once with scroll + hunk navigation (scroll-only diff viewer)
+- **Classic diff mode (no-step)**
+  Scroll the full diff with hunk navigation, no stepping required
+- **Step-through navigation**
+  Move through changes one at a time with keyboard shortcuts
+- **Hunk navigation**
+  Jump between groups of related changes in both modes
 - **Three view modes**:
   - **Single**: Watch the code morph from old to new state
   - **Split**: See old and new versions with synchronized stepping
@@ -43,59 +72,69 @@ cargo install oyo
 
 ## Usage
 
-Optional theme override:
+### Classic diff (scroll-only)
 
 ```bash
-oy --theme-name tokyonight
+oy --no-step
+# or toggle in-app with `s`
 ```
 
-### CLI
+### Step-through diff
 
 ```bash
-# Diff uncommitted changes in current git repo
 oy
+```
 
-# Compare two files
+### Compare files
+
+```bash
 oy old.rs new.rs
+```
 
-# Commit picker
+### Commit picker
+
+```bash
 oy view
+```
 
-# Split view
+### View modes
+
+```bash
 oy old.rs new.rs --view split
-
-# Evolution view
 oy old.rs new.rs --view evolution
+```
 
-# Autoplay mode
+### Autoplay
+
+```bash
 oy old.rs new.rs --autoplay
-
-# Custom autoplay speed (100ms between steps)
 oy old.rs new.rs --speed 100
+```
 
-# No-step mode
-oy old.rs new.rs --no-step
+### Git ranges
 
-# Staged changes (index vs HEAD)
-oy --staged
-
-# Git range
+```bash
 oy --range HEAD~1..HEAD
-# or
 oy --range main...feature
 ```
 
-### Git Integration
-
-`oy` supports git external diff (7-arg interface) and `git difftool`. For most workflows,
-`difftool` is smoother; `diff.external` will open a TUI per file.
+### Staged changes
 
 ```bash
-# One-off (recommended)
+oy --staged
+```
+
+---
+
+## Git Integration
+
+### Recommended (`git difftool`)
+
+```bash
 git difftool -y --tool=oy
 ```
 
-Recommended `~/.gitconfig`:
+`~/.gitconfig`:
 
 ```gitconfig
 [difftool "oy"]
@@ -106,42 +145,22 @@ Recommended `~/.gitconfig`:
 
 [alias]
     d = difftool -y --tool=oy
-    oy = "!oy"
 ```
 
-External diff setup (optional):
+> Note: keep your pager (`less`, `moar`, `moor`) for `git diff`.
+> Do **not** set `core.pager` or `interactive.diffFilter` to `oy`.
 
-```bash
-git config --global diff.external oy
-```
+---
 
-Note: keep your pager (e.g., `less`, `moar`, `moor`) for normal `git diff` output.
-Do not set `core.pager` to `oy`. Also avoid `interactive.diffFilter` — it expects
-a stdin filter, not a TUI.
-
-### Jujutsu (jj)
-
-In `~/.config/jj/config.toml`:
+## Jujutsu (jj)
 
 ```toml
 [ui]
 paginate = "never"
 diff-formatter = ["oy", "$left", "$right"]
-```
 
-To use `jj diff --tool=oy`:
-
-```toml
 [diff-tools.oy]
 command = ["oy", "$left", "$right"]
-```
-
-Note: do not set your `ui.pager` to `oy`.
-
-Example range diff:
-
-```bash
-jj diff -f zy -t w
 ```
 
 ### Keyboard Shortcuts
