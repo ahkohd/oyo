@@ -594,7 +594,22 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
     let header_max_width = header_area.width.saturating_sub(1) as usize;
     let range_display = app.multi_diff.git_range_display();
     let header_text = if let Some((from, to)) = range_display {
-        truncate_text(&format!("{root_path} • {from}..{to}"), header_max_width)
+        let range_text = format!("{from}..{to}");
+        let range_width = text_width(&range_text);
+        if header_max_width <= range_width {
+            truncate_text(&range_text, header_max_width)
+        } else {
+            let sep = " • ";
+            let sep_width = text_width(sep);
+            let root_max_width =
+                header_max_width.saturating_sub(range_width + sep_width + 2);
+            let root_display = truncate_path(&root_path, root_max_width);
+            if root_display.is_empty() {
+                truncate_text(&range_text, header_max_width)
+            } else {
+                format!("{root_display}{sep}{range_text}")
+            }
+        }
     } else {
         let root_label = "Root ";
         let root_max_width = header_area
