@@ -601,8 +601,7 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
         } else {
             let sep = " • ";
             let sep_width = text_width(sep);
-            let root_max_width =
-                header_max_width.saturating_sub(range_width + sep_width + 2);
+            let root_max_width = header_max_width.saturating_sub(range_width + sep_width + 2);
             let root_display = truncate_path(&root_path, root_max_width);
             if root_display.is_empty() {
                 truncate_text(&range_text, header_max_width)

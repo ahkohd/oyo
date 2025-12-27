@@ -744,7 +744,12 @@ impl App {
         } else {
             color::dim_color(self.theme.accent)
         };
-        apply_highlight_spans(spans, &ranges, highlight_bg)
+        let highlight_fg = if is_active {
+            self.search_highlight_fg(highlight_bg)
+        } else {
+            None
+        };
+        apply_highlight_spans(spans, &ranges, highlight_bg, highlight_fg)
     }
 
     pub fn yank_current_change(&mut self) {
@@ -758,6 +763,24 @@ impl App {
         };
         if let Some(text) = self.text_for_yank(line) {
             copy_to_clipboard(&text);
+        }
+    }
+
+    fn search_highlight_fg(&self, bg: Color) -> Option<Color> {
+        let text = self.theme.text;
+        let mut best_color = text;
+        let mut best_ratio = color::contrast_ratio(bg, text).unwrap_or(0.0);
+        if let Some(bg_color) = self.theme.background {
+            let ratio = color::contrast_ratio(bg, bg_color).unwrap_or(0.0);
+            if ratio > best_ratio {
+                best_ratio = ratio;
+                best_color = bg_color;
+            }
+        }
+        if best_ratio == 0.0 {
+            None
+        } else {
+            Some(best_color)
         }
     }
 
@@ -3247,6 +3270,7 @@ fn apply_highlight_spans(
     spans: Vec<Span<'static>>,
     ranges: &[(usize, usize)],
     bg: Color,
+    fg: Option<Color>,
 ) -> Vec<Span<'static>> {
     if ranges.is_empty() {
         return spans;
@@ -3281,7 +3305,10 @@ fn apply_highlight_spans(
             let highlight_end = r_end.min(span_end);
             if highlight_end > highlight_start {
                 let slice = &text[(highlight_start - span_start)..(highlight_end - span_start)];
-                let style = span.style.bg(bg);
+                let mut style = span.style.bg(bg);
+                if let Some(fg) = fg {
+                    style = style.fg(fg);
+                }
                 out.push(Span::styled(slice.to_string(), style));
             }
             cursor = highlight_end;

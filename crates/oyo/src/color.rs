@@ -196,6 +196,42 @@ pub fn gradient_color(gradient: &AnimationGradient, t: f32) -> Rgb {
     hsl_to_rgb(hsl)
 }
 
+/// Relative luminance (sRGB) for contrast calculations.
+pub fn relative_luminance(color: Color) -> Option<f32> {
+    match color {
+        Color::Rgb(r, g, b) => {
+            let r = r as f32 / 255.0;
+            let g = g as f32 / 255.0;
+            let b = b as f32 / 255.0;
+            let r = if r <= 0.03928 {
+                r / 12.92
+            } else {
+                ((r + 0.055) / 1.055).powf(2.4)
+            };
+            let g = if g <= 0.03928 {
+                g / 12.92
+            } else {
+                ((g + 0.055) / 1.055).powf(2.4)
+            };
+            let b = if b <= 0.03928 {
+                b / 12.92
+            } else {
+                ((b + 0.055) / 1.055).powf(2.4)
+            };
+            Some(0.2126 * r + 0.7152 * g + 0.0722 * b)
+        }
+        _ => None,
+    }
+}
+
+/// Contrast ratio between two colors (WCAG formula).
+pub fn contrast_ratio(a: Color, b: Color) -> Option<f32> {
+    let la = relative_luminance(a)?;
+    let lb = relative_luminance(b)?;
+    let (max, min) = if la > lb { (la, lb) } else { (lb, la) };
+    Some((max + 0.05) / (min + 0.05))
+}
+
 /// Compute a linear animation t value across both phases (0.0 → 1.0)
 pub fn animation_t_linear(phase: AnimationPhase, progress: f32) -> f32 {
     let p = progress.clamp(0.0, 1.0);
