@@ -222,7 +222,7 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
         } else if view_line.show_hunk_extent {
             (
                 extent_marker.as_str(),
-                Style::default().fg(app.theme.diff_ext_marker),
+                super::extent_marker_style(app, view_line.kind),
             )
         } else {
             (" ", Style::default())

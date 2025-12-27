@@ -2,8 +2,8 @@
 
 use crate::color;
 use crate::config::{
-    DiffBackgroundMode, DiffForegroundMode, FileCountMode, ModifiedStepMode, ResolvedTheme,
-    SyntaxMode,
+    DiffBackgroundMode, DiffExtentMarkerMode, DiffForegroundMode, FileCountMode, ModifiedStepMode,
+    ResolvedTheme, SyntaxMode,
 };
 use crate::syntax::{SyntaxCache, SyntaxEngine, SyntaxSide};
 use oyo_core::{
@@ -199,6 +199,8 @@ pub struct App {
     pub diff_bg: DiffBackgroundMode,
     /// Diff foreground rendering mode
     pub diff_fg: DiffForegroundMode,
+    /// Diff extent marker color mode
+    pub diff_extent_marker: DiffExtentMarkerMode,
     /// Single-pane modified line render mode while stepping
     pub single_modified_step_mode: ModifiedStepMode,
     /// Keep split panes vertically aligned by inserting blank rows
@@ -376,6 +378,7 @@ impl App {
             stepping: true,
             diff_bg: DiffBackgroundMode::None,
             diff_fg: DiffForegroundMode::Theme,
+            diff_extent_marker: DiffExtentMarkerMode::Neutral,
             single_modified_step_mode: ModifiedStepMode::Mixed,
             split_align_lines: false,
             split_align_fill: "╱".to_string(),

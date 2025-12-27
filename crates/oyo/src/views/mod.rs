@@ -403,9 +403,9 @@ pub(crate) fn truncate_text(text: &str, max_width: usize) -> String {
     format!("{}...", &text[..suffix_len])
 }
 
-use crate::app::AnimationPhase;
+use crate::app::{AnimationPhase, App};
 use crate::color;
-use crate::config::ResolvedTheme;
+use crate::config::{DiffExtentMarkerMode, ResolvedTheme};
 use ratatui::{
     layout::{Alignment, Rect},
     style::{Color, Modifier, Style},
@@ -413,6 +413,19 @@ use ratatui::{
     widgets::Paragraph,
     Frame,
 };
+
+pub(crate) fn extent_marker_style(app: &App, kind: LineKind) -> Style {
+    let color = match app.diff_extent_marker {
+        DiffExtentMarkerMode::Neutral => app.theme.diff_ext_marker,
+        DiffExtentMarkerMode::Diff => match kind {
+            LineKind::Inserted | LineKind::PendingInsert => app.theme.insert_base(),
+            LineKind::Deleted | LineKind::PendingDelete => app.theme.delete_base(),
+            LineKind::Modified | LineKind::PendingModify => app.theme.modify_base(),
+            LineKind::Context => app.theme.diff_ext_marker,
+        },
+    };
+    Style::default().fg(color)
+}
 
 // ============================================================================
 // HSL-based animation styles (configurable colors, smooth gradients)

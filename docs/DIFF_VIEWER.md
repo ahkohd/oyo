@@ -111,6 +111,11 @@ Applies to single/split only (ignored in evolution):
 - `line`: full-line background including gutter (line numbers/signs), but
   cursor/ext markers do not take background.
 
+### Extent markers
+
+- `ui.diff.extent_marker = "neutral"`: hunk extent markers use the neutral marker color.
+- `ui.diff.extent_marker = "diff"`: hunk extent markers take the line’s diff color.
+
 ## Line Wrap
 
 - Wrap is visual-only; navigation still operates on logical lines.
@@ -123,6 +128,7 @@ Applies to single/split only (ignored in evolution):
 [ui.diff]
 bg = "text"           # none | text | line
 fg = "theme"          # theme | syntax
+extent_marker = "neutral" # neutral | diff
 
 [ui.evo]
 syntax = "context"    # context | full

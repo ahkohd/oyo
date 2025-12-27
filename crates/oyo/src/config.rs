@@ -655,6 +655,9 @@ pub struct DiffConfig {
     /// Diff foreground mode: "theme" or "syntax"
     #[serde(default = "diff_fg_default")]
     pub fg: DiffForegroundMode,
+    /// Extent marker color mode: "neutral" or "diff"
+    #[serde(default = "diff_extent_marker_default")]
+    pub extent_marker: DiffExtentMarkerMode,
 }
 
 impl Default for DiffConfig {
@@ -662,6 +665,7 @@ impl Default for DiffConfig {
         Self {
             bg: diff_bg_default(),
             fg: diff_fg_default(),
+            extent_marker: diff_extent_marker_default(),
         }
     }
 }
@@ -672,6 +676,10 @@ fn diff_bg_default() -> DiffBackgroundMode {
 
 fn diff_fg_default() -> DiffForegroundMode {
     DiffForegroundMode::Theme
+}
+
+fn diff_extent_marker_default() -> DiffExtentMarkerMode {
+    DiffExtentMarkerMode::Neutral
 }
 
 /// Evolution view syntax scope
@@ -712,6 +720,15 @@ pub enum DiffForegroundMode {
     #[default]
     Theme,
     Syntax,
+}
+
+/// Extent marker color mode
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DiffExtentMarkerMode {
+    #[default]
+    Neutral,
+    Diff,
 }
 
 /// Syntax highlighting mode
