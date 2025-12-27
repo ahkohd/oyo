@@ -1167,12 +1167,14 @@ fn view_spans_to_text(spans: &[ViewSpan]) -> String {
 
 fn get_old_span_style(
     kind: ViewSpanKind,
-    _line_kind: LineKind,
+    line_kind: LineKind,
     is_active: bool,
     app: &App,
 ) -> Style {
     let theme = &app.theme;
-    let use_bg = app.diff_bg == DiffBackgroundMode::Text;
+    let use_bg = app.diff_bg == DiffBackgroundMode::Text
+        || (app.diff_bg == DiffBackgroundMode::Line
+            && matches!(line_kind, LineKind::Modified | LineKind::PendingModify));
     let removed_bg = if use_bg { theme.diff_removed_bg } else { None };
     match kind {
         ViewSpanKind::Equal => Style::default().fg(theme.diff_context),
@@ -1244,12 +1246,14 @@ fn get_old_span_style(
 
 fn get_new_span_style(
     kind: ViewSpanKind,
-    _line_kind: LineKind,
+    line_kind: LineKind,
     is_active: bool,
     app: &App,
 ) -> Style {
     let theme = &app.theme;
-    let use_bg = app.diff_bg == DiffBackgroundMode::Text;
+    let use_bg = app.diff_bg == DiffBackgroundMode::Text
+        || (app.diff_bg == DiffBackgroundMode::Line
+            && matches!(line_kind, LineKind::Modified | LineKind::PendingModify));
     let added_bg = if use_bg { theme.diff_added_bg } else { None };
     match kind {
         ViewSpanKind::Equal => Style::default().fg(theme.diff_context),

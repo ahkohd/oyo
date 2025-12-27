@@ -54,7 +54,14 @@ pub(crate) fn apply_line_bg(
 ) -> Vec<Span<'static>> {
     let mut out: Vec<Span<'static>> = spans
         .into_iter()
-        .map(|span| Span::styled(span.content, span.style.bg(bg)))
+        .map(|span| {
+            let style = if span.style.bg.is_some() {
+                span.style
+            } else {
+                span.style.bg(bg)
+            };
+            Span::styled(span.content, style)
+        })
         .collect();
 
     if !line_wrap {

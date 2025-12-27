@@ -39,7 +39,10 @@ fn build_inline_modified_spans(
     } else {
         (AnimationPhase::Idle, 1.0, false)
     };
-    let use_bg = app.diff_bg == DiffBackgroundMode::Text;
+    let use_bg = matches!(
+        app.diff_bg,
+        DiffBackgroundMode::Text | DiffBackgroundMode::Line
+    );
     let added_bg = if use_bg {
         app.theme.diff_added_bg
     } else {
@@ -144,7 +147,10 @@ fn build_modified_only_spans(
     } else {
         (AnimationPhase::Idle, 1.0, false)
     };
-    let use_bg = app.diff_bg == DiffBackgroundMode::Text;
+    let use_bg = matches!(
+        app.diff_bg,
+        DiffBackgroundMode::Text | DiffBackgroundMode::Line
+    );
     let modified_bg = if use_bg {
         app.theme.diff_modified_bg
     } else {
@@ -566,17 +572,36 @@ pub fn render_single_pane(frame: &mut Frame, app: &mut App, area: Rect) {
                 &view_line.spans
             };
 
-            let style_line_kind = if has_peek
-                || (!app.stepping
-                    && matches!(view_line.kind, LineKind::Modified | LineKind::PendingModify))
-            {
+            let is_modified_line =
+                matches!(view_line.kind, LineKind::Modified | LineKind::PendingModify);
+            let treat_as_context = has_peek || (!app.stepping && is_modified_line);
+            let style_line_kind = if treat_as_context {
                 LineKind::Context
             } else {
                 view_line.kind
             };
             for view_span in spans {
-                let style =
+                let mut style =
                     get_span_style(view_span.kind, style_line_kind, view_line.is_active, app);
+                if !app.stepping && is_modified_line && app.diff_bg == DiffBackgroundMode::Line {
+                    match view_span.kind {
+                        ViewSpanKind::Deleted | ViewSpanKind::PendingDelete => {
+                            if style.bg.is_none() {
+                                if let Some(bg) = app.theme.diff_removed_bg {
+                                    style = style.bg(bg);
+                                }
+                            }
+                        }
+                        ViewSpanKind::Inserted | ViewSpanKind::PendingInsert => {
+                            if style.bg.is_none() {
+                                if let Some(bg) = app.theme.diff_added_bg {
+                                    style = style.bg(bg);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
                 // For deleted spans, don't strikethrough leading whitespace
                 if app.strikethrough_deletions
                     && matches!(
@@ -812,10 +837,16 @@ fn get_span_style(kind: ViewSpanKind, line_kind: LineKind, is_active: bool, app:
     let backward = app.is_backward_animation();
     let theme = &app.theme;
     let is_modification = matches!(line_kind, LineKind::Modified | LineKind::PendingModify);
-    let use_bg = app.diff_bg == DiffBackgroundMode::Text;
-    let added_bg = if use_bg { theme.diff_added_bg } else { None };
-    let removed_bg = if use_bg { theme.diff_removed_bg } else { None };
-    let modified_bg = if use_bg { theme.diff_modified_bg } else { None };
+    let text_bg = app.diff_bg == DiffBackgroundMode::Text;
+    let modified_bg = if text_bg
+        || (app.diff_bg == DiffBackgroundMode::Line && is_modification)
+    {
+        theme.diff_modified_bg
+    } else {
+        None
+    };
+    let added_bg = if text_bg { theme.diff_added_bg } else { None };
+    let removed_bg = if text_bg { theme.diff_removed_bg } else { None };
 
     match kind {
         ViewSpanKind::Equal => Style::default().fg(theme.diff_context),
