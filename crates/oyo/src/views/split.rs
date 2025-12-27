@@ -250,11 +250,7 @@ fn render_old_pane(frame: &mut Frame, app: &mut App, area: Rect) {
             let fill_span = align_fill_span(app, visible_width);
             let marker_fill = align_fill_gutter_span(app, 1);
             let gutter_fill = align_fill_gutter_span(app, 4);
-            let sign_fill = if app.gutter_signs {
-                align_fill_gutter_span(app, 1)
-            } else {
-                Span::raw(" ")
-            };
+            let sign_fill = align_fill_gutter_span(app, 1);
             gutter_lines.push(Line::from(vec![
                 marker_fill,
                 gutter_fill,
@@ -265,11 +261,7 @@ fn render_old_pane(frame: &mut Frame, app: &mut App, area: Rect) {
                 for _ in 1..wrap_count {
                     let marker_fill = align_fill_gutter_span(app, 1);
                     let gutter_fill = align_fill_gutter_span(app, 4);
-                    let sign_fill = if app.gutter_signs {
-                        align_fill_gutter_span(app, 1)
-                    } else {
-                        Span::raw(" ")
-                    };
+                    let sign_fill = align_fill_gutter_span(app, 1);
                     gutter_lines.push(Line::from(vec![
                         marker_fill,
                         gutter_fill,
@@ -675,22 +667,14 @@ fn render_new_pane(frame: &mut Frame, app: &mut App, area: Rect) {
             };
             let fill_span = align_fill_span(app, visible_width);
             let gutter_fill = align_fill_gutter_span(app, 4);
-            let sign_fill = if app.gutter_signs {
-                align_fill_gutter_span(app, 1)
-            } else {
-                Span::raw(" ")
-            };
+            let sign_fill = align_fill_gutter_span(app, 1);
             gutter_lines.push(Line::from(vec![gutter_fill, sign_fill]));
             content_lines.push(Line::from(fill_span.clone()));
             marker_lines.push(Line::from(Span::raw(" ")));
             if app.line_wrap && wrap_count > 1 {
                 for _ in 1..wrap_count {
                     let gutter_fill = align_fill_gutter_span(app, 4);
-                    let sign_fill = if app.gutter_signs {
-                        align_fill_gutter_span(app, 1)
-                    } else {
-                        Span::raw(" ")
-                    };
+                    let sign_fill = align_fill_gutter_span(app, 1);
                     gutter_lines.push(Line::from(vec![gutter_fill, sign_fill]));
                     content_lines.push(Line::from(fill_span.clone()));
                     marker_lines.push(Line::from(Span::raw(" ")));
