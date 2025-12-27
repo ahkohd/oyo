@@ -649,12 +649,15 @@ impl Default for EvoViewConfig {
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 pub struct DiffConfig {
-    /// Diff background mode: "none", "text", "word", or "line"
+    /// Diff background (full-line) toggle
     #[serde(default = "diff_bg_default")]
-    pub bg: DiffBackgroundMode,
+    pub bg: bool,
     /// Diff foreground mode: "theme" or "syntax"
     #[serde(default = "diff_fg_default")]
     pub fg: DiffForegroundMode,
+    /// Inline diff highlight mode: "word", "text", or "none"
+    #[serde(default = "diff_highlight_default")]
+    pub highlight: DiffHighlightMode,
     /// Extent marker color mode: "neutral" or "diff"
     #[serde(default = "diff_extent_marker_default")]
     pub extent_marker: DiffExtentMarkerMode,
@@ -668,18 +671,23 @@ impl Default for DiffConfig {
         Self {
             bg: diff_bg_default(),
             fg: diff_fg_default(),
+            highlight: diff_highlight_default(),
             extent_marker: diff_extent_marker_default(),
             extent_marker_scope: diff_extent_marker_scope_default(),
         }
     }
 }
 
-fn diff_bg_default() -> DiffBackgroundMode {
-    DiffBackgroundMode::Text
+fn diff_bg_default() -> bool {
+    false
 }
 
 fn diff_fg_default() -> DiffForegroundMode {
     DiffForegroundMode::Theme
+}
+
+fn diff_highlight_default() -> DiffHighlightMode {
+    DiffHighlightMode::Text
 }
 
 fn diff_extent_marker_default() -> DiffExtentMarkerMode {
@@ -709,18 +717,6 @@ pub enum ModifiedStepMode {
     Modified,
 }
 
-/// Diff background rendering mode
-#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum DiffBackgroundMode {
-    #[serde(alias = "off")]
-    None,
-    #[default]
-    Text,
-    Word,
-    Line,
-}
-
 /// Diff foreground rendering mode
 #[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
@@ -728,6 +724,16 @@ pub enum DiffForegroundMode {
     #[default]
     Theme,
     Syntax,
+}
+
+/// Inline diff highlight mode
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DiffHighlightMode {
+    #[default]
+    Text,
+    Word,
+    None,
 }
 
 /// Extent marker color mode

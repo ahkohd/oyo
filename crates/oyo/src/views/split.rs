@@ -7,7 +7,7 @@ use super::{
 };
 use crate::app::{AnimationPhase, App};
 use crate::color;
-use crate::config::{DiffBackgroundMode, DiffForegroundMode};
+use crate::config::{DiffForegroundMode, DiffHighlightMode};
 use crate::syntax::SyntaxSide;
 use oyo_core::{
     AnimationFrame, ChangeKind, LineKind, StepDirection, ViewLine, ViewSpan, ViewSpanKind,
@@ -270,7 +270,7 @@ fn render_old_pane(frame: &mut Frame, app: &mut App, area: Rect) {
             let line_num_str = format!("{:4}", old_line_num);
             let bg_kind = split_old_bg_kind(view_line.kind);
             let line_num_style = line_num_style_for_kind(bg_kind, app);
-            let line_bg_gutter = if app.diff_bg == DiffBackgroundMode::Line {
+            let line_bg_gutter = if app.diff_bg {
                 diff_line_bg(bg_kind, &app.theme)
             } else {
                 None
@@ -337,7 +337,13 @@ fn render_old_pane(frame: &mut Frame, app: &mut App, area: Rect) {
                 preview_mode && view_line.hunk_index == Some(preview_hunk) && wants_diff_syntax;
             let preview_modified = in_preview_hunk
                 && matches!(view_line.kind, LineKind::Modified | LineKind::PendingModify);
-            let can_use_diff_syntax = wants_diff_syntax;
+            let highlight_inline = matches!(
+                app.diff_highlight,
+                DiffHighlightMode::Text | DiffHighlightMode::Word
+            );
+            let modified_line =
+                matches!(view_line.kind, LineKind::Modified | LineKind::PendingModify);
+            let can_use_diff_syntax = wants_diff_syntax && !modified_line;
             if app.syntax_enabled()
                 && !preview_modified
                 && !view_line.is_active_change
@@ -359,7 +365,7 @@ fn render_old_pane(frame: &mut Frame, app: &mut App, area: Rect) {
                     .contains(&view_line.change_id);
                 let show_inline = view_line.old_line.is_some()
                     && view_line.new_line.is_some()
-                    && (view_line.is_active || is_applied);
+                    && (view_line.is_active || is_applied || (highlight_inline && modified_line));
                 let spans = if show_inline {
                     if let Some(change) = app
                         .multi_diff
@@ -394,11 +400,18 @@ fn render_old_pane(frame: &mut Frame, app: &mut App, area: Rect) {
                 };
 
                 for view_span in spans {
+                    let highlight_allowed =
+                        matches!(view_line.kind, LineKind::Modified | LineKind::PendingModify)
+                            || !view_line.is_active
+                            || (view_line.is_active
+                                && !matches!(app.diff_highlight, DiffHighlightMode::None)
+                                && (!app.diff_bg || app.diff_fg == DiffForegroundMode::Theme));
                     let style = get_old_span_style(
                         view_span.kind,
                         view_line.kind,
                         view_line.is_active,
                         app,
+                        highlight_allowed,
                     );
                     // For deleted spans, don't strikethrough leading whitespace
                     if app.strikethrough_deletions
@@ -424,7 +437,7 @@ fn render_old_pane(frame: &mut Frame, app: &mut App, area: Rect) {
                 }
             }
 
-            let line_bg_line = if app.diff_bg == DiffBackgroundMode::Line {
+            let line_bg_line = if app.diff_bg {
                 diff_line_bg(bg_kind, &app.theme)
             } else {
                 None
@@ -433,7 +446,18 @@ fn render_old_pane(frame: &mut Frame, app: &mut App, area: Rect) {
                 content_spans = apply_line_bg(content_spans, bg, visible_width, app.line_wrap);
             }
 
-            if matches!(app.diff_bg, DiffBackgroundMode::Text | DiffBackgroundMode::Word)
+            let highlight_allowed =
+                matches!(view_line.kind, LineKind::Modified | LineKind::PendingModify)
+                    || !view_line.is_active
+                    || (view_line.is_active
+                        && !matches!(app.diff_highlight, DiffHighlightMode::None)
+                        && (!app.diff_bg || app.diff_fg == DiffForegroundMode::Theme));
+            if highlight_allowed
+                && !app.diff_bg
+                && matches!(
+                    app.diff_highlight,
+                    DiffHighlightMode::Text | DiffHighlightMode::Word
+                )
                 && used_syntax
             {
                 if let Some(bg) = diff_line_bg(bg_kind, &app.theme) {
@@ -441,10 +465,30 @@ fn render_old_pane(frame: &mut Frame, app: &mut App, area: Rect) {
                 }
             }
 
-            if app.diff_bg == DiffBackgroundMode::Text {
-                content_spans = clear_leading_ws_bg(content_spans, Some(app.theme.diff_context));
-            } else if app.diff_bg == DiffBackgroundMode::Word {
-                content_spans = clear_leading_ws_bg(content_spans, None);
+            if highlight_allowed {
+                if !app.diff_bg {
+                    if app.diff_highlight == DiffHighlightMode::Text {
+                        if !view_line.is_active {
+                            content_spans =
+                                clear_leading_ws_bg(content_spans, Some(app.theme.diff_context));
+                        }
+                    } else if app.diff_highlight == DiffHighlightMode::Word {
+                        content_spans = clear_leading_ws_bg(content_spans, None);
+                    }
+                } else if app.diff_highlight == DiffHighlightMode::Word {
+                    content_spans = super::replace_leading_ws_bg(content_spans, None, line_bg_line);
+                }
+            }
+
+            let mut italic_line = false;
+            if app.syntax_enabled() {
+                if used_syntax {
+                    italic_line = super::line_is_italic(&content_spans);
+                } else if let Some(spans) =
+                    app.syntax_spans_for_line(SyntaxSide::Old, Some(old_line_num))
+                {
+                    italic_line = super::line_is_italic(&spans);
+                }
             }
 
             let line_text = spans_to_text(&content_spans);
@@ -452,6 +496,9 @@ fn render_old_pane(frame: &mut Frame, app: &mut App, area: Rect) {
                 && has_query
                 && line_text.to_ascii_lowercase().contains(&query);
             content_spans = app.highlight_search_spans(content_spans, &line_text, is_active_match);
+            if italic_line {
+                content_spans = super::apply_italic_spans(content_spans);
+            }
 
             content_spans = expand_tabs_in_spans(&content_spans, TAB_WIDTH);
 
@@ -466,7 +513,7 @@ fn render_old_pane(frame: &mut Frame, app: &mut App, area: Rect) {
             let mut display_spans = content_spans;
             if !app.line_wrap {
                 display_spans = slice_spans(&display_spans, app.horizontal_scroll, visible_width);
-                if app.diff_bg == DiffBackgroundMode::Line {
+                if app.diff_bg {
                     if let Some(bg) = diff_line_bg(bg_kind, &app.theme) {
                         display_spans = pad_spans_bg(display_spans, bg, visible_width);
                     }
@@ -690,7 +737,7 @@ fn render_new_pane(frame: &mut Frame, app: &mut App, area: Rect) {
             let line_num_str = format!("{:4}", new_line_num);
             let bg_kind = split_new_bg_kind(view_line.kind);
             let line_num_style = line_num_style_for_kind(bg_kind, app);
-            let line_bg_gutter = if app.diff_bg == DiffBackgroundMode::Line {
+            let line_bg_gutter = if app.diff_bg {
                 diff_line_bg(bg_kind, &app.theme)
             } else {
                 None
@@ -749,7 +796,13 @@ fn render_new_pane(frame: &mut Frame, app: &mut App, area: Rect) {
                 preview_mode && view_line.hunk_index == Some(preview_hunk) && wants_diff_syntax;
             let preview_modified = in_preview_hunk
                 && matches!(view_line.kind, LineKind::Modified | LineKind::PendingModify);
-            let can_use_diff_syntax = wants_diff_syntax;
+            let highlight_inline = matches!(
+                app.diff_highlight,
+                DiffHighlightMode::Text | DiffHighlightMode::Word
+            );
+            let modified_line =
+                matches!(view_line.kind, LineKind::Modified | LineKind::PendingModify);
+            let can_use_diff_syntax = wants_diff_syntax && !modified_line;
             if app.syntax_enabled()
                 && !preview_modified
                 && !view_line.is_active_change
@@ -781,7 +834,7 @@ fn render_new_pane(frame: &mut Frame, app: &mut App, area: Rect) {
                     .contains(&view_line.change_id);
                 let show_inline = view_line.old_line.is_some()
                     && view_line.new_line.is_some()
-                    && (view_line.is_active || is_applied);
+                    && (view_line.is_active || is_applied || (highlight_inline && modified_line));
                 let spans = if show_inline {
                     if let Some(change) = app
                         .multi_diff
@@ -828,16 +881,23 @@ fn render_new_pane(frame: &mut Frame, app: &mut App, area: Rect) {
                     &view_line.spans
                 };
                 for view_span in spans {
+                    let highlight_allowed =
+                        matches!(view_line.kind, LineKind::Modified | LineKind::PendingModify)
+                            || !view_line.is_active
+                            || (view_line.is_active
+                                && !matches!(app.diff_highlight, DiffHighlightMode::None)
+                                && (!app.diff_bg || app.diff_fg == DiffForegroundMode::Theme));
                     let style = get_new_span_style(
                         view_span.kind,
                         view_line.kind,
                         view_line.is_active,
                         app,
+                        highlight_allowed,
                     );
                     content_spans.push(Span::styled(view_span.text.clone(), style));
                 }
             }
-            let line_bg_line = if app.diff_bg == DiffBackgroundMode::Line {
+            let line_bg_line = if app.diff_bg {
                 diff_line_bg(bg_kind, &app.theme)
             } else {
                 None
@@ -846,7 +906,18 @@ fn render_new_pane(frame: &mut Frame, app: &mut App, area: Rect) {
                 content_spans = apply_line_bg(content_spans, bg, visible_width, app.line_wrap);
             }
 
-            if matches!(app.diff_bg, DiffBackgroundMode::Text | DiffBackgroundMode::Word)
+            let highlight_allowed =
+                matches!(view_line.kind, LineKind::Modified | LineKind::PendingModify)
+                    || !view_line.is_active
+                    || (view_line.is_active
+                        && !matches!(app.diff_highlight, DiffHighlightMode::None)
+                        && (!app.diff_bg || app.diff_fg == DiffForegroundMode::Theme));
+            if highlight_allowed
+                && !app.diff_bg
+                && matches!(
+                    app.diff_highlight,
+                    DiffHighlightMode::Text | DiffHighlightMode::Word
+                )
                 && used_syntax
             {
                 if let Some(bg) = diff_line_bg(bg_kind, &app.theme) {
@@ -854,10 +925,41 @@ fn render_new_pane(frame: &mut Frame, app: &mut App, area: Rect) {
                 }
             }
 
-            if app.diff_bg == DiffBackgroundMode::Text {
-                content_spans = clear_leading_ws_bg(content_spans, Some(app.theme.diff_context));
-            } else if app.diff_bg == DiffBackgroundMode::Word {
-                content_spans = clear_leading_ws_bg(content_spans, None);
+            if highlight_allowed {
+                if !app.diff_bg {
+                    if app.diff_highlight == DiffHighlightMode::Text {
+                        if !view_line.is_active {
+                            content_spans =
+                                clear_leading_ws_bg(content_spans, Some(app.theme.diff_context));
+                        }
+                    } else if app.diff_highlight == DiffHighlightMode::Word {
+                        content_spans = clear_leading_ws_bg(content_spans, None);
+                    }
+                } else if app.diff_highlight == DiffHighlightMode::Word {
+                    content_spans = super::replace_leading_ws_bg(content_spans, None, line_bg_line);
+                }
+            }
+
+            let mut italic_line = false;
+            if app.syntax_enabled() {
+                if used_syntax {
+                    italic_line = super::line_is_italic(&content_spans);
+                } else {
+                    let use_old = view_line.kind == LineKind::Context && view_line.has_changes;
+                    let side = if use_old {
+                        SyntaxSide::Old
+                    } else {
+                        SyntaxSide::New
+                    };
+                    let line_num = if use_old {
+                        view_line.old_line.or(Some(new_line_num))
+                    } else {
+                        Some(new_line_num)
+                    };
+                    if let Some(spans) = app.syntax_spans_for_line(side, line_num) {
+                        italic_line = super::line_is_italic(&spans);
+                    }
+                }
             }
 
             let line_text = spans_to_text(&content_spans);
@@ -865,6 +967,9 @@ fn render_new_pane(frame: &mut Frame, app: &mut App, area: Rect) {
                 && has_query
                 && line_text.to_ascii_lowercase().contains(&query);
             content_spans = app.highlight_search_spans(content_spans, &line_text, is_active_match);
+            if italic_line {
+                content_spans = super::apply_italic_spans(content_spans);
+            }
 
             content_spans = expand_tabs_in_spans(&content_spans, TAB_WIDTH);
 
@@ -879,7 +984,7 @@ fn render_new_pane(frame: &mut Frame, app: &mut App, area: Rect) {
             let mut display_spans = content_spans;
             if !app.line_wrap {
                 display_spans = slice_spans(&display_spans, app.horizontal_scroll, visible_width);
-                if app.diff_bg == DiffBackgroundMode::Line {
+                if app.diff_bg {
                     if let Some(bg) = diff_line_bg(bg_kind, &app.theme) {
                         display_spans = pad_spans_bg(display_spans, bg, visible_width);
                     }
@@ -1163,15 +1268,22 @@ fn view_spans_to_text(spans: &[ViewSpan]) -> String {
 
 fn get_old_span_style(
     kind: ViewSpanKind,
-    line_kind: LineKind,
+    _line_kind: LineKind,
     is_active: bool,
     app: &App,
+    highlight_allowed: bool,
 ) -> Style {
     let theme = &app.theme;
-    let use_bg = matches!(app.diff_bg, DiffBackgroundMode::Text | DiffBackgroundMode::Word)
-        || (app.diff_bg == DiffBackgroundMode::Line
-            && matches!(line_kind, LineKind::Modified | LineKind::PendingModify));
-    let removed_bg = if use_bg { theme.diff_removed_bg } else { None };
+    let use_bg = highlight_allowed
+        && matches!(
+            app.diff_highlight,
+            DiffHighlightMode::Text | DiffHighlightMode::Word
+        );
+    let removed_bg = if use_bg {
+        super::boost_inline_bg(app, theme.diff_removed_bg, theme.delete_base())
+    } else {
+        None
+    };
     match kind {
         ViewSpanKind::Equal => Style::default().fg(theme.diff_context),
         ViewSpanKind::Deleted => {
@@ -1242,15 +1354,22 @@ fn get_old_span_style(
 
 fn get_new_span_style(
     kind: ViewSpanKind,
-    line_kind: LineKind,
+    _line_kind: LineKind,
     is_active: bool,
     app: &App,
+    highlight_allowed: bool,
 ) -> Style {
     let theme = &app.theme;
-    let use_bg = matches!(app.diff_bg, DiffBackgroundMode::Text | DiffBackgroundMode::Word)
-        || (app.diff_bg == DiffBackgroundMode::Line
-            && matches!(line_kind, LineKind::Modified | LineKind::PendingModify));
-    let added_bg = if use_bg { theme.diff_added_bg } else { None };
+    let use_bg = highlight_allowed
+        && matches!(
+            app.diff_highlight,
+            DiffHighlightMode::Text | DiffHighlightMode::Word
+        );
+    let added_bg = if use_bg {
+        super::boost_inline_bg(app, theme.diff_added_bg, theme.insert_base())
+    } else {
+        None
+    };
     match kind {
         ViewSpanKind::Equal => Style::default().fg(theme.diff_context),
         ViewSpanKind::Inserted => {

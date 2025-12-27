@@ -2,7 +2,7 @@
 
 use crate::color;
 use crate::config::{
-    DiffBackgroundMode, DiffExtentMarkerMode, DiffExtentMarkerScope, DiffForegroundMode,
+    DiffExtentMarkerMode, DiffExtentMarkerScope, DiffForegroundMode, DiffHighlightMode,
     FileCountMode, ModifiedStepMode, ResolvedTheme, SyntaxMode,
 };
 use crate::syntax::{SyntaxCache, SyntaxEngine, SyntaxSide};
@@ -195,10 +195,12 @@ pub struct App {
     pub theme_is_light: bool,
     /// Whether stepping is enabled (false = no-step diff view)
     pub stepping: bool,
-    /// Diff background rendering mode
-    pub diff_bg: DiffBackgroundMode,
+    /// Diff background (full-line) toggle
+    pub diff_bg: bool,
     /// Diff foreground rendering mode
     pub diff_fg: DiffForegroundMode,
+    /// Inline diff highlight mode
+    pub diff_highlight: DiffHighlightMode,
     /// Diff extent marker color mode
     pub diff_extent_marker: DiffExtentMarkerMode,
     /// Diff extent marker scope
@@ -378,8 +380,9 @@ impl App {
             theme: ResolvedTheme::default(),
             theme_is_light: false,
             stepping: true,
-            diff_bg: DiffBackgroundMode::None,
+            diff_bg: false,
             diff_fg: DiffForegroundMode::Theme,
+            diff_highlight: DiffHighlightMode::Text,
             diff_extent_marker: DiffExtentMarkerMode::Neutral,
             diff_extent_marker_scope: DiffExtentMarkerScope::Progress,
             single_modified_step_mode: ModifiedStepMode::Mixed,

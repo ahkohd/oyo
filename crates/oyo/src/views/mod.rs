@@ -33,6 +33,35 @@ pub(crate) fn spans_width(spans: &[Span]) -> usize {
         .sum()
 }
 
+pub(crate) fn line_is_italic(spans: &[Span]) -> bool {
+    let mut has_text = false;
+    for span in spans {
+        if span.content.trim().is_empty() {
+            continue;
+        }
+        has_text = true;
+        if !span.style.add_modifier.contains(Modifier::ITALIC) {
+            return false;
+        }
+    }
+    has_text
+}
+
+pub(crate) fn apply_italic_spans(spans: Vec<Span<'static>>) -> Vec<Span<'static>> {
+    spans
+        .into_iter()
+        .map(|span| Span::styled(span.content, span.style.add_modifier(Modifier::ITALIC)))
+        .collect()
+}
+
+pub(crate) fn boost_inline_bg(app: &App, base_bg: Option<Color>, accent: Color) -> Option<Color> {
+    if !app.diff_bg {
+        return base_bg;
+    }
+    let base = base_bg?;
+    color::blend_colors(base, accent, 0.10).or(Some(base))
+}
+
 pub(crate) fn pending_tail_text(count: usize) -> String {
     format!("... +{} more", count)
 }
@@ -123,6 +152,65 @@ pub(crate) fn clear_leading_ws_bg(
             let ws_style = if should_clear {
                 Style {
                     bg: None,
+                    ..span.style
+                }
+            } else {
+                span.style
+            };
+            out.push(Span::styled(ws.to_string(), ws_style));
+        }
+        if !rest.is_empty() {
+            out.push(Span::styled(rest.to_string(), span.style));
+            at_line_start = false;
+        }
+    }
+
+    out
+}
+
+pub(crate) fn replace_leading_ws_bg(
+    spans: Vec<Span<'static>>,
+    clear_when_fg: Option<Color>,
+    replacement_bg: Option<Color>,
+) -> Vec<Span<'static>> {
+    let mut out = Vec::new();
+    let mut at_line_start = true;
+
+    for span in spans {
+        if !at_line_start {
+            out.push(span);
+            continue;
+        }
+
+        let text = span.content.as_ref();
+        if text.is_empty() {
+            continue;
+        }
+
+        let mut ws_len = 0usize;
+        for (idx, ch) in text.char_indices() {
+            if ch.is_whitespace() {
+                ws_len = idx + ch.len_utf8();
+            } else {
+                break;
+            }
+        }
+
+        if ws_len == 0 {
+            out.push(span);
+            at_line_start = false;
+            continue;
+        }
+
+        let (ws, rest) = text.split_at(ws_len);
+        let should_clear = match clear_when_fg {
+            Some(fg) => span.style.fg == Some(fg),
+            None => true,
+        };
+        if !ws.is_empty() {
+            let ws_style = if should_clear {
+                Style {
+                    bg: replacement_bg,
                     ..span.style
                 }
             } else {

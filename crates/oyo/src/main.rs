@@ -228,6 +228,7 @@ fn apply_config_to_app(app: &mut App, config: &config::Config, args: &Args, ligh
     app.gutter_signs = config.ui.gutter_signs;
     app.diff_bg = config.ui.diff.bg;
     app.diff_fg = config.ui.diff.fg;
+    app.diff_highlight = config.ui.diff.highlight;
     app.diff_extent_marker = config.ui.diff.extent_marker;
     app.diff_extent_marker_scope = config.ui.diff.extent_marker_scope;
     app.syntax_mode = config.ui.syntax.mode;
@@ -720,6 +721,7 @@ fn main() -> Result<()> {
     app.gutter_signs = config.ui.gutter_signs;
     app.diff_bg = config.ui.diff.bg;
     app.diff_fg = config.ui.diff.fg;
+    app.diff_highlight = config.ui.diff.highlight;
     app.diff_extent_marker = config.ui.diff.extent_marker;
     app.diff_extent_marker_scope = config.ui.diff.extent_marker_scope;
     app.syntax_mode = config.ui.syntax.mode;

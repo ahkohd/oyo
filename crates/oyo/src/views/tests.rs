@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use crate::app::{AnimationPhase, App, ViewMode};
-use crate::config::{DiffBackgroundMode, DiffForegroundMode, EvoSyntaxMode, SyntaxMode};
+use crate::config::{DiffForegroundMode, DiffHighlightMode, EvoSyntaxMode, SyntaxMode};
 use crate::views::{render_evolution, render_single_pane, render_split};
 use oyo_core::MultiFileDiff;
 use ratatui::{backend::TestBackend, buffer::Buffer, Terminal};
@@ -17,8 +17,9 @@ fn make_app(old: &str, new: &str, view_mode: ViewMode) -> App {
     app.animation_enabled = false;
     app.animation_phase = AnimationPhase::Idle;
     app.syntax_mode = SyntaxMode::Off;
-    app.diff_bg = DiffBackgroundMode::None;
+    app.diff_bg = false;
     app.diff_fg = DiffForegroundMode::Theme;
+    app.diff_highlight = DiffHighlightMode::Text;
     app
 }
 
