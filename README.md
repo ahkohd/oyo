@@ -215,6 +215,7 @@ stepping = true             # Enable stepping (false = no-step mode)
 # bg = "none"               # "none", "text", or "line"
 # fg = "theme"              # "theme" or "syntax"
 # extent_marker = "neutral" # "neutral" or "diff"
+# extent_marker_scope = "progress" # "progress" or "hunk"
 # [ui.split]
 # align_lines = false       # Insert blanks to keep split panes aligned
 # align_fill = "╱"          # Fill character for aligned blanks (empty = no marker)

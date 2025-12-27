@@ -658,6 +658,9 @@ pub struct DiffConfig {
     /// Extent marker color mode: "neutral" or "diff"
     #[serde(default = "diff_extent_marker_default")]
     pub extent_marker: DiffExtentMarkerMode,
+    /// Extent marker scope: "progress" or "hunk"
+    #[serde(default = "diff_extent_marker_scope_default")]
+    pub extent_marker_scope: DiffExtentMarkerScope,
 }
 
 impl Default for DiffConfig {
@@ -666,6 +669,7 @@ impl Default for DiffConfig {
             bg: diff_bg_default(),
             fg: diff_fg_default(),
             extent_marker: diff_extent_marker_default(),
+            extent_marker_scope: diff_extent_marker_scope_default(),
         }
     }
 }
@@ -682,6 +686,9 @@ fn diff_extent_marker_default() -> DiffExtentMarkerMode {
     DiffExtentMarkerMode::Neutral
 }
 
+fn diff_extent_marker_scope_default() -> DiffExtentMarkerScope {
+    DiffExtentMarkerScope::Progress
+}
 /// Evolution view syntax scope
 #[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
@@ -729,6 +736,15 @@ pub enum DiffExtentMarkerMode {
     #[default]
     Neutral,
     Diff,
+}
+
+/// Extent marker scope
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DiffExtentMarkerScope {
+    #[default]
+    Progress,
+    Hunk,
 }
 
 /// Syntax highlighting mode

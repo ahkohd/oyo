@@ -405,7 +405,7 @@ pub(crate) fn truncate_text(text: &str, max_width: usize) -> String {
 
 use crate::app::{AnimationPhase, App};
 use crate::color;
-use crate::config::{DiffExtentMarkerMode, ResolvedTheme};
+use crate::config::{DiffExtentMarkerMode, DiffExtentMarkerScope, ResolvedTheme};
 use ratatui::{
     layout::{Alignment, Rect},
     style::{Color, Modifier, Style},
@@ -414,14 +414,33 @@ use ratatui::{
     Frame,
 };
 
-pub(crate) fn extent_marker_style(app: &App, kind: LineKind) -> Style {
+pub(crate) fn extent_marker_style(
+    app: &App,
+    kind: LineKind,
+    has_changes: bool,
+    old_line: Option<usize>,
+    new_line: Option<usize>,
+) -> Style {
     let color = match app.diff_extent_marker {
         DiffExtentMarkerMode::Neutral => app.theme.diff_ext_marker,
-        DiffExtentMarkerMode::Diff => match kind {
-            LineKind::Inserted | LineKind::PendingInsert => app.theme.insert_base(),
-            LineKind::Deleted | LineKind::PendingDelete => app.theme.delete_base(),
-            LineKind::Modified | LineKind::PendingModify => app.theme.modify_base(),
-            LineKind::Context => app.theme.diff_ext_marker,
+        DiffExtentMarkerMode::Diff => match app.diff_extent_marker_scope {
+            DiffExtentMarkerScope::Progress => match kind {
+                LineKind::Inserted | LineKind::PendingInsert => app.theme.insert_base(),
+                LineKind::Deleted | LineKind::PendingDelete => app.theme.delete_base(),
+                LineKind::Modified | LineKind::PendingModify => app.theme.modify_base(),
+                LineKind::Context => app.theme.diff_ext_marker,
+            },
+            DiffExtentMarkerScope::Hunk => {
+                if !has_changes {
+                    app.theme.diff_ext_marker
+                } else if old_line.is_none() {
+                    app.theme.insert_base()
+                } else if new_line.is_none() {
+                    app.theme.delete_base()
+                } else {
+                    app.theme.modify_base()
+                }
+            }
         },
     };
     Style::default().fg(color)

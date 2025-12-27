@@ -115,6 +115,8 @@ Applies to single/split only (ignored in evolution):
 
 - `ui.diff.extent_marker = "neutral"`: hunk extent markers use the neutral marker color.
 - `ui.diff.extent_marker = "diff"`: hunk extent markers take the line’s diff color.
+- `ui.diff.extent_marker_scope = "progress"`: only already-applied change lines use diff colors.
+- `ui.diff.extent_marker_scope = "hunk"`: all lines in the current hunk use diff colors.
 
 ## Line Wrap
 
@@ -129,6 +131,7 @@ Applies to single/split only (ignored in evolution):
 bg = "text"           # none | text | line
 fg = "theme"          # theme | syntax
 extent_marker = "neutral" # neutral | diff
+extent_marker_scope = "progress" # progress | hunk
 
 [ui.evo]
 syntax = "context"    # context | full

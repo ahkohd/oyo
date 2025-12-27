@@ -287,7 +287,13 @@ fn render_old_pane(frame: &mut Frame, app: &mut App, area: Rect) {
             } else if view_line.show_hunk_extent {
                 (
                     extent_marker.as_str(),
-                    super::extent_marker_style(app, view_line.kind),
+                    super::extent_marker_style(
+                        app,
+                        view_line.kind,
+                        view_line.has_changes,
+                        view_line.old_line,
+                        view_line.new_line,
+                    ),
                 )
             } else {
                 (" ", Style::default())
@@ -697,7 +703,13 @@ fn render_new_pane(frame: &mut Frame, app: &mut App, area: Rect) {
             } else if view_line.show_hunk_extent {
                 (
                     extent_marker_right.as_str(),
-                    super::extent_marker_style(app, view_line.kind),
+                    super::extent_marker_style(
+                        app,
+                        view_line.kind,
+                        view_line.has_changes,
+                        view_line.old_line,
+                        view_line.new_line,
+                    ),
                 )
             } else {
                 (" ", Style::default())
