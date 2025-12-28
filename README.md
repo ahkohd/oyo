@@ -271,6 +271,42 @@ panel_visible = true        # Show file panel in multi-file mode
 counts = "active"           # Per-file +/- counts: active, focused, all, off
 ```
 
+Example config:
+
+```toml
+[ui]
+zen = false
+auto_center = true
+view_mode = "single"
+gutter_signs = false
+topbar = true
+
+[ui.theme]
+name = "tokyonight"
+
+[ui.diff]
+fg = "syntax"
+bg = true
+highlight = "text"
+extent_marker = "diff"
+extent_marker_scope = "hunk"
+
+[ui.syntax]
+mode = "on"
+
+[ui.evo]
+syntax = "full"
+
+[ui.split]
+align_lines = true
+
+[playback]
+speed = 200
+animation = true
+animation_duration = 150
+autoplay = false
+```
+
 Config is loaded from (in priority order):
 1. `$XDG_CONFIG_HOME/oyo/config.toml`
 2. `~/.config/oyo/config.toml`
