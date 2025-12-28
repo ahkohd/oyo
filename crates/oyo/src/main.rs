@@ -1221,6 +1221,9 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<()> 
                             app.toggle_zen();
                         }
                         KeyCode::Char('r') => {
+                            app.replay_step();
+                        }
+                        KeyCode::Char('R') => {
                             app.reset_count();
                             if app.file_list_focused {
                                 // Refresh all files from git

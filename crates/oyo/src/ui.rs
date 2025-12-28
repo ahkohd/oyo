@@ -1206,6 +1206,8 @@ fn draw_help_popover(frame: &mut Frame, app: &mut App) {
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(" Playback", section_style)));
     push_help_line(&mut lines, "Space / B", "Autoplay forward/reverse");
+    push_help_line(&mut lines, "r", "Replay last step");
+    push_help_line(&mut lines, "nr", "Replay last n steps");
     push_help_line(
         &mut lines,
         "+ / -",
@@ -1216,7 +1218,7 @@ fn draw_help_popover(frame: &mut Frame, app: &mut App) {
     lines.push(Line::from(Span::styled(" View", section_style)));
     push_help_line(&mut lines, "Tab", "Cycle view mode");
     push_help_line(&mut lines, "Z", "Zen mode");
-    push_help_line(&mut lines, "r", "Refresh from disk");
+    push_help_line(&mut lines, "R", "Refresh from disk");
 
     if app.is_multi_file() {
         lines.push(Line::from(""));
@@ -1226,7 +1228,7 @@ fn draw_help_popover(frame: &mut Frame, app: &mut App) {
         push_help_line(&mut lines, "Enter", "Focus file list");
         push_help_line(&mut lines, "j / k / ↑↓", "Move selection (focused)");
         push_help_line(&mut lines, "/", "Filter files (when focused)");
-        push_help_line(&mut lines, "r", "Refresh all (when focused)");
+        push_help_line(&mut lines, "R", "Refresh all (when focused)");
     }
 
     lines.push(Line::from(""));

@@ -255,6 +255,8 @@ pub struct App {
     snap_frame: Option<AnimationFrame>,
     /// Start time of the current snap frame
     snap_frame_started_at: Option<Instant>,
+    /// Remaining steps for limited autoplay (replay)
+    autoplay_remaining: Option<usize>,
     /// Last known viewport height for the diff area
     pub last_viewport_height: usize,
 }
@@ -410,6 +412,7 @@ impl App {
             goto_active: false,
             snap_frame: None,
             snap_frame_started_at: None,
+            autoplay_remaining: None,
             last_viewport_height: 0,
         }
     }
@@ -1231,6 +1234,40 @@ impl App {
 
     pub fn prev_step(&mut self) {
         self.step_backward();
+    }
+
+    pub fn replay_step(&mut self) {
+        if !self.stepping {
+            return;
+        }
+        let count = self.take_count();
+        if self.animation_phase != AnimationPhase::Idle || self.snap_frame.is_some() {
+            return;
+        }
+        let current_step = self.multi_diff.current_navigator().state().current_step;
+        if current_step == 0 {
+            return;
+        }
+        let back_steps = count.min(current_step);
+        if back_steps == 0 {
+            return;
+        }
+        self.autoplay = false;
+        self.autoplay_remaining = None;
+        let target_step = current_step.saturating_sub(back_steps);
+        self.clear_peek();
+        self.snap_frame = None;
+        self.snap_frame_started_at = None;
+        self.clear_active_on_next_render = false;
+        self.multi_diff.current_navigator().goto(target_step);
+        self.animation_phase = AnimationPhase::Idle;
+        self.animation_progress = 1.0;
+        self.centered_once = false;
+        self.needs_scroll_to_active = true;
+        self.autoplay = true;
+        self.autoplay_reverse = false;
+        self.autoplay_remaining = Some(back_steps);
+        self.last_autoplay_tick = Instant::now();
     }
 
     fn step_forward(&mut self) -> bool {
@@ -2384,6 +2421,7 @@ impl App {
         } else {
             self.autoplay = true;
             self.autoplay_reverse = true;
+            self.autoplay_remaining = None;
         }
         self.last_autoplay_tick = Instant::now();
     }
@@ -3136,7 +3174,15 @@ impl App {
                 } else {
                     self.step_forward()
                 };
-                if !moved {
+                if let Some(remaining) = self.autoplay_remaining.as_mut() {
+                    if moved && *remaining > 0 {
+                        *remaining = remaining.saturating_sub(1);
+                    }
+                    if !moved || *remaining == 0 {
+                        self.autoplay_remaining = None;
+                        self.autoplay = false;
+                    }
+                } else if !moved {
                     self.autoplay = false;
                 }
                 self.last_autoplay_tick = now;

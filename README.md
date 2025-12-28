@@ -202,7 +202,8 @@ command = ["oy", "$left", "$right"]
 | `E` | Toggle evo syntax (context/full) |
 | `s` | Toggle stepping (no-step mode) |
 | `S` | Toggle strikethrough |
-| `r` | Refresh file (or all files when file list focused) |
+| `r` | Replay last step (count supported) |
+| `R` | Refresh file (or all files when file list focused) |
 | `f` | Toggle file panel |
 | `Enter` | Focus file list |
 | `]` | Next file (supports count) |
