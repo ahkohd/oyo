@@ -2035,11 +2035,23 @@ impl App {
 
         let (x, y, width, height) = match self.file_list_area {
             Some(area) => area,
-            None => return false,
+            None => {
+                if self.file_list_focused {
+                    self.file_list_focused = false;
+                    self.file_filter_active = false;
+                    return true;
+                }
+                return false;
+            }
         };
         let end_x = x.saturating_add(width);
         let end_y = y.saturating_add(height);
         if column < x || column >= end_x || row < y || row >= end_y {
+            if self.file_list_focused {
+                self.file_list_focused = false;
+                self.file_filter_active = false;
+                return true;
+            }
             return false;
         }
 
