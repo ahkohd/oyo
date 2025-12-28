@@ -20,7 +20,6 @@ Review all changes at once, scroll freely, and jump between hunks, just like a t
 
 - Scroll the full diff
 - Jump between hunks
-- Vim-style navigation
 - No stepping required
 
 Enable with:
