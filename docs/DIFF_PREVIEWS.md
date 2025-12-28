@@ -148,6 +148,10 @@ highlight = "word"
 
 ### Extent Markers
 
+#### extent_marker = "diff"
+
+![extent marker diff](../assets/diff_extent_marker_diff.png)
+
 #### extent_marker_scope = "hunk"
 
 ![extent marker scope hunk](../assets/extent_marker_scope_hunk.png)
@@ -155,10 +159,6 @@ highlight = "word"
 #### extent_marker_scope = "progress"
 
 ![extent marker scope progress](../assets/extent_marker_scope_progress.png)
-
-#### extent_marker = "diff"
-
-![extent marker diff](../assets/diff_extent_marker_diff.png)
 
 ### Gutter Signs
 
