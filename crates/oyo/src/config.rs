@@ -20,6 +20,9 @@
 //! primary_marker_right = "◀"
 //! extent_marker = "▌"
 //! extent_marker_right = "▐"
+//! # [navigation.wrap]
+//! # step = "none"
+//! # hunk = "none"
 //!
 //! [ui.theme.defs]
 //! oyo14 = "#A3BE8C"
@@ -594,6 +597,41 @@ impl Default for UiConfig {
     }
 }
 
+/// Step wrap behavior at the ends of a file.
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum StepWrapMode {
+    #[default]
+    None,
+    Step,
+    File,
+}
+
+/// Hunk wrap behavior at the ends of a file.
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum HunkWrapMode {
+    #[default]
+    None,
+    Hunk,
+    File,
+}
+
+/// Navigation wrap configuration.
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
+pub struct WrapConfig {
+    pub step: StepWrapMode,
+    pub hunk: HunkWrapMode,
+}
+
+/// Navigation configuration.
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
+pub struct NavigationConfig {
+    pub wrap: WrapConfig,
+}
+
 /// Split view configuration
 #[derive(Debug, Deserialize)]
 #[serde(default)]
@@ -890,6 +928,7 @@ pub struct Config {
     pub ui: UiConfig,
     pub playback: PlaybackConfig,
     pub files: FilesConfig,
+    pub navigation: NavigationConfig,
     pub no_step: NoStepConfig,
 }
 

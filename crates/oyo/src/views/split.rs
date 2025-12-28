@@ -526,12 +526,98 @@ fn render_old_pane(frame: &mut Frame, app: &mut App, area: Rect) {
                 }
             }
 
-            if pending_insert_only > 0 && tail_change_id == Some(view_line.change_id) {
-                let virtual_text = pending_tail_text(pending_insert_only);
+            let show_virtual = app.allow_virtual_lines();
+            let pending_text = if show_virtual
+                && pending_insert_only > 0
+                && tail_change_id == Some(view_line.change_id)
+            {
+                Some(pending_tail_text(pending_insert_only))
+            } else {
+                None
+            };
+            let last_step_hint = if show_virtual {
+                app.last_step_hint_for_change(view_line.change_id)
+            } else {
+                None
+            };
+            if let Some(virtual_text) = match (pending_text, last_step_hint) {
+                (Some(pending), Some(hint)) => Some(format!("{pending} • {hint}")),
+                (Some(pending), None) => Some(pending),
+                (None, Some(hint)) => Some(format!("... {hint}")),
+                (None, None) => None,
+            } {
                 let virtual_style = Style::default()
                     .fg(app.theme.text_muted)
                     .add_modifier(Modifier::ITALIC);
                 let mut virtual_spans = vec![Span::styled(virtual_text.clone(), virtual_style)];
+                virtual_spans = expand_tabs_in_spans(&virtual_spans, TAB_WIDTH);
+
+                let virtual_width = spans_width(&virtual_spans);
+                max_line_width = max_line_width.max(virtual_width);
+
+                let virtual_wrap = if app.line_wrap {
+                    wrap_count_for_spans(&virtual_spans, visible_width)
+                } else {
+                    1
+                };
+
+                let mut display_virtual = virtual_spans;
+                if !app.line_wrap {
+                    display_virtual =
+                        slice_spans(&display_virtual, app.horizontal_scroll, visible_width);
+                }
+                content_lines.push(Line::from(display_virtual));
+                gutter_lines.push(Line::from(vec![
+                    Span::raw(" "),
+                    Span::raw("    "),
+                    Span::raw(" "),
+                ]));
+                if app.line_wrap && virtual_wrap > 1 {
+                    for _ in 1..virtual_wrap {
+                        gutter_lines.push(Line::from(Span::raw(" ")));
+                    }
+                }
+            }
+
+            if let Some(hint_text) = app.step_edge_hint_for_change(view_line.change_id) {
+                let virtual_style = Style::default()
+                    .fg(app.theme.text_muted)
+                    .add_modifier(Modifier::ITALIC);
+                let mut virtual_spans = vec![Span::styled(hint_text.to_string(), virtual_style)];
+                virtual_spans = expand_tabs_in_spans(&virtual_spans, TAB_WIDTH);
+
+                let virtual_width = spans_width(&virtual_spans);
+                max_line_width = max_line_width.max(virtual_width);
+
+                let virtual_wrap = if app.line_wrap {
+                    wrap_count_for_spans(&virtual_spans, visible_width)
+                } else {
+                    1
+                };
+
+                let mut display_virtual = virtual_spans;
+                if !app.line_wrap {
+                    display_virtual =
+                        slice_spans(&display_virtual, app.horizontal_scroll, visible_width);
+                }
+                content_lines.push(Line::from(display_virtual));
+                gutter_lines.push(Line::from(vec![
+                    Span::raw(" "),
+                    Span::raw("    "),
+                    Span::raw(" "),
+                ]));
+                if app.line_wrap && virtual_wrap > 1 {
+                    for _ in 1..virtual_wrap {
+                        gutter_lines.push(Line::from(Span::raw(" ")));
+                    }
+                }
+            }
+
+            if let Some(hint_text) = app.last_step_hint_for_change(view_line.change_id) {
+                let virtual_style = Style::default()
+                    .fg(app.theme.text_muted)
+                    .add_modifier(Modifier::ITALIC);
+                let mut virtual_spans = vec![Span::styled(hint_text.to_string(), virtual_style)];
                 virtual_spans = expand_tabs_in_spans(&virtual_spans, TAB_WIDTH);
 
                 let virtual_width = spans_width(&virtual_spans);
@@ -1007,6 +1093,38 @@ fn render_new_pane(frame: &mut Frame, app: &mut App, area: Rect) {
                     .fg(app.theme.text_muted)
                     .add_modifier(Modifier::ITALIC);
                 let mut virtual_spans = vec![Span::styled(virtual_text.clone(), virtual_style)];
+                virtual_spans = expand_tabs_in_spans(&virtual_spans, TAB_WIDTH);
+
+                let virtual_width = spans_width(&virtual_spans);
+                max_line_width = max_line_width.max(virtual_width);
+
+                let virtual_wrap = if app.line_wrap {
+                    wrap_count_for_spans(&virtual_spans, visible_width)
+                } else {
+                    1
+                };
+
+                let mut display_virtual = virtual_spans;
+                if !app.line_wrap {
+                    display_virtual =
+                        slice_spans(&display_virtual, app.horizontal_scroll, visible_width);
+                }
+                content_lines.push(Line::from(display_virtual));
+                gutter_lines.push(Line::from(vec![Span::raw("    "), Span::raw(" ")]));
+                marker_lines.push(Line::from(Span::raw(" ")));
+                if app.line_wrap && virtual_wrap > 1 {
+                    for _ in 1..virtual_wrap {
+                        gutter_lines.push(Line::from(Span::raw(" ")));
+                        marker_lines.push(Line::from(Span::raw(" ")));
+                    }
+                }
+            }
+
+            if let Some(hint_text) = app.step_edge_hint_for_change(view_line.change_id) {
+                let virtual_style = Style::default()
+                    .fg(app.theme.text_muted)
+                    .add_modifier(Modifier::ITALIC);
+                let mut virtual_spans = vec![Span::styled(hint_text.to_string(), virtual_style)];
                 virtual_spans = expand_tabs_in_spans(&virtual_spans, TAB_WIDTH);
 
                 let virtual_width = spans_width(&virtual_spans);

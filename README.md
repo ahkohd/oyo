@@ -230,6 +230,10 @@ scrollbar = false           # Show scrollbar (default: false)
 strikethrough_deletions = false # Show strikethrough on deleted text
 gutter_signs = true         # Show +/- sign column (single/evolution)
 stepping = true             # Enable stepping (false = no-step mode)
+
+[navigation.wrap]
+step = "none"               # "none" | "step" | "file"
+hunk = "none"               # "none" | "hunk" | "file"
 # [ui.diff]
 # bg = false                # Full-line diff background (true/false)
 # fg = "theme"              # "theme" or "syntax"

@@ -1180,7 +1180,7 @@ fn draw_help_popover(frame: &mut Frame, app: &mut App) {
     push_help_line(&mut lines, "j / k / ↑↓", "Step forward/back");
     push_help_line(&mut lines, "h / l / ←→", "Prev/next hunk");
     push_help_line(&mut lines, "b / e", "Hunk begin/end");
-    push_help_line(&mut lines, "p", "Peek change (modified -> old -> mixed)");
+    push_help_line(&mut lines, "p", "Peek change");
     push_help_line(&mut lines, "P", "Peek old hunk");
     push_help_line(&mut lines, "y / Y", "Yank line/hunk");
     push_help_line(&mut lines, "/", "Search (diff pane)");
@@ -1188,7 +1188,7 @@ fn draw_help_popover(frame: &mut Frame, app: &mut App) {
     push_help_line(&mut lines, ":<line>", "Go to line");
     push_help_line(&mut lines, ":h<num>", "Go to hunk");
     push_help_line(&mut lines, ":s<num>", "Go to step");
-    push_help_line(&mut lines, "< / >", "First/last applied step");
+    push_help_line(&mut lines, "< / >", "First/last step (or hunk in no-step)");
     push_help_line(&mut lines, "gg / G", "Go to start/end");
     push_help_line(&mut lines, "J / K", "Scroll up/down");
     push_help_line(&mut lines, "H / L", "Scroll left/right");
