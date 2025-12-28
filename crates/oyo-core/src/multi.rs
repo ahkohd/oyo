@@ -399,6 +399,38 @@ impl MultiFileDiff {
         }
     }
 
+    /// Create from multiple file pairs.
+    pub fn from_file_pairs(pairs: Vec<(PathBuf, String, String)>) -> Self {
+        let engine = DiffEngine::new().with_word_level(true);
+        let mut files = Vec::with_capacity(pairs.len());
+        let mut old_contents = Vec::with_capacity(pairs.len());
+        let mut new_contents = Vec::with_capacity(pairs.len());
+
+        for (path, old_content, new_content) in pairs {
+            let diff = engine.diff_strings(&old_content, &new_content);
+            files.push(FileEntry {
+                display_name: path.display().to_string(),
+                path,
+                old_path: None,
+                status: FileStatus::Modified,
+                insertions: diff.insertions,
+                deletions: diff.deletions,
+            });
+            old_contents.push(old_content);
+            new_contents.push(new_content);
+        }
+
+        Self {
+            files,
+            selected_index: 0,
+            navigators: (0..old_contents.len()).map(|_| None).collect(),
+            repo_root: None,
+            git_mode: None,
+            old_contents,
+            new_contents,
+        }
+    }
+
     /// Get the navigator for the currently selected file
     pub fn current_navigator(&mut self) -> &mut DiffNavigator {
         if self.navigators[self.selected_index].is_none() {

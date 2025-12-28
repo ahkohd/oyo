@@ -168,6 +168,11 @@ impl DiffNavigator {
         self.state.cursor_change = change_id;
     }
 
+    /// Set cursor change without altering current hunk.
+    pub fn set_cursor_change(&mut self, change_id: Option<usize>) {
+        self.state.cursor_change = change_id;
+    }
+
     /// Clear the non-animated cursor.
     pub fn clear_cursor_change(&mut self) {
         self.state.cursor_change = None;

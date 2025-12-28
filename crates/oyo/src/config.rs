@@ -856,6 +856,22 @@ impl Default for FilesConfig {
     }
 }
 
+/// No-step mode configuration
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct NoStepConfig {
+    /// Jump to the first hunk when entering a file in no-step mode
+    pub auto_jump_on_enter: bool,
+}
+
+impl Default for NoStepConfig {
+    fn default() -> Self {
+        Self {
+            auto_jump_on_enter: true,
+        }
+    }
+}
+
 /// File list counts display behavior
 #[derive(Debug, Deserialize, Clone, Copy, Default)]
 #[serde(rename_all = "snake_case")]
@@ -874,6 +890,7 @@ pub struct Config {
     pub ui: UiConfig,
     pub playback: PlaybackConfig,
     pub files: FilesConfig,
+    pub no_step: NoStepConfig,
 }
 
 impl Config {

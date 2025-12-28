@@ -239,6 +239,7 @@ fn apply_config_to_app(app: &mut App, config: &config::Config, args: &Args, ligh
     app.evo_syntax = config.ui.evo.syntax;
     app.auto_step_on_enter = config.playback.auto_step_on_enter;
     app.auto_step_blank_files = config.playback.auto_step_blank_files;
+    app.no_step_auto_jump_on_enter = config.no_step.auto_jump_on_enter;
     app.primary_marker = config.ui.primary_marker.clone();
     app.primary_marker_right = config
         .ui

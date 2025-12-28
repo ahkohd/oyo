@@ -269,6 +269,9 @@ auto_step_blank_files = true # Auto-step when file would be blank at step 0 (new
 [files]
 panel_visible = true        # Show file panel in multi-file mode
 counts = "active"           # Per-file +/- counts: active, focused, all, off
+
+[no_step]
+auto_jump_on_enter = true   # Jump to first hunk when entering a file in no-step mode
 ```
 
 Example config:

@@ -177,6 +177,8 @@ pub struct App {
     pub auto_step_on_enter: bool,
     /// Auto-step when file would be blank at step 0 (new files)
     pub auto_step_blank_files: bool,
+    /// Auto-jump to first hunk when entering a file in no-step mode
+    pub no_step_auto_jump_on_enter: bool,
     /// Manual center was requested (zz), enables overscroll until manual scroll
     pub centered_once: bool,
     /// Marker for primary active line (left pane / single pane)
@@ -373,6 +375,7 @@ impl App {
             file_panel_auto_hidden: false,
             auto_step_on_enter: true,
             auto_step_blank_files: true,
+            no_step_auto_jump_on_enter: true,
             centered_once: false,
             primary_marker: "▶".to_string(),
             primary_marker_right: "◀".to_string(),
@@ -1642,34 +1645,40 @@ impl App {
     }
 
     fn set_cursor_for_current_scroll(&mut self) {
-        let target = match self.view_mode {
-            ViewMode::Split => {
-                let (old_starts, new_starts) = self.compute_hunk_starts_split();
-                let effective: Vec<Option<HunkStart>> = old_starts
-                    .into_iter()
-                    .zip(new_starts)
-                    .map(|(old, new)| self.pick_split_start(old, new))
-                    .collect();
-                effective.iter().enumerate().rev().find_map(|(idx, start)| {
-                    start.and_then(|s| (s.idx <= self.scroll_offset).then_some((idx, s)))
-                })
-            }
-            _ => {
-                let hunk_starts = self.compute_hunk_starts_single();
-                hunk_starts
-                    .iter()
-                    .enumerate()
-                    .rev()
-                    .find_map(|(idx, start)| {
-                        start.and_then(|s| (s.idx <= self.scroll_offset).then_some((idx, s)))
-                    })
-            }
-        };
+        let view = self
+            .multi_diff
+            .current_navigator()
+            .current_view_with_frame(AnimationFrame::Idle);
+        let mut display_idx = 0usize;
+        let mut cursor_line = None;
 
-        if let Some((hidx, start)) = target {
-            self.multi_diff
-                .current_navigator()
-                .set_cursor_hunk(hidx, start.change_id);
+        for line in &view {
+            let visible = match self.view_mode {
+                ViewMode::Evolution => {
+                    !matches!(line.kind, LineKind::Deleted | LineKind::PendingDelete)
+                }
+                _ => true,
+            };
+            if !visible {
+                continue;
+            }
+            if display_idx >= self.scroll_offset {
+                cursor_line = Some(line);
+                break;
+            }
+            display_idx += 1;
+        }
+
+        if let Some(line) = cursor_line {
+            if let Some(hidx) = line.hunk_index {
+                self.multi_diff
+                    .current_navigator()
+                    .set_cursor_hunk(hidx, Some(line.change_id));
+            } else {
+                self.multi_diff
+                    .current_navigator()
+                    .set_cursor_change(Some(line.change_id));
+            }
         } else {
             self.multi_diff.current_navigator().clear_cursor_change();
         }
@@ -2003,9 +2012,14 @@ impl App {
         self.needs_scroll_to_active = false;
         let index = self.multi_diff.selected_index;
         if !self.restore_no_step_state_snapshot(index) {
-            self.set_cursor_for_current_scroll();
-            self.multi_diff.current_navigator().set_hunk_scope(false);
+            if self.no_step_auto_jump_on_enter && !self.no_step_visited[index] {
+                self.goto_hunk_index_scroll(0);
+            } else {
+                self.set_cursor_for_current_scroll();
+                self.multi_diff.current_navigator().set_hunk_scope(false);
+            }
         }
+        self.no_step_visited[index] = true;
     }
 
     pub fn toggle_stepping(&mut self) {
@@ -2020,7 +2034,6 @@ impl App {
             if !self.no_step_visited[current_index] {
                 self.scroll_offsets_no_step[current_index] = self.scroll_offset;
                 self.horizontal_scrolls_no_step[current_index] = self.horizontal_scroll;
-                self.no_step_visited[current_index] = true;
             }
             self.restore_scroll_position_for(current_index);
             self.enter_no_step_mode();
@@ -2610,21 +2623,10 @@ impl App {
             return;
         }
 
-        // Save current scroll positions
-        let old_index = self.multi_diff.selected_index;
-        if self.multi_diff.next_file() {
-            if !self.stepping {
-                self.save_no_step_state_snapshot(old_index);
-            }
-            self.save_scroll_position_for(old_index);
-            // Restore scroll positions for new file
-            self.restore_scroll_position_for(self.multi_diff.selected_index);
-            self.animation_phase = AnimationPhase::Idle;
-            self.animation_progress = 1.0;
-            self.reset_search_for_file_switch();
-            self.update_file_list_scroll();
-            self.centered_once = false;
-            self.handle_file_enter();
+        let current = self.multi_diff.selected_index;
+        let next_index = current.saturating_add(1);
+        if next_index < self.multi_diff.file_count() {
+            self.select_file(next_index);
         }
     }
 
@@ -2645,21 +2647,9 @@ impl App {
             return;
         }
 
-        // Save current scroll positions
-        let old_index = self.multi_diff.selected_index;
-        if self.multi_diff.prev_file() {
-            if !self.stepping {
-                self.save_no_step_state_snapshot(old_index);
-            }
-            self.save_scroll_position_for(old_index);
-            // Restore scroll positions for new file
-            self.restore_scroll_position_for(self.multi_diff.selected_index);
-            self.animation_phase = AnimationPhase::Idle;
-            self.animation_progress = 1.0;
-            self.reset_search_for_file_switch();
-            self.update_file_list_scroll();
-            self.centered_once = false;
-            self.handle_file_enter();
+        let current = self.multi_diff.selected_index;
+        if current > 0 {
+            self.select_file(current - 1);
         }
     }
 
@@ -2727,8 +2717,12 @@ impl App {
             self.animation_phase = AnimationPhase::Idle;
             self.animation_progress = 1.0;
             if !self.restore_no_step_state_snapshot(idx) {
-                self.set_cursor_for_current_scroll();
-                self.multi_diff.current_navigator().set_hunk_scope(false);
+                if self.no_step_auto_jump_on_enter && !self.no_step_visited[idx] {
+                    self.goto_hunk_index_scroll(0);
+                } else {
+                    self.set_cursor_for_current_scroll();
+                    self.multi_diff.current_navigator().set_hunk_scope(false);
+                }
             }
             self.no_step_visited[idx] = true;
             // Don't mess with scroll_offset here; it might have been restored by next_file/prev_file
@@ -2842,6 +2836,9 @@ impl App {
     }
 
     fn save_no_step_state_snapshot(&mut self, index: usize) {
+        if self.stepping {
+            return;
+        }
         let state = self.multi_diff.current_navigator().state();
         if let Some(slot) = self.no_step_state_snapshots.get_mut(index) {
             *slot = Some(NoStepState {
@@ -2856,12 +2853,19 @@ impl App {
         let Some(snapshot) = self.no_step_state_snapshots.get(index).and_then(|s| *s) else {
             return false;
         };
-        self.multi_diff
-            .current_navigator()
-            .set_cursor_hunk(snapshot.current_hunk, snapshot.cursor_change);
-        self.multi_diff
-            .current_navigator()
-            .set_hunk_scope(snapshot.last_nav_was_hunk);
+        if snapshot.last_nav_was_hunk && snapshot.cursor_change.is_some() {
+            self.multi_diff
+                .current_navigator()
+                .set_cursor_hunk(snapshot.current_hunk, snapshot.cursor_change);
+            self.multi_diff
+                .current_navigator()
+                .set_hunk_scope(snapshot.last_nav_was_hunk);
+        } else if self.no_step_auto_jump_on_enter {
+            self.goto_hunk_index_scroll(0);
+        } else {
+            self.multi_diff.current_navigator().clear_cursor_change();
+            self.multi_diff.current_navigator().set_hunk_scope(false);
+        }
         true
     }
 
@@ -3812,16 +3816,16 @@ mod tests {
         app.next_hunk_scroll();
 
         let state = app.multi_diff.current_navigator().state();
-        assert_eq!(state.current_hunk, 0);
+        let current_hunk = state.current_hunk;
 
         app.goto_hunk_end_scroll();
         let end_state = app.multi_diff.current_navigator().state();
-        assert_eq!(end_state.current_hunk, 0);
+        assert_eq!(end_state.current_hunk, current_hunk);
         assert!(end_state.cursor_change.is_some());
 
         app.goto_hunk_start_scroll();
         let start_state = app.multi_diff.current_navigator().state();
-        assert_eq!(start_state.current_hunk, 0);
+        assert_eq!(start_state.current_hunk, current_hunk);
         assert!(start_state.cursor_change.is_some());
     }
 
@@ -3854,5 +3858,72 @@ mod tests {
 
         app.next_step();
         assert_eq!(app.hunk_step_info(), Some((2, 2)));
+    }
+
+    #[test]
+    fn test_no_step_snapshot_restores_cursor_or_jumps() {
+        let old_lines: Vec<String> = (1..=25).map(|i| format!("line{}", i)).collect();
+        let mut new_lines = old_lines.clone();
+        new_lines[1] = "line2-new".to_string();
+        new_lines[19] = "line20-new".to_string();
+        let old = old_lines.join("\n");
+        let new = new_lines.join("\n");
+
+        let multi_diff = MultiFileDiff::from_file_pair(
+            std::path::PathBuf::from("a.txt"),
+            std::path::PathBuf::from("a.txt"),
+            old,
+            new,
+        );
+        let mut app = App::new(multi_diff, ViewMode::SinglePane, 0, false, None);
+        app.stepping = false;
+        app.no_step_auto_jump_on_enter = true;
+        app.enter_no_step_mode();
+
+        let idx = app.multi_diff.selected_index;
+        app.save_no_step_state_snapshot(idx);
+        app.multi_diff.current_navigator().clear_cursor_change();
+        app.multi_diff.current_navigator().set_hunk_scope(false);
+
+        assert!(app.restore_no_step_state_snapshot(idx));
+        let cursor_id = app
+            .multi_diff
+            .current_navigator()
+            .state()
+            .cursor_change
+            .expect("cursor change expected");
+        assert!(cursor_id > 0);
+    }
+
+    #[test]
+    fn test_no_step_cursor_stable_through_file_cycles() {
+        let old_lines: Vec<String> = (1..=25).map(|i| format!("line{}", i)).collect();
+        let mut new_lines = old_lines.clone();
+        new_lines[1] = "line2-new".to_string();
+        new_lines[19] = "line20-new".to_string();
+        let old = old_lines.join("\n");
+        let new = new_lines.join("\n");
+
+        let multi = MultiFileDiff::from_file_pairs(vec![
+            (std::path::PathBuf::from("a.txt"), old.clone(), new.clone()),
+            (std::path::PathBuf::from("b.txt"), old.clone(), new.clone()),
+            (std::path::PathBuf::from("c.txt"), old.clone(), new.clone()),
+        ]);
+        let mut app = App::new(multi, ViewMode::SinglePane, 0, false, None);
+        app.stepping = false;
+        app.no_step_auto_jump_on_enter = true;
+        app.enter_no_step_mode();
+
+        app.goto_hunk_start_scroll();
+        let first_cursor = app.multi_diff.current_navigator().state().cursor_change;
+
+        app.next_file();
+        app.next_file();
+        app.prev_file();
+        app.prev_file();
+
+        let cursor_after = app.multi_diff.current_navigator().state().cursor_change;
+
+        assert_eq!(first_cursor, cursor_after);
     }
 }
