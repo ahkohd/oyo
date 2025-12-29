@@ -13,7 +13,7 @@ mod tests;
 
 use std::collections::VecDeque;
 
-use oyo_core::LineKind;
+use oyo_core::{LineKind, ViewSpan};
 use ratatui::text::Span;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
@@ -22,6 +22,14 @@ pub(crate) fn spans_to_text(spans: &[Span]) -> String {
     let mut out = String::new();
     for span in spans {
         out.push_str(span.content.as_ref());
+    }
+    out
+}
+
+pub(crate) fn view_spans_to_text(spans: &[ViewSpan]) -> String {
+    let mut out = String::new();
+    for span in spans {
+        out.push_str(&span.text);
     }
     out
 }

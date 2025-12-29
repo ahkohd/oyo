@@ -3,7 +3,8 @@
 
 use super::{
     expand_tabs_in_spans, pending_tail_text, render_empty_state, slice_spans, spans_to_text,
-    spans_width, truncate_text, wrap_count_for_spans, wrap_count_for_text, TAB_WIDTH,
+    spans_width, truncate_text, view_spans_to_text, wrap_count_for_spans, wrap_count_for_text,
+    TAB_WIDTH,
 };
 use crate::app::{AnimationPhase, App};
 use crate::syntax::SyntaxSide;
@@ -18,6 +19,41 @@ use ratatui::{
 
 /// Width of the fixed line number gutter (marker + line num + space + blank sign + space)
 const GUTTER_WIDTH: u16 = 8; // "▶1234   " (matches single-pane width)
+
+fn hunk_overflow_wrapped_evolution(
+    view_lines: &[ViewLine],
+    hunk_idx: usize,
+    wrap_width: usize,
+    scroll_offset: usize,
+    viewport_height: usize,
+) -> Option<(bool, bool)> {
+    let mut display_idx = 0usize;
+    let mut start: Option<usize> = None;
+    let mut end: Option<usize> = None;
+
+    for line in view_lines {
+        if matches!(line.kind, LineKind::Deleted | LineKind::PendingDelete) {
+            continue;
+        }
+        let text = view_spans_to_text(&line.spans);
+        let wrap_count = wrap_count_for_text(&text, wrap_width).max(1);
+        if line.hunk_index == Some(hunk_idx) {
+            if start.is_none() {
+                start = Some(display_idx);
+            }
+            end = Some(display_idx.saturating_add(wrap_count.saturating_sub(1)));
+        }
+        display_idx = display_idx.saturating_add(wrap_count);
+    }
+
+    let (start, end) = match (start, end) {
+        (Some(start), Some(end)) => (start, end),
+        _ => return None,
+    };
+    let visible_start = scroll_offset;
+    let visible_end = scroll_offset.saturating_add(viewport_height.saturating_sub(1));
+    Some((start < visible_start, end > visible_end))
+}
 
 /// Render the evolution view - file morphing without deletion markers
 pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -65,14 +101,48 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
         0
     };
     let current_hunk = app.multi_diff.current_navigator().state().current_hunk;
-    let tail_change_id = if pending_insert_only > 0 {
-        view_lines
-            .iter()
-            .rev()
-            .find(|line| line.hunk_index == Some(current_hunk))
-            .map(|line| line.change_id)
+    let show_virtual = app.allow_virtual_lines();
+    let pending_text = if show_virtual && pending_insert_only > 0 {
+        Some(pending_tail_text(pending_insert_only))
     } else {
         None
+    };
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(pending) = pending_text {
+        parts.push(pending);
+    }
+    if let Some(hint) = app.last_step_hint_text() {
+        parts.push(hint.to_string());
+    }
+    if let Some(hint) = app.hunk_edge_hint_text() {
+        parts.push(hint.to_string());
+    }
+    let virtual_text = if show_virtual && !parts.is_empty() {
+        if pending_insert_only == 0 {
+            if let Some(first) = parts.first_mut() {
+                *first = format!("... {first}");
+            }
+        }
+        Some(parts.join(" • "))
+    } else {
+        None
+    };
+    let (overflow_above, overflow_below) = if virtual_text.is_some() {
+        if app.line_wrap {
+            hunk_overflow_wrapped_evolution(
+                &view_lines,
+                current_hunk,
+                visible_width,
+                app.scroll_offset,
+                visible_height,
+            )
+            .unwrap_or((false, false))
+        } else {
+            app.hunk_hint_overflow(current_hunk, visible_height)
+                .unwrap_or((false, false))
+        }
+    } else {
+        (false, false)
     };
 
     // Split area into gutter (fixed) and content (scrollable)
@@ -116,6 +186,16 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
         .enumerate()
         .filter_map(|(idx, line)| if is_visible(line) { Some(idx) } else { None })
         .collect();
+    let mut next_visible_hunk: Vec<Option<usize>> = vec![None; view_lines.len()];
+    let mut next_hunk: Option<usize> = None;
+    for idx in visible_indices.iter().rev() {
+        next_visible_hunk[*idx] = next_hunk;
+        if view_lines[*idx].hunk_index.is_some() {
+            next_hunk = view_lines[*idx].hunk_index;
+        }
+    }
+    let mut prev_visible_hunk: Option<usize> = None;
+    let mut virtual_inserted = false;
     let fallback_primary = primary_raw_idx.and_then(|idx| {
         if visible_indices.is_empty() {
             return None;
@@ -139,6 +219,66 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
             before.or(after)
         }
     });
+    let cursor_in_target = view_lines.iter().enumerate().any(|(raw_idx, line)| {
+        let is_primary = line.is_primary_active || fallback_primary == Some(raw_idx);
+        is_primary && line.hunk_index == Some(current_hunk)
+    });
+    let cursor_visible = if app.line_wrap {
+        cursor_in_target
+    } else {
+        let mut display_idx = 0usize;
+        let mut cursor_display = None;
+        for (raw_idx, line) in view_lines.iter().enumerate() {
+            if !is_visible(line) {
+                continue;
+            }
+            let is_primary = line.is_primary_active || fallback_primary == Some(raw_idx);
+            if is_primary {
+                cursor_display = Some(display_idx);
+                break;
+            }
+            display_idx += 1;
+        }
+        cursor_display
+            .map(|idx| {
+                idx >= app.scroll_offset && idx < app.scroll_offset.saturating_add(visible_height)
+            })
+            .unwrap_or(false)
+    };
+    let mut prev_visible_hunk_map: Vec<Option<usize>> = vec![None; view_lines.len()];
+    let mut prev_hunk: Option<usize> = None;
+    for idx in visible_indices.iter() {
+        prev_visible_hunk_map[*idx] = prev_hunk;
+        if view_lines[*idx].hunk_index.is_some() {
+            prev_hunk = view_lines[*idx].hunk_index;
+        }
+    }
+    let cursor_idx = visible_indices.iter().copied().find(|idx| {
+        let line = &view_lines[*idx];
+        let is_primary = line.is_primary_active || fallback_primary == Some(*idx);
+        is_primary && line.hunk_index == Some(current_hunk)
+    });
+    let cursor_at_first = cursor_idx
+        .map(|idx| prev_visible_hunk_map[idx] != Some(current_hunk))
+        .unwrap_or(false);
+    let cursor_at_last = cursor_idx
+        .map(|idx| next_visible_hunk[idx] != Some(current_hunk))
+        .unwrap_or(false);
+    let fully_visible = !overflow_above && !overflow_below;
+    let mut force_top = overflow_below && !overflow_above;
+    let mut force_bottom = overflow_above && !overflow_below;
+    if fully_visible {
+        if cursor_at_first {
+            force_top = true;
+        } else if cursor_at_last {
+            force_bottom = true;
+        }
+    }
+    let mut prefer_cursor =
+        cursor_in_target && cursor_visible && !force_top && !force_bottom && !fully_visible;
+    if pending_insert_only > 0 && cursor_in_target && cursor_visible {
+        prefer_cursor = true;
+    }
 
     let query = app.search_query().trim().to_ascii_lowercase();
     let has_query = !query.is_empty();
@@ -168,6 +308,56 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
         }
         if !app.line_wrap && gutter_lines.len() >= visible_height {
             break;
+        }
+
+        let line_hunk = view_line.hunk_index;
+        let is_first_in_hunk = line_hunk.is_some() && prev_visible_hunk != line_hunk;
+        let is_last_in_hunk = line_hunk.is_some() && next_visible_hunk[raw_idx] != line_hunk;
+        if let Some(text) = virtual_text.as_ref() {
+            if !virtual_inserted
+                && !prefer_cursor
+                && force_top
+                && line_hunk == Some(current_hunk)
+                && is_first_in_hunk
+            {
+                let virtual_style = Style::default()
+                    .fg(app.theme.text_muted)
+                    .add_modifier(Modifier::ITALIC);
+                let mut virtual_spans = vec![Span::styled(text.clone(), virtual_style)];
+                virtual_spans = expand_tabs_in_spans(&virtual_spans, TAB_WIDTH);
+
+                let virtual_width = spans_width(&virtual_spans);
+                max_line_width = max_line_width.max(virtual_width);
+
+                let virtual_wrap = if app.line_wrap {
+                    wrap_count_for_spans(&virtual_spans, wrap_width)
+                } else {
+                    1
+                };
+                if app.line_wrap {
+                    display_len += virtual_wrap;
+                }
+
+                let mut display_virtual = virtual_spans;
+                if !app.line_wrap {
+                    display_virtual =
+                        slice_spans(&display_virtual, app.horizontal_scroll, visible_width);
+                }
+                content_lines.push(Line::from(display_virtual));
+                gutter_lines.push(Line::from(vec![
+                    Span::raw(" "),
+                    Span::raw("    "),
+                    Span::raw(" "),
+                    Span::raw(" "),
+                    Span::raw(" "),
+                ]));
+                if app.line_wrap && virtual_wrap > 1 {
+                    for _ in 1..virtual_wrap {
+                        gutter_lines.push(Line::from(Span::raw(" ")));
+                    }
+                }
+                virtual_inserted = true;
+            }
         }
 
         let line_num = view_line.new_line.or(view_line.old_line).unwrap_or(0);
@@ -342,64 +532,98 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
                 gutter_lines.push(Line::from(Span::raw(" ")));
             }
         }
+        if let Some(text) = virtual_text.as_ref() {
+            if !virtual_inserted
+                && prefer_cursor
+                && line_hunk == Some(current_hunk)
+                && (view_line.is_primary_active || fallback_primary == Some(raw_idx))
+            {
+                let virtual_style = Style::default()
+                    .fg(app.theme.text_muted)
+                    .add_modifier(Modifier::ITALIC);
+                let mut virtual_spans = vec![Span::styled(text.clone(), virtual_style)];
+                virtual_spans = expand_tabs_in_spans(&virtual_spans, TAB_WIDTH);
 
-        let show_virtual = app.allow_virtual_lines();
-        let pending_text = if show_virtual
-            && pending_insert_only > 0
-            && tail_change_id == Some(view_line.change_id)
-        {
-            Some(pending_tail_text(pending_insert_only))
-        } else {
-            None
-        };
-        let last_step_hint = if show_virtual {
-            app.last_step_hint_for_change(view_line.change_id)
-        } else {
-            None
-        };
-        if let Some(virtual_text) = match (pending_text, last_step_hint) {
-            (Some(pending), Some(hint)) => Some(format!("{pending} • {hint}")),
-            (Some(pending), None) => Some(pending),
-            (None, Some(hint)) => Some(format!("... {hint}")),
-            (None, None) => None,
-        } {
-            let virtual_style = Style::default()
-                .fg(app.theme.text_muted)
-                .add_modifier(Modifier::ITALIC);
-            let mut virtual_spans = vec![Span::styled(virtual_text.clone(), virtual_style)];
-            virtual_spans = expand_tabs_in_spans(&virtual_spans, TAB_WIDTH);
+                let virtual_width = spans_width(&virtual_spans);
+                max_line_width = max_line_width.max(virtual_width);
 
-            let virtual_width = spans_width(&virtual_spans);
-            max_line_width = max_line_width.max(virtual_width);
-
-            let virtual_wrap = if app.line_wrap {
-                wrap_count_for_spans(&virtual_spans, wrap_width)
-            } else {
-                1
-            };
-            if app.line_wrap {
-                display_len += virtual_wrap;
-            }
-
-            let mut display_virtual = virtual_spans;
-            if !app.line_wrap {
-                display_virtual =
-                    slice_spans(&display_virtual, app.horizontal_scroll, visible_width);
-            }
-            content_lines.push(Line::from(display_virtual));
-            gutter_lines.push(Line::from(vec![
-                Span::raw(" "),
-                Span::raw("    "),
-                Span::raw(" "),
-                Span::raw(" "),
-                Span::raw(" "),
-            ]));
-            if app.line_wrap && virtual_wrap > 1 {
-                for _ in 1..virtual_wrap {
-                    gutter_lines.push(Line::from(Span::raw(" ")));
+                let virtual_wrap = if app.line_wrap {
+                    wrap_count_for_spans(&virtual_spans, wrap_width)
+                } else {
+                    1
+                };
+                if app.line_wrap {
+                    display_len += virtual_wrap;
                 }
+
+                let mut display_virtual = virtual_spans;
+                if !app.line_wrap {
+                    display_virtual =
+                        slice_spans(&display_virtual, app.horizontal_scroll, visible_width);
+                }
+                content_lines.push(Line::from(display_virtual));
+                gutter_lines.push(Line::from(vec![
+                    Span::raw(" "),
+                    Span::raw("    "),
+                    Span::raw(" "),
+                    Span::raw(" "),
+                    Span::raw(" "),
+                ]));
+                if app.line_wrap && virtual_wrap > 1 {
+                    for _ in 1..virtual_wrap {
+                        gutter_lines.push(Line::from(Span::raw(" ")));
+                    }
+                }
+                virtual_inserted = true;
             }
         }
+        if let Some(text) = virtual_text.as_ref() {
+            if !virtual_inserted
+                && !prefer_cursor
+                && !force_top
+                && line_hunk == Some(current_hunk)
+                && is_last_in_hunk
+            {
+                let virtual_style = Style::default()
+                    .fg(app.theme.text_muted)
+                    .add_modifier(Modifier::ITALIC);
+                let mut virtual_spans = vec![Span::styled(text.clone(), virtual_style)];
+                virtual_spans = expand_tabs_in_spans(&virtual_spans, TAB_WIDTH);
+
+                let virtual_width = spans_width(&virtual_spans);
+                max_line_width = max_line_width.max(virtual_width);
+
+                let virtual_wrap = if app.line_wrap {
+                    wrap_count_for_spans(&virtual_spans, wrap_width)
+                } else {
+                    1
+                };
+                if app.line_wrap {
+                    display_len += virtual_wrap;
+                }
+
+                let mut display_virtual = virtual_spans;
+                if !app.line_wrap {
+                    display_virtual =
+                        slice_spans(&display_virtual, app.horizontal_scroll, visible_width);
+                }
+                content_lines.push(Line::from(display_virtual));
+                gutter_lines.push(Line::from(vec![
+                    Span::raw(" "),
+                    Span::raw("    "),
+                    Span::raw(" "),
+                    Span::raw(" "),
+                    Span::raw(" "),
+                ]));
+                if app.line_wrap && virtual_wrap > 1 {
+                    for _ in 1..virtual_wrap {
+                        gutter_lines.push(Line::from(Span::raw(" ")));
+                    }
+                }
+                virtual_inserted = true;
+            }
+        }
+        prev_visible_hunk = line_hunk;
 
         if let Some(hint_text) = app.step_edge_hint_for_change(view_line.change_id) {
             let virtual_style = Style::default()
@@ -422,7 +646,8 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
 
             let mut display_virtual = virtual_spans;
             if !app.line_wrap {
-                display_virtual = slice_spans(&display_virtual, app.horizontal_scroll, visible_width);
+                display_virtual =
+                    slice_spans(&display_virtual, app.horizontal_scroll, visible_width);
             }
             content_lines.push(Line::from(display_virtual));
             gutter_lines.push(Line::from(vec![

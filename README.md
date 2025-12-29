@@ -312,6 +312,10 @@ speed = 200
 animation = true
 animation_duration = 150
 autoplay = false
+
+[hunk.wrap]
+step = "file"
+hunk = "hunk"
 ```
 
 Config is loaded from (in priority order):

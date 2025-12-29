@@ -3,7 +3,7 @@
 use super::{
     apply_line_bg, apply_spans_bg, clear_leading_ws_bg, diff_line_bg, expand_tabs_in_spans,
     pad_spans_bg, pending_tail_text, render_empty_state, slice_spans, spans_to_text, spans_width,
-    truncate_text, wrap_count_for_spans, wrap_count_for_text, TAB_WIDTH,
+    truncate_text, view_spans_to_text, wrap_count_for_spans, wrap_count_for_text, TAB_WIDTH,
 };
 use crate::app::{AnimationPhase, App};
 use crate::color;
@@ -99,6 +99,85 @@ fn align_fill_gutter_span(app: &App, width: usize) -> Span<'static> {
     Span::styled(out, Style::default().fg(fg).add_modifier(Modifier::DIM))
 }
 
+fn push_virtual_line_old(
+    text: &str,
+    app: &App,
+    visible_width: usize,
+    max_line_width: &mut usize,
+    content_lines: &mut Vec<Line>,
+    gutter_lines: &mut Vec<Line>,
+) {
+    let virtual_style = Style::default()
+        .fg(app.theme.text_muted)
+        .add_modifier(Modifier::ITALIC);
+    let mut virtual_spans = vec![Span::styled(text.to_string(), virtual_style)];
+    virtual_spans = expand_tabs_in_spans(&virtual_spans, TAB_WIDTH);
+
+    let virtual_width = spans_width(&virtual_spans);
+    *max_line_width = (*max_line_width).max(virtual_width);
+
+    let virtual_wrap = if app.line_wrap {
+        wrap_count_for_spans(&virtual_spans, visible_width)
+    } else {
+        1
+    };
+
+    let mut display_virtual = virtual_spans;
+    if !app.line_wrap {
+        display_virtual = slice_spans(&display_virtual, app.horizontal_scroll, visible_width);
+    }
+    content_lines.push(Line::from(display_virtual));
+    gutter_lines.push(Line::from(vec![
+        Span::raw(" "),
+        Span::raw("    "),
+        Span::raw(" "),
+    ]));
+    if app.line_wrap && virtual_wrap > 1 {
+        for _ in 1..virtual_wrap {
+            gutter_lines.push(Line::from(Span::raw(" ")));
+        }
+    }
+}
+
+fn push_virtual_line_new(
+    text: &str,
+    app: &App,
+    visible_width: usize,
+    max_line_width: &mut usize,
+    content_lines: &mut Vec<Line>,
+    gutter_lines: &mut Vec<Line>,
+    marker_lines: &mut Vec<Line>,
+) {
+    let virtual_style = Style::default()
+        .fg(app.theme.text_muted)
+        .add_modifier(Modifier::ITALIC);
+    let mut virtual_spans = vec![Span::styled(text.to_string(), virtual_style)];
+    virtual_spans = expand_tabs_in_spans(&virtual_spans, TAB_WIDTH);
+
+    let virtual_width = spans_width(&virtual_spans);
+    *max_line_width = (*max_line_width).max(virtual_width);
+
+    let virtual_wrap = if app.line_wrap {
+        wrap_count_for_spans(&virtual_spans, visible_width)
+    } else {
+        1
+    };
+
+    let mut display_virtual = virtual_spans;
+    if !app.line_wrap {
+        display_virtual = slice_spans(&display_virtual, app.horizontal_scroll, visible_width);
+    }
+    content_lines.push(Line::from(display_virtual));
+    gutter_lines.push(Line::from(vec![Span::raw("    "), Span::raw(" ")]));
+    marker_lines.push(Line::from(Span::raw(" ")));
+    if app.line_wrap && virtual_wrap > 1 {
+        for _ in 1..virtual_wrap {
+            gutter_lines.push(Line::from(vec![Span::raw("    "), Span::raw(" ")]));
+            marker_lines.push(Line::from(Span::raw(" ")));
+        }
+    }
+}
+
 /// Width of the fixed line number gutter
 const GUTTER_WIDTH: u16 = 6; // "▶1234 " or " 1234 "
 const OLD_BORDER_WIDTH: u16 = 1;
@@ -121,6 +200,7 @@ pub fn render_split(frame: &mut Frame, app: &mut App, area: Rect) {
         .current_navigator()
         .current_view_with_frame(AnimationFrame::Idle);
     let step_direction = app.multi_diff.current_step_direction();
+    let preview_hunk = app.multi_diff.current_navigator().state().current_hunk;
 
     // Split into two panes
     let chunks = Layout::default()
@@ -128,13 +208,26 @@ pub fn render_split(frame: &mut Frame, app: &mut App, area: Rect) {
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(area);
 
+    let old_width = chunks[0]
+        .width
+        .saturating_sub(GUTTER_WIDTH + OLD_BORDER_WIDTH) as usize;
+    let new_width = chunks[1]
+        .width
+        .saturating_sub(NEW_GUTTER_WIDTH + NEW_MARKER_WIDTH) as usize;
+    let hunk_overflow = if app.line_wrap {
+        split_hunk_overflow_wrapped(
+            app,
+            &view_lines,
+            preview_hunk,
+            visible_height,
+            old_width,
+            new_width,
+        )
+    } else {
+        app.hunk_hint_overflow(preview_hunk, visible_height)
+    };
+
     if app.line_wrap {
-        let old_width = chunks[0]
-            .width
-            .saturating_sub(GUTTER_WIDTH + OLD_BORDER_WIDTH) as usize;
-        let new_width = chunks[1]
-            .width
-            .saturating_sub(NEW_GUTTER_WIDTH + NEW_MARKER_WIDTH) as usize;
         let (display_len, active_idx) = split_wrap_display_metrics(
             app,
             &view_lines,
@@ -158,21 +251,20 @@ pub fn render_split(frame: &mut Frame, app: &mut App, area: Rect) {
         app.clamp_scroll(display_len, visible_height, app.allow_overscroll());
     }
     if !app.line_wrap {
-        let old_width = chunks[0]
-            .width
-            .saturating_sub(GUTTER_WIDTH + OLD_BORDER_WIDTH) as usize;
-        let new_width = chunks[1]
-            .width
-            .saturating_sub(NEW_GUTTER_WIDTH + NEW_MARKER_WIDTH) as usize;
         app.clamp_horizontal_scroll_cached(old_width.min(new_width));
     }
     app.reset_current_max_line_width();
 
-    render_old_pane(frame, app, chunks[0]);
-    render_new_pane(frame, app, chunks[1]);
+    render_old_pane(frame, app, chunks[0], hunk_overflow);
+    render_new_pane(frame, app, chunks[1], hunk_overflow);
 }
 
-fn render_old_pane(frame: &mut Frame, app: &mut App, area: Rect) {
+fn render_old_pane(
+    frame: &mut Frame,
+    app: &mut App,
+    area: Rect,
+    hunk_overflow: Option<(bool, bool)>,
+) {
     // Clone markers to avoid borrow conflicts
     let primary_marker = app.primary_marker.clone();
     let extent_marker = app.extent_marker.clone();
@@ -193,15 +285,115 @@ fn render_old_pane(frame: &mut Frame, app: &mut App, area: Rect) {
     } else {
         0
     };
-    let tail_change_id = if pending_insert_only > 0 {
-        view_lines
-            .iter()
-            .rev()
-            .find(|line| line.hunk_index == Some(preview_hunk) && line.old_line.is_some())
-            .map(|line| line.change_id)
+    let show_virtual = app.allow_virtual_lines();
+    let pending_text = if show_virtual && pending_insert_only > 0 {
+        Some(pending_tail_text(pending_insert_only))
     } else {
         None
     };
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(pending) = pending_text {
+        parts.push(pending);
+    }
+    if let Some(hint) = app.last_step_hint_text() {
+        parts.push(hint.to_string());
+    }
+    if let Some(hint) = app.hunk_edge_hint_text() {
+        parts.push(hint.to_string());
+    }
+    let virtual_text = if show_virtual && !parts.is_empty() {
+        if pending_insert_only == 0 {
+            if let Some(first) = parts.first_mut() {
+                *first = format!("... {first}");
+            }
+        }
+        Some(parts.join(" • "))
+    } else {
+        None
+    };
+    let (overflow_above, overflow_below) = if virtual_text.is_some() {
+        hunk_overflow.unwrap_or((false, false))
+    } else {
+        (false, false)
+    };
+    let old_visible = |line: &ViewLine| -> bool {
+        let old_present = line.old_line.is_some();
+        let new_present = line.new_line.is_some()
+            && !matches!(line.kind, LineKind::Deleted | LineKind::PendingDelete);
+        old_present || (app.split_align_lines && new_present)
+    };
+    let cursor_in_target = view_lines
+        .iter()
+        .any(|line| line.is_primary_active && line.hunk_index == Some(preview_hunk));
+    let cursor_visible = if app.line_wrap {
+        cursor_in_target
+    } else {
+        let mut display_idx = 0usize;
+        let mut cursor_display = None;
+        for line in view_lines.iter() {
+            if !old_visible(line) {
+                continue;
+            }
+            if line.is_primary_active {
+                cursor_display = Some(display_idx);
+                break;
+            }
+            display_idx += 1;
+        }
+        cursor_display
+            .map(|idx| {
+                idx >= app.scroll_offset && idx < app.scroll_offset.saturating_add(visible_height)
+            })
+            .unwrap_or(false)
+    };
+    let visible_indices: Vec<usize> = view_lines
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, line)| if old_visible(line) { Some(idx) } else { None })
+        .collect();
+    let mut next_visible_hunk: Vec<Option<usize>> = vec![None; view_lines.len()];
+    let mut next_hunk: Option<usize> = None;
+    for idx in visible_indices.iter().rev() {
+        next_visible_hunk[*idx] = next_hunk;
+        if view_lines[*idx].hunk_index.is_some() {
+            next_hunk = view_lines[*idx].hunk_index;
+        }
+    }
+    let mut prev_visible_hunk_map: Vec<Option<usize>> = vec![None; view_lines.len()];
+    let mut prev_hunk: Option<usize> = None;
+    for idx in visible_indices.iter() {
+        prev_visible_hunk_map[*idx] = prev_hunk;
+        if view_lines[*idx].hunk_index.is_some() {
+            prev_hunk = view_lines[*idx].hunk_index;
+        }
+    }
+    let cursor_idx = visible_indices.iter().copied().find(|idx| {
+        let line = &view_lines[*idx];
+        line.is_primary_active && line.hunk_index == Some(preview_hunk)
+    });
+    let cursor_at_first = cursor_idx
+        .map(|idx| prev_visible_hunk_map[idx] != Some(preview_hunk))
+        .unwrap_or(false);
+    let cursor_at_last = cursor_idx
+        .map(|idx| next_visible_hunk[idx] != Some(preview_hunk))
+        .unwrap_or(false);
+    let fully_visible = !overflow_above && !overflow_below;
+    let mut force_top = overflow_below && !overflow_above;
+    let mut force_bottom = overflow_above && !overflow_below;
+    if fully_visible {
+        if cursor_at_first {
+            force_top = true;
+        } else if cursor_at_last {
+            force_bottom = true;
+        }
+    }
+    let mut prefer_cursor =
+        cursor_in_target && cursor_visible && !force_top && !force_bottom && !fully_visible;
+    if pending_insert_only > 0 && cursor_in_target && cursor_visible {
+        prefer_cursor = true;
+    }
+    let mut prev_visible_hunk: Option<usize> = None;
+    let mut virtual_inserted = false;
 
     // Split into gutter (fixed) and content (scrollable), plus border
     let chunks = Layout::default()
@@ -224,7 +416,7 @@ fn render_old_pane(frame: &mut Frame, app: &mut App, area: Rect) {
     let has_query = !query.is_empty();
     let mut max_line_width: usize = 0;
 
-    for view_line in view_lines.iter() {
+    for (idx, view_line) in view_lines.iter().enumerate() {
         let old_present = view_line.old_line.is_some();
         let new_present = view_line.new_line.is_some()
             && !matches!(view_line.kind, LineKind::Deleted | LineKind::PendingDelete);
@@ -239,6 +431,28 @@ fn render_old_pane(frame: &mut Frame, app: &mut App, area: Rect) {
         }
         if !app.line_wrap && gutter_lines.len() >= visible_height {
             break;
+        }
+
+        let line_hunk = view_line.hunk_index;
+        let is_first_in_hunk = line_hunk.is_some() && prev_visible_hunk != line_hunk;
+        let is_last_in_hunk = line_hunk.is_some() && next_visible_hunk[idx] != line_hunk;
+        if let Some(text) = virtual_text.as_ref() {
+            if !virtual_inserted
+                && !prefer_cursor
+                && force_top
+                && line_hunk == Some(preview_hunk)
+                && is_first_in_hunk
+            {
+                push_virtual_line_old(
+                    text,
+                    app,
+                    visible_width,
+                    &mut max_line_width,
+                    &mut content_lines,
+                    &mut gutter_lines,
+                );
+                virtual_inserted = true;
+            }
         }
 
         if !old_present {
@@ -262,6 +476,24 @@ fn render_old_pane(frame: &mut Frame, app: &mut App, area: Rect) {
                     content_lines.push(Line::from(fill_span.clone()));
                 }
             }
+            if let Some(text) = virtual_text.as_ref() {
+                if !virtual_inserted
+                    && !force_top
+                    && line_hunk == Some(preview_hunk)
+                    && is_last_in_hunk
+                {
+                    push_virtual_line_old(
+                        text,
+                        app,
+                        visible_width,
+                        &mut max_line_width,
+                        &mut content_lines,
+                        &mut gutter_lines,
+                    );
+                    virtual_inserted = true;
+                }
+            }
+            prev_visible_hunk = line_hunk;
             line_idx += 1;
             continue;
         }
@@ -525,57 +757,39 @@ fn render_old_pane(frame: &mut Frame, app: &mut App, area: Rect) {
                     gutter_lines.push(Line::from(Span::raw(" ")));
                 }
             }
-
-            let show_virtual = app.allow_virtual_lines();
-            let pending_text = if show_virtual
-                && pending_insert_only > 0
-                && tail_change_id == Some(view_line.change_id)
-            {
-                Some(pending_tail_text(pending_insert_only))
-            } else {
-                None
-            };
-            let last_step_hint = if show_virtual {
-                app.last_step_hint_for_change(view_line.change_id)
-            } else {
-                None
-            };
-            if let Some(virtual_text) = match (pending_text, last_step_hint) {
-                (Some(pending), Some(hint)) => Some(format!("{pending} • {hint}")),
-                (Some(pending), None) => Some(pending),
-                (None, Some(hint)) => Some(format!("... {hint}")),
-                (None, None) => None,
-            } {
-                let virtual_style = Style::default()
-                    .fg(app.theme.text_muted)
-                    .add_modifier(Modifier::ITALIC);
-                let mut virtual_spans = vec![Span::styled(virtual_text.clone(), virtual_style)];
-                virtual_spans = expand_tabs_in_spans(&virtual_spans, TAB_WIDTH);
-
-                let virtual_width = spans_width(&virtual_spans);
-                max_line_width = max_line_width.max(virtual_width);
-
-                let virtual_wrap = if app.line_wrap {
-                    wrap_count_for_spans(&virtual_spans, visible_width)
-                } else {
-                    1
-                };
-
-                let mut display_virtual = virtual_spans;
-                if !app.line_wrap {
-                    display_virtual =
-                        slice_spans(&display_virtual, app.horizontal_scroll, visible_width);
+            if let Some(text) = virtual_text.as_ref() {
+                if !virtual_inserted
+                    && prefer_cursor
+                    && line_hunk == Some(preview_hunk)
+                    && view_line.is_primary_active
+                {
+                    push_virtual_line_old(
+                        text,
+                        app,
+                        visible_width,
+                        &mut max_line_width,
+                        &mut content_lines,
+                        &mut gutter_lines,
+                    );
+                    virtual_inserted = true;
                 }
-                content_lines.push(Line::from(display_virtual));
-                gutter_lines.push(Line::from(vec![
-                    Span::raw(" "),
-                    Span::raw("    "),
-                    Span::raw(" "),
-                ]));
-                if app.line_wrap && virtual_wrap > 1 {
-                    for _ in 1..virtual_wrap {
-                        gutter_lines.push(Line::from(Span::raw(" ")));
-                    }
+            }
+            if let Some(text) = virtual_text.as_ref() {
+                if !virtual_inserted
+                    && !prefer_cursor
+                    && !force_top
+                    && line_hunk == Some(preview_hunk)
+                    && is_last_in_hunk
+                {
+                    push_virtual_line_old(
+                        text,
+                        app,
+                        visible_width,
+                        &mut max_line_width,
+                        &mut content_lines,
+                        &mut gutter_lines,
+                    );
+                    virtual_inserted = true;
                 }
             }
 
@@ -612,40 +826,7 @@ fn render_old_pane(frame: &mut Frame, app: &mut App, area: Rect) {
                     }
                 }
             }
-
-            if let Some(hint_text) = app.last_step_hint_for_change(view_line.change_id) {
-                let virtual_style = Style::default()
-                    .fg(app.theme.text_muted)
-                    .add_modifier(Modifier::ITALIC);
-                let mut virtual_spans = vec![Span::styled(hint_text.to_string(), virtual_style)];
-                virtual_spans = expand_tabs_in_spans(&virtual_spans, TAB_WIDTH);
-
-                let virtual_width = spans_width(&virtual_spans);
-                max_line_width = max_line_width.max(virtual_width);
-
-                let virtual_wrap = if app.line_wrap {
-                    wrap_count_for_spans(&virtual_spans, visible_width)
-                } else {
-                    1
-                };
-
-                let mut display_virtual = virtual_spans;
-                if !app.line_wrap {
-                    display_virtual =
-                        slice_spans(&display_virtual, app.horizontal_scroll, visible_width);
-                }
-                content_lines.push(Line::from(display_virtual));
-                gutter_lines.push(Line::from(vec![
-                    Span::raw(" "),
-                    Span::raw("    "),
-                    Span::raw(" "),
-                ]));
-                if app.line_wrap && virtual_wrap > 1 {
-                    for _ in 1..virtual_wrap {
-                        gutter_lines.push(Line::from(Span::raw(" ")));
-                    }
-                }
-            }
+            prev_visible_hunk = line_hunk;
             line_idx += 1;
 
             if let Some((debug_idx, _)) = debug_target {
@@ -719,7 +900,12 @@ fn render_old_pane(frame: &mut Frame, app: &mut App, area: Rect) {
     app.update_current_max_line_width(max_line_width);
 }
 
-fn render_new_pane(frame: &mut Frame, app: &mut App, area: Rect) {
+fn render_new_pane(
+    frame: &mut Frame,
+    app: &mut App,
+    area: Rect,
+    hunk_overflow: Option<(bool, bool)>,
+) {
     // Clone markers to avoid borrow conflicts
     let primary_marker_right = app.primary_marker_right.clone();
     let extent_marker_right = app.extent_marker_right.clone();
@@ -740,19 +926,115 @@ fn render_new_pane(frame: &mut Frame, app: &mut App, area: Rect) {
     } else {
         0
     };
-    let tail_change_id = if pending_insert_only > 0 {
-        view_lines
-            .iter()
-            .rev()
-            .find(|line| {
-                line.hunk_index == Some(preview_hunk)
-                    && line.new_line.is_some()
-                    && !matches!(line.kind, LineKind::Deleted | LineKind::PendingDelete)
-            })
-            .map(|line| line.change_id)
+    let show_virtual = app.allow_virtual_lines();
+    let pending_text = if show_virtual && pending_insert_only > 0 {
+        Some(pending_tail_text(pending_insert_only))
     } else {
         None
     };
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(pending) = pending_text {
+        parts.push(pending);
+    }
+    if let Some(hint) = app.last_step_hint_text() {
+        parts.push(hint.to_string());
+    }
+    if let Some(hint) = app.hunk_edge_hint_text() {
+        parts.push(hint.to_string());
+    }
+    let virtual_text = if show_virtual && !parts.is_empty() {
+        if pending_insert_only == 0 {
+            if let Some(first) = parts.first_mut() {
+                *first = format!("... {first}");
+            }
+        }
+        Some(parts.join(" • "))
+    } else {
+        None
+    };
+    let (overflow_above, overflow_below) = if virtual_text.is_some() {
+        hunk_overflow.unwrap_or((false, false))
+    } else {
+        (false, false)
+    };
+    let new_visible = |line: &ViewLine| -> bool {
+        let old_present = line.old_line.is_some();
+        let new_present = line.new_line.is_some()
+            && !matches!(line.kind, LineKind::Deleted | LineKind::PendingDelete);
+        new_present || (app.split_align_lines && old_present)
+    };
+    let cursor_in_target = view_lines
+        .iter()
+        .any(|line| line.is_primary_active && line.hunk_index == Some(preview_hunk));
+    let cursor_visible = if app.line_wrap {
+        cursor_in_target
+    } else {
+        let mut display_idx = 0usize;
+        let mut cursor_display = None;
+        for line in view_lines.iter() {
+            if !new_visible(line) {
+                continue;
+            }
+            if line.is_primary_active {
+                cursor_display = Some(display_idx);
+                break;
+            }
+            display_idx += 1;
+        }
+        cursor_display
+            .map(|idx| {
+                idx >= app.scroll_offset && idx < app.scroll_offset.saturating_add(visible_height)
+            })
+            .unwrap_or(false)
+    };
+    let visible_indices: Vec<usize> = view_lines
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, line)| if new_visible(line) { Some(idx) } else { None })
+        .collect();
+    let mut next_visible_hunk: Vec<Option<usize>> = vec![None; view_lines.len()];
+    let mut next_hunk: Option<usize> = None;
+    for idx in visible_indices.iter().rev() {
+        next_visible_hunk[*idx] = next_hunk;
+        if view_lines[*idx].hunk_index.is_some() {
+            next_hunk = view_lines[*idx].hunk_index;
+        }
+    }
+    let mut prev_visible_hunk_map: Vec<Option<usize>> = vec![None; view_lines.len()];
+    let mut prev_hunk: Option<usize> = None;
+    for idx in visible_indices.iter() {
+        prev_visible_hunk_map[*idx] = prev_hunk;
+        if view_lines[*idx].hunk_index.is_some() {
+            prev_hunk = view_lines[*idx].hunk_index;
+        }
+    }
+    let cursor_idx = visible_indices.iter().copied().find(|idx| {
+        let line = &view_lines[*idx];
+        line.is_primary_active && line.hunk_index == Some(preview_hunk)
+    });
+    let cursor_at_first = cursor_idx
+        .map(|idx| prev_visible_hunk_map[idx] != Some(preview_hunk))
+        .unwrap_or(false);
+    let cursor_at_last = cursor_idx
+        .map(|idx| next_visible_hunk[idx] != Some(preview_hunk))
+        .unwrap_or(false);
+    let fully_visible = !overflow_above && !overflow_below;
+    let mut force_top = overflow_below && !overflow_above;
+    let mut force_bottom = overflow_above && !overflow_below;
+    if fully_visible {
+        if cursor_at_first {
+            force_top = true;
+        } else if cursor_at_last {
+            force_bottom = true;
+        }
+    }
+    let mut prefer_cursor =
+        cursor_in_target && cursor_visible && !force_top && !force_bottom && !fully_visible;
+    if pending_insert_only > 0 && cursor_in_target && cursor_visible {
+        prefer_cursor = true;
+    }
+    let mut prev_visible_hunk: Option<usize> = None;
+    let mut virtual_inserted = false;
 
     // Split into gutter (fixed) and content (scrollable)
     let chunks = Layout::default()
@@ -777,7 +1059,7 @@ fn render_new_pane(frame: &mut Frame, app: &mut App, area: Rect) {
     let has_query = !query.is_empty();
     let mut max_line_width: usize = 0;
 
-    for view_line in view_lines.iter() {
+    for (idx, view_line) in view_lines.iter().enumerate() {
         let old_present = view_line.old_line.is_some();
         let new_present = view_line.new_line.is_some()
             && !matches!(view_line.kind, LineKind::Deleted | LineKind::PendingDelete);
@@ -792,6 +1074,29 @@ fn render_new_pane(frame: &mut Frame, app: &mut App, area: Rect) {
         }
         if !app.line_wrap && gutter_lines.len() >= visible_height {
             break;
+        }
+
+        let line_hunk = view_line.hunk_index;
+        let is_first_in_hunk = line_hunk.is_some() && prev_visible_hunk != line_hunk;
+        let is_last_in_hunk = line_hunk.is_some() && next_visible_hunk[idx] != line_hunk;
+        if let Some(text) = virtual_text.as_ref() {
+            if !virtual_inserted
+                && !prefer_cursor
+                && force_top
+                && line_hunk == Some(preview_hunk)
+                && is_first_in_hunk
+            {
+                push_virtual_line_new(
+                    text,
+                    app,
+                    visible_width,
+                    &mut max_line_width,
+                    &mut content_lines,
+                    &mut gutter_lines,
+                    &mut marker_lines,
+                );
+                virtual_inserted = true;
+            }
         }
 
         if !new_present {
@@ -815,6 +1120,25 @@ fn render_new_pane(frame: &mut Frame, app: &mut App, area: Rect) {
                     marker_lines.push(Line::from(Span::raw(" ")));
                 }
             }
+            if let Some(text) = virtual_text.as_ref() {
+                if !virtual_inserted
+                    && !force_top
+                    && line_hunk == Some(preview_hunk)
+                    && is_last_in_hunk
+                {
+                    push_virtual_line_new(
+                        text,
+                        app,
+                        visible_width,
+                        &mut max_line_width,
+                        &mut content_lines,
+                        &mut gutter_lines,
+                        &mut marker_lines,
+                    );
+                    virtual_inserted = true;
+                }
+            }
+            prev_visible_hunk = line_hunk;
             line_idx += 1;
             continue;
         }
@@ -1087,36 +1411,41 @@ fn render_new_pane(frame: &mut Frame, app: &mut App, area: Rect) {
                 }
             }
 
-            if pending_insert_only > 0 && tail_change_id == Some(view_line.change_id) {
-                let virtual_text = pending_tail_text(pending_insert_only);
-                let virtual_style = Style::default()
-                    .fg(app.theme.text_muted)
-                    .add_modifier(Modifier::ITALIC);
-                let mut virtual_spans = vec![Span::styled(virtual_text.clone(), virtual_style)];
-                virtual_spans = expand_tabs_in_spans(&virtual_spans, TAB_WIDTH);
-
-                let virtual_width = spans_width(&virtual_spans);
-                max_line_width = max_line_width.max(virtual_width);
-
-                let virtual_wrap = if app.line_wrap {
-                    wrap_count_for_spans(&virtual_spans, visible_width)
-                } else {
-                    1
-                };
-
-                let mut display_virtual = virtual_spans;
-                if !app.line_wrap {
-                    display_virtual =
-                        slice_spans(&display_virtual, app.horizontal_scroll, visible_width);
+            if let Some(text) = virtual_text.as_ref() {
+                if !virtual_inserted
+                    && prefer_cursor
+                    && line_hunk == Some(preview_hunk)
+                    && view_line.is_primary_active
+                {
+                    push_virtual_line_new(
+                        text,
+                        app,
+                        visible_width,
+                        &mut max_line_width,
+                        &mut content_lines,
+                        &mut gutter_lines,
+                        &mut marker_lines,
+                    );
+                    virtual_inserted = true;
                 }
-                content_lines.push(Line::from(display_virtual));
-                gutter_lines.push(Line::from(vec![Span::raw("    "), Span::raw(" ")]));
-                marker_lines.push(Line::from(Span::raw(" ")));
-                if app.line_wrap && virtual_wrap > 1 {
-                    for _ in 1..virtual_wrap {
-                        gutter_lines.push(Line::from(Span::raw(" ")));
-                        marker_lines.push(Line::from(Span::raw(" ")));
-                    }
+            }
+            if let Some(text) = virtual_text.as_ref() {
+                if !virtual_inserted
+                    && !prefer_cursor
+                    && !force_top
+                    && line_hunk == Some(preview_hunk)
+                    && is_last_in_hunk
+                {
+                    push_virtual_line_new(
+                        text,
+                        app,
+                        visible_width,
+                        &mut max_line_width,
+                        &mut content_lines,
+                        &mut gutter_lines,
+                        &mut marker_lines,
+                    );
+                    virtual_inserted = true;
                 }
             }
 
@@ -1152,6 +1481,7 @@ fn render_new_pane(frame: &mut Frame, app: &mut App, area: Rect) {
                 }
             }
 
+            prev_visible_hunk = line_hunk;
             line_idx += 1;
 
             if let Some((debug_idx, ref label)) = debug_target {
@@ -1316,6 +1646,85 @@ fn split_wrap_display_metrics(
     (display_len, active_idx)
 }
 
+fn split_hunk_overflow_wrapped(
+    app: &mut App,
+    view: &[ViewLine],
+    hunk_idx: usize,
+    viewport_height: usize,
+    old_width: usize,
+    new_width: usize,
+) -> Option<(bool, bool)> {
+    let mut old_idx = 0usize;
+    let mut new_idx = 0usize;
+    let mut old_start: Option<usize> = None;
+    let mut old_end: Option<usize> = None;
+    let mut new_start: Option<usize> = None;
+    let mut new_end: Option<usize> = None;
+
+    for line in view {
+        let old_present = line.old_line.is_some();
+        let new_present = line.new_line.is_some()
+            && !matches!(line.kind, LineKind::Deleted | LineKind::PendingDelete);
+
+        let old_wrap = if old_present {
+            split_old_line_wrap_count(app, line, old_width)
+        } else if app.split_align_lines && new_present {
+            split_new_line_wrap_count(app, line, old_width)
+        } else {
+            0
+        };
+        let new_wrap = if new_present {
+            split_new_line_wrap_count(app, line, new_width)
+        } else if app.split_align_lines && old_present {
+            split_old_line_wrap_count(app, line, new_width)
+        } else {
+            0
+        };
+
+        if old_wrap > 0 {
+            if line.hunk_index == Some(hunk_idx) {
+                if old_start.is_none() {
+                    old_start = Some(old_idx);
+                }
+                old_end = Some(old_idx.saturating_add(old_wrap.saturating_sub(1)));
+            }
+            old_idx = old_idx.saturating_add(old_wrap);
+        }
+        if new_wrap > 0 {
+            if line.hunk_index == Some(hunk_idx) {
+                if new_start.is_none() {
+                    new_start = Some(new_idx);
+                }
+                new_end = Some(new_idx.saturating_add(new_wrap.saturating_sub(1)));
+            }
+            new_idx = new_idx.saturating_add(new_wrap);
+        }
+    }
+
+    let old_bounds = old_start.zip(old_end);
+    let new_bounds = new_start.zip(new_end);
+    let (start, end) = match (old_bounds, new_bounds) {
+        (Some(old), Some(new)) => {
+            let old_dist = (old.0 as isize - app.scroll_offset as isize).abs();
+            let new_dist = (new.0 as isize - app.scroll_offset as isize).abs();
+            if old_dist < new_dist {
+                old
+            } else {
+                new
+            }
+        }
+        (Some(old), None) => old,
+        (None, Some(new)) => new,
+        (None, None) => return None,
+    };
+
+    let visible_start = app.scroll_offset;
+    let visible_end = app
+        .scroll_offset
+        .saturating_add(viewport_height.saturating_sub(1));
+    Some((start < visible_start, end > visible_end))
+}
+
 fn split_old_line_wrap_count(app: &mut App, line: &ViewLine, wrap_width: usize) -> usize {
     if matches!(line.kind, LineKind::Modified | LineKind::PendingModify) {
         if let Some(change) = app
@@ -1374,14 +1783,6 @@ fn split_new_line_wrap_count(app: &mut App, line: &ViewLine, wrap_width: usize) 
 
     let text = view_spans_to_text(&line.spans);
     wrap_count_for_text(&text, wrap_width)
-}
-
-fn view_spans_to_text(spans: &[ViewSpan]) -> String {
-    let mut out = String::new();
-    for span in spans {
-        out.push_str(&span.text);
-    }
-    out
 }
 
 fn get_old_span_style(

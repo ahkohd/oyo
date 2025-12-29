@@ -84,6 +84,18 @@ struct StepEdgeHint {
     until: Instant,
 }
 
+#[derive(Clone, Copy, Debug)]
+enum HunkEdge {
+    First,
+    Last,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct HunkEdgeHint {
+    edge: HunkEdge,
+    until: Instant,
+}
+
 /// The main application state
 pub struct App {
     /// Multi-file diff manager
@@ -278,6 +290,8 @@ pub struct App {
     autoplay_remaining: Option<usize>,
     /// Edge-of-steps hint (shown briefly after trying to step past ends)
     step_edge_hint: Option<StepEdgeHint>,
+    /// Edge-of-hunks hint (shown briefly after trying to go past ends)
+    hunk_edge_hint: Option<HunkEdgeHint>,
     /// Last known viewport height for the diff area
     pub last_viewport_height: usize,
 }
@@ -439,6 +453,7 @@ impl App {
             snap_frame_started_at: None,
             autoplay_remaining: None,
             step_edge_hint: None,
+            hunk_edge_hint: None,
             last_viewport_height: 0,
         }
     }
@@ -1300,6 +1315,10 @@ impl App {
         self.step_edge_hint = None;
     }
 
+    fn clear_hunk_edge_hint(&mut self) {
+        self.hunk_edge_hint = None;
+    }
+
     pub(crate) fn step_edge_hint_for_change(&self, change_id: usize) -> Option<&'static str> {
         let hint = self.step_edge_hint?;
         if Instant::now() > hint.until {
@@ -1315,10 +1334,18 @@ impl App {
         }
     }
 
-    pub(crate) fn last_step_hint_for_change(
-        &mut self,
-        change_id: usize,
-    ) -> Option<&'static str> {
+    pub(crate) fn hunk_edge_hint_text(&self) -> Option<&'static str> {
+        let hint = self.hunk_edge_hint?;
+        if Instant::now() > hint.until {
+            return None;
+        }
+        Some(match hint.edge {
+            HunkEdge::First => "first hunk",
+            HunkEdge::Last => "last hunk",
+        })
+    }
+
+    pub(crate) fn last_step_hint_text(&mut self) -> Option<&'static str> {
         if !self.stepping {
             return None;
         }
@@ -1333,31 +1360,57 @@ impl App {
         if remaining != 1 {
             return None;
         }
-        let anchor = state
-            .applied_changes
-            .last()
-            .copied()
-            .or(state.active_change)
-            .or_else(|| {
-                self.multi_diff
-                    .current_navigator()
-                    .diff()
-                    .significant_changes
-                    .first()
-                    .copied()
-            });
-        if anchor == Some(change_id) {
-            Some("last step next")
-        } else {
-            None
-        }
+        Some("last step next")
+    }
+
+    fn trigger_hunk_edge_hint(&mut self, edge: HunkEdge) {
+        self.hunk_edge_hint = Some(HunkEdgeHint {
+            edge,
+            until: Instant::now() + Duration::from_millis(STEP_EDGE_HINT_MS),
+        });
+    }
+
+    pub(crate) fn hunk_hint_overflow(
+        &mut self,
+        hunk_idx: usize,
+        viewport_height: usize,
+    ) -> Option<(bool, bool)> {
+        let bounds = match self.view_mode {
+            ViewMode::Split => {
+                let (old_bounds, new_bounds) = self.compute_hunk_bounds_split();
+                let old = old_bounds.get(hunk_idx).copied().flatten();
+                let new = new_bounds.get(hunk_idx).copied().flatten();
+                self.pick_split_bounds(old, new)
+            }
+            _ => self
+                .compute_hunk_bounds_single()
+                .get(hunk_idx)
+                .copied()
+                .flatten(),
+        }?;
+
+        let visible_start = self.scroll_offset;
+        let visible_end = self
+            .scroll_offset
+            .saturating_add(viewport_height.saturating_sub(1));
+        let overflow_above = bounds.start.idx < visible_start;
+        let overflow_below = bounds.end.idx > visible_end;
+        Some((overflow_above, overflow_below))
     }
 
     fn trigger_step_edge_hint(&mut self, edge: StepEdge) {
         let state = self.multi_diff.current_navigator().state();
         let change_id = match edge {
-            StepEdge::End => state.applied_changes.last().copied().or(state.active_change),
-            StepEdge::Start => state.applied_changes.first().copied().or(state.active_change),
+            StepEdge::End => state
+                .applied_changes
+                .last()
+                .copied()
+                .or(state.active_change),
+            StepEdge::Start => state
+                .applied_changes
+                .first()
+                .copied()
+                .or(state.active_change),
         };
         self.step_edge_hint = Some(StepEdgeHint {
             change_id,
@@ -1368,6 +1421,7 @@ impl App {
 
     fn step_forward(&mut self) -> bool {
         self.clear_peek();
+        self.clear_hunk_edge_hint();
         self.snap_frame = None;
         self.snap_frame_started_at = None;
         if self.multi_diff.current_navigator().next() {
@@ -1398,6 +1452,7 @@ impl App {
 
     fn step_backward(&mut self) -> bool {
         self.clear_peek();
+        self.clear_hunk_edge_hint();
         self.snap_frame = None;
         self.snap_frame_started_at = None;
         if !self.animation_enabled {
@@ -1835,12 +1890,6 @@ impl App {
             .state()
             .last_nav_was_hunk;
         let use_cursor = auto_center && cursor_set && in_hunk_scope;
-        if matches!(self.hunk_wrap, HunkWrapMode::File) && in_hunk_scope {
-            let total = self.multi_diff.current_navigator().state().total_hunks;
-            if total <= 1 && self.wrap_to_file_hunk(true, false) {
-                return;
-            }
-        }
         let inclusive = in_hunk_scope;
         let target = match self.view_mode {
             ViewMode::Split => {
@@ -1890,8 +1939,15 @@ impl App {
             if self.auto_center {
                 self.needs_scroll_to_active = true;
             }
+            self.clear_hunk_edge_hint();
         } else if matches!(self.hunk_wrap, HunkWrapMode::File) {
-            self.wrap_to_file_hunk(true, false);
+            if self.wrap_to_file_hunk(true, false) {
+                self.clear_hunk_edge_hint();
+            } else {
+                self.trigger_hunk_edge_hint(HunkEdge::Last);
+            }
+        } else {
+            self.trigger_hunk_edge_hint(HunkEdge::Last);
         }
     }
 
@@ -1908,12 +1964,6 @@ impl App {
             .state()
             .last_nav_was_hunk;
         let use_cursor = auto_center && cursor_set && in_hunk_scope;
-        if matches!(self.hunk_wrap, HunkWrapMode::File) && in_hunk_scope {
-            let total = self.multi_diff.current_navigator().state().total_hunks;
-            if total <= 1 && self.wrap_to_file_hunk(false, false) {
-                return;
-            }
-        }
         let target = match self.view_mode {
             ViewMode::Split => {
                 let (old_starts, new_starts) = self.compute_hunk_starts_split();
@@ -1962,8 +2012,15 @@ impl App {
             if self.auto_center {
                 self.needs_scroll_to_active = true;
             }
+            self.clear_hunk_edge_hint();
         } else if matches!(self.hunk_wrap, HunkWrapMode::File) {
-            self.wrap_to_file_hunk(false, false);
+            if self.wrap_to_file_hunk(false, false) {
+                self.clear_hunk_edge_hint();
+            } else {
+                self.trigger_hunk_edge_hint(HunkEdge::First);
+            }
+        } else {
+            self.trigger_hunk_edge_hint(HunkEdge::First);
         }
     }
 
@@ -1975,18 +2032,28 @@ impl App {
                 self.start_animation();
             }
             self.needs_scroll_to_active = true;
+            self.clear_hunk_edge_hint();
         } else {
             match self.hunk_wrap {
                 HunkWrapMode::Hunk => {
                     let total = self.multi_diff.current_navigator().state().total_hunks;
                     if total > 0 {
                         self.goto_hunk_index(0);
+                        self.clear_hunk_edge_hint();
+                    } else {
+                        self.trigger_hunk_edge_hint(HunkEdge::Last);
                     }
                 }
                 HunkWrapMode::File => {
-                    self.wrap_to_file_hunk(true, true);
+                    if self.wrap_to_file_hunk(true, true) {
+                        self.clear_hunk_edge_hint();
+                    } else {
+                        self.trigger_hunk_edge_hint(HunkEdge::Last);
+                    }
                 }
-                HunkWrapMode::None => {}
+                HunkWrapMode::None => {
+                    self.trigger_hunk_edge_hint(HunkEdge::Last);
+                }
             }
         }
     }
@@ -2001,18 +2068,28 @@ impl App {
                 self.clear_active_on_next_render = true;
             }
             self.needs_scroll_to_active = true;
+            self.clear_hunk_edge_hint();
         } else {
             match self.hunk_wrap {
                 HunkWrapMode::Hunk => {
                     let total = self.multi_diff.current_navigator().state().total_hunks;
                     if total > 0 {
                         self.goto_hunk_index(total.saturating_sub(1));
+                        self.clear_hunk_edge_hint();
+                    } else {
+                        self.trigger_hunk_edge_hint(HunkEdge::First);
                     }
                 }
                 HunkWrapMode::File => {
-                    self.wrap_to_file_hunk(false, true);
+                    if self.wrap_to_file_hunk(false, true) {
+                        self.clear_hunk_edge_hint();
+                    } else {
+                        self.trigger_hunk_edge_hint(HunkEdge::First);
+                    }
                 }
-                HunkWrapMode::None => {}
+                HunkWrapMode::None => {
+                    self.trigger_hunk_edge_hint(HunkEdge::First);
+                }
             }
         }
     }
@@ -2048,20 +2125,46 @@ impl App {
             None => return 0,
         };
 
+        let cursor_id = state
+            .cursor_change
+            .or(state.active_change)
+            .or_else(|| state.applied_changes.last().copied());
+        let cursor_id = match cursor_id {
+            Some(id) => id,
+            None => return 0,
+        };
+        let cursor_idx = match hunk.change_ids.iter().position(|id| *id == cursor_id) {
+            Some(idx) => idx,
+            None => return 0,
+        };
+        let get_change = |id| nav.diff().changes.iter().find(|c| c.id == id);
+        let is_insert_only = |change: &oyo_core::Change| {
+            change
+                .spans
+                .iter()
+                .all(|span| span.kind == ChangeKind::Insert)
+        };
+        let cursor_change = match get_change(cursor_id) {
+            Some(change) => change,
+            None => return 0,
+        };
+        if !is_insert_only(cursor_change) {
+            return 0;
+        }
+
         let mut pending = 0usize;
-        for change_id in &hunk.change_ids {
+        for change_id in hunk.change_ids.iter().skip(cursor_idx + 1) {
+            let change = match get_change(*change_id) {
+                Some(change) => change,
+                None => continue,
+            };
+            if !is_insert_only(change) {
+                break;
+            }
             if state.applied_changes.contains(change_id) {
                 continue;
             }
-            if let Some(change) = nav.diff().changes.iter().find(|c| c.id == *change_id) {
-                let is_insert_only = change
-                    .spans
-                    .iter()
-                    .all(|span| span.kind == ChangeKind::Insert);
-                if is_insert_only {
-                    pending += 1;
-                }
-            }
+            pending += 1;
         }
 
         pending
@@ -2224,6 +2327,7 @@ impl App {
             self.step_view_mode = self.view_mode;
             self.stepping = false;
             self.clear_step_edge_hint();
+            self.clear_hunk_edge_hint();
             if !self.no_step_visited[current_index] {
                 self.scroll_offsets_no_step[current_index] = self.scroll_offset;
                 self.horizontal_scrolls_no_step[current_index] = self.horizontal_scroll;
@@ -2236,6 +2340,7 @@ impl App {
             self.save_scroll_position_for(current_index);
             self.stepping = true;
             self.clear_step_edge_hint();
+            self.clear_hunk_edge_hint();
             self.peek_state = self.step_peek_state.take();
             self.view_mode = self.step_view_mode;
             if !self.restore_step_state_snapshot(current_index) {
@@ -2347,6 +2452,15 @@ impl App {
             return false;
         }
         !self.is_backward_animation()
+    }
+
+    pub(crate) fn cursor_visible_in_wrap(&self, viewport_height: usize) -> bool {
+        self.last_wrap_active_idx
+            .map(|idx| {
+                idx >= self.scroll_offset
+                    && idx < self.scroll_offset.saturating_add(viewport_height)
+            })
+            .unwrap_or(false)
     }
 
     /// Convert CLI animation phase to core AnimationFrame for phase-aware rendering
@@ -2976,6 +3090,7 @@ impl App {
     pub fn select_file(&mut self, index: usize) {
         let old_index = self.multi_diff.selected_index;
         self.clear_step_edge_hint();
+        self.clear_hunk_edge_hint();
         if !self.stepping {
             self.save_no_step_state_snapshot(old_index);
         }
@@ -3441,6 +3556,11 @@ impl App {
         if let Some(hint) = self.step_edge_hint {
             if now >= hint.until {
                 self.step_edge_hint = None;
+            }
+        }
+        if let Some(hint) = self.hunk_edge_hint {
+            if now >= hint.until {
+                self.hunk_edge_hint = None;
             }
         }
 

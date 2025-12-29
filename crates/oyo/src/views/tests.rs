@@ -107,6 +107,7 @@ fn test_evolution_full_preview_no_duplicate_modified_line() {
     app.evo_syntax = EvoSyntaxMode::Full;
 
     app.next_hunk();
+    app.next_hunk();
     let rendered = buffer_text(&render_buffer(&mut app, 80, 20)).join("\n");
     assert!(rendered.contains("NEWEVO"));
     assert!(!rendered.contains("OLDEVO"));
@@ -124,5 +125,75 @@ fn test_evolution_deleted_active_fallback_marker() {
     assert!(
         rendered.contains("▶"),
         "cursor marker should remain visible when deleted line is hidden"
+    );
+}
+
+#[test]
+fn test_single_wrap_hunk_hint_overflow_places_above() {
+    let long = "LONGINSERT_LONGINSERT_LONGINSERT_LONGINSERT";
+    let old = "";
+    let new = format!("{long}\nshort\n");
+    let mut app = make_app(old, &new, ViewMode::SinglePane);
+    app.line_wrap = true;
+
+    for _ in 0..5 {
+        if app.last_step_hint_text().is_some() {
+            break;
+        }
+        app.next_step();
+    }
+    assert!(
+        app.last_step_hint_text().is_some(),
+        "should reach last-step hint state"
+    );
+
+    let lines = buffer_text(&render_buffer(&mut app, 20, 4));
+    let hint_idx = lines
+        .iter()
+        .position(|line| line.contains("last step"))
+        .expect("virtual hint should render");
+    let long_idx = lines
+        .iter()
+        .position(|line| line.contains("LONGINSERT"))
+        .expect("insert line should render");
+    assert!(
+        hint_idx < long_idx,
+        "wrapped overflow should place hint above the hunk"
+    );
+}
+
+#[test]
+fn test_split_wrap_hunk_hint_overflow_places_above() {
+    let long = "LONGINSERT".repeat(12);
+    let old = "";
+    let new = format!("{long}\nshort\n");
+    let mut app = make_app(old, &new, ViewMode::Split);
+    app.line_wrap = true;
+    app.split_align_lines = true;
+
+    for _ in 0..5 {
+        if app.last_step_hint_text().is_some() {
+            break;
+        }
+        app.next_step();
+    }
+    assert!(
+        app.last_step_hint_text().is_some(),
+        "should reach last-step hint state"
+    );
+    app.multi_diff.current_navigator().clear_active_change();
+
+    let lines = buffer_text(&render_buffer(&mut app, 60, 4));
+    let hint_idx = lines
+        .iter()
+        .position(|line| line.contains("last step"))
+        .expect("virtual hint should render");
+    let long_idx = lines
+        .iter()
+        .position(|line| line.contains("LONGINSERT"))
+        .expect("insert line should render");
+    assert!(
+        hint_idx < long_idx,
+        "wrapped overflow should place hint above the hunk"
     );
 }
