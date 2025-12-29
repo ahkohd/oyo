@@ -313,9 +313,6 @@ speed = 200
 animation = true
 animation_duration = 150
 autoplay = false
-
-[navigation.wrap]
-step = "file"
 ```
 
 Config is loaded from (in priority order):
