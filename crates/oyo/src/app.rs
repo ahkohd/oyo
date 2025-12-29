@@ -64,6 +64,9 @@ struct HunkBounds {
     end: HunkStart,
 }
 
+pub(crate) const FILE_PANEL_MIN_WIDTH: u16 = 24;
+pub(crate) const DIFF_VIEW_MIN_WIDTH: u16 = 50;
+
 #[derive(Clone, Copy, Debug)]
 struct NoStepState {
     current_hunk: usize,
@@ -132,6 +135,12 @@ pub struct App {
     pub file_list_focused: bool,
     /// Whether the file panel is visible (for multi-file mode)
     pub file_panel_visible: bool,
+    /// File panel width (in columns)
+    pub file_panel_width: u16,
+    /// File panel full area (x, y, width, height)
+    pub file_panel_rect: Option<(u16, u16, u16, u16)>,
+    /// True when dragging the file panel separator
+    pub file_panel_resizing: bool,
     /// File list scroll offset
     pub file_list_scroll: usize,
     /// File list view area (x, y, width, height)
@@ -374,6 +383,9 @@ impl App {
             last_autoplay_tick: Instant::now(),
             file_list_focused: false,
             file_panel_visible: true,
+            file_panel_width: 30,
+            file_panel_rect: None,
+            file_panel_resizing: false,
             file_list_scroll: 0,
             file_list_area: None,
             file_list_rows: Vec::new(),
@@ -2439,6 +2451,53 @@ impl App {
         if !self.file_panel_visible {
             self.file_list_focused = false;
         }
+    }
+
+    pub fn clamp_file_panel_width(&self, viewport_width: u16) -> u16 {
+        let max_panel = viewport_width
+            .saturating_sub(DIFF_VIEW_MIN_WIDTH)
+            .max(FILE_PANEL_MIN_WIDTH);
+        self.file_panel_width.clamp(FILE_PANEL_MIN_WIDTH, max_panel)
+    }
+
+    pub fn resize_file_panel(&mut self, delta: i16, viewport_width: u16) {
+        let next = (self.file_panel_width as i16).saturating_add(delta);
+        let next = next.max(FILE_PANEL_MIN_WIDTH as i16) as u16;
+        self.file_panel_width = next;
+        self.file_panel_width = self.clamp_file_panel_width(viewport_width);
+        self.file_panel_manually_set = true;
+    }
+
+    pub fn start_file_panel_resize(&mut self, column: u16, row: u16) -> bool {
+        let (x, y, width, height) = match self.file_panel_rect {
+            Some(rect) => rect,
+            None => return false,
+        };
+        let sep_x = x.saturating_add(width.saturating_sub(1));
+        let end_y = y.saturating_add(height);
+        if column == sep_x && row >= y && row < end_y {
+            self.file_panel_resizing = true;
+            self.file_panel_manually_set = true;
+            return true;
+        }
+        false
+    }
+
+    pub fn drag_file_panel_resize(&mut self, column: u16, viewport_width: u16) -> bool {
+        if !self.file_panel_resizing {
+            return false;
+        }
+        if let Some((x, _, _, _)) = self.file_panel_rect {
+            let width = column.saturating_sub(x).saturating_add(1);
+            self.file_panel_width = width;
+            self.file_panel_width = self.clamp_file_panel_width(viewport_width);
+            return true;
+        }
+        false
+    }
+
+    pub fn end_file_panel_resize(&mut self) {
+        self.file_panel_resizing = false;
     }
 
     /// Check if current animation is backward (un-applying a change)

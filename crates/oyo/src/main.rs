@@ -219,6 +219,7 @@ fn apply_config_to_app(app: &mut App, config: &config::Config, args: &Args, ligh
     app.animation_enabled = config.playback.animation;
     app.animation_duration = config.playback.animation_duration;
     app.file_panel_visible = config.files.panel_visible;
+    app.file_panel_width = config.files.panel_width;
     app.file_count_mode = config.files.counts;
     app.auto_center = config.ui.auto_center;
     app.topbar = config.ui.topbar;
@@ -715,6 +716,7 @@ fn main() -> Result<()> {
     app.animation_enabled = config.playback.animation;
     app.animation_duration = config.playback.animation_duration;
     app.file_panel_visible = config.files.panel_visible;
+    app.file_panel_width = config.files.panel_width;
     app.file_count_mode = config.files.counts;
     app.auto_center = config.ui.auto_center;
     app.topbar = config.ui.topbar;
@@ -793,9 +795,22 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<()> 
                     app.reset_count();
                     match me.kind {
                         MouseEventKind::Down(MouseButton::Left) => {
+                            if app.start_file_panel_resize(me.column, me.row) {
+                                continue;
+                            }
                             if app.handle_file_list_click(me.column, me.row) {
                                 continue;
                             }
+                        }
+                        MouseEventKind::Drag(MouseButton::Left) => {
+                            if let Ok((cols, _)) = crossterm::terminal::size() {
+                                if app.drag_file_panel_resize(me.column, cols) {
+                                    continue;
+                                }
+                            }
+                        }
+                        MouseEventKind::Up(MouseButton::Left) => {
+                            app.end_file_panel_resize();
                         }
                         MouseEventKind::ScrollUp => {
                             if app.file_list_focused {
@@ -1155,11 +1170,23 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<()> 
                         }
                         KeyCode::Char('+') | KeyCode::Char('=') => {
                             app.reset_count();
-                            app.increase_speed();
+                            if app.is_multi_file() && app.file_list_focused {
+                                if let Ok((cols, _)) = crossterm::terminal::size() {
+                                    app.resize_file_panel(2, cols);
+                                }
+                            } else {
+                                app.increase_speed();
+                            }
                         }
                         KeyCode::Char('-') => {
                             app.reset_count();
-                            app.decrease_speed();
+                            if app.is_multi_file() && app.file_list_focused {
+                                if let Ok((cols, _)) = crossterm::terminal::size() {
+                                    app.resize_file_panel(-2, cols);
+                                }
+                            } else {
+                                app.decrease_speed();
+                            }
                         }
                         KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             app.reset_count();

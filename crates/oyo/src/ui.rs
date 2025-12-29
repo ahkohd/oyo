@@ -1,6 +1,6 @@
 //! UI rendering for the TUI
 
-use crate::app::{App, ViewMode};
+use crate::app::{App, ViewMode, DIFF_VIEW_MIN_WIDTH, FILE_PANEL_MIN_WIDTH};
 use crate::views::{render_evolution, render_single_pane, render_split};
 use oyo_core::FileStatus;
 use ratatui::{
@@ -539,7 +539,7 @@ fn draw_top_bar(frame: &mut Frame, app: &mut App, area: Rect) {
 fn draw_content(frame: &mut Frame, app: &mut App, area: Rect, show_topbar: bool) {
     // Auto-hide file panel if viewport is too narrow (need at least 50 cols for diff view)
     // But respect user's manual toggle preference
-    let min_width_for_panel = 85; // 35 (panel) + 50 (diff view)
+    let min_width_for_panel = FILE_PANEL_MIN_WIDTH + DIFF_VIEW_MIN_WIDTH;
 
     // Track if panel would be auto-hidden (for toggle behavior)
     app.file_panel_auto_hidden = app.is_multi_file()
@@ -557,14 +557,17 @@ fn draw_content(frame: &mut Frame, app: &mut App, area: Rect, show_topbar: bool)
 
     if show_panel {
         // Split: file list on left, diff view on right
+        let panel_width = app.clamp_file_panel_width(area.width);
+        app.file_panel_width = panel_width;
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
-                Constraint::Length(35), // File list width
-                Constraint::Min(0),     // Diff view
+                Constraint::Length(panel_width), // File list width
+                Constraint::Min(0),              // Diff view
             ])
             .split(area);
 
+        app.file_panel_rect = Some((chunks[0].x, chunks[0].y, chunks[0].width, chunks[0].height));
         draw_file_list(frame, app, chunks[0]);
         if show_topbar {
             let diff_chunks = Layout::default()
@@ -583,6 +586,7 @@ fn draw_content(frame: &mut Frame, app: &mut App, area: Rect, show_topbar: bool)
         app.file_list_area = None;
         app.file_list_rows.clear();
         app.file_filter_area = None;
+        app.file_panel_rect = None;
         if show_topbar {
             let diff_chunks = Layout::default()
                 .direction(Direction::Vertical)

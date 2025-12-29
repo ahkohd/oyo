@@ -43,6 +43,7 @@
 //!
 //! [files]
 //! panel_visible = true
+//! panel_width = 30
 //! counts = "active"
 //! ```
 
@@ -1011,6 +1012,8 @@ impl Default for PlaybackConfig {
 pub struct FilesConfig {
     /// Show file panel by default in multi-file mode
     pub panel_visible: bool,
+    /// File panel width (columns)
+    pub panel_width: u16,
     /// When to show per-file +/- counts in the file panel
     pub counts: FileCountMode,
 }
@@ -1019,6 +1022,7 @@ impl Default for FilesConfig {
     fn default() -> Self {
         Self {
             panel_visible: true,
+            panel_width: 30,
             counts: FileCountMode::Active,
         }
     }

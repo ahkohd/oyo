@@ -272,6 +272,7 @@ auto_step_blank_files = true # Auto-step when file would be blank at step 0 (new
 
 [files]
 panel_visible = true        # Show file panel in multi-file mode
+panel_width = 30            # File panel width (columns)
 counts = "active"           # Per-file +/- counts: active, focused, all, off
 
 [no_step]
