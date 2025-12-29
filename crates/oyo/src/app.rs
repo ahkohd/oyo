@@ -2981,6 +2981,8 @@ impl App {
         }
         self.last_wrap_display_len = None;
         self.last_wrap_active_idx = None;
+        self.needs_scroll_to_active = true;
+        self.centered_once = false;
     }
 
     pub fn toggle_strikethrough_deletions(&mut self) {
