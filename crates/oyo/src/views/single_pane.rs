@@ -250,6 +250,11 @@ pub fn render_single_pane(frame: &mut Frame, app: &mut App, area: Rect) {
         app.clamp_scroll(view_lines.len(), visible_height, app.allow_overscroll());
     }
     let debug_target = app.syntax_scope_target(&view_lines);
+    let mut bg_lines: Option<Vec<Line<'static>>> = if app.line_wrap && app.diff_bg {
+        Some(Vec::new())
+    } else {
+        None
+    };
 
     // Split area into gutter (fixed) and content (scrollable)
     let chunks = Layout::default()
@@ -919,10 +924,21 @@ pub fn render_single_pane(frame: &mut Frame, app: &mut App, area: Rect) {
             }
         }
 
+        if let Some(bg_lines) = bg_lines.as_mut() {
+            super::push_wrapped_bg_line(bg_lines, wrap_width, wrap_count, line_bg_line);
+        }
         content_lines.push(Line::from(display_spans));
         if app.line_wrap && wrap_count > 1 {
             for _ in 1..wrap_count {
-                gutter_lines.push(Line::from(Span::raw(" ")));
+                if let Some(bg) = line_bg_gutter {
+                    let pad = " ".repeat(GUTTER_WIDTH as usize - 1);
+                    gutter_lines.push(Line::from(vec![
+                        Span::raw(" "),
+                        Span::styled(pad, Style::default().bg(bg)),
+                    ]));
+                } else {
+                    gutter_lines.push(Line::from(Span::raw(" ")));
+                }
             }
         }
         if let Some(text) = virtual_text.as_ref() {
@@ -953,6 +969,9 @@ pub fn render_single_pane(frame: &mut Frame, app: &mut App, area: Rect) {
                 if !app.line_wrap {
                     display_virtual =
                         slice_spans(&display_virtual, app.horizontal_scroll, visible_width);
+                }
+                if let Some(bg_lines) = bg_lines.as_mut() {
+                    super::push_wrapped_bg_line(bg_lines, wrap_width, virtual_wrap, None);
                 }
                 content_lines.push(Line::from(display_virtual));
                 gutter_lines.push(Line::from(vec![
@@ -1000,6 +1019,9 @@ pub fn render_single_pane(frame: &mut Frame, app: &mut App, area: Rect) {
                     display_virtual =
                         slice_spans(&display_virtual, app.horizontal_scroll, visible_width);
                 }
+                if let Some(bg_lines) = bg_lines.as_mut() {
+                    super::push_wrapped_bg_line(bg_lines, wrap_width, virtual_wrap, None);
+                }
                 content_lines.push(Line::from(display_virtual));
                 gutter_lines.push(Line::from(vec![
                     Span::raw(" "),
@@ -1042,6 +1064,9 @@ pub fn render_single_pane(frame: &mut Frame, app: &mut App, area: Rect) {
                 display_virtual =
                     slice_spans(&display_virtual, app.horizontal_scroll, visible_width);
             }
+            if let Some(bg_lines) = bg_lines.as_mut() {
+                super::push_wrapped_bg_line(bg_lines, wrap_width, virtual_wrap, None);
+            }
             content_lines.push(Line::from(display_virtual));
             gutter_lines.push(Line::from(vec![
                 Span::raw(" "),
@@ -1067,6 +1092,9 @@ pub fn render_single_pane(frame: &mut Frame, app: &mut App, area: Rect) {
                     1
                 };
                 gutter_lines.push(Line::from(Span::raw(" ")));
+                if let Some(bg_lines) = bg_lines.as_mut() {
+                    super::push_wrapped_bg_line(bg_lines, wrap_width, debug_wrap, None);
+                }
                 content_lines.push(Line::from(Span::styled(debug_text, debug_style)));
                 if app.line_wrap {
                     display_len += debug_wrap;
@@ -1123,8 +1151,18 @@ pub fn render_single_pane(frame: &mut Frame, app: &mut App, area: Rect) {
         } else {
             Paragraph::new(content_lines)
         };
-        if let Some(style) = bg_style {
-            content_paragraph = content_paragraph.style(style);
+        let has_bg_overlay = bg_lines.is_some();
+        if let Some(bg_lines) = bg_lines {
+            let mut bg_paragraph = Paragraph::new(bg_lines).scroll((app.scroll_offset as u16, 0));
+            if let Some(style) = bg_style {
+                bg_paragraph = bg_paragraph.style(style);
+            }
+            frame.render_widget(bg_paragraph, content_area);
+        }
+        if !has_bg_overlay {
+            if let Some(style) = bg_style {
+                content_paragraph = content_paragraph.style(style);
+            }
         }
         frame.render_widget(content_paragraph, content_area);
 

@@ -106,6 +106,7 @@ fn push_virtual_line_old(
     max_line_width: &mut usize,
     content_lines: &mut Vec<Line>,
     gutter_lines: &mut Vec<Line>,
+    bg_lines: Option<&mut Vec<Line<'static>>>,
 ) {
     let virtual_style = Style::default()
         .fg(app.theme.text_muted)
@@ -125,6 +126,9 @@ fn push_virtual_line_old(
     let mut display_virtual = virtual_spans;
     if !app.line_wrap {
         display_virtual = slice_spans(&display_virtual, app.horizontal_scroll, visible_width);
+    }
+    if let Some(bg_lines) = bg_lines {
+        super::push_wrapped_bg_line(bg_lines, visible_width, virtual_wrap, None);
     }
     content_lines.push(Line::from(display_virtual));
     gutter_lines.push(Line::from(vec![
@@ -139,6 +143,7 @@ fn push_virtual_line_old(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn push_virtual_line_new(
     text: &str,
     app: &App,
@@ -147,6 +152,7 @@ fn push_virtual_line_new(
     content_lines: &mut Vec<Line>,
     gutter_lines: &mut Vec<Line>,
     marker_lines: &mut Vec<Line>,
+    bg_lines: Option<&mut Vec<Line<'static>>>,
 ) {
     let virtual_style = Style::default()
         .fg(app.theme.text_muted)
@@ -166,6 +172,9 @@ fn push_virtual_line_new(
     let mut display_virtual = virtual_spans;
     if !app.line_wrap {
         display_virtual = slice_spans(&display_virtual, app.horizontal_scroll, visible_width);
+    }
+    if let Some(bg_lines) = bg_lines {
+        super::push_wrapped_bg_line(bg_lines, visible_width, virtual_wrap, None);
     }
     content_lines.push(Line::from(display_virtual));
     gutter_lines.push(Line::from(vec![Span::raw("    "), Span::raw(" ")]));
@@ -276,6 +285,11 @@ fn render_old_pane(
     let visible_height = area.height as usize;
     let visible_width = area.width.saturating_sub(GUTTER_WIDTH + 1) as usize; // +1 for border
     let debug_target = app.syntax_scope_target(&view_lines);
+    let mut bg_lines: Option<Vec<Line<'static>>> = if app.line_wrap && app.diff_bg {
+        Some(Vec::new())
+    } else {
+        None
+    };
     let (preview_mode, preview_hunk) = {
         let state = app.multi_diff.current_navigator().state();
         (state.hunk_preview_mode, state.current_hunk)
@@ -450,6 +464,7 @@ fn render_old_pane(
                     &mut max_line_width,
                     &mut content_lines,
                     &mut gutter_lines,
+                    bg_lines.as_mut(),
                 );
                 virtual_inserted = true;
             }
@@ -466,6 +481,9 @@ fn render_old_pane(
             let gutter_fill = align_fill_gutter_span(app, 4);
             let sign_fill = align_fill_gutter_span(app, 1);
             gutter_lines.push(Line::from(vec![marker_fill, gutter_fill, sign_fill]));
+            if let Some(bg_lines) = bg_lines.as_mut() {
+                super::push_wrapped_bg_line(bg_lines, visible_width, 1, None);
+            }
             content_lines.push(Line::from(fill_span.clone()));
             if app.line_wrap && wrap_count > 1 {
                 for _ in 1..wrap_count {
@@ -473,6 +491,9 @@ fn render_old_pane(
                     let gutter_fill = align_fill_gutter_span(app, 4);
                     let sign_fill = align_fill_gutter_span(app, 1);
                     gutter_lines.push(Line::from(vec![marker_fill, gutter_fill, sign_fill]));
+                    if let Some(bg_lines) = bg_lines.as_mut() {
+                        super::push_wrapped_bg_line(bg_lines, visible_width, 1, None);
+                    }
                     content_lines.push(Line::from(fill_span.clone()));
                 }
             }
@@ -489,6 +510,7 @@ fn render_old_pane(
                         &mut max_line_width,
                         &mut content_lines,
                         &mut gutter_lines,
+                        bg_lines.as_mut(),
                     );
                     virtual_inserted = true;
                 }
@@ -751,10 +773,21 @@ fn render_old_pane(
                     }
                 }
             }
+            if let Some(bg_lines) = bg_lines.as_mut() {
+                super::push_wrapped_bg_line(bg_lines, visible_width, wrap_count, line_bg_line);
+            }
             content_lines.push(Line::from(display_spans));
             if app.line_wrap && wrap_count > 1 {
                 for _ in 1..wrap_count {
-                    gutter_lines.push(Line::from(Span::raw(" ")));
+                    if let Some(bg) = line_bg_gutter {
+                        let pad = " ".repeat(GUTTER_WIDTH as usize - 1);
+                        gutter_lines.push(Line::from(vec![
+                            Span::raw(" "),
+                            Span::styled(pad, Style::default().bg(bg)),
+                        ]));
+                    } else {
+                        gutter_lines.push(Line::from(Span::raw(" ")));
+                    }
                 }
             }
             if let Some(text) = virtual_text.as_ref() {
@@ -770,6 +803,7 @@ fn render_old_pane(
                         &mut max_line_width,
                         &mut content_lines,
                         &mut gutter_lines,
+                        bg_lines.as_mut(),
                     );
                     virtual_inserted = true;
                 }
@@ -788,6 +822,7 @@ fn render_old_pane(
                         &mut max_line_width,
                         &mut content_lines,
                         &mut gutter_lines,
+                        bg_lines.as_mut(),
                     );
                     virtual_inserted = true;
                 }
@@ -814,6 +849,9 @@ fn render_old_pane(
                     display_virtual =
                         slice_spans(&display_virtual, app.horizontal_scroll, visible_width);
                 }
+                if let Some(bg_lines) = bg_lines.as_mut() {
+                    super::push_wrapped_bg_line(bg_lines, visible_width, virtual_wrap, None);
+                }
                 content_lines.push(Line::from(display_virtual));
                 gutter_lines.push(Line::from(vec![
                     Span::raw(" "),
@@ -837,6 +875,9 @@ fn render_old_pane(
                         1
                     };
                     gutter_lines.push(Line::from(Span::raw(" ")));
+                    if let Some(bg_lines) = bg_lines.as_mut() {
+                        super::push_wrapped_bg_line(bg_lines, visible_width, debug_wrap, None);
+                    }
                     content_lines.push(Line::from(Span::raw("")));
                     if app.line_wrap && debug_wrap > 1 {
                         for _ in 1..debug_wrap {
@@ -882,8 +923,18 @@ fn render_old_pane(
         } else {
             Paragraph::new(content_lines)
         };
-        if let Some(style) = bg_style {
-            content_paragraph = content_paragraph.style(style);
+        let has_bg_overlay = bg_lines.is_some();
+        if let Some(bg_lines) = bg_lines {
+            let mut bg_paragraph = Paragraph::new(bg_lines).scroll((app.scroll_offset as u16, 0));
+            if let Some(style) = bg_style {
+                bg_paragraph = bg_paragraph.style(style);
+            }
+            frame.render_widget(bg_paragraph, content_area);
+        }
+        if !has_bg_overlay {
+            if let Some(style) = bg_style {
+                content_paragraph = content_paragraph.style(style);
+            }
         }
         frame.render_widget(content_paragraph, content_area);
     }
@@ -917,6 +968,11 @@ fn render_new_pane(
         .current_view_with_frame(animation_frame);
     let visible_height = area.height as usize;
     let debug_target = app.syntax_scope_target(&view_lines);
+    let mut bg_lines: Option<Vec<Line<'static>>> = if app.line_wrap && app.diff_bg {
+        Some(Vec::new())
+    } else {
+        None
+    };
     let (preview_mode, preview_hunk) = {
         let state = app.multi_diff.current_navigator().state();
         (state.hunk_preview_mode, state.current_hunk)
@@ -1094,6 +1150,7 @@ fn render_new_pane(
                     &mut content_lines,
                     &mut gutter_lines,
                     &mut marker_lines,
+                    bg_lines.as_mut(),
                 );
                 virtual_inserted = true;
             }
@@ -1109,6 +1166,9 @@ fn render_new_pane(
             let gutter_fill = align_fill_gutter_span(app, 4);
             let sign_fill = align_fill_gutter_span(app, 1);
             gutter_lines.push(Line::from(vec![gutter_fill, sign_fill]));
+            if let Some(bg_lines) = bg_lines.as_mut() {
+                super::push_wrapped_bg_line(bg_lines, visible_width, 1, None);
+            }
             content_lines.push(Line::from(fill_span.clone()));
             marker_lines.push(Line::from(Span::raw(" ")));
             if app.line_wrap && wrap_count > 1 {
@@ -1116,6 +1176,9 @@ fn render_new_pane(
                     let gutter_fill = align_fill_gutter_span(app, 4);
                     let sign_fill = align_fill_gutter_span(app, 1);
                     gutter_lines.push(Line::from(vec![gutter_fill, sign_fill]));
+                    if let Some(bg_lines) = bg_lines.as_mut() {
+                        super::push_wrapped_bg_line(bg_lines, visible_width, 1, None);
+                    }
                     content_lines.push(Line::from(fill_span.clone()));
                     marker_lines.push(Line::from(Span::raw(" ")));
                 }
@@ -1134,6 +1197,7 @@ fn render_new_pane(
                         &mut content_lines,
                         &mut gutter_lines,
                         &mut marker_lines,
+                        bg_lines.as_mut(),
                     );
                     virtual_inserted = true;
                 }
@@ -1400,13 +1464,23 @@ fn render_new_pane(
                     }
                 }
             }
+            if let Some(bg_lines) = bg_lines.as_mut() {
+                super::push_wrapped_bg_line(bg_lines, visible_width, wrap_count, line_bg_line);
+            }
             content_lines.push(Line::from(display_spans));
 
             // Build marker line
             marker_lines.push(Line::from(Span::styled(active_marker, active_style)));
             if app.line_wrap && wrap_count > 1 {
                 for _ in 1..wrap_count {
-                    gutter_lines.push(Line::from(Span::raw(" ")));
+                    if let Some(bg) = line_bg_gutter {
+                        gutter_lines.push(Line::from(Span::styled(
+                            " ".repeat(NEW_GUTTER_WIDTH as usize),
+                            Style::default().bg(bg),
+                        )));
+                    } else {
+                        gutter_lines.push(Line::from(Span::raw(" ")));
+                    }
                     marker_lines.push(Line::from(Span::raw(" ")));
                 }
             }
@@ -1425,6 +1499,7 @@ fn render_new_pane(
                         &mut content_lines,
                         &mut gutter_lines,
                         &mut marker_lines,
+                        bg_lines.as_mut(),
                     );
                     virtual_inserted = true;
                 }
@@ -1444,6 +1519,7 @@ fn render_new_pane(
                         &mut content_lines,
                         &mut gutter_lines,
                         &mut marker_lines,
+                        bg_lines.as_mut(),
                     );
                     virtual_inserted = true;
                 }
@@ -1470,6 +1546,9 @@ fn render_new_pane(
                     display_virtual =
                         slice_spans(&display_virtual, app.horizontal_scroll, visible_width);
                 }
+                if let Some(bg_lines) = bg_lines.as_mut() {
+                    super::push_wrapped_bg_line(bg_lines, visible_width, virtual_wrap, None);
+                }
                 content_lines.push(Line::from(display_virtual));
                 gutter_lines.push(Line::from(vec![Span::raw("    "), Span::raw(" ")]));
                 marker_lines.push(Line::from(Span::raw(" ")));
@@ -1494,6 +1573,9 @@ fn render_new_pane(
                         1
                     };
                     gutter_lines.push(Line::from(Span::raw(" ")));
+                    if let Some(bg_lines) = bg_lines.as_mut() {
+                        super::push_wrapped_bg_line(bg_lines, visible_width, debug_wrap, None);
+                    }
                     content_lines.push(Line::from(Span::styled(debug_text, debug_style)));
                     marker_lines.push(Line::from(Span::raw(" ")));
                     if app.line_wrap && debug_wrap > 1 {
@@ -1538,8 +1620,18 @@ fn render_new_pane(
         } else {
             Paragraph::new(content_lines)
         };
-        if let Some(style) = bg_style {
-            content_paragraph = content_paragraph.style(style);
+        let has_bg_overlay = bg_lines.is_some();
+        if let Some(bg_lines) = bg_lines {
+            let mut bg_paragraph = Paragraph::new(bg_lines).scroll((app.scroll_offset as u16, 0));
+            if let Some(style) = bg_style {
+                bg_paragraph = bg_paragraph.style(style);
+            }
+            frame.render_widget(bg_paragraph, content_area);
+        }
+        if !has_bg_overlay {
+            if let Some(style) = bg_style {
+                content_paragraph = content_paragraph.style(style);
+            }
         }
         frame.render_widget(content_paragraph, content_area);
     }

@@ -118,6 +118,29 @@ pub(crate) fn apply_spans_bg(spans: Vec<Span<'static>>, bg: Color) -> Vec<Span<'
         .collect()
 }
 
+pub(crate) fn push_wrapped_bg_line(
+    bg_lines: &mut Vec<Line<'static>>,
+    wrap_width: usize,
+    wrap_count: usize,
+    bg: Option<Color>,
+) {
+    let count = wrap_count.max(1);
+    if wrap_width == 0 {
+        for _ in 0..count {
+            bg_lines.push(Line::from(Span::raw("")));
+        }
+        return;
+    }
+    for _ in 0..count {
+        let span = if let Some(bg) = bg {
+            Span::styled(" ".repeat(wrap_width), Style::default().bg(bg))
+        } else {
+            Span::raw("")
+        };
+        bg_lines.push(Line::from(span));
+    }
+}
+
 pub(crate) fn clear_leading_ws_bg(
     spans: Vec<Span<'static>>,
     clear_when_fg: Option<Color>,
