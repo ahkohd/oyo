@@ -122,15 +122,13 @@ oy syntax-themes
 
 This lists:
 - embedded syntax themes for built-in UI themes
-- any `.tmTheme` files in `~/.config/oyo`
 - any `.tmTheme` files in `~/.config/oyo/themes`
 
 ### Custom tmTheme
 
-Place a tmTheme file in either:
+Place a tmTheme file in:
 
 ```
-~/.config/oyo/MyTheme.tmTheme
 ~/.config/oyo/themes/MyTheme.tmTheme
 ```
 

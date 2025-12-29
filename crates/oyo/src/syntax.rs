@@ -476,17 +476,11 @@ fn config_theme_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     if let Some(config_path) = Config::config_path() {
         if let Some(parent) = config_path.parent() {
-            let base = parent.to_path_buf();
-            dirs.push(base.clone());
-            dirs.push(base.join("themes"));
+            dirs.push(parent.join("themes"));
         }
     }
     if let Some(config_dir) = dirs::config_dir() {
-        let base = config_dir.join("oyo");
-        if !dirs.contains(&base) {
-            dirs.push(base.clone());
-        }
-        let themes = base.join("themes");
+        let themes = config_dir.join("oyo").join("themes");
         if !dirs.contains(&themes) {
             dirs.push(themes);
         }
