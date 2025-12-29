@@ -49,8 +49,9 @@
 use crate::color::{self, AnimationGradient};
 use ratatui::style::Color;
 use serde::Deserialize;
-use std::collections::HashMap;
-use std::path::PathBuf;
+use std::collections::{BTreeSet, HashMap};
+use std::fs;
+use std::path::{Path, PathBuf};
 
 // ============================================================================
 // Theme Configuration
@@ -240,11 +241,11 @@ impl ThemeConfig {
             .unwrap_or(false)
     }
 
-    fn resolved_config(&self) -> ThemeConfig {
+    fn resolved_config(&self, light_mode: bool) -> ThemeConfig {
         let mut base = self
             .name
             .as_deref()
-            .and_then(ThemeConfig::builtin)
+            .and_then(|name| ThemeConfig::load_named(name, light_mode))
             .unwrap_or_default();
 
         base.name = self.name.clone();
@@ -265,6 +266,18 @@ impl ThemeConfig {
         let mut config: ThemeConfig =
             serde_json::from_str(json).expect("builtin theme JSON should parse");
         config.name = Some(key);
+        Some(config)
+    }
+
+    fn load_named(name: &str, light_mode: bool) -> Option<ThemeConfig> {
+        ThemeConfig::custom(name, light_mode).or_else(|| ThemeConfig::builtin(name))
+    }
+
+    fn custom(name: &str, light_mode: bool) -> Option<ThemeConfig> {
+        let path = resolve_theme_json_path(name, light_mode)?;
+        let content = fs::read_to_string(&path).ok()?;
+        let mut config: ThemeConfig = serde_json::from_str(&content).ok()?;
+        config.name = Some(normalize_custom_theme_name(name));
         Some(config)
     }
 }
@@ -359,7 +372,7 @@ impl ThemeConfig {
     /// Resolve theme config to concrete colors
     /// If light_mode is true, prefers .light values, falls back to .dark
     pub fn resolve(&self, light_mode: bool) -> ResolvedTheme {
-        let merged = self.resolved_config();
+        let merged = self.resolved_config(light_mode);
         let defs = &merged.defs;
         let tokens = &merged.theme;
 
@@ -453,6 +466,123 @@ impl ThemeConfig {
             modify: color::gradient_from_color(warning),
         }
     }
+}
+
+fn normalize_custom_theme_name(name: &str) -> String {
+    let path = Path::new(name);
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or(name);
+    stem.trim_end_matches("-dark")
+        .trim_end_matches("-light")
+        .to_string()
+}
+
+fn theme_search_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(config_path) = Config::config_path() {
+        if let Some(parent) = config_path.parent() {
+            let base = parent.to_path_buf();
+            dirs.push(base.clone());
+            dirs.push(base.join("themes"));
+        }
+    }
+    if let Some(config_dir) = dirs::config_dir() {
+        let base = config_dir.join("oyo");
+        if !dirs.contains(&base) {
+            dirs.push(base.clone());
+        }
+        let themes = base.join("themes");
+        if !dirs.contains(&themes) {
+            dirs.push(themes);
+        }
+    }
+    dirs
+}
+
+fn resolve_theme_json_path(name: &str, light_mode: bool) -> Option<PathBuf> {
+    let path = Path::new(name);
+    let has_ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("json"));
+    if path.is_absolute() || name.contains(std::path::MAIN_SEPARATOR) {
+        if path.exists() {
+            return Some(path.to_path_buf());
+        }
+        if !has_ext {
+            let candidate = path.with_extension("json");
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
+        return None;
+    }
+
+    let stem = if has_ext {
+        path.file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(name)
+            .to_string()
+    } else {
+        name.to_string()
+    };
+    let has_variant = stem.ends_with("-light") || stem.ends_with("-dark");
+    let mut candidates = Vec::new();
+
+    if !has_variant {
+        if light_mode {
+            candidates.push(format!("{stem}-light.json"));
+        } else {
+            candidates.push(format!("{stem}-dark.json"));
+        }
+        candidates.push(format!("{stem}.json"));
+        if light_mode {
+            candidates.push(format!("{stem}-dark.json"));
+        } else {
+            candidates.push(format!("{stem}-light.json"));
+        }
+    } else if has_ext {
+        candidates.push(name.to_string());
+    } else {
+        candidates.push(format!("{stem}.json"));
+    }
+
+    for dir in theme_search_dirs() {
+        for candidate in &candidates {
+            let path = dir.join(candidate);
+            if path.exists() {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
+pub fn list_ui_themes() -> Vec<String> {
+    let mut names: BTreeSet<String> = BTreeSet::new();
+    for name in builtin_theme_names() {
+        names.insert(name.to_string());
+    }
+    for dir in theme_search_dirs() {
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(|e| e.eq_ignore_ascii_case("json"))
+                {
+                    if let Some(stem) = path.file_stem().and_then(|n| n.to_str()) {
+                        let base = stem
+                            .trim_end_matches("-dark")
+                            .trim_end_matches("-light")
+                            .to_ascii_lowercase();
+                        names.insert(base);
+                    }
+                }
+            }
+        }
+    }
+    names.into_iter().collect()
 }
 
 fn merge_theme_tokens(base: &mut ThemeTokens, overlay: &ThemeTokens) {

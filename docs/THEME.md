@@ -62,6 +62,25 @@ oy themes
 
 UI theme tokens are defined in [schema.json](crates/oyo/themes/schema.json).
 
+### Custom UI themes
+
+Place JSON theme files in either:
+
+```
+~/.config/oyo/MyTheme.json
+~/.config/oyo/themes/MyTheme.json
+```
+
+Then reference them by file name (extension optional):
+
+```toml
+[ui.theme]
+name = "MyTheme"
+```
+
+If you provide `MyTheme-light.json` and `MyTheme-dark.json`, `oyo` will pick the
+variant based on `ui.theme.mode` (and fall back to the other if one is missing).
+
 ## Syntax Themes
 
 Syntax highlighting is tmTheme-based. You can select a built-in syntax theme or provide
@@ -84,6 +103,10 @@ When `ui.theme.mode = "light"`, `oyo` tries a light variant first:
 - `rosepine` -> `rosepine-dawn`
 - `catppuccin` -> `catppuccin-latte`
 
+Custom syntax themes can also provide `-light`/`-dark` variants (for example,
+`cyberdream-light.tmTheme` and `cyberdream-dark.tmTheme`). `oyo` will pick the
+appropriate variant based on `ui.theme.mode` and fall back to the other if needed.
+
 You can also pick the variant explicitly:
 
 ```toml
@@ -99,21 +122,23 @@ oy syntax-themes
 
 This lists:
 - embedded syntax themes for built-in UI themes
+- any `.tmTheme` files in `~/.config/oyo`
 - any `.tmTheme` files in `~/.config/oyo/themes`
 
 ### Custom tmTheme
 
-Place a tmTheme file in:
+Place a tmTheme file in either:
 
 ```
+~/.config/oyo/MyTheme.tmTheme
 ~/.config/oyo/themes/MyTheme.tmTheme
 ```
 
-Then reference it by file name:
+Then reference it by name:
 
 ```toml
 [ui.syntax]
-theme = "MyTheme.tmTheme"
+theme = "MyTheme"
 ```
 
 You can also pass a full path:

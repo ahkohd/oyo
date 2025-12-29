@@ -58,7 +58,7 @@ oyo does **not** replace classic diffs, it adds a new way to review them.
 - **Playback**: Automatically step through all changes at a configurable speed
 - **Git integration**: Works as a git external diff tool or standalone
 - **Commit picker**: Browse recent commits and pick ranges interactively (`oy view`)
-- **Themes**: Built-in themes plus `.tmTheme` syntax themes (configurable)
+- **Themes**: Built-in themes plus `.tmTheme` syntax themes (configurable, with light/dark variants)
 - **Configurable**: XDG config file support for customization
 
 ## Installation
@@ -313,9 +313,8 @@ animation = true
 animation_duration = 150
 autoplay = false
 
-[hunk.wrap]
+[navigation.wrap]
 step = "file"
-hunk = "hunk"
 ```
 
 Config is loaded from (in priority order):

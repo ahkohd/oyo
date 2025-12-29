@@ -404,10 +404,17 @@ fn resolve_syntax_theme(theme_name: &str, light_mode: bool) -> (Theme, TuiColor)
     ensure_foreground(&mut ansi_theme, ansi_plain);
 
     let mut candidates = Vec::new();
-    if light_mode {
+    if is_explicit_variant(theme_name) {
+        candidates.push(theme_name.to_string());
+    } else if light_mode {
+        candidates.extend(light_variants(theme_name));
+        candidates.push(theme_name.to_string());
+        candidates.extend(dark_variants(theme_name));
+    } else {
+        candidates.extend(dark_variants(theme_name));
+        candidates.push(theme_name.to_string());
         candidates.extend(light_variants(theme_name));
     }
-    candidates.push(theme_name.to_string());
 
     for candidate in candidates {
         if let Some(mut theme) = load_theme_candidate(&candidate) {
@@ -425,7 +432,7 @@ fn load_theme_candidate(name: &str) -> Option<Theme> {
     if name.ends_with(".tmTheme") {
         return load_tmtheme(name);
     }
-    load_embedded_syntax_theme(name)
+    load_embedded_syntax_theme(name).or_else(|| load_tmtheme(name))
 }
 
 fn load_tmtheme(name: &str) -> Option<Theme> {
@@ -437,24 +444,54 @@ fn load_tmtheme(name: &str) -> Option<Theme> {
 }
 
 fn resolve_tmtheme_path(name: &str) -> PathBuf {
+    let with_extension = if name
+        .rsplit('.')
+        .next()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("tmtheme"))
+    {
+        None
+    } else {
+        Some(format!("{name}.tmTheme"))
+    };
     let path = Path::new(name);
     if path.is_absolute() || name.contains(std::path::MAIN_SEPARATOR) {
         return path.to_path_buf();
     }
-    if let Some(config_dir) = config_theme_dir() {
-        let candidate = config_dir.join(name);
+    for dir in config_theme_dirs() {
+        let candidate = dir.join(name);
         if candidate.exists() {
             return candidate;
+        }
+        if let Some(with_extension) = with_extension.as_deref() {
+            let candidate = dir.join(with_extension);
+            if candidate.exists() {
+                return candidate;
+            }
         }
     }
     path.to_path_buf()
 }
 
-fn config_theme_dir() -> Option<PathBuf> {
-    Config::config_path()
-        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-        .or_else(dirs::config_dir)
-        .map(|dir| dir.join("oyo").join("themes"))
+fn config_theme_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(config_path) = Config::config_path() {
+        if let Some(parent) = config_path.parent() {
+            let base = parent.to_path_buf();
+            dirs.push(base.clone());
+            dirs.push(base.join("themes"));
+        }
+    }
+    if let Some(config_dir) = dirs::config_dir() {
+        let base = config_dir.join("oyo");
+        if !dirs.contains(&base) {
+            dirs.push(base.clone());
+        }
+        let themes = base.join("themes");
+        if !dirs.contains(&themes) {
+            dirs.push(themes);
+        }
+    }
+    dirs
 }
 
 pub fn list_syntax_themes() -> Vec<String> {
@@ -462,7 +499,7 @@ pub fn list_syntax_themes() -> Vec<String> {
     for item in EMBEDDED_TMTHEMES {
         names.insert(item.name.to_string());
     }
-    if let Some(theme_dir) = config_theme_dir() {
+    for theme_dir in config_theme_dirs() {
         if let Ok(entries) = fs::read_dir(theme_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
@@ -471,8 +508,11 @@ pub fn list_syntax_themes() -> Vec<String> {
                     .and_then(|e| e.to_str())
                     .is_some_and(|e| e.eq_ignore_ascii_case("tmTheme"))
                 {
-                    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                        names.insert(name.to_string());
+                    if let Some(stem) = path.file_stem().and_then(|n| n.to_str()) {
+                        names.insert(stem.to_string());
+                        if let Some(base) = strip_variant_suffix(stem) {
+                            names.insert(base);
+                        }
                     }
                 }
             }
@@ -555,6 +595,50 @@ fn light_variants(name: &str) -> Vec<String> {
         format!("{name}.light"),
     ]);
     variants
+}
+
+fn dark_variants(name: &str) -> Vec<String> {
+    if name.ends_with(".tmTheme") {
+        let path = Path::new(name);
+        if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+            let base = path.parent().unwrap_or_else(|| Path::new(""));
+            return ["-dark", "_dark", ".dark"]
+                .iter()
+                .map(|suffix| base.join(format!("{stem}{suffix}.tmTheme")))
+                .map(|p| p.to_string_lossy().to_string())
+                .collect();
+        }
+        return Vec::new();
+    }
+    [
+        format!("{name}-dark"),
+        format!("{name}_dark"),
+        format!("{name}.dark"),
+    ]
+    .to_vec()
+}
+
+fn is_explicit_variant(name: &str) -> bool {
+    if name.ends_with(".tmTheme") {
+        return true;
+    }
+    let lower = name.to_ascii_lowercase();
+    lower.ends_with("-light")
+        || lower.ends_with("_light")
+        || lower.ends_with(".light")
+        || lower.ends_with("-dark")
+        || lower.ends_with("_dark")
+        || lower.ends_with(".dark")
+}
+
+fn strip_variant_suffix(stem: &str) -> Option<String> {
+    let lower = stem.to_ascii_lowercase();
+    for suffix in ["-light", "_light", ".light", "-dark", "_dark", ".dark"] {
+        if lower.ends_with(suffix) {
+            return Some(stem[..stem.len().saturating_sub(suffix.len())].to_string());
+        }
+    }
+    None
 }
 
 fn normalize_theme_key(value: &str) -> String {

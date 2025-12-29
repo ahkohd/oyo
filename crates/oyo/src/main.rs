@@ -473,7 +473,7 @@ fn main() -> Result<()> {
     let args = Args::parse();
     let view_limit = match args.command {
         Some(Command::Themes) => {
-            for name in config::builtin_theme_names() {
+            for name in config::list_ui_themes() {
                 println!("{name}");
             }
             return Ok(());
