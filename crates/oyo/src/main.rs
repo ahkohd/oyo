@@ -44,8 +44,8 @@ struct Args {
     #[arg(num_args = 0..)]
     paths: Vec<PathBuf>,
 
-    /// View mode: single, split, or evolution
-    #[arg(short, long, default_value = "single")]
+    /// View mode: unified, split, or evolution
+    #[arg(short, long, default_value = "unified")]
     view: CliViewMode,
 
     /// Animation speed in milliseconds
@@ -107,8 +107,8 @@ enum CliThemeMode {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 enum CliViewMode {
-    /// Single pane that morphs from old to new state
-    Single,
+    /// Unified pane that morphs from old to new state
+    Unified,
     /// Split view with synchronized stepping
     #[value(alias = "sbs")]
     Split,
@@ -120,7 +120,7 @@ enum CliViewMode {
 impl From<CliViewMode> for ViewMode {
     fn from(mode: CliViewMode) -> Self {
         match mode {
-            CliViewMode::Single => ViewMode::SinglePane,
+            CliViewMode::Unified => ViewMode::UnifiedPane,
             CliViewMode::Split => ViewMode::Split,
             CliViewMode::Evolution => ViewMode::Evolution,
         }
@@ -234,7 +234,7 @@ fn apply_config_to_app(app: &mut App, config: &config::Config, args: &Args, ligh
     app.diff_extent_marker_scope = config.ui.diff.extent_marker_scope;
     app.syntax_mode = config.ui.syntax.mode;
     app.syntax_theme = config.ui.syntax.theme.clone();
-    app.single_modified_step_mode = config.ui.single.modified_step_mode;
+    app.unified_modified_step_mode = config.ui.unified.modified_step_mode;
     app.split_align_lines = config.ui.split.align_lines;
     app.split_align_fill = config.ui.split.align_fill.clone();
     app.evo_syntax = config.ui.evo.syntax;
@@ -731,7 +731,7 @@ fn main() -> Result<()> {
     app.diff_extent_marker_scope = config.ui.diff.extent_marker_scope;
     app.syntax_mode = config.ui.syntax.mode;
     app.syntax_theme = config.ui.syntax.theme.clone();
-    app.single_modified_step_mode = config.ui.single.modified_step_mode;
+    app.unified_modified_step_mode = config.ui.unified.modified_step_mode;
     app.split_align_lines = config.ui.split.align_lines;
     app.split_align_fill = config.ui.split.align_fill.clone();
     app.evo_syntax = config.ui.evo.syntax;
@@ -1046,7 +1046,7 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<()> 
                                 app.goto_hunk_end_scroll();
                             }
                         }
-                        // Peek old without stepping (single view)
+                        // Peek old without stepping (unified view)
                         KeyCode::Char('p') => {
                             app.reset_count();
                             if app.stepping {

@@ -21,7 +21,7 @@ use ratatui::{
 /// Width of the fixed line number gutter (marker + line num + prefix + space)
 const GUTTER_WIDTH: u16 = 8; // "▶1234 + "
 
-fn hunk_overflow_wrapped_single(
+fn hunk_overflow_wrapped_unified(
     view_lines: &[ViewLine],
     hunk_idx: usize,
     wrap_width: usize,
@@ -221,8 +221,8 @@ fn build_modified_only_spans(
     }
 }
 
-/// Render the single-pane morphing view
-pub fn render_single_pane(frame: &mut Frame, app: &mut App, area: Rect) {
+/// Render the unified pane morphing view
+pub fn render_unified_pane(frame: &mut Frame, app: &mut App, area: Rect) {
     let visible_height = area.height as usize;
     let visible_width = area.width.saturating_sub(GUTTER_WIDTH) as usize;
     if !app.line_wrap {
@@ -327,7 +327,7 @@ pub fn render_single_pane(frame: &mut Frame, app: &mut App, area: Rect) {
     };
     let (overflow_above, overflow_below) = if virtual_text.is_some() {
         if app.line_wrap {
-            hunk_overflow_wrapped_single(
+            hunk_overflow_wrapped_unified(
                 &view_lines,
                 preview_hunk,
                 wrap_width,
@@ -426,6 +426,9 @@ pub fn render_single_pane(frame: &mut Frame, app: &mut App, area: Rect) {
                 if !app.line_wrap {
                     display_virtual =
                         slice_spans(&display_virtual, app.horizontal_scroll, visible_width);
+                }
+                if let Some(bg_lines) = bg_lines.as_mut() {
+                    super::push_wrapped_bg_line(bg_lines, wrap_width, virtual_wrap, None);
                 }
                 content_lines.push(Line::from(display_virtual));
                 gutter_lines.push(Line::from(vec![
@@ -683,7 +686,8 @@ pub fn render_single_pane(frame: &mut Frame, app: &mut App, area: Rect) {
             let peek_override = app.is_peek_override_for_line(view_line);
             let is_modified_peek =
                 peek_override && peek_mode == Some(crate::app::PeekMode::Modified);
-            let default_modified_only = app.single_modified_step_mode == ModifiedStepMode::Modified;
+            let default_modified_only =
+                app.unified_modified_step_mode == ModifiedStepMode::Modified;
             let change = {
                 let nav = app.multi_diff.current_navigator();
                 nav.diff().changes.get(view_line.change_id).cloned()

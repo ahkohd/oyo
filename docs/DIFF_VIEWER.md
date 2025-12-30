@@ -31,11 +31,11 @@ and avoids implementation details.
 
 ## View Modes
 
-### Single
+### Unified
 
-Single view shows a single stream that morphs as you step.
+Unified view shows a single stream that morphs as you step.
 
-**Modified line lifecycle (single view):**
+**Modified line lifecycle (unified view):**
 
 | State | What you see |
 | --- | --- |
@@ -43,12 +43,12 @@ Single view shows a single stream that morphs as you step.
 | On step | Mixed (old + new inline) |
 | After step | New text |
 
-**Insertions (single view):**
+**Insertions (unified view):**
 - Before step: hidden
 - On step: new text (active)
 - After step: new text
 
-**Deletions (single view):**
+**Deletions (unified view):**
 - Before step: old text
 - On step: old text (active, fades out if animation enabled)
 - After step: hidden
@@ -103,7 +103,7 @@ Inline word-level diffs remain visible after stepping through a modified line.
 
 ### Background (diff.bg)
 
-Applies to single/split only (ignored in evolution):
+Applies to unified/split only (ignored in evolution):
 
 - `false`: no full-line background.
 - `true`: full-line background including gutter (line numbers/signs), but
@@ -111,7 +111,7 @@ Applies to single/split only (ignored in evolution):
 
 ### Inline highlight (diff.highlight)
 
-Applies to single/split only (ignored in evolution):
+Applies to unified/split only (ignored in evolution):
 
 - `text`: highlight changed spans including leading whitespace.
 - `word`: like `text`, but leading whitespace is not highlighted.

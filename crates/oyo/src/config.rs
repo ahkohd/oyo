@@ -8,7 +8,7 @@
 //! zen = false
 //! topbar = true
 //! auto_center = true
-//! view_mode = "single"
+//! view_mode = "unified"
 //! line_wrap = false
 //! scrollbar = false
 //! strikethrough_deletions = false
@@ -668,7 +668,7 @@ pub struct UiConfig {
     pub topbar: bool,
     /// Auto-center on active change after stepping (like vim's zz)
     pub auto_center: bool,
-    /// Default view mode: "single", "split", or "evolution"
+    /// Default view mode: "unified", "split", or "evolution"
     pub view_mode: Option<String>,
     /// Enable line wrapping (default: false, uses horizontal scroll instead)
     pub line_wrap: bool,
@@ -676,12 +676,12 @@ pub struct UiConfig {
     pub scrollbar: bool,
     /// Show strikethrough on deleted text
     pub strikethrough_deletions: bool,
-    /// Show +/- sign column in the gutter (single/evolution)
+    /// Show +/- sign column in the gutter (unified/evolution)
     pub gutter_signs: bool,
     /// Syntax highlighting configuration
     pub syntax: SyntaxConfig,
-    /// Single-pane view settings
-    pub single: SingleViewConfig,
+    /// Unified view settings
+    pub unified: UnifiedViewConfig,
     /// Split view settings
     pub split: SplitViewConfig,
     /// Evolution view settings
@@ -690,11 +690,11 @@ pub struct UiConfig {
     pub diff: DiffConfig,
     /// Enable stepping (default: true). If false, shows all changes (no-step behavior)
     pub stepping: bool,
-    /// Marker for primary active line (left pane / single pane)
+    /// Marker for primary active line (left pane / unified pane)
     pub primary_marker: String,
     /// Marker for right pane primary line (defaults to ◀)
     pub primary_marker_right: Option<String>,
-    /// Marker for hunk extent lines (left pane / single pane)
+    /// Marker for hunk extent lines (left pane / unified pane)
     pub extent_marker: String,
     /// Marker for right pane extent lines (defaults to ▐)
     pub extent_marker_right: Option<String>,
@@ -714,7 +714,7 @@ impl Default for UiConfig {
             strikethrough_deletions: false,
             gutter_signs: true,
             syntax: SyntaxConfig::default(),
-            single: SingleViewConfig::default(),
+            unified: UnifiedViewConfig::default(),
             split: SplitViewConfig::default(),
             evo: EvoViewConfig::default(),
             diff: DiffConfig::default(),
@@ -785,12 +785,12 @@ impl Default for SplitViewConfig {
 /// Single-pane configuration
 #[derive(Debug, Deserialize)]
 #[serde(default)]
-pub struct SingleViewConfig {
+pub struct UnifiedViewConfig {
     /// How modified lines render while stepping: "mixed" or "modified"
     pub modified_step_mode: ModifiedStepMode,
 }
 
-impl Default for SingleViewConfig {
+impl Default for UnifiedViewConfig {
     fn default() -> Self {
         Self {
             modified_step_mode: ModifiedStepMode::Mixed,
@@ -1117,7 +1117,7 @@ impl Config {
     /// Parse view mode string to ViewMode enum
     pub fn parse_view_mode(&self) -> Option<crate::app::ViewMode> {
         self.ui.view_mode.as_ref().and_then(|s| match s.as_str() {
-            "single" => Some(crate::app::ViewMode::SinglePane),
+            "unified" => Some(crate::app::ViewMode::UnifiedPane),
             "split" | "sbs" => Some(crate::app::ViewMode::Split),
             "evolution" | "evo" => Some(crate::app::ViewMode::Evolution),
             _ => None,

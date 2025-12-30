@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use crate::app::{AnimationPhase, App, ViewMode};
 use crate::config::{DiffForegroundMode, DiffHighlightMode, EvoSyntaxMode, SyntaxMode};
-use crate::views::{render_evolution, render_single_pane, render_split};
+use crate::views::{render_evolution, render_split, render_unified_pane};
 use oyo_core::MultiFileDiff;
 use ratatui::{backend::TestBackend, buffer::Buffer, Terminal};
 
@@ -30,7 +30,7 @@ fn render_buffer(app: &mut App, width: u16, height: u16) -> Buffer {
         .draw(|frame| {
             let area = frame.area();
             match app.view_mode {
-                ViewMode::SinglePane => render_single_pane(frame, app, area),
+                ViewMode::UnifiedPane => render_unified_pane(frame, app, area),
                 ViewMode::Split => render_split(frame, app, area),
                 ViewMode::Evolution => render_evolution(frame, app, area),
             }
@@ -56,10 +56,10 @@ fn count_occurrences(haystack: &str, needle: &str) -> usize {
 }
 
 #[test]
-fn test_single_modified_lifecycle_render() {
+fn test_unified_modified_lifecycle_render() {
     let old = "line1\nOLDSIDE\nline3\n";
     let new = "line1\nNEWSIDE\nline3\n";
-    let mut app = make_app(old, new, ViewMode::SinglePane);
+    let mut app = make_app(old, new, ViewMode::UnifiedPane);
 
     let before = buffer_text(&render_buffer(&mut app, 80, 20)).join("\n");
     assert!(before.contains("OLDSIDE"));
@@ -129,11 +129,11 @@ fn test_evolution_deleted_active_fallback_marker() {
 }
 
 #[test]
-fn test_single_wrap_hunk_hint_overflow_places_above() {
+fn test_unified_wrap_hunk_hint_overflow_places_above() {
     let long = "LONGINSERT_LONGINSERT_LONGINSERT_LONGINSERT";
     let old = "";
     let new = format!("{long}\nshort\n");
-    let mut app = make_app(old, &new, ViewMode::SinglePane);
+    let mut app = make_app(old, &new, ViewMode::UnifiedPane);
     app.line_wrap = true;
 
     for _ in 0..5 {

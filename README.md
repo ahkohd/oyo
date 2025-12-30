@@ -46,7 +46,7 @@ oyo does **not** replace classic diffs, it adds a new way to review them.
 - **Hunk navigation**
   Jump between groups of related changes in both modes
 - **Three view modes**:
-  - **Single**: Watch the code morph from old to new state
+  - **Unified**: Watch the code morph from old to new state
   - **Split**: See old and new versions with synchronized stepping
   - **Evolution**: Watch the file evolve, deletions simply disappear
 - **Word-level diffing**: See exactly which words changed within a line
@@ -224,11 +224,11 @@ Create a config file at `~/.config/oyo/config.toml`:
 [ui]
 auto_center = true          # Auto-center on active change (default: true)
 topbar = true               # Show top bar in diff view (default: true)
-view_mode = "single"        # Default: "single", "split", or "evolution"
+view_mode = "unified"       # Default: "unified", "split", or "evolution"
 line_wrap = false           # Wrap long lines (default: false, uses horizontal scroll)
 scrollbar = false           # Show scrollbar (default: false)
 strikethrough_deletions = false # Show strikethrough on deleted text
-gutter_signs = true         # Show +/- sign column (single/evolution)
+gutter_signs = true         # Show +/- sign column (unified/evolution)
 stepping = true             # Enable stepping (false = no-step mode)
 
 [navigation.wrap]
@@ -253,8 +253,8 @@ hunk = "none"               # "none" | "hunk" | "file"
 #   theme = "tokyonight"     # builtin name or "custom.tmTheme" (from ~/.config/oyo/themes)
 #                             # default: ui.theme.name, fallback to "ansi"
 syntax = "on"
-# [ui.single]
-# modified_step_mode = "mixed" # "mixed" or "modified" (single-pane only)
+# [ui.unified]
+# modified_step_mode = "mixed" # "mixed" or "modified" (unified pane only)
 # theme = { name = "tokyonight" } # Built-ins listed below
 primary_marker = "▶"        # Marker for primary active line (single-width char recommended)
 primary_marker_right = "◀"  # Right pane marker (optional, defaults to ◀)
@@ -285,7 +285,7 @@ Example config:
 [ui]
 zen = false
 auto_center = true
-view_mode = "single"
+view_mode = "unified"
 gutter_signs = false
 topbar = true
 

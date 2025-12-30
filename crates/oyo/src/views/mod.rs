@@ -1,12 +1,12 @@
 //! View rendering modules
 
 mod evolution;
-mod single_pane;
 mod split;
+mod unified_pane;
 
 pub use evolution::render_evolution;
-pub use single_pane::render_single_pane;
 pub use split::render_split;
+pub use unified_pane::render_unified_pane;
 
 #[cfg(test)]
 mod tests;

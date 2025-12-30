@@ -34,7 +34,7 @@ pub enum AnimationPhase {
 pub enum ViewMode {
     /// Single pane showing both old and new with markers
     #[default]
-    SinglePane,
+    UnifiedPane,
     /// Split view with old on left, new on right
     Split,
     /// Evolution view - shows file morphing, deletions just disappear
@@ -45,9 +45,9 @@ impl ViewMode {
     /// Cycle to the next view mode
     pub fn next(self) -> Self {
         match self {
-            ViewMode::SinglePane => ViewMode::Split,
+            ViewMode::UnifiedPane => ViewMode::Split,
             ViewMode::Split => ViewMode::Evolution,
-            ViewMode::Evolution => ViewMode::SinglePane,
+            ViewMode::Evolution => ViewMode::UnifiedPane,
         }
     }
 }
@@ -199,7 +199,7 @@ pub struct App {
     pub scrollbar_visible: bool,
     /// Show strikethrough on deleted text
     pub strikethrough_deletions: bool,
-    /// Show +/- sign column in the gutter (single/evolution)
+    /// Show +/- sign column in the gutter (unified/evolution)
     pub gutter_signs: bool,
     /// Whether user has manually toggled the file panel (overrides auto-hide)
     pub file_panel_manually_set: bool,
@@ -215,11 +215,11 @@ pub struct App {
     pub no_step_auto_jump_on_enter: bool,
     /// Manual center was requested (zz), enables overscroll until manual scroll
     pub centered_once: bool,
-    /// Marker for primary active line (left pane / single pane)
+    /// Marker for primary active line (left pane / unified pane)
     pub primary_marker: String,
     /// Marker for right pane primary line
     pub primary_marker_right: String,
-    /// Marker for hunk extent lines (left pane / single pane)
+    /// Marker for hunk extent lines (left pane / unified pane)
     pub extent_marker: String,
     /// Marker for right pane extent lines
     pub extent_marker_right: String,
@@ -246,7 +246,7 @@ pub struct App {
     /// Diff extent marker scope
     pub diff_extent_marker_scope: DiffExtentMarkerScope,
     /// Single-pane modified line render mode while stepping
-    pub single_modified_step_mode: ModifiedStepMode,
+    pub unified_modified_step_mode: ModifiedStepMode,
     /// Keep split panes vertically aligned by inserting blank rows
     pub split_align_lines: bool,
     /// Fill character for aligned blank rows in split view
@@ -438,7 +438,7 @@ impl App {
             diff_highlight: DiffHighlightMode::Text,
             diff_extent_marker: DiffExtentMarkerMode::Neutral,
             diff_extent_marker_scope: DiffExtentMarkerScope::Progress,
-            single_modified_step_mode: ModifiedStepMode::Mixed,
+            unified_modified_step_mode: ModifiedStepMode::Mixed,
             split_align_lines: false,
             split_align_fill: "╱".to_string(),
             evo_syntax: crate::config::EvoSyntaxMode::Context,
@@ -572,7 +572,7 @@ impl App {
     }
 
     fn base_modified_view_mode(&self) -> PeekMode {
-        if self.single_modified_step_mode == ModifiedStepMode::Modified {
+        if self.unified_modified_step_mode == ModifiedStepMode::Modified {
             PeekMode::Modified
         } else {
             PeekMode::Mixed
@@ -964,9 +964,9 @@ impl App {
         let mut matches = Vec::new();
 
         match self.view_mode {
-            ViewMode::SinglePane => {
+            ViewMode::UnifiedPane => {
                 for (display_idx, line) in view.iter().enumerate() {
-                    let text = self.search_text_single(line);
+                    let text = self.search_text_unified(line);
                     if line_has_query(&text, &regex) {
                         matches.push(display_idx);
                     }
@@ -985,7 +985,7 @@ impl App {
                     if !visible {
                         continue;
                     }
-                    let text = self.search_text_single(line);
+                    let text = self.search_text_unified(line);
                     if line_has_query(&text, &regex) {
                         matches.push(display_idx);
                     }
@@ -1022,7 +1022,7 @@ impl App {
         matches
     }
 
-    fn search_text_single(&mut self, view_line: &ViewLine) -> String {
+    fn search_text_unified(&mut self, view_line: &ViewLine) -> String {
         if let Some(mode) = self.peek_mode_for_line(view_line) {
             match mode {
                 PeekMode::Old => {
@@ -1213,7 +1213,7 @@ impl App {
         display_idx: usize,
     ) -> Option<(SyntaxSide, usize)> {
         match self.view_mode {
-            ViewMode::SinglePane => view.get(display_idx).and_then(|line| {
+            ViewMode::UnifiedPane => view.get(display_idx).and_then(|line| {
                 line.new_line.or(line.old_line).map(|line_num| {
                     let side = if line.new_line.is_some() {
                         SyntaxSide::New
@@ -1395,7 +1395,7 @@ impl App {
                 self.pick_split_bounds(old, new)
             }
             _ => self
-                .compute_hunk_bounds_single()
+                .compute_hunk_bounds_unified()
                 .get(hunk_idx)
                 .copied()
                 .flatten(),
@@ -1500,8 +1500,8 @@ impl App {
         }
     }
 
-    /// Compute hunk starts for single/evolution view (display index + change id).
-    fn compute_hunk_starts_single(&mut self) -> Vec<Option<HunkStart>> {
+    /// Compute hunk starts for unified/evolution view (display index + change id).
+    fn compute_hunk_starts_unified(&mut self) -> Vec<Option<HunkStart>> {
         let view = self
             .multi_diff
             .current_navigator()
@@ -1534,8 +1534,8 @@ impl App {
         hunk_starts
     }
 
-    /// Compute hunk bounds for single/evolution view (display start/end + change id).
-    fn compute_hunk_bounds_single(&mut self) -> Vec<Option<HunkBounds>> {
+    /// Compute hunk bounds for unified/evolution view (display start/end + change id).
+    fn compute_hunk_bounds_unified(&mut self) -> Vec<Option<HunkBounds>> {
         let view = self
             .multi_diff
             .current_navigator()
@@ -1796,7 +1796,7 @@ impl App {
             .find_map(|(idx, start)| start.map(|s| (idx, s)))
     }
 
-    fn single_hunk_fallback(&self, starts: &[Option<HunkStart>]) -> Option<(usize, HunkStart)> {
+    fn unified_hunk_fallback(&self, starts: &[Option<HunkStart>]) -> Option<(usize, HunkStart)> {
         let mut only: Option<(usize, HunkStart)> = None;
         for (idx, start) in starts.iter().enumerate() {
             if let Some(start) = start {
@@ -1917,7 +1917,7 @@ impl App {
                     self.next_hunk_from_starts(&effective, inclusive)
                 };
                 if target.is_none() {
-                    target = self.single_hunk_fallback(&effective);
+                    target = self.unified_hunk_fallback(&effective);
                 }
                 if target.is_none() && matches!(self.hunk_wrap, HunkWrapMode::Hunk) {
                     target = self.first_hunk_from_starts(&effective);
@@ -1925,14 +1925,14 @@ impl App {
                 target
             }
             _ => {
-                let hunk_starts = self.compute_hunk_starts_single();
+                let hunk_starts = self.compute_hunk_starts_unified();
                 let mut target = if use_cursor && current_hunk < hunk_starts.len() {
                     self.next_hunk_from_index(&hunk_starts, current_hunk)
                 } else {
                     self.next_hunk_from_starts(&hunk_starts, inclusive)
                 };
                 if target.is_none() {
-                    target = self.single_hunk_fallback(&hunk_starts);
+                    target = self.unified_hunk_fallback(&hunk_starts);
                 }
                 if target.is_none() && matches!(self.hunk_wrap, HunkWrapMode::Hunk) {
                     target = self.first_hunk_from_starts(&hunk_starts);
@@ -1990,7 +1990,7 @@ impl App {
                     self.prev_hunk_from_starts(&effective)
                 };
                 if target.is_none() {
-                    target = self.single_hunk_fallback(&effective);
+                    target = self.unified_hunk_fallback(&effective);
                 }
                 if target.is_none() && matches!(self.hunk_wrap, HunkWrapMode::Hunk) {
                     target = self.last_hunk_from_starts(&effective);
@@ -1998,14 +1998,14 @@ impl App {
                 target
             }
             _ => {
-                let hunk_starts = self.compute_hunk_starts_single();
+                let hunk_starts = self.compute_hunk_starts_unified();
                 let mut target = if use_cursor && current_hunk < hunk_starts.len() {
                     self.prev_hunk_from_index(&hunk_starts, current_hunk)
                 } else {
                     self.prev_hunk_from_starts(&hunk_starts)
                 };
                 if target.is_none() {
-                    target = self.single_hunk_fallback(&hunk_starts);
+                    target = self.unified_hunk_fallback(&hunk_starts);
                 }
                 if target.is_none() && matches!(self.hunk_wrap, HunkWrapMode::Hunk) {
                     target = self.last_hunk_from_starts(&hunk_starts);
@@ -2219,7 +2219,7 @@ impl App {
                     .or_else(|| Self::first_available_hunk(&effective))
             }
             _ => {
-                let bounds = self.compute_hunk_bounds_single();
+                let bounds = self.compute_hunk_bounds_unified();
                 let hidx = if in_hunk_scope {
                     Some(current_hunk)
                 } else {
@@ -2280,7 +2280,7 @@ impl App {
                     .or_else(|| Self::first_available_hunk(&effective))
             }
             _ => {
-                let bounds = self.compute_hunk_bounds_single();
+                let bounds = self.compute_hunk_bounds_unified();
                 let hidx = if in_hunk_scope {
                     Some(current_hunk)
                 } else {
@@ -2306,9 +2306,9 @@ impl App {
 
     /// Enter no-step mode without changing scroll position.
     pub fn enter_no_step_mode(&mut self) {
-        // Evolution mode requires stepping, so switch to Single view
+        // Evolution mode requires stepping, so switch to Unified view
         if self.view_mode == ViewMode::Evolution {
-            self.view_mode = ViewMode::SinglePane;
+            self.view_mode = ViewMode::UnifiedPane;
         }
 
         self.peek_state = None;
@@ -2661,7 +2661,7 @@ impl App {
                 self.pick_split_bounds(old, new).map(|b| (hunk_idx, b))
             }
             _ => {
-                let bounds = self.compute_hunk_bounds_single();
+                let bounds = self.compute_hunk_bounds_unified();
                 bounds
                     .get(hunk_idx)
                     .copied()
@@ -2833,9 +2833,9 @@ impl App {
         if !self.stepping {
             // In no-step mode, skip Evolution view as it requires stepping
             self.view_mode = match self.view_mode {
-                ViewMode::SinglePane => ViewMode::Split,
-                ViewMode::Split => ViewMode::SinglePane,
-                _ => ViewMode::SinglePane,
+                ViewMode::UnifiedPane => ViewMode::Split,
+                ViewMode::Split => ViewMode::UnifiedPane,
+                _ => ViewMode::UnifiedPane,
             };
         } else {
             self.view_mode = self.view_mode.next();
@@ -3937,7 +3937,7 @@ pub fn display_metrics(
     split_align_lines: bool,
 ) -> (usize, Option<usize>) {
     match view_mode {
-        ViewMode::SinglePane => {
+        ViewMode::UnifiedPane => {
             let idx = view
                 .iter()
                 .position(|l| l.is_primary_active)
@@ -4221,13 +4221,13 @@ mod tests {
             old,
             new,
         );
-        let mut app = App::new(multi_diff, ViewMode::SinglePane, 0, false, None);
+        let mut app = App::new(multi_diff, ViewMode::UnifiedPane, 0, false, None);
         app.stepping = false;
         app.enter_no_step_mode();
         app
     }
 
-    fn make_app_with_single_hunk() -> App {
+    fn make_app_with_unified_hunk() -> App {
         let old = "one\ntwo\nthree".to_string();
         let new = "one\nTWO\nthree".to_string();
         let multi_diff = MultiFileDiff::from_file_pair(
@@ -4236,13 +4236,13 @@ mod tests {
             old,
             new,
         );
-        let mut app = App::new(multi_diff, ViewMode::SinglePane, 0, false, None);
+        let mut app = App::new(multi_diff, ViewMode::UnifiedPane, 0, false, None);
         app.stepping = false;
         app.enter_no_step_mode();
         app
     }
 
-    fn make_app_with_single_hunk_two_changes() -> App {
+    fn make_app_with_unified_hunk_two_changes() -> App {
         let old = "one\ntwo\nthree\nfour".to_string();
         let new = "ONE\nTWO\nthree\nfour".to_string();
         let multi_diff = MultiFileDiff::from_file_pair(
@@ -4251,7 +4251,7 @@ mod tests {
             old,
             new,
         );
-        App::new(multi_diff, ViewMode::SinglePane, 0, false, None)
+        App::new(multi_diff, ViewMode::UnifiedPane, 0, false, None)
     }
 
     #[test]
@@ -4286,8 +4286,8 @@ mod tests {
     }
 
     #[test]
-    fn test_single_hunk_jump_sets_cursor() {
-        let mut app = make_app_with_single_hunk();
+    fn test_unified_hunk_jump_sets_cursor() {
+        let mut app = make_app_with_unified_hunk();
         app.next_hunk_scroll();
         let state = app.multi_diff.current_navigator().state();
         assert_eq!(state.total_hunks, 1);
@@ -4358,7 +4358,7 @@ mod tests {
 
     #[test]
     fn test_hunk_step_info_counts_applied_changes() {
-        let mut app = make_app_with_single_hunk_two_changes();
+        let mut app = make_app_with_unified_hunk_two_changes();
         assert_eq!(app.hunk_step_info(), Some((0, 2)));
 
         app.next_step();
@@ -4383,7 +4383,7 @@ mod tests {
             old,
             new,
         );
-        let mut app = App::new(multi_diff, ViewMode::SinglePane, 0, false, None);
+        let mut app = App::new(multi_diff, ViewMode::UnifiedPane, 0, false, None);
         app.stepping = false;
         app.no_step_auto_jump_on_enter = true;
         app.enter_no_step_mode();
@@ -4417,7 +4417,7 @@ mod tests {
             (std::path::PathBuf::from("b.txt"), old.clone(), new.clone()),
             (std::path::PathBuf::from("c.txt"), old.clone(), new.clone()),
         ]);
-        let mut app = App::new(multi, ViewMode::SinglePane, 0, false, None);
+        let mut app = App::new(multi, ViewMode::UnifiedPane, 0, false, None);
         app.stepping = false;
         app.no_step_auto_jump_on_enter = true;
         app.enter_no_step_mode();

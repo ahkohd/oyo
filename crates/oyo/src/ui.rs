@@ -1,7 +1,7 @@
 //! UI rendering for the TUI
 
 use crate::app::{App, ViewMode, DIFF_VIEW_MIN_WIDTH, FILE_PANEL_MIN_WIDTH};
-use crate::views::{render_evolution, render_single_pane, render_split};
+use crate::views::{render_evolution, render_split, render_unified_pane};
 use oyo_core::FileStatus;
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
@@ -271,7 +271,7 @@ fn draw_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
 
     // View mode indicator
     let mode = match app.view_mode {
-        ViewMode::SinglePane => " SINGLE ",
+        ViewMode::UnifiedPane => " UNIFIED ",
         ViewMode::Split => " SPLIT ",
         ViewMode::Evolution => " EVOLUTION ",
     };
@@ -986,7 +986,7 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
 
 fn draw_diff_view(frame: &mut Frame, app: &mut App, area: Rect) {
     match app.view_mode {
-        ViewMode::SinglePane => render_single_pane(frame, app, area),
+        ViewMode::UnifiedPane => render_unified_pane(frame, app, area),
         ViewMode::Split => render_split(frame, app, area),
         ViewMode::Evolution => render_evolution(frame, app, area),
     }
