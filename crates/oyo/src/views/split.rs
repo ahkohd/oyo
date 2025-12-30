@@ -778,15 +778,29 @@ fn render_old_pane(
             }
             content_lines.push(Line::from(display_spans));
             if app.line_wrap && wrap_count > 1 {
+                let (wrap_marker, wrap_style) = if view_line.show_hunk_extent {
+                    (
+                        extent_marker.as_str(),
+                        super::extent_marker_style(
+                            app,
+                            view_line.kind,
+                            view_line.has_changes,
+                            view_line.old_line,
+                            view_line.new_line,
+                        ),
+                    )
+                } else {
+                    (" ", Style::default())
+                };
                 for _ in 1..wrap_count {
                     if let Some(bg) = line_bg_gutter {
                         let pad = " ".repeat(GUTTER_WIDTH as usize - 1);
                         gutter_lines.push(Line::from(vec![
-                            Span::raw(" "),
+                            Span::styled(wrap_marker, wrap_style),
                             Span::styled(pad, Style::default().bg(bg)),
                         ]));
                     } else {
-                        gutter_lines.push(Line::from(Span::raw(" ")));
+                        gutter_lines.push(Line::from(Span::styled(wrap_marker, wrap_style)));
                     }
                 }
             }
@@ -1472,6 +1486,20 @@ fn render_new_pane(
             // Build marker line
             marker_lines.push(Line::from(Span::styled(active_marker, active_style)));
             if app.line_wrap && wrap_count > 1 {
+                let (wrap_marker, wrap_style) = if view_line.show_hunk_extent {
+                    (
+                        extent_marker_right.as_str(),
+                        super::extent_marker_style(
+                            app,
+                            view_line.kind,
+                            view_line.has_changes,
+                            view_line.old_line,
+                            view_line.new_line,
+                        ),
+                    )
+                } else {
+                    (" ", Style::default())
+                };
                 for _ in 1..wrap_count {
                     if let Some(bg) = line_bg_gutter {
                         gutter_lines.push(Line::from(Span::styled(
@@ -1481,7 +1509,7 @@ fn render_new_pane(
                     } else {
                         gutter_lines.push(Line::from(Span::raw(" ")));
                     }
-                    marker_lines.push(Line::from(Span::raw(" ")));
+                    marker_lines.push(Line::from(Span::styled(wrap_marker, wrap_style)));
                 }
             }
 
