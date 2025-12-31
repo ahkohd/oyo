@@ -1,6 +1,7 @@
 //! Oyo CLI - Step-through diff viewer TUI
 
 mod app;
+mod blame;
 mod color;
 mod config;
 mod dashboard;
@@ -232,6 +233,10 @@ fn apply_config_to_app(app: &mut App, config: &config::Config, args: &Args, ligh
     app.diff_highlight = config.ui.diff.highlight;
     app.diff_extent_marker = config.ui.diff.extent_marker;
     app.diff_extent_marker_scope = config.ui.diff.extent_marker_scope;
+    app.blame_enabled = config.ui.blame.enabled;
+    app.blame_mode = config.ui.blame.mode;
+    app.blame_hunk_hint_enabled = config.ui.blame.hunk_hint;
+    app.blame_hunk_hint_enabled = config.ui.blame.hunk_hint;
     app.syntax_mode = config.ui.syntax.mode;
     app.syntax_theme = config.ui.syntax.theme.clone();
     app.unified_modified_step_mode = config.ui.unified.modified_step_mode;
@@ -729,6 +734,8 @@ fn main() -> Result<()> {
     app.diff_highlight = config.ui.diff.highlight;
     app.diff_extent_marker = config.ui.diff.extent_marker;
     app.diff_extent_marker_scope = config.ui.diff.extent_marker_scope;
+    app.blame_enabled = config.ui.blame.enabled;
+    app.blame_mode = config.ui.blame.mode;
     app.syntax_mode = config.ui.syntax.mode;
     app.syntax_theme = config.ui.syntax.theme.clone();
     app.unified_modified_step_mode = config.ui.unified.modified_step_mode;
@@ -933,10 +940,21 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<()> 
                         let is_plain_g = matches!(key.code, KeyCode::Char('g'))
                             && !key.modifiers.contains(KeyModifiers::CONTROL)
                             && !key.modifiers.contains(KeyModifiers::ALT);
+                        let is_blame_gb = matches!(key.code, KeyCode::Char('b'))
+                            && !key.modifiers.contains(KeyModifiers::CONTROL)
+                            && !key.modifiers.contains(KeyModifiers::ALT);
                         if is_plain_g {
                             app.pending_g_prefix = false;
                             app.reset_count();
                             app.goto_start();
+                            continue;
+                        }
+                        if is_blame_gb {
+                            app.pending_g_prefix = false;
+                            app.reset_count();
+                            if app.blame_enabled && app.stepping {
+                                app.trigger_blame_hint();
+                            }
                             continue;
                         }
                         app.pending_g_prefix = false;

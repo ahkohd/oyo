@@ -1184,6 +1184,7 @@ fn draw_help_popover(frame: &mut Frame, app: &mut App) {
     push_help_line(&mut lines, "j / k / ↑↓", "Step forward/back");
     push_help_line(&mut lines, "h / l / ←→", "Prev/next hunk");
     push_help_line(&mut lines, "b / e", "Hunk begin/end");
+    push_help_line(&mut lines, "g b", "Blame (step)");
     push_help_line(&mut lines, "p", "Peek change");
     push_help_line(&mut lines, "P", "Peek old hunk");
     push_help_line(&mut lines, "y / Y", "Yank line/hunk");

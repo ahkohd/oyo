@@ -107,23 +107,34 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
     } else {
         None
     };
-    let mut parts: Vec<String> = Vec::new();
+    let mut parts: Vec<(String, bool)> = Vec::new();
     if let Some(pending) = pending_text {
-        parts.push(pending);
+        parts.push((pending, true));
     }
     if let Some(hint) = app.last_step_hint_text() {
-        parts.push(hint.to_string());
+        parts.push((hint.to_string(), true));
     }
     if let Some(hint) = app.hunk_edge_hint_text() {
-        parts.push(hint.to_string());
+        parts.push((hint.to_string(), true));
+    }
+    if let Some(hint) = app.blame_hunk_hint_text() {
+        parts.push((hint.to_string(), false));
     }
     let virtual_text = if show_virtual && !parts.is_empty() {
         if pending_insert_only == 0 {
-            if let Some(first) = parts.first_mut() {
-                *first = format!("... {first}");
+            if let Some((first, allow_prefix)) = parts.first_mut() {
+                if *allow_prefix {
+                    *first = format!("... {first}");
+                }
             }
         }
-        Some(parts.join(" • "))
+        Some(
+            parts
+                .into_iter()
+                .map(|(text, _)| text)
+                .collect::<Vec<_>>()
+                .join(" • "),
+        )
     } else {
         None
     };
@@ -657,6 +668,39 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
                 Span::raw(" "),
                 Span::raw(" "),
             ]));
+            if app.line_wrap && virtual_wrap > 1 {
+                for _ in 1..virtual_wrap {
+                    gutter_lines.push(Line::from(Span::raw(" ")));
+                }
+            }
+        }
+
+        if let Some(hint_text) = app.blame_step_hint_for_change(view_line.change_id) {
+            let virtual_style = Style::default()
+                .fg(app.theme.text_muted)
+                .add_modifier(Modifier::ITALIC);
+            let mut virtual_spans = vec![Span::styled(hint_text.to_string(), virtual_style)];
+            virtual_spans = expand_tabs_in_spans(&virtual_spans, TAB_WIDTH);
+
+            let virtual_width = spans_width(&virtual_spans);
+            max_line_width = max_line_width.max(virtual_width);
+
+            let virtual_wrap = if app.line_wrap {
+                wrap_count_for_spans(&virtual_spans, wrap_width)
+            } else {
+                1
+            };
+            if app.line_wrap {
+                display_len += virtual_wrap;
+            }
+
+            let mut display_virtual = virtual_spans;
+            if !app.line_wrap {
+                display_virtual =
+                    slice_spans(&display_virtual, app.horizontal_scroll, visible_width);
+            }
+            content_lines.push(Line::from(display_virtual));
+            gutter_lines.push(Line::from(Span::raw(" ")));
             if app.line_wrap && virtual_wrap > 1 {
                 for _ in 1..virtual_wrap {
                     gutter_lines.push(Line::from(Span::raw(" ")));

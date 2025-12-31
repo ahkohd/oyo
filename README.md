@@ -174,6 +174,7 @@ command = ["oy", "$left", "$right"]
 | `←` / `h` | Previous hunk (scrolls in no-step mode) |
 | `b` | Jump to beginning of current hunk (scrolls in no-step mode) |
 | `e` | Jump to end of current hunk (scrolls in no-step mode) |
+| `gb` | Blame current step (opt-in, step mode) |
 | `p` / `P` | Peek change (modified → old → mixed) / Peek old hunk |
 | `y` / `Y` | Yank line/hunk to clipboard |
 | `/` | Search (diff pane, regex) |
@@ -240,6 +241,10 @@ hunk = "none"               # "none" | "hunk" | "file"
 # highlight = "text"        # "text" | "word" | "none"
 # extent_marker = "neutral" # "neutral" or "diff"
 # extent_marker_scope = "progress" # "progress" or "hunk"
+# [ui.blame]
+# enabled = false           # Show git blame hints (opt-in)
+# mode = "one_shot"         # "one_shot" or "toggle"
+# hunk_hint = true          # Show blame hint when jumping to a hunk
 # [ui.split]
 # align_lines = false       # Insert blanks to keep split panes aligned
 # align_fill = "╱"          # Fill character for aligned blanks (empty = no marker)

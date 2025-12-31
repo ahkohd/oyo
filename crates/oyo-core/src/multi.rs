@@ -52,6 +52,14 @@ enum GitDiffMode {
     Range { from: String, to: String },
 }
 
+/// Source for blame lookups.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum BlameSource {
+    Worktree,
+    Index,
+    Commit(String),
+}
+
 impl MultiFileDiff {
     /// Create from a list of changed files (git mode)
     pub fn from_git_changes(
@@ -511,6 +519,30 @@ impl MultiFileDiff {
             }
             _ => None,
         }
+    }
+
+    /// Blame sources for old/new content when in git mode.
+    pub fn blame_sources(&self) -> Option<(BlameSource, BlameSource)> {
+        let mode = self.git_mode.as_ref()?;
+        let sources = match mode {
+            GitDiffMode::Uncommitted => (
+                BlameSource::Commit("HEAD".to_string()),
+                BlameSource::Worktree,
+            ),
+            GitDiffMode::Staged => (BlameSource::Commit("HEAD".to_string()), BlameSource::Index),
+            GitDiffMode::Range { from, to } => (
+                BlameSource::Commit(from.clone()),
+                BlameSource::Commit(to.clone()),
+            ),
+            GitDiffMode::IndexRange { from, to_index } => {
+                if *to_index {
+                    (BlameSource::Commit(from.clone()), BlameSource::Index)
+                } else {
+                    (BlameSource::Index, BlameSource::Commit(from.clone()))
+                }
+            }
+        };
+        Some(sources)
     }
 
     /// Get the step direction of current navigator (if loaded)

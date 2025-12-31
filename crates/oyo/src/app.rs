@@ -1,17 +1,20 @@
 //! Application state and logic
 
+use crate::blame::{blame_line, format_blame_text, load_git_user_name, BlameInfo};
 use crate::color;
 use crate::config::{
-    DiffExtentMarkerMode, DiffExtentMarkerScope, DiffForegroundMode, DiffHighlightMode,
+    BlameMode, DiffExtentMarkerMode, DiffExtentMarkerScope, DiffForegroundMode, DiffHighlightMode,
     FileCountMode, HunkWrapMode, ModifiedStepMode, ResolvedTheme, StepWrapMode, SyntaxMode,
 };
 use crate::syntax::{SyntaxCache, SyntaxEngine, SyntaxSide};
 use oyo_core::{
-    AnimationFrame, Change, ChangeKind, LineKind, MultiFileDiff, StepDirection, StepState, ViewLine,
+    multi::BlameSource, AnimationFrame, Change, ChangeKind, LineKind, MultiFileDiff, StepDirection,
+    StepState, ViewLine,
 };
 use ratatui::style::Color;
 use ratatui::text::Span;
 use regex::{Regex, RegexBuilder};
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use std::{
     io::Write,
@@ -97,6 +100,19 @@ enum HunkEdge {
 struct HunkEdgeHint {
     edge: HunkEdge,
     until: Instant,
+}
+
+#[derive(Clone, Debug)]
+struct BlameStepHint {
+    change_id: usize,
+    text: String,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+struct BlameCacheKey {
+    path: std::path::PathBuf,
+    line: usize,
+    source: BlameSource,
 }
 
 /// The main application state
@@ -245,6 +261,22 @@ pub struct App {
     pub diff_extent_marker: DiffExtentMarkerMode,
     /// Diff extent marker scope
     pub diff_extent_marker_scope: DiffExtentMarkerScope,
+    /// Blame display enabled
+    pub blame_enabled: bool,
+    /// Blame display mode
+    pub blame_mode: BlameMode,
+    /// Show blame hint when jumping to a hunk
+    pub blame_hunk_hint_enabled: bool,
+    /// True when blame toggle is active
+    blame_toggle: bool,
+    /// Cached git user name for blame display
+    blame_user_name: Option<String>,
+    /// Cached blame entries
+    blame_cache: HashMap<BlameCacheKey, BlameInfo>,
+    /// One-shot blame hint for the active change
+    blame_step_hint: Option<BlameStepHint>,
+    /// Blame hint shown when jumping to a hunk
+    blame_hunk_hint: Option<String>,
     /// Single-pane modified line render mode while stepping
     pub unified_modified_step_mode: ModifiedStepMode,
     /// Keep split panes vertically aligned by inserting blank rows
@@ -438,6 +470,14 @@ impl App {
             diff_highlight: DiffHighlightMode::Text,
             diff_extent_marker: DiffExtentMarkerMode::Neutral,
             diff_extent_marker_scope: DiffExtentMarkerScope::Progress,
+            blame_enabled: false,
+            blame_mode: BlameMode::OneShot,
+            blame_hunk_hint_enabled: true,
+            blame_toggle: false,
+            blame_user_name: None,
+            blame_cache: HashMap::new(),
+            blame_step_hint: None,
+            blame_hunk_hint: None,
             unified_modified_step_mode: ModifiedStepMode::Mixed,
             split_align_lines: false,
             split_align_fill: "╱".to_string(),
@@ -1331,6 +1371,158 @@ impl App {
         self.hunk_edge_hint = None;
     }
 
+    fn clear_blame_step_hint(&mut self) {
+        self.blame_step_hint = None;
+    }
+
+    fn clear_blame_hunk_hint(&mut self) {
+        self.blame_hunk_hint = None;
+    }
+
+    fn ensure_blame_user_name(&mut self) {
+        if self.blame_user_name.is_some() {
+            return;
+        }
+        let root = match self.multi_diff.repo_root() {
+            Some(root) => root,
+            None => return,
+        };
+        self.blame_user_name = load_git_user_name(root);
+    }
+
+    fn active_view_line(&mut self) -> Option<ViewLine> {
+        let frame = AnimationFrame::Idle;
+        let view_lines = self
+            .multi_diff
+            .current_navigator()
+            .current_view_with_frame(frame);
+        let mut fallback: Option<ViewLine> = None;
+        for line in view_lines {
+            if line.is_primary_active {
+                return Some(line);
+            }
+            if fallback.is_none() && line.is_active_change {
+                fallback = Some(line);
+            }
+        }
+        fallback
+    }
+
+    fn blame_text_for_line(&mut self, view_line: &ViewLine) -> Option<String> {
+        if !self.blame_enabled || !self.stepping {
+            return None;
+        }
+        let repo_root = self.multi_diff.repo_root()?;
+        let (old_source, new_source) = self.multi_diff.blame_sources()?;
+        let file = self.multi_diff.current_file()?;
+        let old_path = file.old_path.as_ref().unwrap_or(&file.path);
+        let (line, path, source) = match view_line.kind {
+            LineKind::Deleted | LineKind::PendingDelete => {
+                (view_line.old_line?, old_path, old_source)
+            }
+            LineKind::Inserted | LineKind::PendingInsert => {
+                (view_line.new_line?, &file.path, new_source)
+            }
+            LineKind::Modified | LineKind::PendingModify => (
+                view_line.new_line.or(view_line.old_line)?,
+                &file.path,
+                new_source,
+            ),
+            LineKind::Context => (
+                view_line.new_line.or(view_line.old_line)?,
+                &file.path,
+                new_source,
+            ),
+        };
+
+        let key = BlameCacheKey {
+            path: path.to_path_buf(),
+            line,
+            source: source.clone(),
+        };
+        let info = if let Some(info) = self.blame_cache.get(&key) {
+            info.clone()
+        } else {
+            let info = blame_line(repo_root, path, line, &source)?;
+            self.blame_cache.insert(key, info.clone());
+            info
+        };
+
+        self.ensure_blame_user_name();
+        Some(format_blame_text(&info, self.blame_user_name.as_deref()))
+    }
+
+    fn set_blame_step_hint(&mut self) {
+        if let Some(line) = self.active_view_line() {
+            if let Some(text) = self.blame_text_for_line(&line) {
+                self.blame_step_hint = Some(BlameStepHint {
+                    change_id: line.change_id,
+                    text,
+                });
+            }
+        }
+    }
+
+    fn set_blame_hunk_hint(&mut self) {
+        if !self.blame_hunk_hint_enabled {
+            return;
+        }
+        if let Some(line) = self.active_view_line() {
+            if let Some(text) = self.blame_text_for_line(&line) {
+                self.blame_hunk_hint = Some(text);
+            }
+        }
+    }
+
+    fn refresh_blame_toggle_hint(&mut self) {
+        if !self.blame_enabled {
+            return;
+        }
+        if matches!(self.blame_mode, BlameMode::Toggle) && self.blame_toggle {
+            self.clear_blame_step_hint();
+            self.set_blame_step_hint();
+        }
+    }
+
+    pub(crate) fn blame_step_hint_for_change(&self, change_id: usize) -> Option<&str> {
+        if !self.blame_enabled {
+            return None;
+        }
+        let hint = self.blame_step_hint.as_ref()?;
+        if hint.change_id == change_id {
+            Some(hint.text.as_str())
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn blame_hunk_hint_text(&self) -> Option<&str> {
+        if !self.blame_enabled || !self.blame_hunk_hint_enabled {
+            return None;
+        }
+        self.blame_hunk_hint.as_deref()
+    }
+
+    pub fn trigger_blame_hint(&mut self) {
+        if !self.blame_enabled || !self.stepping {
+            return;
+        }
+        self.clear_blame_hunk_hint();
+        match self.blame_mode {
+            BlameMode::OneShot => {
+                self.clear_blame_step_hint();
+                self.set_blame_step_hint();
+            }
+            BlameMode::Toggle => {
+                self.blame_toggle = !self.blame_toggle;
+                self.clear_blame_step_hint();
+                if self.blame_toggle {
+                    self.set_blame_step_hint();
+                }
+            }
+        }
+    }
+
     pub(crate) fn step_edge_hint_for_change(&self, change_id: usize) -> Option<&'static str> {
         let hint = self.step_edge_hint?;
         if Instant::now() > hint.until {
@@ -1434,6 +1626,8 @@ impl App {
     fn step_forward(&mut self) -> bool {
         self.clear_peek();
         self.clear_hunk_edge_hint();
+        self.clear_blame_hunk_hint();
+        self.clear_blame_step_hint();
         self.snap_frame = None;
         self.snap_frame_started_at = None;
         if self.multi_diff.current_navigator().next() {
@@ -1442,6 +1636,7 @@ impl App {
                 self.start_animation();
             }
             self.needs_scroll_to_active = true;
+            self.refresh_blame_toggle_hint();
             true
         } else {
             match self.step_wrap {
@@ -1465,6 +1660,8 @@ impl App {
     fn step_backward(&mut self) -> bool {
         self.clear_peek();
         self.clear_hunk_edge_hint();
+        self.clear_blame_hunk_hint();
+        self.clear_blame_step_hint();
         self.snap_frame = None;
         self.snap_frame_started_at = None;
         if !self.animation_enabled {
@@ -1480,6 +1677,7 @@ impl App {
                 self.clear_active_on_next_render = true;
             }
             self.needs_scroll_to_active = true;
+            self.refresh_blame_toggle_hint();
             true
         } else {
             match self.step_wrap {
@@ -2039,12 +2237,16 @@ impl App {
     /// Move to the next hunk (group of related changes)
     pub fn next_hunk(&mut self) {
         self.clear_peek();
+        self.clear_blame_step_hint();
+        self.clear_blame_hunk_hint();
         if self.multi_diff.current_navigator().next_hunk() {
             if self.animation_enabled {
                 self.start_animation();
             }
             self.needs_scroll_to_active = true;
             self.clear_hunk_edge_hint();
+            self.set_blame_hunk_hint();
+            self.refresh_blame_toggle_hint();
         } else {
             match self.hunk_wrap {
                 HunkWrapMode::Hunk => {
@@ -2073,6 +2275,8 @@ impl App {
     /// Move to the previous hunk (group of related changes)
     pub fn prev_hunk(&mut self) {
         self.clear_peek();
+        self.clear_blame_step_hint();
+        self.clear_blame_hunk_hint();
         if self.multi_diff.current_navigator().prev_hunk() {
             if self.animation_enabled {
                 self.start_animation();
@@ -2081,6 +2285,8 @@ impl App {
             }
             self.needs_scroll_to_active = true;
             self.clear_hunk_edge_hint();
+            self.set_blame_hunk_hint();
+            self.refresh_blame_toggle_hint();
         } else {
             match self.hunk_wrap {
                 HunkWrapMode::Hunk => {
@@ -2185,11 +2391,15 @@ impl App {
     /// Jump to first change of current hunk
     pub fn goto_hunk_start(&mut self) {
         self.clear_peek();
+        self.clear_blame_step_hint();
+        self.clear_blame_hunk_hint();
         if self.multi_diff.current_navigator().goto_hunk_start() {
             if self.animation_enabled {
                 self.start_animation();
             }
             self.needs_scroll_to_active = true;
+            self.set_blame_hunk_hint();
+            self.refresh_blame_toggle_hint();
         }
     }
 
@@ -2246,11 +2456,15 @@ impl App {
     /// Jump to last change of current hunk
     pub fn goto_hunk_end(&mut self) {
         self.clear_peek();
+        self.clear_blame_step_hint();
+        self.clear_blame_hunk_hint();
         if self.multi_diff.current_navigator().goto_hunk_end() {
             if self.animation_enabled {
                 self.start_animation();
             }
             self.needs_scroll_to_active = true;
+            self.set_blame_hunk_hint();
+            self.refresh_blame_toggle_hint();
         }
     }
 
@@ -2340,6 +2554,8 @@ impl App {
             self.stepping = false;
             self.clear_step_edge_hint();
             self.clear_hunk_edge_hint();
+            self.clear_blame_step_hint();
+            self.clear_blame_hunk_hint();
             if !self.no_step_visited[current_index] {
                 self.scroll_offsets_no_step[current_index] = self.scroll_offset;
                 self.horizontal_scrolls_no_step[current_index] = self.horizontal_scroll;
@@ -2353,6 +2569,8 @@ impl App {
             self.stepping = true;
             self.clear_step_edge_hint();
             self.clear_hunk_edge_hint();
+            self.clear_blame_step_hint();
+            self.clear_blame_hunk_hint();
             self.peek_state = self.step_peek_state.take();
             self.view_mode = self.step_view_mode;
             if !self.restore_step_state_snapshot(current_index) {
@@ -2541,6 +2759,8 @@ impl App {
 
     pub fn goto_start(&mut self) {
         self.clear_peek();
+        self.clear_blame_step_hint();
+        self.clear_blame_hunk_hint();
         if !self.stepping {
             self.scroll_offset = 0;
             self.centered_once = false;
@@ -2555,10 +2775,13 @@ impl App {
         self.animation_progress = 1.0;
         self.centered_once = false;
         self.needs_scroll_to_active = true;
+        self.refresh_blame_toggle_hint();
     }
 
     pub fn goto_end(&mut self) {
         self.clear_peek();
+        self.clear_blame_step_hint();
+        self.clear_blame_hunk_hint();
         if !self.stepping {
             self.scroll_offset = usize::MAX;
             self.centered_once = false;
@@ -2573,24 +2796,31 @@ impl App {
         self.animation_progress = 1.0;
         self.centered_once = false;
         // Don't set needs_scroll_to_active - we want to stay at bottom
+        self.refresh_blame_toggle_hint();
     }
 
     pub fn goto_first_step(&mut self) {
         self.clear_peek();
+        self.clear_blame_step_hint();
+        self.clear_blame_hunk_hint();
         self.multi_diff.current_navigator().goto(1);
         self.animation_phase = AnimationPhase::Idle;
         self.animation_progress = 1.0;
         self.centered_once = false;
         self.needs_scroll_to_active = true;
+        self.refresh_blame_toggle_hint();
     }
 
     pub fn goto_last_step(&mut self) {
         self.clear_peek();
+        self.clear_blame_step_hint();
+        self.clear_blame_hunk_hint();
         self.multi_diff.current_navigator().goto_end();
         self.animation_phase = AnimationPhase::Idle;
         self.animation_progress = 1.0;
         self.centered_once = false;
         self.needs_scroll_to_active = true;
+        self.refresh_blame_toggle_hint();
     }
 
     fn goto_step_number(&mut self, step_number: usize) {
@@ -2602,6 +2832,8 @@ impl App {
             return;
         }
         self.clear_peek();
+        self.clear_blame_step_hint();
+        self.clear_blame_hunk_hint();
         let clamped = step_number.max(1).min(total_steps);
         let target_step = clamped.saturating_sub(1);
         self.multi_diff.current_navigator().goto(target_step);
@@ -2609,6 +2841,7 @@ impl App {
         self.animation_progress = 1.0;
         self.centered_once = false;
         self.needs_scroll_to_active = true;
+        self.refresh_blame_toggle_hint();
     }
 
     fn goto_hunk_number(&mut self, hunk_number: usize) {
@@ -2627,6 +2860,8 @@ impl App {
 
     fn goto_hunk_index(&mut self, hunk_idx: usize) {
         self.clear_peek();
+        self.clear_blame_step_hint();
+        self.clear_blame_hunk_hint();
         self.multi_diff.current_navigator().goto_hunk(hunk_idx);
         if self.animation_enabled {
             self.start_animation();
@@ -2634,6 +2869,8 @@ impl App {
             self.clear_active_on_next_render = true;
         }
         self.needs_scroll_to_active = true;
+        self.set_blame_hunk_hint();
+        self.refresh_blame_toggle_hint();
     }
 
     pub fn goto_first_hunk_scroll(&mut self) {
@@ -3152,6 +3389,8 @@ impl App {
         let old_index = self.multi_diff.selected_index;
         self.clear_step_edge_hint();
         self.clear_hunk_edge_hint();
+        self.clear_blame_step_hint();
+        self.clear_blame_hunk_hint();
         if !self.stepping {
             self.save_no_step_state_snapshot(old_index);
         }

@@ -688,6 +688,8 @@ pub struct UiConfig {
     pub evo: EvoViewConfig,
     /// Diff styling settings
     pub diff: DiffConfig,
+    /// Blame display settings
+    pub blame: BlameConfig,
     /// Enable stepping (default: true). If false, shows all changes (no-step behavior)
     pub stepping: bool,
     /// Marker for primary active line (left pane / unified pane)
@@ -718,6 +720,7 @@ impl Default for UiConfig {
             split: SplitViewConfig::default(),
             evo: EvoViewConfig::default(),
             diff: DiffConfig::default(),
+            blame: BlameConfig::default(),
             stepping: true,
             primary_marker: "▶".to_string(),
             primary_marker_right: None,
@@ -921,6 +924,36 @@ pub enum DiffExtentMarkerScope {
     #[default]
     Progress,
     Hunk,
+}
+
+/// Blame display mode
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum BlameMode {
+    /// Show blame only after pressing the key (clears on next step)
+    #[default]
+    OneShot,
+    /// Toggle blame display for the active line
+    Toggle,
+}
+
+/// Blame configuration
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct BlameConfig {
+    pub enabled: bool,
+    pub mode: BlameMode,
+    pub hunk_hint: bool,
+}
+
+impl Default for BlameConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            mode: BlameMode::OneShot,
+            hunk_hint: true,
+        }
+    }
 }
 
 /// Syntax highlighting mode
