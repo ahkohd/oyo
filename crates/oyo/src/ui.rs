@@ -1262,7 +1262,8 @@ fn draw_help_popover(frame: &mut Frame, app: &mut App) {
     push_help_line(&mut lines, "a", "Toggle animation");
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(" View", section_style)));
-    push_help_line(&mut lines, "Tab / Shift-Tab", "Cycle view mode");
+    push_help_line(&mut lines, "Tab", "Cycle view mode");
+    push_help_line(&mut lines, "Shift-Tab", "Cycle view mode (reverse)");
     push_help_line(&mut lines, "Z", "Zen mode");
     push_help_line(&mut lines, "R", "Refresh from disk");
 
