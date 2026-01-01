@@ -50,70 +50,130 @@ pub fn render_blame(frame: &mut Frame, app: &mut App, area: Rect) {
         .current_navigator()
         .current_view_with_frame(animation_frame);
 
-    let mut blame_lines: Vec<Line> = Vec::new();
     let now = OffsetDateTime::now_utc().unix_timestamp();
+    let time_bucket = now / 60;
     let text_width = blame_area.width.saturating_sub(2) as usize;
+    let file_index = app.multi_diff.selected_index;
+    let state = app.multi_diff.current_navigator().state().clone();
+    let cache_key = crate::app::BlameRenderKey {
+        file_index,
+        current_step: state.current_step,
+        current_hunk: state.current_hunk,
+        hunk_preview_mode: state.hunk_preview_mode,
+        preview_from_backward: state.preview_from_backward,
+        stepping: app.stepping,
+        line_wrap: app.line_wrap,
+        wrap_width,
+        blame_width: blame_area.width,
+        view_len: view_lines.len(),
+        animation_frame,
+        cache_rev: app.blame_cache_revision,
+        time_bucket,
+    };
 
-    let mut blame_keys: Vec<Option<String>> = Vec::with_capacity(view_lines.len());
-    let mut blame_texts: Vec<Option<String>> = Vec::with_capacity(view_lines.len());
-    let mut blame_displays: Vec<Option<BlameDisplay>> = Vec::with_capacity(view_lines.len());
+    let rebuild_cache = app
+        .blame_render_cache
+        .as_ref()
+        .map(|cache| cache.key != cache_key)
+        .unwrap_or(true);
 
-    for view_line in &view_lines {
-        if let Some(display) = app.blame_display_for_view_line(view_line, now) {
-            blame_keys.push(Some(display.group_key.clone()));
-            blame_texts.push(Some(display.text.clone()));
-            blame_displays.push(Some(display));
+    if rebuild_cache {
+        let mut blame_keys: Vec<Option<String>> = Vec::with_capacity(view_lines.len());
+        let mut blame_texts: Vec<Option<String>> = Vec::with_capacity(view_lines.len());
+        let mut blame_displays: Vec<Option<BlameDisplay>> = Vec::with_capacity(view_lines.len());
+
+        for view_line in &view_lines {
+            if let Some(display) = app.blame_display_for_view_line(view_line, now) {
+                blame_keys.push(Some(display.group_key.clone()));
+                blame_texts.push(Some(display.text.clone()));
+                blame_displays.push(Some(display));
+            } else {
+                blame_keys.push(None);
+                blame_texts.push(None);
+                blame_displays.push(None);
+            }
+        }
+
+        let mut display_texts: Vec<String> = vec![String::new(); view_lines.len()];
+        let mut extra_rows_after_line: Vec<usize> = vec![0; view_lines.len()];
+        let mut extra_texts_after_line: Vec<Vec<String>> = vec![Vec::new(); view_lines.len()];
+        let mut idx = 0usize;
+        while idx < view_lines.len() {
+            let key = match &blame_keys[idx] {
+                Some(key) => key.clone(),
+                None => {
+                    idx += 1;
+                    continue;
+                }
+            };
+            let mut end = idx + 1;
+            while end < view_lines.len() && blame_keys[end].as_deref() == Some(&key) {
+                end += 1;
+            }
+
+            let text = blame_texts[idx].clone().unwrap_or_default();
+            let wrapped = wrap_blame_text(&text, text_width);
+            let group_len = end - idx;
+            for offset in 0..group_len {
+                if let Some(segment) = wrapped.get(offset) {
+                    display_texts[idx + offset] = segment.clone();
+                }
+            }
+            if wrapped.len() > group_len {
+                let extras: Vec<String> = wrapped[group_len..].to_vec();
+                let last_idx = end.saturating_sub(1);
+                extra_rows_after_line[last_idx] = extras.len();
+                extra_texts_after_line[last_idx] = extras;
+            }
+
+            idx = end;
+        }
+
+        let mut wrap_counts = Vec::with_capacity(view_lines.len());
+        if app.line_wrap && wrap_width > 0 {
+            for view_line in &view_lines {
+                let mut content_spans = vec![Span::raw(view_line.content.clone())];
+                content_spans = expand_tabs_in_spans(&content_spans, TAB_WIDTH);
+                let wrap_count = wrap_count_for_spans(&content_spans, wrap_width);
+                wrap_counts.push(wrap_count.max(1));
+            }
         } else {
-            blame_keys.push(None);
-            blame_texts.push(None);
-            blame_displays.push(None);
+            wrap_counts.resize(view_lines.len(), 1);
         }
+
+        let mut bar_colors: Vec<Option<Color>> = Vec::with_capacity(view_lines.len());
+        for (idx, view_line) in view_lines.iter().enumerate() {
+            let display = blame_displays[idx].as_ref();
+            let color = app.blame_bar_color_for_view_line(view_line, display);
+            bar_colors.push(color);
+        }
+
+        app.blame_render_cache = Some(crate::app::BlameRenderCache {
+            key: cache_key,
+            wrap_counts,
+            extra_rows_after_line,
+            extra_texts_after_line,
+            display_texts,
+            bar_colors,
+        });
     }
 
-    let mut display_texts: Vec<String> = vec![String::new(); view_lines.len()];
-    let mut extra_rows_after_line: Vec<usize> = vec![0; view_lines.len()];
-    let mut extra_texts_after_line: Vec<Vec<String>> = vec![Vec::new(); view_lines.len()];
-    let mut idx = 0usize;
-    while idx < view_lines.len() {
-        let key = match &blame_keys[idx] {
-            Some(key) => key.clone(),
-            None => {
-                idx += 1;
-                continue;
-            }
-        };
-        let mut end = idx + 1;
-        while end < view_lines.len() && blame_keys[end].as_deref() == Some(&key) {
-            end += 1;
-        }
+    let extra_rows_clone = app
+        .blame_render_cache
+        .as_ref()
+        .map(|cache| cache.extra_rows_after_line.clone())
+        .unwrap_or_default();
+    app.blame_extra_rows = Some(extra_rows_clone);
+    super::render_unified_pane(frame, app, content_area);
+    app.blame_extra_rows = None;
 
-        let text = blame_texts[idx].clone().unwrap_or_default();
-        let wrapped = wrap_blame_text(&text, text_width);
-        let group_len = end - idx;
-        for offset in 0..group_len {
-            if let Some(segment) = wrapped.get(offset) {
-                display_texts[idx + offset] = segment.clone();
-            }
-        }
-        if wrapped.len() > group_len {
-            let extras: Vec<String> = wrapped[group_len..].to_vec();
-            let last_idx = end.saturating_sub(1);
-            extra_rows_after_line[last_idx] = extras.len();
-            extra_texts_after_line[last_idx] = extras;
-        }
+    let cache = match app.blame_render_cache.as_ref() {
+        Some(cache) => cache,
+        None => return,
+    };
+    let extra_rows_after_line = cache.extra_rows_after_line.clone();
+    let wrap_counts = cache.wrap_counts.clone();
 
-        idx = end;
-    }
-
-    let extra_total = extra_rows_after_line.iter().copied().sum::<usize>();
-    if !app.line_wrap {
-        app.clamp_scroll(
-            view_lines.len().saturating_add(extra_total),
-            visible_height,
-            app.allow_overscroll(),
-        );
-    }
-    let visible_height = blame_area.height as usize;
     let mut blame_scroll_offset = app.scroll_offset;
     if !app.line_wrap && app.scroll_offset > 0 {
         let max_idx = app.scroll_offset.min(extra_rows_after_line.len());
@@ -126,18 +186,11 @@ pub fn render_blame(frame: &mut Frame, app: &mut App, area: Rect) {
     let visible_start = blame_scroll_offset;
     let visible_end = visible_start + visible_height.saturating_sub(1);
     let mut display_idx = 0usize;
-    let mut wrap_counts = Vec::with_capacity(view_lines.len());
     let mut visible_flags = Vec::with_capacity(view_lines.len());
     let mut visible_indices = Vec::new();
 
-    for (idx, view_line) in view_lines.iter().enumerate() {
-        let mut content_spans = vec![Span::raw(view_line.content.clone())];
-        content_spans = expand_tabs_in_spans(&content_spans, TAB_WIDTH);
-        let wrap_count = if app.line_wrap && wrap_width > 0 {
-            wrap_count_for_spans(&content_spans, wrap_width)
-        } else {
-            1
-        };
+    for (idx, _view_line) in view_lines.iter().enumerate() {
+        let wrap_count = wrap_counts.get(idx).copied().unwrap_or(1);
         let extra_rows = extra_rows_after_line.get(idx).copied().unwrap_or(0);
         let line_start = display_idx;
         let line_end = display_idx
@@ -145,7 +198,6 @@ pub fn render_blame(frame: &mut Frame, app: &mut App, area: Rect) {
             .saturating_add(extra_rows)
             .saturating_sub(1);
         let line_visible = line_end >= visible_start && line_start <= visible_end;
-        wrap_counts.push(wrap_count);
         visible_flags.push(line_visible);
         if line_visible {
             visible_indices.push(idx);
@@ -157,27 +209,25 @@ pub fn render_blame(frame: &mut Frame, app: &mut App, area: Rect) {
 
     app.prefetch_blame_for_view(&view_lines, &visible_indices, visible_height);
 
-    let mut bar_colors: Vec<Option<Color>> = Vec::with_capacity(view_lines.len());
-    for (idx, view_line) in view_lines.iter().enumerate() {
-        let display = blame_displays[idx].as_ref();
-        let color = app.blame_bar_color_for_view_line(view_line, display);
-        bar_colors.push(color);
-    }
+    let cache = match app.blame_render_cache.as_ref() {
+        Some(cache) => cache,
+        None => return,
+    };
+    let extra_texts_after_line = &cache.extra_texts_after_line;
+    let display_texts = &cache.display_texts;
+    let bar_colors = &cache.bar_colors;
 
-    app.blame_extra_rows = Some(extra_rows_after_line.clone());
-    super::render_unified_pane(frame, app, content_area);
-    app.blame_extra_rows = None;
-
+    let mut blame_lines: Vec<Line> = Vec::new();
     for (idx, _view_line) in view_lines.iter().enumerate() {
-        let wrap_count = wrap_counts[idx];
+        let wrap_count = wrap_counts.get(idx).copied().unwrap_or(1);
         let line_visible = visible_flags[idx];
-        let bar_span = match bar_colors[idx] {
+        let bar_span = match bar_colors.get(idx).copied().flatten() {
             Some(color) => Span::styled(BLAME_BAR, Style::default().fg(color)),
             None => Span::raw(" "),
         };
         let text_style = Style::default().fg(app.theme.text_muted);
         if line_visible {
-            let text = display_texts[idx].clone();
+            let text = display_texts.get(idx).cloned().unwrap_or_default();
             blame_lines.push(Line::from(vec![
                 bar_span.clone(),
                 Span::raw(" "),

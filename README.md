@@ -294,6 +294,9 @@ view_mode = "unified"
 gutter_signs = false
 topbar = true
 
+[ui.blame]
+enabled = true
+
 [ui.theme]
 name = "tokyonight"
 

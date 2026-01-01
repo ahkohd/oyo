@@ -155,6 +155,32 @@ struct BlamePrefetchRange {
     end: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct BlameRenderKey {
+    pub(crate) file_index: usize,
+    pub(crate) current_step: usize,
+    pub(crate) current_hunk: usize,
+    pub(crate) hunk_preview_mode: bool,
+    pub(crate) preview_from_backward: bool,
+    pub(crate) stepping: bool,
+    pub(crate) line_wrap: bool,
+    pub(crate) wrap_width: usize,
+    pub(crate) blame_width: u16,
+    pub(crate) view_len: usize,
+    pub(crate) animation_frame: AnimationFrame,
+    pub(crate) cache_rev: u64,
+    pub(crate) time_bucket: i64,
+}
+
+pub(crate) struct BlameRenderCache {
+    pub(crate) key: BlameRenderKey,
+    pub(crate) wrap_counts: Vec<usize>,
+    pub(crate) extra_rows_after_line: Vec<usize>,
+    pub(crate) extra_texts_after_line: Vec<Vec<String>>,
+    pub(crate) display_texts: Vec<String>,
+    pub(crate) bar_colors: Vec<Option<Color>>,
+}
+
 #[derive(Clone, Debug)]
 struct BlameRequest {
     repo_root: PathBuf,
@@ -339,6 +365,10 @@ pub struct App {
     blame_time_ranges: HashMap<BlamePrefetchKey, (i64, i64)>,
     /// Cached blame prefetch windows
     blame_prefetch: HashMap<BlamePrefetchKey, BlamePrefetchRange>,
+    /// Cached blame render layout (for scroll performance)
+    pub(crate) blame_render_cache: Option<BlameRenderCache>,
+    /// Revision for blame cache updates
+    pub(crate) blame_cache_revision: u64,
     /// Blame prefetch requests currently in flight
     blame_pending: HashMap<BlamePrefetchKey, BlamePrefetchRange>,
     /// Throttle blame prefetch to avoid repeated git calls
@@ -554,6 +584,8 @@ impl App {
             blame_bar_cache: HashMap::new(),
             blame_time_ranges: HashMap::new(),
             blame_prefetch: HashMap::new(),
+            blame_render_cache: None,
+            blame_cache_revision: 0,
             blame_pending: HashMap::new(),
             blame_prefetch_at: None,
             blame_worker_tx: None,
@@ -1784,6 +1816,7 @@ impl App {
         let Some(rx) = self.blame_worker_rx.as_ref() else {
             return;
         };
+        let mut updated = false;
         while let Ok(resp) = rx.try_recv() {
             let range_key = BlamePrefetchKey {
                 path: resp.path.clone(),
@@ -1808,6 +1841,7 @@ impl App {
                     }
                 }
                 self.blame_cache.insert(key, info);
+                updated = true;
             }
             self.blame_prefetch.insert(
                 range_key.clone(),
@@ -1817,6 +1851,10 @@ impl App {
                 },
             );
             self.blame_pending.remove(&range_key);
+        }
+        if updated {
+            self.blame_cache_revision = self.blame_cache_revision.wrapping_add(1);
+            self.blame_render_cache = None;
         }
     }
 
