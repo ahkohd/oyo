@@ -7,7 +7,7 @@ use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 use time::OffsetDateTime;
 
-const BLAME_GUTTER_WIDTH: u16 = 42;
+const BLAME_GUTTER_PERCENT: u16 = 32;
 const CONTENT_GUTTER_WIDTH: u16 = 8;
 const BLAME_BAR: &str = "▌";
 
@@ -21,7 +21,7 @@ pub fn render_blame(frame: &mut Frame, app: &mut App, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Length(BLAME_GUTTER_WIDTH),
+            Constraint::Percentage(BLAME_GUTTER_PERCENT),
             Constraint::Length(2),
             Constraint::Min(0),
         ])
