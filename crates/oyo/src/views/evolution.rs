@@ -62,6 +62,10 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
     if !app.line_wrap {
         app.clamp_horizontal_scroll_cached(visible_width);
     }
+    if app.current_file_is_binary() {
+        render_empty_state(frame, area, &app.theme, false, true);
+        return;
+    }
 
     // Clone markers to avoid borrow conflicts
     let primary_marker = app.primary_marker.clone();
@@ -767,7 +771,13 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
             .diff()
             .significant_changes
             .is_empty();
-        render_empty_state(frame, content_area, &app.theme, has_changes);
+        render_empty_state(
+            frame,
+            content_area,
+            &app.theme,
+            has_changes,
+            app.current_file_is_binary(),
+        );
     } else {
         let mut content_paragraph = if app.line_wrap {
             Paragraph::new(content_lines)

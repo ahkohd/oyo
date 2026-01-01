@@ -1,7 +1,8 @@
 //! UI rendering for the TUI
 
 use crate::app::{App, ViewMode, DIFF_VIEW_MIN_WIDTH, FILE_PANEL_MIN_WIDTH};
-use crate::views::{render_evolution, render_split, render_unified_pane};
+use crate::color;
+use crate::views::{render_blame, render_evolution, render_split, render_unified_pane};
 use oyo_core::FileStatus;
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
@@ -274,6 +275,7 @@ fn draw_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
         ViewMode::UnifiedPane => " UNIFIED ",
         ViewMode::Split => " SPLIT ",
         ViewMode::Evolution => " EVOLUTION ",
+        ViewMode::Blame => " BLAME ",
     };
 
     let file_path = app.current_file_path();
@@ -480,7 +482,23 @@ fn draw_top_bar(frame: &mut Frame, app: &mut App, area: Rect) {
     let (insertions, deletions) = app.stats();
     let file = app.multi_diff.current_file();
     let available_width = area.width as usize;
-    let right_width = text_width(&format!("-{}  +{}", deletions, insertions));
+    let mut right_spans = if matches!(app.view_mode, ViewMode::Blame) {
+        blame_age_legend_spans(app)
+    } else {
+        vec![
+            Span::styled(
+                format!("-{}", deletions),
+                Style::default().fg(app.theme.error),
+            ),
+            Span::raw("  "),
+            Span::styled(
+                format!("+{}", insertions),
+                Style::default().fg(app.theme.success),
+            ),
+            Span::raw(" "),
+        ]
+    };
+    let right_width = spans_width(&right_spans);
     let left_max = available_width.saturating_sub(right_width + 2);
 
     let (name_text, status_style) = if let Some(file) = file {
@@ -510,19 +528,7 @@ fn draw_top_bar(frame: &mut Frame, app: &mut App, area: Rect) {
     left_spans = clamp_spans_to_width(&left_spans, left_max);
     left_spans = pad_spans_left(left_spans, left_max);
 
-    let right_spans = vec![
-        Span::styled(
-            format!("-{}", deletions),
-            Style::default().fg(app.theme.error),
-        ),
-        Span::raw("  "),
-        Span::styled(
-            format!("+{}", insertions),
-            Style::default().fg(app.theme.success),
-        ),
-        Span::raw(" "),
-    ];
-    let right_spans = clamp_spans_to_width(&right_spans, right_width + 1);
+    right_spans = clamp_spans_to_width(&right_spans, right_width + 1);
     let right_spans = pad_spans_right(right_spans, right_width + 1);
 
     let mut spans = Vec::new();
@@ -534,6 +540,32 @@ fn draw_top_bar(frame: &mut Frame, app: &mut App, area: Rect) {
         paragraph = paragraph.style(Style::default().bg(bg));
     }
     frame.render_widget(paragraph, area);
+}
+
+fn blame_age_legend_spans(app: &App) -> Vec<Span<'static>> {
+    let blocks = 10usize;
+    let mut spans = Vec::with_capacity(blocks + 3);
+    spans.push(Span::styled(
+        "Older ",
+        Style::default().fg(app.theme.text_muted),
+    ));
+
+    let base = app.theme.warning;
+    let steps = blocks.saturating_sub(1).max(1) as f32;
+    for idx in 0..blocks {
+        let t = idx as f32 / steps;
+        spans.push(Span::styled(
+            "▮",
+            Style::default().fg(color::ramp_color(base, t)),
+        ));
+    }
+
+    spans.push(Span::styled(
+        " Newer",
+        Style::default().fg(app.theme.text_muted),
+    ));
+    spans.push(Span::raw(" "));
+    spans
 }
 
 fn draw_content(frame: &mut Frame, app: &mut App, area: Rect, show_topbar: bool) {
@@ -832,19 +864,23 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
             crate::config::FileCountMode::All => true,
             crate::config::FileCountMode::Off => false,
         };
-        let show_signs = show_for_row && (file.insertions > 0 || file.deletions > 0);
-        let insert_text = if show_signs {
+        let show_signs = show_for_row && (file.binary || file.insertions > 0 || file.deletions > 0);
+        let insert_text = if show_signs && !file.binary {
             format!("+{}", file.insertions)
         } else {
             String::new()
         };
-        let delete_text = if show_signs {
+        let delete_text = if show_signs && !file.binary {
             format!("-{}", file.deletions)
         } else {
             String::new()
         };
         let signs_len = if show_signs {
-            1 + insert_text.len() + 1 + delete_text.len()
+            if file.binary {
+                1 + "bin".len()
+            } else {
+                1 + insert_text.len() + 1 + delete_text.len()
+            }
         } else {
             0
         };
@@ -900,9 +936,13 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
             } else {
                 Style::default().fg(app.theme.text_muted)
             };
-            line_spans.push(Span::styled(insert_text, sign_style));
-            line_spans.push(Span::raw(" "));
-            line_spans.push(Span::styled(delete_text, delete_style));
+            if file.binary {
+                line_spans.push(Span::styled("bin", sign_style));
+            } else {
+                line_spans.push(Span::styled(insert_text, sign_style));
+                line_spans.push(Span::raw(" "));
+                line_spans.push(Span::styled(delete_text, delete_style));
+            }
         }
 
         let line = Line::from(line_spans);
@@ -989,6 +1029,7 @@ fn draw_diff_view(frame: &mut Frame, app: &mut App, area: Rect) {
         ViewMode::UnifiedPane => render_unified_pane(frame, app, area),
         ViewMode::Split => render_split(frame, app, area),
         ViewMode::Evolution => render_evolution(frame, app, area),
+        ViewMode::Blame => render_blame(frame, app, area),
     }
 }
 
@@ -1221,7 +1262,7 @@ fn draw_help_popover(frame: &mut Frame, app: &mut App) {
     push_help_line(&mut lines, "a", "Toggle animation");
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(" View", section_style)));
-    push_help_line(&mut lines, "Tab", "Cycle view mode");
+    push_help_line(&mut lines, "Tab / Shift-Tab", "Cycle view mode");
     push_help_line(&mut lines, "Z", "Zen mode");
     push_help_line(&mut lines, "R", "Refresh from disk");
 

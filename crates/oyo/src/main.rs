@@ -116,6 +116,8 @@ enum CliViewMode {
     /// Evolution view - shows file morphing, deletions just disappear
     #[value(alias = "evo")]
     Evolution,
+    /// Blame view - per-line blame gutter
+    Blame,
 }
 
 impl From<CliViewMode> for ViewMode {
@@ -124,6 +126,7 @@ impl From<CliViewMode> for ViewMode {
             CliViewMode::Unified => ViewMode::UnifiedPane,
             CliViewMode::Split => ViewMode::Split,
             CliViewMode::Evolution => ViewMode::Evolution,
+            CliViewMode::Blame => ViewMode::Blame,
         }
     }
 }
@@ -283,17 +286,17 @@ fn build_diff_from_input_mode(
             old_file,
             new_file,
         } => {
-            let old_content = if old_file.to_string_lossy() == "/dev/null" {
-                String::new()
+            let old_bytes = if old_file.to_string_lossy() == "/dev/null" {
+                Vec::new()
             } else {
-                std::fs::read_to_string(&old_file)
+                std::fs::read(&old_file)
                     .context(format!("Failed to read old file: {}", old_file.display()))?
             };
 
-            let new_content = if new_file.to_string_lossy() == "/dev/null" {
-                String::new()
+            let new_bytes = if new_file.to_string_lossy() == "/dev/null" {
+                Vec::new()
             } else {
-                std::fs::read_to_string(&new_file)
+                std::fs::read(&new_file)
                     .context(format!("Failed to read new file: {}", new_file.display()))?
             };
 
@@ -301,12 +304,7 @@ fn build_diff_from_input_mode(
                 oyo_core::git::get_current_branch(&std::env::current_dir().unwrap_or_default())
                     .ok();
 
-            let diff = MultiFileDiff::from_file_pair(
-                display_path.clone(),
-                display_path,
-                old_content,
-                new_content,
-            );
+            let diff = MultiFileDiff::from_file_pair_bytes(display_path, old_bytes, new_bytes);
             (diff, branch)
         }
         InputMode::TwoPaths { old_path, new_path } => {
@@ -314,12 +312,20 @@ fn build_diff_from_input_mode(
                 MultiFileDiff::from_directories(&old_path, &new_path)
                     .context("Failed to create diff from directories")?
             } else {
-                let old_content = std::fs::read_to_string(&old_path)
-                    .context(format!("Failed to read: {}", old_path.display()))?;
-                let new_content = std::fs::read_to_string(&new_path)
-                    .context(format!("Failed to read: {}", new_path.display()))?;
+                let old_bytes = if old_path.to_string_lossy() == "/dev/null" {
+                    Vec::new()
+                } else {
+                    std::fs::read(&old_path)
+                        .context(format!("Failed to read: {}", old_path.display()))?
+                };
+                let new_bytes = if new_path.to_string_lossy() == "/dev/null" {
+                    Vec::new()
+                } else {
+                    std::fs::read(&new_path)
+                        .context(format!("Failed to read: {}", new_path.display()))?
+                };
 
-                MultiFileDiff::from_file_pair(old_path, new_path, old_content, new_content)
+                MultiFileDiff::from_file_pair_bytes(new_path, old_bytes, new_bytes)
             };
             (diff, None)
         }
@@ -1120,7 +1126,7 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<()> 
                             }
                         }
                         // File navigation (supports count)
-                        KeyCode::Char('[') | KeyCode::BackTab => {
+                        KeyCode::Char('[') => {
                             let count = app.take_count();
                             for _ in 0..count {
                                 app.prev_file();
@@ -1148,6 +1154,10 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<()> 
                         KeyCode::Tab => {
                             app.reset_count();
                             app.toggle_view_mode();
+                        }
+                        KeyCode::BackTab => {
+                            app.reset_count();
+                            app.toggle_view_mode_reverse();
                         }
                         // Scroll navigation (supports count)
                         KeyCode::Char('K') => {

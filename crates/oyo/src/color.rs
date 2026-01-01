@@ -196,6 +196,20 @@ pub fn gradient_color(gradient: &AnimationGradient, t: f32) -> Rgb {
     hsl_to_rgb(hsl)
 }
 
+/// Build a single-hue ramp from dark to light for a given base color.
+pub fn ramp_color(base: Color, t: f32) -> Color {
+    let Some(rgb) = color_to_rgb(base) else {
+        return base;
+    };
+    let mut hsl = rgb_to_hsl(rgb);
+    let start_l = (hsl.l * 0.35).clamp(0.05, 0.6);
+    let end_l = (hsl.l + 0.35).min(0.9);
+    let t = t.clamp(0.0, 1.0);
+    hsl.l = start_l + (end_l - start_l) * t;
+    let rgb = hsl_to_rgb(hsl);
+    Color::Rgb(rgb.r, rgb.g, rgb.b)
+}
+
 /// Relative luminance (sRGB) for contrast calculations.
 pub fn relative_luminance(color: Color) -> Option<f32> {
     match color {

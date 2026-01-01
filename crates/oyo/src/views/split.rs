@@ -196,6 +196,10 @@ const NEW_MARKER_WIDTH: u16 = 1;
 /// Render the split view
 pub fn render_split(frame: &mut Frame, app: &mut App, area: Rect) {
     let visible_height = area.height as usize;
+    if app.current_file_is_binary() {
+        render_empty_state(frame, area, &app.theme, false, true);
+        return;
+    }
     if app.line_wrap {
         app.handle_search_scroll_if_needed(visible_height);
     } else {
@@ -976,7 +980,13 @@ fn render_old_pane(
             .diff()
             .significant_changes
             .is_empty();
-        render_empty_state(frame, content_area, &app.theme, has_changes);
+        render_empty_state(
+            frame,
+            content_area,
+            &app.theme,
+            has_changes,
+            app.current_file_is_binary(),
+        );
     } else {
         let mut content_paragraph = if app.line_wrap {
             Paragraph::new(content_lines)
@@ -1733,7 +1743,13 @@ fn render_new_pane(
             .diff()
             .significant_changes
             .is_empty();
-        render_empty_state(frame, content_area, &app.theme, has_changes);
+        render_empty_state(
+            frame,
+            content_area,
+            &app.theme,
+            has_changes,
+            app.current_file_is_binary(),
+        );
     } else {
         let mut content_paragraph = if app.line_wrap {
             Paragraph::new(content_lines)

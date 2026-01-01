@@ -1,9 +1,11 @@
 //! View rendering modules
 
+mod blame;
 mod evolution;
 mod split;
 mod unified_pane;
 
+pub use blame::render_blame;
 pub use evolution::render_evolution;
 pub use split::render_split;
 pub use unified_pane::render_unified_pane;
@@ -677,14 +679,22 @@ fn should_strikethrough(phase: AnimationPhase, progress: f32, backward: bool) ->
 
 /// Render empty state message centered in area.
 /// Shows hint line only if viewport has enough height and width.
-fn render_empty_state(frame: &mut Frame, area: Rect, theme: &ResolvedTheme, has_changes: bool) {
+fn render_empty_state(
+    frame: &mut Frame,
+    area: Rect,
+    theme: &ResolvedTheme,
+    has_changes: bool,
+    is_binary: bool,
+) {
     // Fill entire area with background
     if let Some(bg) = theme.background {
         let bg_fill = Paragraph::new("").style(Style::default().bg(bg));
         frame.render_widget(bg_fill, area);
     }
 
-    let (primary_text, show_hint) = if has_changes {
+    let (primary_text, show_hint) = if is_binary {
+        ("Binary file (preview disabled)", false)
+    } else if has_changes {
         ("No content at this step", true)
     } else {
         ("No changes in this file", false)

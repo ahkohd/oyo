@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use crate::app::{AnimationPhase, App, ViewMode};
 use crate::config::{DiffForegroundMode, DiffHighlightMode, EvoSyntaxMode, SyntaxMode};
-use crate::views::{render_evolution, render_split, render_unified_pane};
+use crate::views::{render_blame, render_evolution, render_split, render_unified_pane};
 use oyo_core::MultiFileDiff;
 use ratatui::{backend::TestBackend, buffer::Buffer, Terminal};
 
@@ -33,6 +33,7 @@ fn render_buffer(app: &mut App, width: u16, height: u16) -> Buffer {
                 ViewMode::UnifiedPane => render_unified_pane(frame, app, area),
                 ViewMode::Split => render_split(frame, app, area),
                 ViewMode::Evolution => render_evolution(frame, app, area),
+                ViewMode::Blame => render_blame(frame, app, area),
             }
         })
         .expect("draw");

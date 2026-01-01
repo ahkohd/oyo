@@ -228,6 +228,10 @@ pub fn render_unified_pane(frame: &mut Frame, app: &mut App, area: Rect) {
     if !app.line_wrap {
         app.clamp_horizontal_scroll_cached(visible_width);
     }
+    if app.current_file_is_binary() {
+        render_empty_state(frame, area, &app.theme, false, true);
+        return;
+    }
 
     // Clone markers to avoid borrow conflicts
     let primary_marker = app.primary_marker.clone();
@@ -246,8 +250,21 @@ pub fn render_unified_pane(frame: &mut Frame, app: &mut App, area: Rect) {
         .multi_diff
         .current_navigator()
         .current_view_with_frame(animation_frame);
+    let blame_extra_rows = if matches!(app.view_mode, crate::app::ViewMode::Blame) {
+        app.blame_extra_rows.clone()
+    } else {
+        None
+    };
+    let extra_total = blame_extra_rows
+        .as_ref()
+        .map(|rows| rows.iter().copied().sum::<usize>())
+        .unwrap_or(0);
     if !app.line_wrap {
-        app.clamp_scroll(view_lines.len(), visible_height, app.allow_overscroll());
+        app.clamp_scroll(
+            view_lines.len().saturating_add(extra_total),
+            visible_height,
+            app.allow_overscroll(),
+        );
     }
     let debug_target = app.syntax_scope_target(&view_lines);
     let mut bg_lines: Option<Vec<Line<'static>>> = if app.line_wrap && app.diff_bg {
@@ -270,7 +287,11 @@ pub fn render_unified_pane(frame: &mut Frame, app: &mut App, area: Rect) {
     let mut content_lines: Vec<Line> = Vec::new();
     let mut max_line_width: usize = 0;
     let wrap_width = visible_width;
-    let mut display_len = if app.line_wrap { 0 } else { view_lines.len() };
+    let mut display_len = if app.line_wrap {
+        0
+    } else {
+        view_lines.len().saturating_add(extra_total)
+    };
     let mut primary_display_idx: Option<usize> = None;
     let mut active_display_idx: Option<usize> = None;
 
@@ -970,6 +991,22 @@ pub fn render_unified_pane(frame: &mut Frame, app: &mut App, area: Rect) {
                 }
             }
         }
+        let extra_rows = blame_extra_rows
+            .as_ref()
+            .and_then(|rows| rows.get(idx).copied())
+            .unwrap_or(0);
+        if extra_rows > 0 {
+            if app.line_wrap {
+                display_len += extra_rows;
+            }
+            if let Some(bg_lines) = bg_lines.as_mut() {
+                super::push_wrapped_bg_line(bg_lines, wrap_width, extra_rows, None);
+            }
+            for _ in 0..extra_rows {
+                content_lines.push(Line::from(Span::raw("")));
+                gutter_lines.push(Line::from(Span::raw(" ")));
+            }
+        }
         if let Some(text) = virtual_text.as_ref() {
             if !virtual_inserted
                 && prefer_cursor
@@ -1213,7 +1250,13 @@ pub fn render_unified_pane(frame: &mut Frame, app: &mut App, area: Rect) {
             .diff()
             .significant_changes
             .is_empty();
-        render_empty_state(frame, content_area, &app.theme, has_changes);
+        render_empty_state(
+            frame,
+            content_area,
+            &app.theme,
+            has_changes,
+            app.current_file_is_binary(),
+        );
     } else {
         let mut content_paragraph = if app.line_wrap {
             Paragraph::new(content_lines)
