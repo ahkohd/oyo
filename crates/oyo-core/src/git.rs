@@ -48,7 +48,7 @@ pub struct CommitEntry {
     pub short_id: String,
     pub parents: Vec<String>,
     pub author: String,
-    pub date: String,
+    pub author_time: Option<i64>,
     pub summary: String,
     pub stats: Option<CommitStats>,
 }
@@ -235,14 +235,13 @@ pub fn get_changes_between_index(
 
 /// Get recent commits with short stats
 pub fn get_recent_commits(repo_path: &Path, limit: usize) -> Result<Vec<CommitEntry>, GitError> {
-    let format = "%H%x1f%h%x1f%P%x1f%an%x1f%ad%x1f%s";
+    let format = "%H%x1f%h%x1f%P%x1f%an%x1f%at%x1f%s";
     let output = Command::new("git")
         .arg("-C")
         .arg(repo_path)
         .arg("log")
         .arg("-n")
         .arg(limit.to_string())
-        .arg("--date=format:%Y-%m-%d %H:%M")
         .arg(format!("--pretty=format:{format}"))
         .arg("--shortstat")
         .output()?;
@@ -271,12 +270,13 @@ pub fn get_recent_commits(repo_path: &Path, limit: usize) -> Result<Vec<CommitEn
             } else {
                 parts[2].split_whitespace().map(|s| s.to_string()).collect()
             };
+            let author_time = parts[4].trim().parse::<i64>().ok();
             commits.push(CommitEntry {
                 id: parts[0].to_string(),
                 short_id: parts[1].to_string(),
                 parents,
                 author: parts[3].to_string(),
-                date: parts[4].to_string(),
+                author_time,
                 summary: parts[5].to_string(),
                 stats: None,
             });

@@ -248,6 +248,9 @@ hunk = "none"               # "none" | "hunk" | "file"
 # enabled = false           # Show git blame hints (opt-in)
 # mode = "one_shot"         # "one_shot" or "toggle"
 # hunk_hint = true          # Show blame hint when jumping to a hunk
+# [ui.time]
+# mode = "relative"         # "relative" | "absolute" | "custom"
+# format = "[year]-[month]-[day] [hour]:[minute]" # Used when mode = "custom"
 # [ui.split]
 # align_lines = false       # Insert blanks to keep split panes aligned
 # align_fill = "╱"          # Fill character for aligned blanks (empty = no marker)

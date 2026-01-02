@@ -690,6 +690,8 @@ pub struct UiConfig {
     pub diff: DiffConfig,
     /// Blame display settings
     pub blame: BlameConfig,
+    /// Time display settings
+    pub time: TimeConfig,
     /// Enable stepping (default: true). If false, shows all changes (no-step behavior)
     pub stepping: bool,
     /// Marker for primary active line (left pane / unified pane)
@@ -721,6 +723,7 @@ impl Default for UiConfig {
             evo: EvoViewConfig::default(),
             diff: DiffConfig::default(),
             blame: BlameConfig::default(),
+            time: TimeConfig::default(),
             stepping: true,
             primary_marker: "▶".to_string(),
             primary_marker_right: None,
@@ -952,6 +955,59 @@ impl Default for BlameConfig {
             enabled: false,
             mode: BlameMode::OneShot,
             hunk_hint: true,
+        }
+    }
+}
+
+/// Time display mode
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TimeMode {
+    #[default]
+    Relative,
+    Absolute,
+    Custom,
+}
+
+/// Time display configuration
+#[derive(Debug, Clone, Deserialize)]
+#[serde(from = "TimeConfigDef")]
+pub struct TimeConfig {
+    pub mode: TimeMode,
+    pub format: String,
+}
+
+impl Default for TimeConfig {
+    fn default() -> Self {
+        Self {
+            mode: TimeMode::Relative,
+            format: String::new(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum TimeConfigDef {
+    Mode(TimeMode),
+    Detailed {
+        #[serde(default)]
+        mode: TimeMode,
+        format: Option<String>,
+    },
+}
+
+impl From<TimeConfigDef> for TimeConfig {
+    fn from(def: TimeConfigDef) -> Self {
+        match def {
+            TimeConfigDef::Mode(mode) => Self {
+                mode,
+                ..Self::default()
+            },
+            TimeConfigDef::Detailed { mode, format } => Self {
+                mode,
+                format: format.unwrap_or_default(),
+            },
         }
     }
 }

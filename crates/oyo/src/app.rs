@@ -10,6 +10,7 @@ use crate::config::{
     FileCountMode, HunkWrapMode, ModifiedStepMode, ResolvedTheme, StepWrapMode, SyntaxMode,
 };
 use crate::syntax::{SyntaxCache, SyntaxEngine, SyntaxSide};
+use crate::time_format::TimeFormatter;
 use oyo_core::{
     multi::BlameSource, AnimationFrame, Change, ChangeKind, LineKind, MultiFileDiff, StepDirection,
     StepState, ViewLine,
@@ -327,6 +328,8 @@ pub struct App {
     pub clear_active_on_next_render: bool,
     /// Resolved theme (colors, gradients)
     pub theme: ResolvedTheme,
+    /// Time formatting rules
+    pub time_format: TimeFormatter,
     /// Whether the UI theme is in light mode
     pub theme_is_light: bool,
     /// Whether stepping is enabled (false = no-step diff view)
@@ -565,6 +568,7 @@ impl App {
             extent_marker_right: "▐".to_string(),
             clear_active_on_next_render: false,
             theme: ResolvedTheme::default(),
+            time_format: TimeFormatter::default(),
             theme_is_light: false,
             stepping: true,
             hunk_wrap: HunkWrapMode::None,
@@ -1780,12 +1784,14 @@ impl App {
 
     pub(crate) fn format_blame_github_info(&mut self, info: &BlameInfo, now: i64) -> String {
         self.ensure_blame_user_name();
-        format_blame_github_text(info, self.blame_user_name.as_deref(), now)
+        let time_text = self.time_format.format(info.author_time, now);
+        format_blame_github_text(info, self.blame_user_name.as_deref(), &time_text)
     }
 
     fn format_blame_hint_info(&mut self, info: &BlameInfo, now: i64) -> String {
         self.ensure_blame_user_name();
-        format_blame_hint_text(info, self.blame_user_name.as_deref(), now, 60)
+        let time_text = self.time_format.format(info.author_time, now);
+        format_blame_hint_text(info, self.blame_user_name.as_deref(), &time_text, 60)
     }
 
     fn ensure_blame_worker(&mut self) {

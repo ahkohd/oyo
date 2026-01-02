@@ -37,4 +37,4 @@ dirs = "5.0"
 regex = "1.10"
 unicode-width = "0.1"
 unicode-segmentation = "1.11"
-time = { version = "0.3", features = ["std"] }
+time = { version = "0.3", features = ["std", "formatting", "parsing"] }

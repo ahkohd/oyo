@@ -147,7 +147,11 @@ pub fn blame_range(
     Some(entries)
 }
 
-pub fn format_blame_github_text(info: &BlameInfo, git_user: Option<&str>, now: i64) -> String {
+pub fn format_blame_github_text(
+    info: &BlameInfo,
+    git_user: Option<&str>,
+    time_text: &str,
+) -> String {
     if info.uncommitted {
         return "Uncommitted".to_string();
     }
@@ -157,10 +161,7 @@ pub fn format_blame_github_text(info: &BlameInfo, git_user: Option<&str>, now: i
             author = "You".to_string();
         }
     }
-    let relative = info
-        .author_time
-        .map(|ts| format_relative_age(ts, now))
-        .unwrap_or_else(|| "Unknown".to_string());
+    let relative = time_text;
     let short = short_commit(&info.commit);
     if info.summary.is_empty() {
         format!("{author}, {relative} {short}")
@@ -172,7 +173,7 @@ pub fn format_blame_github_text(info: &BlameInfo, git_user: Option<&str>, now: i
 pub fn format_blame_hint_text(
     info: &BlameInfo,
     git_user: Option<&str>,
-    now: i64,
+    time_text: &str,
     max_summary_len: usize,
 ) -> String {
     if info.uncommitted {
@@ -184,10 +185,7 @@ pub fn format_blame_hint_text(
             author = "You".to_string();
         }
     }
-    let relative = info
-        .author_time
-        .map(|ts| format_relative_age(ts, now))
-        .unwrap_or_else(|| "Unknown".to_string());
+    let relative = time_text;
     let short = short_commit(&info.commit);
     if info.summary.is_empty() {
         return format!("{author}, {relative} {short}");
@@ -209,32 +207,5 @@ fn short_commit(commit: &str) -> String {
         commit[..8].to_string()
     } else {
         commit.to_string()
-    }
-}
-
-fn format_relative_age(epoch: i64, now: i64) -> String {
-    let age_secs = now.saturating_sub(epoch);
-    let age_days = age_secs / 86_400;
-    if age_days <= 0 {
-        return "today".to_string();
-    }
-    if age_days == 1 {
-        return "1 day ago".to_string();
-    }
-    if age_days < 30 {
-        return format!("{age_days} days ago");
-    }
-    if age_days < 365 {
-        let months = (age_days / 30).max(1);
-        if months == 1 {
-            return "1 month ago".to_string();
-        }
-        return format!("{months} months ago");
-    }
-    let years = age_days / 365;
-    if years == 1 {
-        "1 year ago".to_string()
-    } else {
-        format!("{years} years ago")
     }
 }

@@ -6,11 +6,13 @@ mod color;
 mod config;
 mod dashboard;
 mod syntax;
+mod time_format;
 mod ui;
 mod views;
 
 use crate::dashboard::{Dashboard, DashboardConfig, DashboardSelection};
 use crate::syntax::{list_syntax_themes, SyntaxEngine};
+use crate::time_format::TimeFormatter;
 use anyhow::{Context, Result};
 use app::{App, ViewMode};
 use clap::{Parser, Subcommand};
@@ -264,6 +266,7 @@ fn apply_config_to_app(app: &mut App, config: &config::Config, args: &Args, ligh
         .clone()
         .unwrap_or_else(|| "▐".to_string());
     app.theme = config.ui.theme.resolve(light_mode);
+    app.time_format = TimeFormatter::new(&config.ui.time);
     app.theme_is_light = light_mode;
 
     if args.no_step {
@@ -566,6 +569,7 @@ fn main() -> Result<()> {
             .context("Failed to get staged changes")?;
 
         let theme = config.ui.theme.resolve(light_mode);
+        let time_format = TimeFormatter::new(&config.ui.time);
         let mut dashboard = Dashboard::new(DashboardConfig {
             repo_root: repo_root.clone(),
             branch: branch.clone(),
@@ -575,6 +579,7 @@ fn main() -> Result<()> {
             theme,
             primary_marker: config.ui.primary_marker.clone(),
             extent_marker: config.ui.extent_marker.clone(),
+            time_format,
         });
 
         let mut terminal = setup_terminal()?;

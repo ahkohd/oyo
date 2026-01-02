@@ -1,6 +1,7 @@
 //! Git range picker dashboard for oy view
 
 use crate::config::ResolvedTheme;
+use crate::time_format::TimeFormatter;
 use oyo_core::git::CommitEntry;
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
@@ -10,6 +11,7 @@ use ratatui::{
     Frame,
 };
 use std::path::PathBuf;
+use time::OffsetDateTime;
 use unicode_width::UnicodeWidthStr;
 
 const FOOTER_HEIGHT: u16 = 3;
@@ -54,7 +56,7 @@ struct DashboardEntry {
 pub struct Dashboard {
     repo_root: PathBuf,
     branch: Option<String>,
-    head_meta: Option<(String, String)>,
+    head_meta: Option<HeadMeta>,
     entries: Vec<DashboardEntry>,
     filtered: Vec<usize>,
     selected: usize,
@@ -66,6 +68,7 @@ pub struct Dashboard {
     primary_marker: String,
     extent_marker: String,
     last_list_area: Rect,
+    time_format: TimeFormatter,
 }
 
 #[derive(Debug, Clone)]
@@ -78,6 +81,7 @@ pub struct DashboardConfig {
     pub theme: ResolvedTheme,
     pub primary_marker: String,
     pub extent_marker: String,
+    pub time_format: TimeFormatter,
 }
 
 struct RenderLineContext<'a> {
@@ -87,16 +91,24 @@ struct RenderLineContext<'a> {
     range_marker: Option<RangeMarker>,
     marker_width: usize,
     theme: &'a ResolvedTheme,
-    head_meta: Option<&'a (String, String)>,
+    head_meta: Option<&'a HeadMeta>,
+    time_format: &'a TimeFormatter,
+    now: i64,
+}
+
+#[derive(Debug, Clone)]
+struct HeadMeta {
+    author: String,
+    author_time: Option<i64>,
 }
 
 impl Dashboard {
     pub fn new(config: DashboardConfig) -> Self {
         let mut entries = Vec::new();
-        let head_meta = config
-            .commits
-            .first()
-            .map(|commit| (commit.author.clone(), commit.date.clone()));
+        let head_meta = config.commits.first().map(|commit| HeadMeta {
+            author: commit.author.clone(),
+            author_time: commit.author_time,
+        });
         entries.push(DashboardEntry {
             kind: EntryKind::WorkingTree {
                 files: config.working_files,
@@ -128,6 +140,7 @@ impl Dashboard {
             primary_marker: config.primary_marker,
             extent_marker: config.extent_marker,
             last_list_area: Rect::default(),
+            time_format: config.time_format,
         }
     }
 
@@ -587,6 +600,7 @@ impl Dashboard {
         });
 
         let start = self.scroll.min(rows.len());
+        let now = OffsetDateTime::now_utc().unix_timestamp();
         let end = (start + height).min(rows.len());
         for (row_idx, row) in rows.iter().enumerate().take(end).skip(start) {
             let DisplayRow::Entry {
@@ -612,6 +626,8 @@ impl Dashboard {
                 marker_width,
                 theme: &self.theme,
                 head_meta: self.head_meta.as_ref(),
+                time_format: &self.time_format,
+                now,
             });
             lines.push(line);
         }
@@ -672,7 +688,10 @@ impl DashboardEntry {
                 if ctx.detail {
                     let meta = ctx
                         .head_meta
-                        .map(|(author, date)| format!("{author} • {date}"))
+                        .map(|meta| {
+                            let date = ctx.time_format.format(meta.author_time, ctx.now);
+                            format!("{} {}", meta.author, date)
+                        })
                         .unwrap_or_else(|| "Working tree changes".to_string());
                     spans.push(Span::styled(
                         "  ",
@@ -702,7 +721,10 @@ impl DashboardEntry {
                 if ctx.detail {
                     let meta = ctx
                         .head_meta
-                        .map(|(author, date)| format!("{author} • {date}"))
+                        .map(|meta| {
+                            let date = ctx.time_format.format(meta.author_time, ctx.now);
+                            format!("{} {}", meta.author, date)
+                        })
                         .unwrap_or_else(|| "Staged changes".to_string());
                     spans.push(Span::styled(
                         "  ",
@@ -730,7 +752,8 @@ impl DashboardEntry {
             }
             EntryKind::Commit(commit) => {
                 if ctx.detail {
-                    let meta = format!("{} • {}", commit.author, commit.date);
+                    let date = ctx.time_format.format(commit.author_time, ctx.now);
+                    let meta = format!("{} {}", commit.author, date);
                     spans.push(Span::styled(
                         "  ",
                         Style::default().fg(ctx.theme.text_muted),
