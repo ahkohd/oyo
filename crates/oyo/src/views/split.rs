@@ -205,9 +205,10 @@ pub fn render_split(frame: &mut Frame, app: &mut App, area: Rect) {
     } else {
         app.ensure_active_visible_if_needed(visible_height);
     }
+    let show_extent = app.stepping && !app.multi_diff.current_navigator().state().is_at_start();
     app.multi_diff
         .current_navigator()
-        .set_show_hunk_extent_while_stepping(app.stepping);
+        .set_show_hunk_extent_while_stepping(show_extent);
     let view_lines = app
         .multi_diff
         .current_navigator()

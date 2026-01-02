@@ -56,6 +56,15 @@ fn count_occurrences(haystack: &str, needle: &str) -> usize {
     haystack.match_indices(needle).count()
 }
 
+fn column_contains(buf: &Buffer, x: u16, needle: &str) -> bool {
+    for y in 0..buf.area.height {
+        if buf[(x, y)].symbol() == needle {
+            return true;
+        }
+    }
+    false
+}
+
 #[test]
 fn test_unified_modified_lifecycle_render() {
     let old = "line1\nOLDSIDE\nline3\n";
@@ -196,5 +205,35 @@ fn test_split_wrap_hunk_hint_overflow_places_above() {
     assert!(
         hint_idx < long_idx,
         "wrapped overflow should place hint above the hunk"
+    );
+}
+
+#[test]
+fn test_extent_markers_clear_at_start() {
+    let old = "line1\nOLD_A\nOLD_B\nline4\n";
+    let new = "line1\nNEW_A\nNEW_B\nline4\n";
+    let mut app = make_app(old, new, ViewMode::UnifiedPane);
+    app.extent_marker = "E".to_string();
+
+    let before_buf = render_buffer(&mut app, 80, 10);
+    assert!(
+        !column_contains(&before_buf, 0, "E"),
+        "extent markers should be hidden at step 0"
+    );
+
+    app.next_hunk();
+    let in_hunk_buf = render_buffer(&mut app, 80, 10);
+    assert!(
+        column_contains(&in_hunk_buf, 0, "E"),
+        "extent markers should show inside a hunk"
+    );
+
+    app.prev_step();
+    app.multi_diff.current_navigator().clear_active_change();
+    app.animation_phase = AnimationPhase::Idle;
+    let after_buf = render_buffer(&mut app, 80, 10);
+    assert!(
+        !column_contains(&after_buf, 0, "E"),
+        "extent markers should clear after hunk-out"
     );
 }

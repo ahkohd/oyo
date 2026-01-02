@@ -42,9 +42,10 @@ pub fn render_blame(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 
     let animation_frame = app.animation_frame();
+    let show_extent = app.stepping && !app.multi_diff.current_navigator().state().is_at_start();
     app.multi_diff
         .current_navigator()
-        .set_show_hunk_extent_while_stepping(app.stepping);
+        .set_show_hunk_extent_while_stepping(show_extent);
     let view_lines = app
         .multi_diff
         .current_navigator()
