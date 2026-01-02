@@ -1,7 +1,7 @@
 use crate::app::{App, BlameDisplay};
 use crate::views::{expand_tabs_in_spans, wrap_count_for_spans, TAB_WIDTH};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
@@ -223,7 +223,12 @@ pub fn render_blame(frame: &mut Frame, app: &mut App, area: Rect) {
         let line_visible = visible_flags[idx];
         let bar_span = match bar_colors.get(idx).copied().flatten() {
             Some(color) => Span::styled(BLAME_BAR, Style::default().fg(color)),
-            None => Span::raw(" "),
+            None => Span::styled(
+                BLAME_BAR,
+                Style::default()
+                    .fg(app.theme.text_muted)
+                    .add_modifier(Modifier::DIM),
+            ),
         };
         let text_style = Style::default().fg(app.theme.text_muted);
         if line_visible {
