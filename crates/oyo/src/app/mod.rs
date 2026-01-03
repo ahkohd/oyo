@@ -18,6 +18,7 @@ mod blame;
 mod file_panel;
 mod files;
 mod navigation;
+mod palette;
 mod playback;
 mod search;
 mod syntax;
@@ -60,6 +61,8 @@ pub struct App {
     files_visited: Vec<bool>,
     /// Whether to quit
     pub should_quit: bool,
+    /// Whether to open the commit picker dashboard
+    pub open_dashboard: bool,
     /// Current animation phase
     pub animation_phase: AnimationPhase,
     /// Animation progress (0.0 to 1.0)
@@ -254,6 +257,34 @@ pub struct App {
     search_query: String,
     /// True when search input is active
     search_active: bool,
+    /// Command palette query
+    command_palette_query: String,
+    /// True when command palette is active
+    command_palette_active: bool,
+    /// Selected command palette entry
+    command_palette_selection: usize,
+    /// Command palette list area (x, y, width, height)
+    command_palette_list_area: Option<(u16, u16, u16, u16)>,
+    /// Command palette list start index
+    command_palette_list_start: usize,
+    /// Command palette visible list count
+    command_palette_list_count: usize,
+    /// Command palette list item height (rows per item)
+    command_palette_item_height: u16,
+    /// Quick file search query
+    file_search_query: String,
+    /// True when quick file search is active
+    file_search_active: bool,
+    /// Selected quick file search entry
+    file_search_selection: usize,
+    /// Quick file search list area (x, y, width, height)
+    file_search_list_area: Option<(u16, u16, u16, u16)>,
+    /// Quick file search list start index
+    file_search_list_start: usize,
+    /// Quick file search visible list count
+    file_search_list_count: usize,
+    /// Quick file search list item height (rows per item)
+    file_search_item_height: u16,
     /// Last matched display index for search navigation
     search_last_target: Option<usize>,
     /// Pending scroll to a search target
@@ -303,6 +334,7 @@ impl App {
             no_step_visited: vec![false; file_count],
             files_visited: vec![false; file_count],
             should_quit: false,
+            open_dashboard: false,
             animation_phase: AnimationPhase::Idle,
             animation_progress: 1.0,
             last_animation_tick: Instant::now(),
@@ -401,6 +433,20 @@ impl App {
             step_view_mode: view_mode,
             search_query: String::new(),
             search_active: false,
+            command_palette_query: String::new(),
+            command_palette_active: false,
+            command_palette_selection: 0,
+            command_palette_list_area: None,
+            command_palette_list_start: 0,
+            command_palette_list_count: 0,
+            command_palette_item_height: 1,
+            file_search_query: String::new(),
+            file_search_active: false,
+            file_search_selection: 0,
+            file_search_list_area: None,
+            file_search_list_start: 0,
+            file_search_list_count: 0,
+            file_search_item_height: 1,
             search_last_target: None,
             needs_scroll_to_search: false,
             search_target: None,

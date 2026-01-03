@@ -1652,6 +1652,28 @@ impl App {
         }
     }
 
+    pub fn set_view_mode(&mut self, target: ViewMode) {
+        if target == ViewMode::Blame && !self.blame_enabled {
+            return;
+        }
+        if target == ViewMode::Evolution && !self.stepping {
+            self.step_view_mode = ViewMode::Evolution;
+            self.toggle_stepping();
+            return;
+        }
+
+        if !self.stepping {
+            self.view_mode = match target {
+                ViewMode::Evolution => ViewMode::UnifiedPane,
+                other => other,
+            };
+            self.step_view_mode = self.view_mode;
+            return;
+        }
+
+        self.view_mode = target;
+    }
+
     pub fn toggle_view_mode_reverse(&mut self) {
         let allow_blame = self.blame_enabled;
         if !self.stepping {

@@ -267,10 +267,14 @@ impl App {
     }
 
     pub fn filtered_file_indices(&self) -> Vec<usize> {
-        if self.file_filter.is_empty() {
+        self.file_indices_for_query(&self.file_filter)
+    }
+
+    pub(super) fn file_indices_for_query(&self, query: &str) -> Vec<usize> {
+        if query.is_empty() {
             return (0..self.multi_diff.files.len()).collect();
         }
-        let query = self.file_filter.to_ascii_lowercase();
+        let query = query.to_ascii_lowercase();
         self.multi_diff
             .files
             .iter()

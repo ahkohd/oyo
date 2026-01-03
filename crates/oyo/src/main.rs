@@ -156,6 +156,12 @@ enum InputMode {
     None,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AppExit {
+    Quit,
+    OpenDashboard,
+}
+
 /// Detect if we're being called as a git external diff tool
 /// Git calls: oy path old-file old-hex old-mode new-file new-hex new-mode
 fn detect_input_mode(paths: &[PathBuf]) -> InputMode {
@@ -553,64 +559,9 @@ fn main() -> Result<()> {
     };
 
     if let Some(limit) = view_limit {
-        let cwd = std::env::current_dir().unwrap_or_default();
-        if !oyo_core::git::is_git_repo(&cwd) {
-            anyhow::bail!("Not in a git repository.");
-        }
-
-        let repo_root =
-            oyo_core::git::get_repo_root(&cwd).context("Failed to get git repository root")?;
-        let branch = oyo_core::git::get_current_branch(&repo_root).ok();
-        let commits = oyo_core::git::get_recent_commits(&repo_root, limit)
-            .context("Failed to get commits")?;
-        let working_changes = oyo_core::git::get_uncommitted_changes(&repo_root)
-            .context("Failed to get uncommitted changes")?;
-        let staged_changes = oyo_core::git::get_staged_changes(&repo_root)
-            .context("Failed to get staged changes")?;
-
-        let theme = config.ui.theme.resolve(light_mode);
-        let time_format = TimeFormatter::new(&config.ui.time);
-        let mut dashboard = Dashboard::new(DashboardConfig {
-            repo_root: repo_root.clone(),
-            branch: branch.clone(),
-            commits,
-            working_files: working_changes.len(),
-            staged_files: staged_changes.len(),
-            theme,
-            primary_marker: config.ui.primary_marker.clone(),
-            extent_marker: config.ui.extent_marker.clone(),
-            time_format,
-        });
-
         let mut terminal = setup_terminal()?;
-        let selection = run_dashboard(&mut terminal, &mut dashboard)?;
-        if selection.is_none() {
-            disable_raw_mode()?;
-            execute!(
-                terminal.backend_mut(),
-                LeaveAlternateScreen,
-                DisableMouseCapture
-            )?;
-            terminal.show_cursor()?;
-            return Ok(());
-        }
-
-        let input_mode = match selection.unwrap() {
-            DashboardSelection::Uncommitted => InputMode::GitUncommitted,
-            DashboardSelection::Staged => InputMode::GitStaged,
-            DashboardSelection::Range { from, to } => InputMode::GitRange { from, to },
-        };
-
-        let empty_message = match &input_mode {
-            InputMode::GitUncommitted => Some("No uncommitted changes found.".to_string()),
-            InputMode::GitStaged => Some("No staged changes found.".to_string()),
-            InputMode::GitRange { from, to } => {
-                Some(format!("No changes in range {}..{}.", from, to))
-            }
-            _ => Some("No changes found.".to_string()),
-        };
-        let (multi_diff, git_branch) = match build_diff_from_input_mode(input_mode)? {
-            Some(result) => result,
+        let mut input_mode = match run_commit_picker(&mut terminal, &config, light_mode, limit)? {
+            Some(mode) => mode,
             None => {
                 disable_raw_mode()?;
                 execute!(
@@ -619,38 +570,58 @@ fn main() -> Result<()> {
                     DisableMouseCapture
                 )?;
                 terminal.show_cursor()?;
-                if let Some(message) = empty_message {
-                    println!("{message}");
-                }
                 return Ok(());
             }
         };
 
-        if multi_diff.file_count() == 0 {
-            disable_raw_mode()?;
-            execute!(
-                terminal.backend_mut(),
-                LeaveAlternateScreen,
-                DisableMouseCapture
-            )?;
-            terminal.show_cursor()?;
-            println!("No changes found.");
-            return Ok(());
+        loop {
+            let empty_message = match &input_mode {
+                InputMode::GitUncommitted => Some("No uncommitted changes found.".to_string()),
+                InputMode::GitStaged => Some("No staged changes found.".to_string()),
+                InputMode::GitRange { from, to } => {
+                    Some(format!("No changes in range {}..{}.", from, to))
+                }
+                _ => Some("No changes found.".to_string()),
+            };
+            let (multi_diff, git_branch) = match build_diff_from_input_mode(input_mode)? {
+                Some(result) => result,
+                None => {
+                    if let Some(message) = empty_message {
+                        println!("{message}");
+                    }
+                    break;
+                }
+            };
+
+            if multi_diff.file_count() == 0 {
+                println!("No changes found.");
+                break;
+            }
+
+            let view_mode: ViewMode = args.view.into();
+            let view_mode = config.parse_view_mode().unwrap_or(view_mode);
+            let speed = if args.speed != 200 {
+                args.speed
+            } else {
+                config.playback.speed
+            };
+            let autoplay = args.autoplay || config.playback.autoplay;
+
+            let mut app = App::new(multi_diff, view_mode, speed, autoplay, git_branch);
+            apply_config_to_app(&mut app, &config, &args, light_mode);
+
+            let exit = run_app(&mut terminal, &mut app)?;
+            match exit {
+                AppExit::Quit => break,
+                AppExit::OpenDashboard => {
+                    let Some(mode) = run_commit_picker(&mut terminal, &config, light_mode, limit)?
+                    else {
+                        break;
+                    };
+                    input_mode = mode;
+                }
+            }
         }
-
-        let view_mode: ViewMode = args.view.into();
-        let view_mode = config.parse_view_mode().unwrap_or(view_mode);
-        let speed = if args.speed != 200 {
-            args.speed
-        } else {
-            config.playback.speed
-        };
-        let autoplay = args.autoplay || config.playback.autoplay;
-
-        let mut app = App::new(multi_diff, view_mode, speed, autoplay, git_branch);
-        apply_config_to_app(&mut app, &config, &args, light_mode);
-
-        let result = run_app(&mut terminal, &mut app);
 
         disable_raw_mode()?;
         execute!(
@@ -659,15 +630,10 @@ fn main() -> Result<()> {
             DisableMouseCapture
         )?;
         terminal.show_cursor()?;
-
-        if let Err(err) = result {
-            eprintln!("Error: {}", err);
-            return Err(err);
-        }
         return Ok(());
     }
 
-    let input_mode = if args.paths.len() == 7 {
+    let mut input_mode = if args.paths.len() == 7 {
         detect_input_mode(&args.paths)
     } else if args.staged || args.range.is_some() {
         if !args.paths.is_empty() {
@@ -686,96 +652,59 @@ fn main() -> Result<()> {
         detect_input_mode(&args.paths)
     };
 
-    let empty_message = match &input_mode {
-        InputMode::GitUncommitted => Some("No uncommitted changes found.".to_string()),
-        InputMode::GitStaged => Some("No staged changes found.".to_string()),
-        InputMode::GitRange { from, to } => Some(format!("No changes in range {}..{}.", from, to)),
-        _ => Some("No changes found.".to_string()),
-    };
-    let (multi_diff, git_branch) = match build_diff_from_input_mode(input_mode)? {
-        Some(result) => result,
-        None => {
-            if let Some(message) = empty_message {
-                println!("{message}");
-            }
-            return Ok(());
-        }
-    };
+    let mut terminal = setup_terminal()?;
+    let dashboard_limit = view_limit.unwrap_or(200);
 
-    if multi_diff.file_count() == 0 {
-        println!("No changes found.");
-        return Ok(());
+    loop {
+        let empty_message = match &input_mode {
+            InputMode::GitUncommitted => Some("No uncommitted changes found.".to_string()),
+            InputMode::GitStaged => Some("No staged changes found.".to_string()),
+            InputMode::GitRange { from, to } => {
+                Some(format!("No changes in range {}..{}.", from, to))
+            }
+            _ => Some("No changes found.".to_string()),
+        };
+        let (multi_diff, git_branch) = match build_diff_from_input_mode(input_mode)? {
+            Some(result) => result,
+            None => {
+                if let Some(message) = empty_message {
+                    println!("{message}");
+                }
+                break;
+            }
+        };
+
+        if multi_diff.file_count() == 0 {
+            println!("No changes found.");
+            break;
+        }
+
+        let view_mode: ViewMode = args.view.into();
+        let view_mode = config.parse_view_mode().unwrap_or(view_mode);
+        let speed = if args.speed != 200 {
+            args.speed
+        } else {
+            config.playback.speed
+        };
+        let autoplay = args.autoplay || config.playback.autoplay;
+
+        let mut app = App::new(multi_diff, view_mode, speed, autoplay, git_branch);
+        apply_config_to_app(&mut app, &config, &args, light_mode);
+
+        let exit = run_app(&mut terminal, &mut app)?;
+        match exit {
+            AppExit::Quit => break,
+            AppExit::OpenDashboard => {
+                let Some(mode) =
+                    run_commit_picker(&mut terminal, &config, light_mode, dashboard_limit)?
+                else {
+                    break;
+                };
+                input_mode = mode;
+            }
+        }
     }
 
-    // Setup terminal
-    let mut terminal = setup_terminal()?;
-
-    // Determine view mode (CLI overrides config)
-    let view_mode: ViewMode = args.view.into();
-    let view_mode = config.parse_view_mode().unwrap_or(view_mode);
-
-    // Determine speed (CLI default is 200, config can override)
-    let speed = if args.speed != 200 {
-        args.speed
-    } else {
-        config.playback.speed
-    };
-
-    // Autoplay: CLI flag or config
-    let autoplay = args.autoplay || config.playback.autoplay;
-
-    // Create app
-    let mut app = App::new(multi_diff, view_mode, speed, autoplay, git_branch);
-
-    // Apply additional config settings
-    app.zen_mode = config.ui.zen;
-    app.animation_enabled = config.playback.animation;
-    app.animation_duration = config.playback.animation_duration;
-    app.file_panel_visible = config.files.panel_visible;
-    app.file_panel_width = config.files.panel_width;
-    app.file_count_mode = config.files.counts;
-    app.auto_center = config.ui.auto_center;
-    app.topbar = config.ui.topbar;
-    app.line_wrap = config.ui.line_wrap;
-    app.scrollbar_visible = config.ui.scrollbar;
-    app.strikethrough_deletions = config.ui.strikethrough_deletions;
-    app.gutter_signs = config.ui.gutter_signs;
-    app.diff_bg = config.ui.diff.bg;
-    app.diff_fg = config.ui.diff.fg;
-    app.diff_highlight = config.ui.diff.highlight;
-    app.diff_extent_marker = config.ui.diff.extent_marker;
-    app.diff_extent_marker_scope = config.ui.diff.extent_marker_scope;
-    app.blame_enabled = config.ui.blame.enabled;
-    app.blame_mode = config.ui.blame.mode;
-    app.syntax_mode = config.ui.syntax.mode;
-    app.syntax_theme = config.ui.syntax.theme.clone();
-    app.unified_modified_step_mode = config.ui.unified.modified_step_mode;
-    app.split_align_lines = config.ui.split.align_lines;
-    app.split_align_fill = config.ui.split.align_fill.clone();
-    app.evo_syntax = config.ui.evo.syntax;
-    app.auto_step_on_enter = config.playback.auto_step_on_enter;
-    app.auto_step_blank_files = config.playback.auto_step_blank_files;
-    app.hunk_wrap = config.navigation.wrap.hunk;
-    app.step_wrap = config.navigation.wrap.step;
-    app.primary_marker = config.ui.primary_marker.clone();
-    app.primary_marker_right = config
-        .ui
-        .primary_marker_right
-        .clone()
-        .unwrap_or_else(|| "◀".to_string());
-    app.extent_marker = config.ui.extent_marker.clone();
-    app.extent_marker_right = config
-        .ui
-        .extent_marker_right
-        .clone()
-        .unwrap_or_else(|| "▐".to_string());
-
-    apply_config_to_app(&mut app, &config, &args, light_mode);
-
-    // Run event loop
-    let result = run_app(&mut terminal, &mut app);
-
-    // Restore terminal
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
@@ -784,15 +713,10 @@ fn main() -> Result<()> {
     )?;
     terminal.show_cursor()?;
 
-    if let Err(err) = result {
-        eprintln!("Error: {}", err);
-        return Err(err);
-    }
-
     Ok(())
 }
 
-fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<()> {
+fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<AppExit> {
     let tick_rate = Duration::from_millis(16);
 
     loop {
@@ -811,6 +735,36 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<()> 
                         continue;
                     }
                     app.reset_count();
+                    if app.command_palette_active() {
+                        match me.kind {
+                            MouseEventKind::ScrollUp => {
+                                app.move_command_palette_selection(-1);
+                            }
+                            MouseEventKind::ScrollDown => {
+                                app.move_command_palette_selection(1);
+                            }
+                            MouseEventKind::Down(MouseButton::Left) => {
+                                app.handle_command_palette_click(me.column, me.row);
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
+                    if app.file_search_active() {
+                        match me.kind {
+                            MouseEventKind::ScrollUp => {
+                                app.move_file_search_selection(-1);
+                            }
+                            MouseEventKind::ScrollDown => {
+                                app.move_file_search_selection(1);
+                            }
+                            MouseEventKind::Down(MouseButton::Left) => {
+                                app.handle_file_search_click(me.column, me.row);
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
                     match me.kind {
                         MouseEventKind::Down(MouseButton::Left) => {
                             if app.start_file_panel_resize(me.column, me.row) {
@@ -867,6 +821,100 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<()> 
                         }
                         continue;
                     }
+                    let is_ctrl_p = key.modifiers.contains(KeyModifiers::CONTROL)
+                        && matches!(key.code, KeyCode::Char('p') | KeyCode::Char('P'));
+                    let is_ctrl_shift_p = key.modifiers.contains(KeyModifiers::CONTROL)
+                        && key.modifiers.contains(KeyModifiers::SHIFT)
+                        && matches!(key.code, KeyCode::Char('p') | KeyCode::Char('P'));
+
+                    if is_ctrl_shift_p {
+                        if app.file_search_active() {
+                            app.stop_file_search();
+                        } else {
+                            app.start_file_search();
+                        }
+                        continue;
+                    }
+
+                    if is_ctrl_p {
+                        if app.command_palette_active() {
+                            app.stop_command_palette();
+                        } else {
+                            app.start_command_palette();
+                        }
+                        continue;
+                    }
+
+                    if app.command_palette_active() {
+                        match key.code {
+                            KeyCode::Esc => {
+                                app.stop_command_palette();
+                            }
+                            KeyCode::Enter => {
+                                app.apply_command_palette_selection();
+                            }
+                            KeyCode::Backspace => {
+                                if app.command_palette_query().is_empty() {
+                                    app.stop_command_palette();
+                                } else {
+                                    app.pop_command_palette_char();
+                                }
+                            }
+                            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                app.clear_command_palette_text();
+                            }
+                            KeyCode::Down => {
+                                app.move_command_palette_selection(1);
+                            }
+                            KeyCode::Up => {
+                                app.move_command_palette_selection(-1);
+                            }
+                            KeyCode::Char(c)
+                                if !key.modifiers.contains(KeyModifiers::CONTROL)
+                                    && !key.modifiers.contains(KeyModifiers::ALT) =>
+                            {
+                                app.push_command_palette_char(c);
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
+
+                    if app.file_search_active() {
+                        match key.code {
+                            KeyCode::Esc => {
+                                app.stop_file_search();
+                            }
+                            KeyCode::Enter => {
+                                app.apply_file_search_selection();
+                            }
+                            KeyCode::Backspace => {
+                                if app.file_search_query().is_empty() {
+                                    app.stop_file_search();
+                                } else {
+                                    app.pop_file_search_char();
+                                }
+                            }
+                            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                app.clear_file_search_text();
+                            }
+                            KeyCode::Down => {
+                                app.move_file_search_selection(1);
+                            }
+                            KeyCode::Up => {
+                                app.move_file_search_selection(-1);
+                            }
+                            KeyCode::Char(c)
+                                if !key.modifiers.contains(KeyModifiers::CONTROL)
+                                    && !key.modifiers.contains(KeyModifiers::ALT) =>
+                            {
+                                app.push_file_search_char(c);
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
+
                     if app.file_filter_active {
                         match key.code {
                             KeyCode::Esc | KeyCode::Enter => {
@@ -1007,7 +1055,7 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<()> 
                             } else if app.show_path_popup {
                                 app.show_path_popup = false;
                             } else {
-                                return Ok(());
+                                return Ok(AppExit::Quit);
                             }
                         }
                         // Step navigation (supports count)
@@ -1348,8 +1396,12 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<()> 
         // Handle autoplay
         app.tick();
 
+        if app.open_dashboard {
+            app.open_dashboard = false;
+            return Ok(AppExit::OpenDashboard);
+        }
         if app.should_quit {
-            return Ok(());
+            return Ok(AppExit::Quit);
         }
     }
 }
@@ -1469,4 +1521,50 @@ fn run_dashboard<B: Backend>(
             }
         }
     }
+}
+
+fn run_commit_picker<B: Backend>(
+    terminal: &mut Terminal<B>,
+    config: &config::Config,
+    light_mode: bool,
+    limit: usize,
+) -> Result<Option<InputMode>> {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    if !oyo_core::git::is_git_repo(&cwd) {
+        anyhow::bail!("Not in a git repository.");
+    }
+
+    let repo_root =
+        oyo_core::git::get_repo_root(&cwd).context("Failed to get git repository root")?;
+    let branch = oyo_core::git::get_current_branch(&repo_root).ok();
+    let commits =
+        oyo_core::git::get_recent_commits(&repo_root, limit).context("Failed to get commits")?;
+    let working_changes = oyo_core::git::get_uncommitted_changes(&repo_root)
+        .context("Failed to get uncommitted changes")?;
+    let staged_changes =
+        oyo_core::git::get_staged_changes(&repo_root).context("Failed to get staged changes")?;
+
+    let theme = config.ui.theme.resolve(light_mode);
+    let time_format = TimeFormatter::new(&config.ui.time);
+    let mut dashboard = Dashboard::new(DashboardConfig {
+        repo_root,
+        branch,
+        commits,
+        working_files: working_changes.len(),
+        staged_files: staged_changes.len(),
+        theme,
+        primary_marker: config.ui.primary_marker.clone(),
+        extent_marker: config.ui.extent_marker.clone(),
+        time_format,
+    });
+
+    let selection = run_dashboard(terminal, &mut dashboard)?;
+    let input_mode = match selection {
+        None => return Ok(None),
+        Some(DashboardSelection::Uncommitted) => InputMode::GitUncommitted,
+        Some(DashboardSelection::Staged) => InputMode::GitStaged,
+        Some(DashboardSelection::Range { from, to }) => InputMode::GitRange { from, to },
+    };
+
+    Ok(Some(input_mode))
 }

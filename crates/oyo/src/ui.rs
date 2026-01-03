@@ -5,12 +5,12 @@ use crate::color;
 use crate::views::{render_blame, render_evolution, render_split, render_unified_pane};
 use oyo_core::FileStatus;
 use ratatui::{
-    layout::{Alignment, Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Margin, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{
-        Block, Borders, Clear, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation,
-        ScrollbarState,
+        Block, Borders, Clear, List, ListItem, ListState, Paragraph, Scrollbar,
+        ScrollbarOrientation, ScrollbarState,
     },
     Frame,
 };
@@ -263,6 +263,14 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     // Draw file path popup if active
     if app.show_path_popup {
         draw_path_popup(frame, app);
+    }
+
+    if app.command_palette_active() {
+        draw_command_palette_popover(frame, app);
+    }
+
+    if app.file_search_active() {
+        draw_file_search_popover(frame, app);
     }
 }
 
@@ -1088,6 +1096,8 @@ fn draw_help_popover(frame: &mut Frame, app: &mut App) {
         "Tab",
         "Z",
         "r",
+        "Ctrl+P",
+        "Ctrl+Shift+P",
     ];
     if app.is_multi_file() {
         help_keys.extend_from_slice(&["[ / ]", "f", "Enter", "j / k / ↑↓", "/", "r"]);
@@ -1249,6 +1259,8 @@ fn draw_help_popover(frame: &mut Frame, app: &mut App) {
     }
     push_help_line(&mut lines, "s", "Toggle stepping");
     push_help_line(&mut lines, "S", "Toggle strikethrough");
+    push_help_line(&mut lines, "Ctrl+P", "Command palette");
+    push_help_line(&mut lines, "Ctrl+Shift+P", "Quick file search");
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(" Playback", section_style)));
     push_help_line(&mut lines, "Space / B", "Autoplay forward/reverse");
@@ -1303,10 +1315,10 @@ fn draw_help_popover(frame: &mut Frame, app: &mut App) {
 
     let mut block = Block::default()
         .borders(Borders::ALL)
-        .title(" Help ")
-        .title_alignment(Alignment::Center)
+        .border_type(ratatui::widgets::BorderType::Rounded)
         .border_style(Style::default().fg(app.theme.border_active));
-    if let Some(bg) = app.theme.background_panel {
+    block = block.border_style(Style::default().fg(app.theme.border_active));
+    if let Some(bg) = app.theme.background {
         block = block.style(Style::default().bg(bg));
     }
 
@@ -1369,7 +1381,8 @@ fn draw_path_popup(frame: &mut Frame, app: &App) {
         .title(" File Path ")
         .title_alignment(Alignment::Center)
         .border_style(Style::default().fg(app.theme.border_active));
-    if let Some(bg) = app.theme.background_panel {
+    block = block.border_style(Style::default().fg(app.theme.border_active));
+    if let Some(bg) = app.theme.background {
         block = block.style(Style::default().bg(bg));
     }
 
@@ -1379,4 +1392,225 @@ fn draw_path_popup(frame: &mut Frame, app: &App) {
         .alignment(Alignment::Center);
 
     frame.render_widget(path_block, popup_area);
+}
+
+fn draw_command_palette_popover(frame: &mut Frame, app: &mut App) {
+    let area = frame.area();
+    let popup_width = 56u16.min(area.width.saturating_sub(4));
+    let max_height = (area.height / 2).saturating_sub(2).max(6);
+    let entries = app.command_palette_filtered_entries();
+    let selection = app.command_palette_selection();
+    let item_height = 1u16;
+    let overhead = 6u16;
+    let max_list_height = max_height.saturating_sub(overhead).max(1) as usize;
+    let list_height = entries.len().max(1).min(max_list_height);
+    let popup_height = (list_height as u16)
+        .saturating_add(overhead)
+        .min(max_height);
+
+    let popup_x = (area.width.saturating_sub(popup_width)) / 2;
+    let desired_y = area.height / 4;
+    let max_y = area.height.saturating_sub(popup_height);
+    let popup_y = desired_y.min(max_y);
+    let popup_area = Rect::new(popup_x, popup_y, popup_width, popup_height);
+
+    frame.render_widget(Clear, popup_area);
+    let mut block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded);
+    block = block.border_style(Style::default().fg(app.theme.border_active));
+    if let Some(bg) = app.theme.background {
+        block = block.style(Style::default().bg(bg));
+    }
+    frame.render_widget(block.clone(), popup_area);
+    let inner = block.inner(popup_area);
+    let padded = inner.inner(Margin {
+        vertical: 1,
+        horizontal: 1,
+    });
+    let content = if padded.width > 0 && padded.height > 0 {
+        padded
+    } else {
+        inner
+    };
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(2), Constraint::Min(1)])
+        .split(content);
+
+    let query = app.command_palette_query();
+    let placeholder = "Search for commands...";
+    let (query_text, query_style) = if query.is_empty() {
+        (placeholder, Style::default().fg(app.theme.text_muted))
+    } else {
+        (query, Style::default().fg(app.theme.text))
+    };
+    let input_line = Line::from(vec![
+        Span::styled("› ", Style::default().fg(app.theme.primary)),
+        Span::styled(query_text, query_style),
+    ]);
+    frame.render_widget(
+        Paragraph::new(vec![input_line]).alignment(Alignment::Left),
+        chunks[0],
+    );
+
+    if entries.is_empty() {
+        app.set_command_palette_list_area(None, 0, 0, 1);
+        let line = Line::from(Span::styled(
+            "No results",
+            Style::default().fg(app.theme.text_muted),
+        ));
+        frame.render_widget(
+            Paragraph::new(vec![line]).alignment(Alignment::Center),
+            chunks[1],
+        );
+        return;
+    }
+
+    let mut start = 0usize;
+    if selection >= list_height {
+        start = selection + 1 - list_height;
+    }
+    let end = (start + list_height).min(entries.len());
+    let visible = &entries[start..end];
+    let list_width = chunks[1].width.saturating_sub(2) as usize;
+    app.set_command_palette_list_area(
+        Some((chunks[1].x, chunks[1].y, chunks[1].width, chunks[1].height)),
+        start,
+        visible.len(),
+        item_height,
+    );
+
+    let items: Vec<ListItem> = visible
+        .iter()
+        .map(|entry| {
+            let label = truncate_text(&entry.label, list_width);
+            ListItem::new(Line::from(Span::styled(
+                label,
+                Style::default().fg(app.theme.text),
+            )))
+        })
+        .collect();
+
+    let mut state = ListState::default();
+    let selection_in_view = selection.saturating_sub(start);
+    state.select(Some(selection_in_view.min(visible.len().saturating_sub(1))));
+    let mut highlight_style = Style::default().fg(app.theme.accent);
+    if let Some(bg) = app.theme.background_element.or(app.theme.background_panel) {
+        highlight_style = highlight_style.bg(bg);
+    }
+    let list = List::new(items).highlight_style(highlight_style);
+    frame.render_stateful_widget(list, chunks[1], &mut state);
+}
+
+fn draw_file_search_popover(frame: &mut Frame, app: &mut App) {
+    let area = frame.area();
+    let popup_width = 60u16.min(area.width.saturating_sub(4));
+    let max_height = (area.height / 2).saturating_sub(2).max(6);
+    let indices = app.file_search_filtered_indices();
+    let selection = app.file_search_selection();
+    let item_height = 1u16;
+    let overhead = 6u16;
+    let max_list_height = max_height.saturating_sub(overhead).max(1) as usize;
+    let list_height = indices.len().max(1).min(max_list_height);
+    let popup_height = (list_height as u16)
+        .saturating_add(overhead)
+        .min(max_height);
+
+    let popup_x = (area.width.saturating_sub(popup_width)) / 2;
+    let desired_y = area.height / 4;
+    let max_y = area.height.saturating_sub(popup_height);
+    let popup_y = desired_y.min(max_y);
+    let popup_area = Rect::new(popup_x, popup_y, popup_width, popup_height);
+
+    frame.render_widget(Clear, popup_area);
+    let mut block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded);
+    block = block.border_style(Style::default().fg(app.theme.border_active));
+    if let Some(bg) = app.theme.background {
+        block = block.style(Style::default().bg(bg));
+    }
+    frame.render_widget(block.clone(), popup_area);
+    let inner = block.inner(popup_area);
+    let padded = inner.inner(Margin {
+        vertical: 1,
+        horizontal: 1,
+    });
+    let content = if padded.width > 0 && padded.height > 0 {
+        padded
+    } else {
+        inner
+    };
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(2), Constraint::Min(1)])
+        .split(content);
+
+    let query = app.file_search_query();
+    let placeholder = "Search for files...";
+    let (query_text, query_style) = if query.is_empty() {
+        (placeholder, Style::default().fg(app.theme.text_muted))
+    } else {
+        (query, Style::default().fg(app.theme.text))
+    };
+    let input_line = Line::from(vec![
+        Span::styled("› ", Style::default().fg(app.theme.primary)),
+        Span::styled(query_text, query_style),
+    ]);
+    frame.render_widget(
+        Paragraph::new(vec![input_line]).alignment(Alignment::Left),
+        chunks[0],
+    );
+
+    if indices.is_empty() {
+        app.set_file_search_list_area(None, 0, 0, 1);
+        let line = Line::from(Span::styled(
+            "No results",
+            Style::default().fg(app.theme.text_muted),
+        ));
+        frame.render_widget(
+            Paragraph::new(vec![line]).alignment(Alignment::Center),
+            chunks[1],
+        );
+        return;
+    }
+
+    let mut start = 0usize;
+    if selection >= list_height {
+        start = selection + 1 - list_height;
+    }
+    let end = (start + list_height).min(indices.len());
+    let visible = &indices[start..end];
+    let list_width = chunks[1].width.saturating_sub(2) as usize;
+    app.set_file_search_list_area(
+        Some((chunks[1].x, chunks[1].y, chunks[1].width, chunks[1].height)),
+        start,
+        visible.len(),
+        item_height,
+    );
+
+    let items: Vec<ListItem> = visible
+        .iter()
+        .map(|idx| {
+            let name = app.multi_diff.files[*idx].display_name.clone();
+            let label = truncate_path(&name, list_width);
+            ListItem::new(Line::from(Span::styled(
+                label,
+                Style::default().fg(app.theme.text),
+            )))
+        })
+        .collect();
+
+    let mut state = ListState::default();
+    let selection_in_view = selection.saturating_sub(start);
+    state.select(Some(selection_in_view.min(visible.len().saturating_sub(1))));
+    let mut highlight_style = Style::default().fg(app.theme.accent);
+    if let Some(bg) = app.theme.background_element.or(app.theme.background_panel) {
+        highlight_style = highlight_style.bg(bg);
+    }
+    let list = List::new(items).highlight_style(highlight_style);
+    frame.render_stateful_widget(list, chunks[1], &mut state);
 }
