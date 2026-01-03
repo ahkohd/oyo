@@ -26,6 +26,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    outputs:
+      version: ${{ steps.version.outputs.new }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -84,13 +86,6 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
-      - name: Create GitHub Release
-        if: ${{ !inputs.dry_run }}
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: v${{ steps.version.outputs.new }}
-          generate_release_notes: true
-
       - name: Dry run summary
         if: ${{ inputs.dry_run }}
         run: |
@@ -101,3 +96,127 @@ jobs:
           echo "- Would publish oyo-core and oyo to crates.io" >> $GITHUB_STEP_SUMMARY
           cargo publish -p oyo-core --dry-run --allow-dirty
           cargo publish -p oyo --dry-run --allow-dirty
+
+  build:
+    name: Build (${{ matrix.target }})
+    needs: release
+    if: ${{ !inputs.dry_run }}
+    strategy:
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-14
+          - target: x86_64-apple-darwin
+            os: macos-13
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: v${{ needs.release.outputs.version }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar -czvf ../../../oy-${{ matrix.target }}.tar.gz oy
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: oy-${{ matrix.target }}
+          path: oy-${{ matrix.target }}.tar.gz
+
+  publish:
+    name: Publish Release
+    needs: [release, build]
+    if: ${{ !inputs.dry_run }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.release.outputs.version }}
+          generate_release_notes: true
+          files: artifacts/*
+
+  update-homebrew:
+    name: Update Homebrew Tap
+    needs: [release, publish]
+    if: ${{ !inputs.dry_run }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Compute SHA256
+        id: sha
+        run: |
+          echo "aarch64=$(shasum -a 256 artifacts/oy-aarch64-apple-darwin.tar.gz | cut -d' ' -f1)" >> $GITHUB_OUTPUT
+          echo "x86_64=$(shasum -a 256 artifacts/oy-x86_64-apple-darwin.tar.gz | cut -d' ' -f1)" >> $GITHUB_OUTPUT
+
+      - name: Update formula
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_OYO_TAP_TOKEN }}
+        run: |
+          VERSION="${{ needs.release.outputs.version }}"
+          SHA_ARM64="${{ steps.sha.outputs.aarch64 }}"
+          SHA_X86="${{ steps.sha.outputs.x86_64 }}"
+
+          git clone https://x-access-token:${GH_TOKEN}@github.com/ahkohd/homebrew-oyo.git
+          cd homebrew-oyo
+
+          mkdir -p Formula
+          cat > Formula/oy.rb << 'FORMULA'
+          class Oy < Formula
+            desc "Step-through diff viewer for the terminal"
+            homepage "https://github.com/ahkohd/oyo"
+            version "VERSION_PLACEHOLDER"
+            license "MIT"
+
+            on_macos do
+              on_arm do
+                url "https://github.com/ahkohd/oyo/releases/download/vVERSION_PLACEHOLDER/oy-aarch64-apple-darwin.tar.gz"
+                sha256 "SHA_ARM64_PLACEHOLDER"
+              end
+              on_intel do
+                url "https://github.com/ahkohd/oyo/releases/download/vVERSION_PLACEHOLDER/oy-x86_64-apple-darwin.tar.gz"
+                sha256 "SHA_X86_PLACEHOLDER"
+              end
+            end
+
+            def install
+              bin.install "oy"
+            end
+
+            test do
+              system "#{bin}/oy", "--version"
+            end
+          end
+          FORMULA
+
+          sed -i "s/VERSION_PLACEHOLDER/${VERSION}/g" Formula/oy.rb
+          sed -i "s/SHA_ARM64_PLACEHOLDER/${SHA_ARM64}/g" Formula/oy.rb
+          sed -i "s/SHA_X86_PLACEHOLDER/${SHA_X86}/g" Formula/oy.rb
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/oy.rb
+          git commit -m "oy ${VERSION}"
+          git push

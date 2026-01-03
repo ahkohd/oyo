@@ -65,7 +65,13 @@ oyo does **not** replace classic diffs, it adds a new way to review them.
 
 ## Installation
 
-### CLI (Cargo)
+### Homebrew (macOS)
+
+```bash
+brew install ahkohd/oyo/oy
+```
+
+### Cargo
 
 ```bash
 cargo install oyo
