@@ -55,7 +55,7 @@ oyo does **not** replace classic diffs, it adds a new way to review them.
 - **Search**: Regex search with to jump between matches
 - **Syntax highlighting**: Toggle on/off for code-aware coloring (auto-enabled in no-step mode)
 - **Blame hints**: One-shot or toggle blame previews while stepping (opt-in)
-- **Command palette + quick file search**: Search for commands and files without leaving the diff
+- **Command palette**: Search for commands and files without leaving the diff
 - **Line wrap**: Toggle wrapping for long lines
 - **Animated transitions**: Smooth fade in/out animations as changes are applied
 - **Playback**: Automatically step through all changes at a configurable speed
