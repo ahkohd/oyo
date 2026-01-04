@@ -73,7 +73,7 @@ pub(crate) fn boost_inline_bg(app: &App, base_bg: Option<Color>, accent: Color) 
 }
 
 pub(crate) fn pending_tail_text(count: usize) -> String {
-    format!("+{} More", count)
+    format!("… +{} steps", count)
 }
 
 pub(crate) fn diff_line_bg(kind: LineKind, theme: &ResolvedTheme) -> Option<Color> {
