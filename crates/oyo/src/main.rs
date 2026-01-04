@@ -1038,6 +1038,12 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<AppE
                         let is_blame_gb = matches!(key.code, KeyCode::Char('b'))
                             && !key.modifiers.contains(KeyModifiers::CONTROL)
                             && !key.modifiers.contains(KeyModifiers::ALT);
+                        let is_patch_line = matches!(key.code, KeyCode::Char('y'))
+                            && !key.modifiers.contains(KeyModifiers::CONTROL)
+                            && !key.modifiers.contains(KeyModifiers::ALT);
+                        let is_patch_hunk = matches!(key.code, KeyCode::Char('Y'))
+                            && !key.modifiers.contains(KeyModifiers::CONTROL)
+                            && !key.modifiers.contains(KeyModifiers::ALT);
                         if is_plain_g {
                             app.pending_g_prefix = false;
                             app.reset_count();
@@ -1050,6 +1056,18 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<AppE
                             if app.blame_enabled {
                                 app.trigger_blame_hint();
                             }
+                            continue;
+                        }
+                        if is_patch_line {
+                            app.pending_g_prefix = false;
+                            app.reset_count();
+                            app.yank_current_change_patch();
+                            continue;
+                        }
+                        if is_patch_hunk {
+                            app.pending_g_prefix = false;
+                            app.reset_count();
+                            app.yank_current_hunk_patch();
                             continue;
                         }
                         app.pending_g_prefix = false;

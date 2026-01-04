@@ -57,7 +57,7 @@ oyo does **not** replace classic diffs, it adds a new way to review them.
 - **Blame hints**: One-shot or toggle blame previews while stepping (opt-in)
 - **Command palette**: Search for commands and files without leaving the diff
 - **Line wrap**: Toggle wrapping for long lines
-- **Context folding**: Collapse long unchanged blocks on demand
+- **Fold unchanged blocks**: Toggle to collapse long context sections
 - **Animated transitions**: Smooth fade in/out animations as changes are applied
 - **Playback**: Automatically step through all changes at a configurable speed
 - **Git integration**: Works as a git external diff tool or standalone
@@ -206,6 +206,7 @@ command = ["oy", "$left", "$right"]
 | `Ctrl+u` | Half page up |
 | `Ctrl+d` | Half page down |
 | `Ctrl+g` | Show full file path |
+| `gy` / `gY` | Copy patch for line/hunk |
 | `Ctrl+p` | Command palette |
 | `Ctrl+Shift+p` | Quick file search |
 | `z` | Center on active change |

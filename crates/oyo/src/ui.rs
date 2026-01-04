@@ -1239,6 +1239,7 @@ fn draw_help_popover(frame: &mut Frame, app: &mut App) {
     push_help_line(&mut lines, "p", "Peek change");
     push_help_line(&mut lines, "P", "Peek old hunk");
     push_help_line(&mut lines, "y / Y", "Yank line/hunk");
+    push_help_line(&mut lines, "g y / g Y", "Copy patch (line/hunk)");
     push_help_line(&mut lines, "/", "Search (diff pane)");
     push_help_line(&mut lines, "n / N", "Next/prev match");
     push_help_line(&mut lines, ":<line>", "Go to line");

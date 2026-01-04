@@ -7,7 +7,8 @@ use super::{
     PeekState, StepEdge, StepEdgeHint, ViewMode,
 };
 use crate::config::{HunkWrapMode, ModifiedStepMode, StepWrapMode};
-use oyo_core::{AnimationFrame, ChangeKind, LineKind, StepState, ViewLine};
+use oyo_core::{git::FileStatus, AnimationFrame, ChangeKind, LineKind, StepState, ViewLine};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 const STEP_EDGE_HINT_MS: u64 = 700;
@@ -147,6 +148,151 @@ impl App {
             return;
         }
         copy_to_clipboard(&lines.join("\n"));
+    }
+
+    pub fn yank_current_change_patch(&mut self) {
+        let frame = self.animation_frame();
+        let view_lines = self.current_view_with_frame(frame);
+        let Some(line) = view_lines.iter().find(|line| line.is_primary_active) else {
+            return;
+        };
+        if let Some(text) = self.patch_for_hunk(Some(line.change_id)) {
+            copy_to_clipboard(&text);
+        }
+    }
+
+    pub fn yank_current_hunk_patch(&mut self) {
+        if let Some(text) = self.patch_for_hunk(None) {
+            copy_to_clipboard(&text);
+        }
+    }
+
+    fn patch_for_hunk(&mut self, change_filter: Option<usize>) -> Option<String> {
+        if self.current_file_is_binary() {
+            return None;
+        }
+        let (diff, current_hunk) = {
+            let nav = self.multi_diff.current_navigator();
+            (nav.diff().clone(), nav.state().current_hunk)
+        };
+        let mut indices = Vec::new();
+        let change_ids: Vec<usize> = match change_filter {
+            Some(change_id) => vec![change_id],
+            None => {
+                let hunk = diff.hunks.get(current_hunk)?;
+                hunk.change_ids.clone()
+            }
+        };
+        for change_id in change_ids {
+            if let Some(idx) = diff.changes.iter().position(|c| c.id == change_id) {
+                indices.push(idx);
+            }
+        }
+        let start_idx = *indices.iter().min()?;
+        let end_idx = *indices.iter().max()?;
+        let changes = &diff.changes[start_idx..=end_idx];
+
+        let file = self.multi_diff.current_file()?;
+        let (old_path, new_path) = match file.status {
+            FileStatus::Added | FileStatus::Untracked => (None, Some(file.path.clone())),
+            FileStatus::Deleted => (Some(file.path.clone()), None),
+            FileStatus::Renamed => (
+                file.old_path.clone().or_else(|| Some(file.path.clone())),
+                Some(file.path.clone()),
+            ),
+            _ => (
+                file.old_path.clone().or_else(|| Some(file.path.clone())),
+                Some(file.path.clone()),
+            ),
+        };
+        let diff_old = file.old_path.clone().unwrap_or_else(|| file.path.clone());
+        let diff_new = file.path.clone();
+
+        let (lines, old_start, new_start, old_count, new_count) =
+            self.build_unified_hunk_lines(changes)?;
+
+        let mut out = String::new();
+        out.push_str(&format!(
+            "diff --git a/{} b/{}\n",
+            diff_old.display(),
+            diff_new.display()
+        ));
+        out.push_str(&format!(
+            "--- {}\n",
+            self.patch_header_path(old_path.as_ref(), "a")
+        ));
+        out.push_str(&format!(
+            "+++ {}\n",
+            self.patch_header_path(new_path.as_ref(), "b")
+        ));
+        out.push_str(&format!(
+            "@@ -{},{} +{},{} @@\n",
+            old_start, old_count, new_start, new_count
+        ));
+        for line in lines {
+            out.push_str(&line);
+            out.push('\n');
+        }
+        Some(out.trim_end_matches('\n').to_string())
+    }
+
+    fn patch_header_path(&self, path: Option<&PathBuf>, prefix: &str) -> String {
+        match path {
+            Some(path) => format!("{}/{}", prefix, path.display()),
+            None => "/dev/null".to_string(),
+        }
+    }
+
+    fn build_unified_hunk_lines(
+        &self,
+        changes: &[oyo_core::Change],
+    ) -> Option<(Vec<String>, usize, usize, usize, usize)> {
+        let mut lines: Vec<String> = Vec::new();
+        let mut old_start: Option<usize> = None;
+        let mut new_start: Option<usize> = None;
+        let mut old_count = 0usize;
+        let mut new_count = 0usize;
+
+        for change in changes {
+            if old_start.is_none() {
+                old_start = change.spans.iter().find_map(|span| span.old_line);
+            }
+            if new_start.is_none() {
+                new_start = change.spans.iter().find_map(|span| span.new_line);
+            }
+            let has_old = change.spans.iter().any(|span| span.old_line.is_some());
+            let has_new = change.spans.iter().any(|span| span.new_line.is_some());
+            let is_context = !change.has_changes();
+            if is_context {
+                let text = old_text_for_change(change);
+                lines.push(format!(" {}", text));
+                if has_old {
+                    old_count += 1;
+                }
+                if has_new {
+                    new_count += 1;
+                }
+                continue;
+            }
+            if has_old {
+                let text = old_text_for_change(change);
+                lines.push(format!("-{}", text));
+                old_count += 1;
+            }
+            if has_new {
+                let text = modified_only_text_for_change(change);
+                lines.push(format!("+{}", text));
+                new_count += 1;
+            }
+        }
+
+        Some((
+            lines,
+            old_start.unwrap_or(0),
+            new_start.unwrap_or(0),
+            old_count,
+            new_count,
+        ))
     }
 
     fn text_for_yank(&mut self, view_line: &ViewLine) -> Option<String> {
