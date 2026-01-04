@@ -39,10 +39,7 @@ impl App {
 
     fn active_view_line(&mut self) -> Option<ViewLine> {
         let frame = oyo_core::AnimationFrame::Idle;
-        let view_lines = self
-            .multi_diff
-            .current_navigator()
-            .current_view_with_frame(frame);
+        let view_lines = self.current_view_with_frame(frame);
         let mut fallback: Option<ViewLine> = None;
         for line in view_lines {
             if line.is_primary_active {
@@ -208,7 +205,7 @@ impl App {
     }
 
     fn blame_text_for_line(&mut self, view_line: &ViewLine) -> Option<String> {
-        if !self.blame_enabled || !self.stepping {
+        if !self.blame_enabled {
             return None;
         }
         if self.should_force_uncommitted_blame(view_line) {
@@ -631,7 +628,7 @@ impl App {
     }
 
     pub fn trigger_blame_hint(&mut self) {
-        if !self.blame_enabled || !self.stepping {
+        if !self.blame_enabled {
             return;
         }
         self.clear_blame_hunk_hint();

@@ -1,5 +1,6 @@
 use super::utils::{
-    copy_to_clipboard, inline_text_for_change, modified_only_text_for_change, old_text_for_change,
+    copy_to_clipboard, inline_text_for_change, is_fold_line, modified_only_text_for_change,
+    old_text_for_change,
 };
 use super::{
     AnimationPhase, App, HunkBounds, HunkEdge, HunkEdgeHint, HunkStart, PeekMode, PeekScope,
@@ -120,10 +121,7 @@ impl App {
 
     pub fn yank_current_change(&mut self) {
         let frame = self.animation_frame();
-        let view_lines = self
-            .multi_diff
-            .current_navigator()
-            .current_view_with_frame(frame);
+        let view_lines = self.current_view_with_frame(frame);
         let Some(line) = view_lines.iter().find(|line| line.is_primary_active) else {
             return;
         };
@@ -134,10 +132,7 @@ impl App {
 
     pub fn yank_current_hunk(&mut self) {
         let frame = self.animation_frame();
-        let view_lines = self
-            .multi_diff
-            .current_navigator()
-            .current_view_with_frame(frame);
+        let view_lines = self.current_view_with_frame(frame);
         let current_hunk = self.multi_diff.current_navigator().state().current_hunk;
         let mut lines: Vec<String> = Vec::new();
         for line in view_lines
@@ -283,8 +278,8 @@ impl App {
         }
         if hint.change_id == Some(change_id) {
             Some(match hint.edge {
-                StepEdge::Start => "... start",
-                StepEdge::End => "... end",
+                StepEdge::Start => "No more steps",
+                StepEdge::End => "No more steps",
             })
         } else {
             None
@@ -297,8 +292,8 @@ impl App {
             return None;
         }
         Some(match hint.edge {
-            HunkEdge::First => "first hunk",
-            HunkEdge::Last => "last hunk",
+            HunkEdge::First => "First hunk",
+            HunkEdge::Last => "Last hunk",
         })
     }
 
@@ -345,7 +340,7 @@ impl App {
         if remaining != 1 {
             return None;
         }
-        Some("last step next")
+        Some("Last step next")
     }
 
     fn trigger_hunk_edge_hint(&mut self, edge: HunkEdge) {
@@ -453,10 +448,7 @@ impl App {
 
     /// Compute hunk starts for unified/evolution view (display index + change id).
     fn compute_hunk_starts_unified(&mut self) -> Vec<Option<HunkStart>> {
-        let view = self
-            .multi_diff
-            .current_navigator()
-            .current_view_with_frame(AnimationFrame::Idle);
+        let view = self.current_view_with_frame(AnimationFrame::Idle);
         let (_, total_hunks) = self.hunk_info();
 
         let mut hunk_starts = vec![None; total_hunks];
@@ -487,10 +479,7 @@ impl App {
 
     /// Compute hunk bounds for unified/evolution view (display start/end + change id).
     fn compute_hunk_bounds_unified(&mut self) -> Vec<Option<HunkBounds>> {
-        let view = self
-            .multi_diff
-            .current_navigator()
-            .current_view_with_frame(AnimationFrame::Idle);
+        let view = self.current_view_with_frame(AnimationFrame::Idle);
         let (_, total_hunks) = self.hunk_info();
 
         let mut bounds: Vec<Option<HunkBounds>> = vec![None; total_hunks];
@@ -529,10 +518,7 @@ impl App {
 
     /// Compute hunk starts for split view (per-pane display index + change id).
     fn compute_hunk_starts_split(&mut self) -> (Vec<Option<HunkStart>>, Vec<Option<HunkStart>>) {
-        let view = self
-            .multi_diff
-            .current_navigator()
-            .current_view_with_frame(AnimationFrame::Idle);
+        let view = self.current_view_with_frame(AnimationFrame::Idle);
         let (_, total_hunks) = self.hunk_info();
 
         let mut old_starts = vec![None; total_hunks];
@@ -541,7 +527,8 @@ impl App {
         let mut new_idx = 0usize;
 
         for line in &view {
-            if line.old_line.is_some() {
+            let fold_line = is_fold_line(line);
+            if line.old_line.is_some() || fold_line {
                 if let Some(hidx) = line.hunk_index {
                     if hidx < total_hunks && old_starts[hidx].is_none() {
                         old_starts[hidx] = Some(HunkStart {
@@ -552,7 +539,7 @@ impl App {
                 }
                 old_idx += 1;
             }
-            if line.new_line.is_some() {
+            if line.new_line.is_some() || fold_line {
                 if let Some(hidx) = line.hunk_index {
                     if hidx < total_hunks && new_starts[hidx].is_none() {
                         new_starts[hidx] = Some(HunkStart {
@@ -570,10 +557,7 @@ impl App {
 
     /// Compute hunk bounds for split view (per-pane display start/end + change id).
     fn compute_hunk_bounds_split(&mut self) -> (Vec<Option<HunkBounds>>, Vec<Option<HunkBounds>>) {
-        let view = self
-            .multi_diff
-            .current_navigator()
-            .current_view_with_frame(AnimationFrame::Idle);
+        let view = self.current_view_with_frame(AnimationFrame::Idle);
         let (_, total_hunks) = self.hunk_info();
 
         let mut old_bounds: Vec<Option<HunkBounds>> = vec![None; total_hunks];
@@ -582,7 +566,8 @@ impl App {
         let mut new_idx = 0usize;
 
         for line in &view {
-            if line.old_line.is_some() {
+            let fold_line = is_fold_line(line);
+            if line.old_line.is_some() || fold_line {
                 if let Some(hidx) = line.hunk_index {
                     if hidx < total_hunks {
                         let start = HunkStart {
@@ -601,7 +586,7 @@ impl App {
                 }
                 old_idx += 1;
             }
-            if line.new_line.is_some() {
+            if line.new_line.is_some() || fold_line {
                 if let Some(hidx) = line.hunk_index {
                     if hidx < total_hunks {
                         let start = HunkStart {
@@ -801,10 +786,7 @@ impl App {
     }
 
     pub(super) fn set_cursor_for_current_scroll(&mut self) {
-        let view = self
-            .multi_diff
-            .current_navigator()
-            .current_view_with_frame(AnimationFrame::Idle);
+        let view = self.current_view_with_frame(AnimationFrame::Idle);
         let mut display_idx = 0usize;
         let mut cursor_line = None;
 
@@ -842,6 +824,7 @@ impl App {
 
     /// Scroll to the next hunk (no-step mode)
     pub fn next_hunk_scroll(&mut self) {
+        self.clear_blame_hunk_hint();
         let auto_center = self.auto_center;
         let (current_hunk, cursor_set) = {
             let state = self.multi_diff.current_navigator().state();
@@ -903,6 +886,8 @@ impl App {
                 self.needs_scroll_to_active = true;
             }
             self.clear_hunk_edge_hint();
+            self.set_blame_hunk_hint();
+            self.refresh_blame_toggle_hint();
         } else if matches!(self.hunk_wrap, HunkWrapMode::File) {
             if self.wrap_to_file_hunk(true, false) {
                 self.clear_hunk_edge_hint();
@@ -916,6 +901,7 @@ impl App {
 
     /// Scroll to the previous hunk (no-step mode)
     pub fn prev_hunk_scroll(&mut self) {
+        self.clear_blame_hunk_hint();
         let auto_center = self.auto_center;
         let (current_hunk, cursor_set) = {
             let state = self.multi_diff.current_navigator().state();
@@ -976,6 +962,8 @@ impl App {
                 self.needs_scroll_to_active = true;
             }
             self.clear_hunk_edge_hint();
+            self.set_blame_hunk_hint();
+            self.refresh_blame_toggle_hint();
         } else if matches!(self.hunk_wrap, HunkWrapMode::File) {
             if self.wrap_to_file_hunk(false, false) {
                 self.clear_hunk_edge_hint();
@@ -1158,6 +1146,7 @@ impl App {
 
     /// Jump to the start of the current hunk (no-step mode)
     pub fn goto_hunk_start_scroll(&mut self) {
+        self.clear_blame_hunk_hint();
         let (current_hunk, in_hunk_scope) = {
             let state = self.multi_diff.current_navigator().state();
             (
@@ -1203,6 +1192,8 @@ impl App {
             if self.auto_center {
                 self.needs_scroll_to_active = true;
             }
+            self.set_blame_hunk_hint();
+            self.refresh_blame_toggle_hint();
         }
     }
 
@@ -1223,6 +1214,7 @@ impl App {
 
     /// Jump to the end of the current hunk (no-step mode)
     pub fn goto_hunk_end_scroll(&mut self) {
+        self.clear_blame_hunk_hint();
         let (current_hunk, in_hunk_scope) = {
             let state = self.multi_diff.current_navigator().state();
             (
@@ -1268,6 +1260,8 @@ impl App {
             if self.auto_center {
                 self.needs_scroll_to_active = true;
             }
+            self.set_blame_hunk_hint();
+            self.refresh_blame_toggle_hint();
         }
     }
 
@@ -1469,6 +1463,7 @@ impl App {
     }
 
     pub(super) fn goto_hunk_index_scroll(&mut self, hunk_idx: usize) {
+        self.clear_blame_hunk_hint();
         let target = match self.view_mode {
             ViewMode::Split => {
                 let (old_bounds, new_bounds) = self.compute_hunk_bounds_split();
@@ -1496,15 +1491,14 @@ impl App {
             if self.auto_center {
                 self.needs_scroll_to_active = true;
             }
+            self.set_blame_hunk_hint();
+            self.refresh_blame_toggle_hint();
         }
     }
 
     pub(super) fn goto_line_number(&mut self, line_number: usize) {
         self.clear_peek();
-        let view = self
-            .multi_diff
-            .current_navigator()
-            .current_view_with_frame(AnimationFrame::Idle);
+        let view = self.current_view_with_frame(AnimationFrame::Idle);
         let target_idx = match self.view_mode {
             ViewMode::Split => {
                 let mut old_idx = 0usize;
@@ -1516,11 +1510,15 @@ impl App {
                 let mut old_match = None;
                 let mut new_match = None;
                 for line in &view {
+                    let fold_line = is_fold_line(line);
                     if let Some(old_line) = line.old_line {
                         old_max_line = old_max_line.max(old_line);
                         if old_line == line_number {
                             old_match = Some(old_idx);
                         }
+                        old_idx += 1;
+                        old_last = Some(old_idx - 1);
+                    } else if fold_line {
                         old_idx += 1;
                         old_last = Some(old_idx - 1);
                     }
@@ -1529,6 +1527,9 @@ impl App {
                         if new_line == line_number {
                             new_match = Some(new_idx);
                         }
+                        new_idx += 1;
+                        new_last = Some(new_idx - 1);
+                    } else if fold_line {
                         new_idx += 1;
                         new_last = Some(new_idx - 1);
                     }

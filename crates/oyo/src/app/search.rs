@@ -240,10 +240,7 @@ impl App {
             None => return Vec::new(),
         };
         let frame = self.animation_frame();
-        let view = self
-            .multi_diff
-            .current_navigator()
-            .current_view_with_frame(frame);
+        let view = self.current_view_with_frame(frame);
         let mut matches = Vec::new();
 
         match self.view_mode {

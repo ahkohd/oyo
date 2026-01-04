@@ -333,10 +333,7 @@ impl App {
     #[allow(dead_code)]
     pub fn total_lines(&mut self) -> usize {
         let frame = self.animation_frame();
-        self.multi_diff
-            .current_navigator()
-            .current_view_with_frame(frame)
-            .len()
+        self.current_view_with_frame(frame).len()
     }
 
     /// Get statistics about the current file's diff

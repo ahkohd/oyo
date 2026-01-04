@@ -199,7 +199,7 @@ fn truncate_with_ellipsis(text: &str, max_len: usize) -> String {
         return text.to_string();
     }
     let suffix_len = max_len.saturating_sub(3);
-    format!("{}...", &text[..suffix_len])
+    format!("{}…", &text[..suffix_len])
 }
 
 fn short_commit(commit: &str) -> String {

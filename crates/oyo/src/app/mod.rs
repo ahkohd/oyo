@@ -3,11 +3,12 @@
 use crate::blame::BlameInfo;
 use crate::config::{
     BlameMode, DiffExtentMarkerMode, DiffExtentMarkerScope, DiffForegroundMode, DiffHighlightMode,
-    FileCountMode, HunkWrapMode, ModifiedStepMode, ResolvedTheme, StepWrapMode, SyntaxMode,
+    FileCountMode, FoldContextMode, HunkWrapMode, ModifiedStepMode, ResolvedTheme, StepWrapMode,
+    SyntaxMode,
 };
 use crate::syntax::{SyntaxCache, SyntaxEngine};
 use crate::time_format::TimeFormatter;
-use oyo_core::{AnimationFrame, MultiFileDiff, StepDirection, StepState};
+use oyo_core::{AnimationFrame, MultiFileDiff, StepDirection, StepState, ViewLine};
 use ratatui::style::Color;
 use regex::Regex;
 use std::collections::HashMap;
@@ -34,8 +35,8 @@ use types::{
     BlameStepHint, HunkBounds, HunkEdge, HunkEdgeHint, HunkStart, NoStepState, StepEdge,
     StepEdgeHint, SyntaxScopeCache,
 };
-pub(crate) use utils::display_metrics;
 use utils::{allow_overscroll_state, max_scroll};
+pub(crate) use utils::{display_metrics, is_fold_line};
 
 /// The main application state
 pub struct App {
@@ -131,6 +132,10 @@ pub struct App {
     max_line_widths_no_step: Vec<usize>,
     /// Line wrap mode (when true, horizontal scroll is ignored)
     pub line_wrap: bool,
+    /// Collapse long unchanged (context) blocks
+    pub fold_context: FoldContextMode,
+    /// Default fold context mode (restored when toggling)
+    fold_context_default: FoldContextMode,
     /// Cached wrapped display length (for line wrap centering)
     last_wrap_display_len: Option<usize>,
     /// Cached wrapped active display index (for line wrap centering)
@@ -369,6 +374,8 @@ impl App {
             max_line_widths_step: vec![0; file_count],
             max_line_widths_no_step: vec![0; file_count],
             line_wrap: false,
+            fold_context: FoldContextMode::Off,
+            fold_context_default: FoldContextMode::Off,
             last_wrap_display_len: None,
             last_wrap_active_idx: None,
             scrollbar_visible: false,
@@ -664,6 +671,26 @@ impl App {
         self.centered_once = false;
     }
 
+    pub fn toggle_fold_context(&mut self) {
+        if self.fold_context.is_enabled() {
+            self.fold_context = FoldContextMode::Off;
+        } else if self.fold_context_default.is_enabled() {
+            self.fold_context = self.fold_context_default;
+        } else {
+            self.fold_context = FoldContextMode::On;
+        }
+        self.last_wrap_display_len = None;
+        self.last_wrap_active_idx = None;
+        self.needs_scroll_to_active = true;
+        self.centered_once = false;
+        self.blame_render_cache = None;
+    }
+
+    pub fn set_fold_context_mode(&mut self, mode: FoldContextMode) {
+        self.fold_context = mode;
+        self.fold_context_default = mode;
+    }
+
     pub fn toggle_strikethrough_deletions(&mut self) {
         self.strikethrough_deletions = !self.strikethrough_deletions;
     }
@@ -839,6 +866,14 @@ impl App {
         }
     }
 
+    pub(crate) fn current_view_with_frame(&mut self, frame: AnimationFrame) -> Vec<ViewLine> {
+        let view = self
+            .multi_diff
+            .current_navigator()
+            .current_view_with_frame(frame);
+        utils::fold_context_view(view, self.fold_context)
+    }
+
     pub(crate) fn is_backward_animation(&self) -> bool {
         if self.snap_frame.is_some() {
             return self.multi_diff.current_step_direction() == StepDirection::Backward;
@@ -885,10 +920,7 @@ impl App {
         }
 
         let frame = self.animation_frame();
-        let view = self
-            .multi_diff
-            .current_navigator()
-            .current_view_with_frame(frame);
+        let view = self.current_view_with_frame(frame);
 
         let (display_len, display_idx) = display_metrics(
             &view,
@@ -999,10 +1031,7 @@ impl App {
         }
 
         let frame = self.animation_frame();
-        let view = self
-            .multi_diff
-            .current_navigator()
-            .current_view_with_frame(frame);
+        let view = self.current_view_with_frame(frame);
         let step_direction = self.multi_diff.current_step_direction();
 
         let (display_len, display_idx) = display_metrics(

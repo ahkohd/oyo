@@ -672,6 +672,8 @@ pub struct UiConfig {
     pub view_mode: Option<String>,
     /// Enable line wrapping (default: false, uses horizontal scroll instead)
     pub line_wrap: bool,
+    /// Collapse long unchanged (context) blocks ("off", "on", or "counts")
+    pub fold_context: FoldContextMode,
     /// Show scrollbar (default: false)
     pub scrollbar: bool,
     /// Show strikethrough on deleted text
@@ -714,6 +716,7 @@ impl Default for UiConfig {
             auto_center: true,
             view_mode: None,
             line_wrap: false,
+            fold_context: FoldContextMode::Off,
             scrollbar: false,
             strikethrough_deletions: false,
             gutter_signs: true,
@@ -871,6 +874,29 @@ fn diff_extent_marker_default() -> DiffExtentMarkerMode {
 
 fn diff_extent_marker_scope_default() -> DiffExtentMarkerScope {
     DiffExtentMarkerScope::Progress
+}
+
+/// Context folding display mode
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum FoldContextMode {
+    /// No folding
+    #[default]
+    Off,
+    /// Fold with a minimal marker
+    On,
+    /// Fold with a line count marker
+    Counts,
+}
+
+impl FoldContextMode {
+    pub fn is_enabled(self) -> bool {
+        !matches!(self, FoldContextMode::Off)
+    }
+
+    pub fn show_counts(self) -> bool {
+        matches!(self, FoldContextMode::Counts)
+    }
 }
 /// Evolution view syntax scope
 #[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]

@@ -1,6 +1,4 @@
 Possible next features (post‑diff‑viewer completeness)
 1. Conflict view (read‑only): highlight <<<<<<< / ======= / >>>>>>> and jump between them.
-2. Fold unchanged blocks: toggle to collapse long context sections.
-3. Quick file search: type‑ahead + jump (distinct from filter).
-4. Copy patch/hunk: clipboard export in unified diff format.
-5. Performance guardrails: lazy line rendering for huge files.
+2. Copy patch/hunk: clipboard export in unified diff format.
+3. Performance guardrails: lazy line rendering for huge files.

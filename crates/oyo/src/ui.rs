@@ -34,7 +34,7 @@ fn truncate_filename_keep_ext(name: &str, max_width: usize) -> String {
     let ext_len = ext.len();
     if ext_len >= max_width {
         let suffix_len = max_width.saturating_sub(3);
-        return format!("...{}", &name[name.len().saturating_sub(suffix_len)..]);
+        return format!("…{}", &name[name.len().saturating_sub(suffix_len)..]);
     }
 
     if ext_len == 0 {
@@ -47,7 +47,7 @@ fn truncate_filename_keep_ext(name: &str, max_width: usize) -> String {
         } else {
             ""
         };
-        return format!("{head}...{tail}");
+        return format!("{head}…{tail}");
     }
 
     let max_stem_len = max_width.saturating_sub(ext_len);
@@ -65,7 +65,7 @@ fn truncate_filename_keep_ext(name: &str, max_width: usize) -> String {
     } else {
         ""
     };
-    format!("{head}...{tail}{ext}")
+    format!("{head}…{tail}{ext}")
 }
 
 fn text_width(text: &str) -> usize {
@@ -155,7 +155,7 @@ fn pad_spans_right(spans: Vec<Span>, width: usize) -> Vec<Span> {
     out
 }
 
-/// Truncate a path to fit a given width, using /.../ for middle sections
+/// Truncate a path to fit a given width, using /…/ for middle sections
 fn truncate_path(path: &str, max_width: usize) -> String {
     if max_width == 0 {
         return String::new();
@@ -176,8 +176,8 @@ fn truncate_path(path: &str, max_width: usize) -> String {
     let first = parts[0];
     let last = parts.last().unwrap_or(&"");
 
-    // If just first + last fits with /.../, use that
-    let prefix = format!("{}/.../", first);
+    // If just first + last fits with /…/, use that
+    let prefix = format!("{}/…/", first);
     let available = max_width.saturating_sub(prefix.len());
     if available > 0 {
         let last_display = truncate_filename_keep_ext(last, available);
@@ -187,11 +187,11 @@ fn truncate_path(path: &str, max_width: usize) -> String {
         }
     }
 
-    // Otherwise just show .../filename
+    // Otherwise just show …/filename
     if max_width <= 4 {
         return ".".repeat(max_width);
     }
-    let prefix = ".../";
+    let prefix = "…/";
     let available = max_width.saturating_sub(prefix.len());
     if available == 0 {
         return ".".repeat(max_width);
@@ -220,7 +220,7 @@ fn truncate_text(text: &str, max_width: usize) -> String {
         acc.push(ch);
         width += ch_width;
     }
-    format!("{acc}...")
+    format!("{acc}…")
 }
 
 /// Main drawing function
@@ -1253,6 +1253,7 @@ fn draw_help_popover(frame: &mut Frame, app: &mut App) {
     push_help_line(&mut lines, "^G", "Show full file path");
     push_help_line(&mut lines, "z", "Center on active");
     push_help_line(&mut lines, "w", "Toggle line wrap");
+    push_help_line(&mut lines, "v", "Toggle context folding");
     push_help_line(&mut lines, "t", "Toggle syntax highlight");
     if app.view_mode == ViewMode::Evolution {
         push_help_line(&mut lines, "E", "Toggle evo syntax (context/full)");
@@ -1440,7 +1441,7 @@ fn draw_command_palette_popover(frame: &mut Frame, app: &mut App) {
         .split(content);
 
     let query = app.command_palette_query();
-    let placeholder = "Search for commands...";
+    let placeholder = "Search for commands…";
     let (query_text, query_style) = if query.is_empty() {
         (placeholder, Style::default().fg(app.theme.text_muted))
     } else {
@@ -1550,7 +1551,7 @@ fn draw_file_search_popover(frame: &mut Frame, app: &mut App) {
         .split(content);
 
     let query = app.file_search_query();
-    let placeholder = "Search for files...";
+    let placeholder = "Search for files…";
     let (query_text, query_style) = if query.is_empty() {
         (placeholder, Style::default().fg(app.theme.text_muted))
     } else {

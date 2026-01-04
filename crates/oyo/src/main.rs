@@ -236,6 +236,7 @@ fn apply_config_to_app(app: &mut App, config: &config::Config, args: &Args, ligh
     app.auto_center = config.ui.auto_center;
     app.topbar = config.ui.topbar;
     app.line_wrap = config.ui.line_wrap;
+    app.set_fold_context_mode(config.ui.fold_context);
     app.scrollbar_visible = config.ui.scrollbar;
     app.strikethrough_deletions = config.ui.strikethrough_deletions;
     app.gutter_signs = config.ui.gutter_signs;
@@ -287,7 +288,7 @@ fn apply_config_to_app(app: &mut App, config: &config::Config, args: &Args, ligh
 }
 
 fn build_diff_from_input_mode(
-    input_mode: InputMode,
+    input_mode: &InputMode,
 ) -> Result<Option<(MultiFileDiff, Option<String>)>> {
     let (multi_diff, git_branch) = match input_mode {
         InputMode::GitExternal {
@@ -298,14 +299,14 @@ fn build_diff_from_input_mode(
             let old_bytes = if old_file.to_string_lossy() == "/dev/null" {
                 Vec::new()
             } else {
-                std::fs::read(&old_file)
+                std::fs::read(old_file)
                     .context(format!("Failed to read old file: {}", old_file.display()))?
             };
 
             let new_bytes = if new_file.to_string_lossy() == "/dev/null" {
                 Vec::new()
             } else {
-                std::fs::read(&new_file)
+                std::fs::read(new_file)
                     .context(format!("Failed to read new file: {}", new_file.display()))?
             };
 
@@ -313,28 +314,29 @@ fn build_diff_from_input_mode(
                 oyo_core::git::get_current_branch(&std::env::current_dir().unwrap_or_default())
                     .ok();
 
-            let diff = MultiFileDiff::from_file_pair_bytes(display_path, old_bytes, new_bytes);
+            let diff =
+                MultiFileDiff::from_file_pair_bytes(display_path.clone(), old_bytes, new_bytes);
             (diff, branch)
         }
         InputMode::TwoPaths { old_path, new_path } => {
             let diff = if old_path.is_dir() && new_path.is_dir() {
-                MultiFileDiff::from_directories(&old_path, &new_path)
+                MultiFileDiff::from_directories(old_path, new_path)
                     .context("Failed to create diff from directories")?
             } else {
                 let old_bytes = if old_path.to_string_lossy() == "/dev/null" {
                     Vec::new()
                 } else {
-                    std::fs::read(&old_path)
+                    std::fs::read(old_path)
                         .context(format!("Failed to read: {}", old_path.display()))?
                 };
                 let new_bytes = if new_path.to_string_lossy() == "/dev/null" {
                     Vec::new()
                 } else {
-                    std::fs::read(&new_path)
+                    std::fs::read(new_path)
                         .context(format!("Failed to read: {}", new_path.display()))?
                 };
 
-                MultiFileDiff::from_file_pair_bytes(new_path, old_bytes, new_bytes)
+                MultiFileDiff::from_file_pair_bytes(new_path.clone(), old_bytes, new_bytes)
             };
             (diff, None)
         }
@@ -424,14 +426,18 @@ fn build_diff_from_input_mode(
                 .context("Failed to create diff from index range")?;
                 (changes, diff)
             } else {
-                let changes = oyo_core::git::get_changes_between(&repo_root, &from, &to)
+                let changes = oyo_core::git::get_changes_between(&repo_root, from, to)
                     .context("Failed to get range changes")?;
                 if changes.is_empty() {
                     return Ok(None);
                 }
-                let diff =
-                    MultiFileDiff::from_git_range(repo_root.clone(), changes.clone(), from, to)
-                        .context("Failed to create diff from range")?;
+                let diff = MultiFileDiff::from_git_range(
+                    repo_root.clone(),
+                    changes.clone(),
+                    from.clone(),
+                    to.clone(),
+                )
+                .context("Failed to create diff from range")?;
                 (changes, diff)
             };
             if changes.is_empty() {
@@ -574,6 +580,7 @@ fn main() -> Result<()> {
             }
         };
 
+        let mut exit_message: Option<String> = None;
         loop {
             let empty_message = match &input_mode {
                 InputMode::GitUncommitted => Some("No uncommitted changes found.".to_string()),
@@ -583,18 +590,16 @@ fn main() -> Result<()> {
                 }
                 _ => Some("No changes found.".to_string()),
             };
-            let (multi_diff, git_branch) = match build_diff_from_input_mode(input_mode)? {
+            let (multi_diff, git_branch) = match build_diff_from_input_mode(&input_mode)? {
                 Some(result) => result,
                 None => {
-                    if let Some(message) = empty_message {
-                        println!("{message}");
-                    }
+                    exit_message = empty_message;
                     break;
                 }
             };
 
             if multi_diff.file_count() == 0 {
-                println!("No changes found.");
+                exit_message = Some("No changes found.".to_string());
                 break;
             }
 
@@ -630,6 +635,9 @@ fn main() -> Result<()> {
             DisableMouseCapture
         )?;
         terminal.show_cursor()?;
+        if let Some(message) = exit_message {
+            println!("{message}");
+        }
         return Ok(());
     }
 
@@ -652,9 +660,31 @@ fn main() -> Result<()> {
         detect_input_mode(&args.paths)
     };
 
+    let empty_message = match &input_mode {
+        InputMode::GitUncommitted => Some("No uncommitted changes found.".to_string()),
+        InputMode::GitStaged => Some("No staged changes found.".to_string()),
+        InputMode::GitRange { from, to } => Some(format!("No changes in range {}..{}.", from, to)),
+        _ => Some("No changes found.".to_string()),
+    };
+    let prefetched = match build_diff_from_input_mode(&input_mode)? {
+        Some(result) => result,
+        None => {
+            if let Some(message) = empty_message {
+                println!("{message}");
+            }
+            return Ok(());
+        }
+    };
+    if prefetched.0.file_count() == 0 {
+        println!("No changes found.");
+        return Ok(());
+    }
+
     let mut terminal = setup_terminal()?;
     let dashboard_limit = view_limit.unwrap_or(200);
 
+    let mut exit_message: Option<String> = None;
+    let mut pending_diff = Some(prefetched);
     loop {
         let empty_message = match &input_mode {
             InputMode::GitUncommitted => Some("No uncommitted changes found.".to_string()),
@@ -664,18 +694,20 @@ fn main() -> Result<()> {
             }
             _ => Some("No changes found.".to_string()),
         };
-        let (multi_diff, git_branch) = match build_diff_from_input_mode(input_mode)? {
-            Some(result) => result,
-            None => {
-                if let Some(message) = empty_message {
-                    println!("{message}");
+        let (multi_diff, git_branch) = if let Some(result) = pending_diff.take() {
+            result
+        } else {
+            match build_diff_from_input_mode(&input_mode)? {
+                Some(result) => result,
+                None => {
+                    exit_message = empty_message;
+                    break;
                 }
-                break;
             }
         };
 
         if multi_diff.file_count() == 0 {
-            println!("No changes found.");
+            exit_message = Some("No changes found.".to_string());
             break;
         }
 
@@ -701,6 +733,7 @@ fn main() -> Result<()> {
                     break;
                 };
                 input_mode = mode;
+                pending_diff = None;
             }
         }
     }
@@ -712,6 +745,9 @@ fn main() -> Result<()> {
         DisableMouseCapture
     )?;
     terminal.show_cursor()?;
+    if let Some(message) = exit_message {
+        println!("{message}");
+    }
 
     Ok(())
 }
@@ -1011,7 +1047,7 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<AppE
                         if is_blame_gb {
                             app.pending_g_prefix = false;
                             app.reset_count();
-                            if app.blame_enabled && app.stepping {
+                            if app.blame_enabled {
                                 app.trigger_blame_hint();
                             }
                             continue;
@@ -1356,6 +1392,10 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<AppE
                             if app.is_multi_file() {
                                 app.toggle_file_panel();
                             }
+                        }
+                        KeyCode::Char('v') => {
+                            app.reset_count();
+                            app.toggle_fold_context();
                         }
                         KeyCode::Char('/') => {
                             app.reset_count();

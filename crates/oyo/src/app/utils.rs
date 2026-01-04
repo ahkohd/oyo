@@ -1,5 +1,6 @@
 use super::{AnimationPhase, ViewMode};
-use oyo_core::{Change, ChangeKind, LineKind, StepDirection, ViewLine};
+use crate::config::FoldContextMode;
+use oyo_core::{Change, ChangeKind, LineKind, StepDirection, ViewLine, ViewSpan, ViewSpanKind};
 use ratatui::style::Color;
 use ratatui::text::Span;
 use regex::Regex;
@@ -218,6 +219,79 @@ pub fn display_metrics(
     }
 }
 
+const FOLD_CONTEXT_MIN_LINES: usize = 8;
+
+pub(crate) fn fold_context_view(view: Vec<ViewLine>, mode: FoldContextMode) -> Vec<ViewLine> {
+    if !mode.is_enabled() {
+        return view;
+    }
+    if view.is_empty() {
+        return view;
+    }
+    let mut out: Vec<ViewLine> = Vec::with_capacity(view.len());
+    let mut idx = 0usize;
+    while idx < view.len() {
+        let line = &view[idx];
+        let is_context = matches!(line.kind, LineKind::Context);
+        let is_outside_hunk = line.hunk_index.is_none();
+        let is_plain = !line.has_changes;
+        if is_context && is_outside_hunk && is_plain {
+            let start = idx;
+            let mut end = idx + 1;
+            while end < view.len() {
+                let next = &view[end];
+                if matches!(next.kind, LineKind::Context)
+                    && next.hunk_index.is_none()
+                    && !next.has_changes
+                {
+                    end += 1;
+                } else {
+                    break;
+                }
+            }
+            let count = end - start;
+            if count >= FOLD_CONTEXT_MIN_LINES {
+                let text = if mode.show_counts() {
+                    let label = if count == 1 { "line" } else { "lines" };
+                    format!("… {count} {label}")
+                } else {
+                    "…".to_string()
+                };
+                out.push(ViewLine {
+                    content: text.clone(),
+                    spans: vec![ViewSpan {
+                        text,
+                        kind: ViewSpanKind::Equal,
+                    }],
+                    kind: LineKind::Context,
+                    old_line: None,
+                    new_line: None,
+                    is_active: false,
+                    is_active_change: false,
+                    is_primary_active: false,
+                    show_hunk_extent: false,
+                    change_id: 0,
+                    hunk_index: None,
+                    has_changes: false,
+                });
+                idx = end;
+                continue;
+            }
+        }
+        out.push(view[idx].clone());
+        idx += 1;
+    }
+    out
+}
+
+pub(crate) fn is_fold_line(line: &ViewLine) -> bool {
+    matches!(line.kind, LineKind::Context)
+        && line.hunk_index.is_none()
+        && line.old_line.is_none()
+        && line.new_line.is_none()
+        && !line.has_changes
+}
+
 pub(crate) fn evolution_display_metrics(
     view: &[ViewLine],
     animation_phase: AnimationPhase,
@@ -261,9 +335,11 @@ pub(crate) fn split_display_metrics(
     let mut new_fallback_idx: Option<usize> = None;
 
     for line in view {
-        let old_present = line.old_line.is_some();
-        let new_present = line.new_line.is_some()
-            && !matches!(line.kind, LineKind::Deleted | LineKind::PendingDelete);
+        let fold_line = is_fold_line(line);
+        let old_present = line.old_line.is_some() || fold_line;
+        let new_present = (line.new_line.is_some()
+            && !matches!(line.kind, LineKind::Deleted | LineKind::PendingDelete))
+            || fold_line;
         if old_present || (split_align_lines && new_present) {
             if line.is_primary_active {
                 old_primary_idx = Some(old_count);

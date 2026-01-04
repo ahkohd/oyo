@@ -46,10 +46,7 @@ pub fn render_blame(frame: &mut Frame, app: &mut App, area: Rect) {
     app.multi_diff
         .current_navigator()
         .set_show_hunk_extent_while_stepping(show_extent);
-    let view_lines = app
-        .multi_diff
-        .current_navigator()
-        .current_view_with_frame(animation_frame);
+    let view_lines = app.current_view_with_frame(animation_frame);
 
     let now = OffsetDateTime::now_utc().unix_timestamp();
     let time_bucket = now / 60;

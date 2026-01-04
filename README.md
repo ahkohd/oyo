@@ -57,6 +57,7 @@ oyo does **not** replace classic diffs, it adds a new way to review them.
 - **Blame hints**: One-shot or toggle blame previews while stepping (opt-in)
 - **Command palette**: Search for commands and files without leaving the diff
 - **Line wrap**: Toggle wrapping for long lines
+- **Context folding**: Collapse long unchanged blocks on demand
 - **Animated transitions**: Smooth fade in/out animations as changes are applied
 - **Playback**: Automatically step through all changes at a configurable speed
 - **Git integration**: Works as a git external diff tool or standalone
@@ -211,6 +212,7 @@ command = ["oy", "$left", "$right"]
 | `Z` | Toggle zen mode |
 | `a` | Toggle animations |
 | `w` | Toggle line wrap |
+| `v` | Toggle context folding |
 | `t` | Toggle syntax highlight |
 | `E` | Toggle evo syntax (context/full) |
 | `s` | Toggle stepping (no-step mode) |
@@ -239,6 +241,7 @@ auto_center = true          # Auto-center on active change (default: true)
 topbar = true               # Show top bar in diff view (default: true)
 view_mode = "unified"       # Default: "unified", "split", "evolution", or "blame"
 line_wrap = false           # Wrap long lines (default: false, uses horizontal scroll)
+fold_context = "off"        # "off", "on", or "counts"
 scrollbar = false           # Show scrollbar (default: false)
 strikethrough_deletions = false # Show strikethrough on deleted text
 gutter_signs = true         # Show +/- sign column (unified/evolution)

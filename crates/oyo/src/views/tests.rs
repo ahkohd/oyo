@@ -160,7 +160,7 @@ fn test_unified_wrap_hunk_hint_overflow_places_above() {
     let lines = buffer_text(&render_buffer(&mut app, 20, 4));
     let hint_idx = lines
         .iter()
-        .position(|line| line.contains("last step"))
+        .position(|line| line.contains("Last step"))
         .expect("virtual hint should render");
     let long_idx = lines
         .iter()
@@ -196,7 +196,7 @@ fn test_split_wrap_hunk_hint_overflow_places_above() {
     let lines = buffer_text(&render_buffer(&mut app, 60, 4));
     let hint_idx = lines
         .iter()
-        .position(|line| line.contains("last step"))
+        .position(|line| line.contains("Last step"))
         .expect("virtual hint should render");
     let long_idx = lines
         .iter()

@@ -5,7 +5,7 @@ use super::{
     pad_spans_bg, pending_tail_text, render_empty_state, slice_spans, spans_to_text, spans_width,
     truncate_text, wrap_count_for_spans, wrap_count_for_text, TAB_WIDTH,
 };
-use crate::app::{AnimationPhase, App};
+use crate::app::{is_fold_line, AnimationPhase, App};
 use crate::color;
 use crate::config::{DiffForegroundMode, DiffHighlightMode, ModifiedStepMode};
 use crate::syntax::SyntaxSide;
@@ -247,10 +247,7 @@ pub fn render_unified_pane(frame: &mut Frame, app: &mut App, area: Rect) {
     app.multi_diff
         .current_navigator()
         .set_show_hunk_extent_while_stepping(show_extent);
-    let view_lines = app
-        .multi_diff
-        .current_navigator()
-        .current_view_with_frame(animation_frame);
+    let view_lines = app.current_view_with_frame(animation_frame);
     let blame_extra_rows = if matches!(app.view_mode, crate::app::ViewMode::Blame) {
         app.blame_extra_rows.clone()
     } else {
@@ -327,13 +324,6 @@ pub fn render_unified_pane(frame: &mut Frame, app: &mut App, area: Rect) {
         parts.push((hint.to_string(), false));
     }
     let virtual_text = if show_virtual && !parts.is_empty() {
-        if pending_insert_only == 0 {
-            if let Some((first, allow_prefix)) = parts.first_mut() {
-                if *allow_prefix {
-                    *first = format!("... {first}");
-                }
-            }
-        }
         Some(
             parts
                 .into_iter()
@@ -480,8 +470,13 @@ pub fn render_unified_pane(frame: &mut Frame, app: &mut App, area: Rect) {
             }
         }
 
+        let fold_line = is_fold_line(view_line);
         let line_num = view_line.old_line.or(view_line.new_line).unwrap_or(0);
-        let line_num_str = format!("{:4}", line_num);
+        let line_num_str = if fold_line || line_num == 0 {
+            "    ".to_string()
+        } else {
+            format!("{:4}", line_num)
+        };
 
         // Line number color from theme - use gradient base for diff types
         let insert_base = color::gradient_color(&app.theme.insert, 0.5);

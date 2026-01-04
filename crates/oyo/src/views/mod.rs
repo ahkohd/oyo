@@ -73,7 +73,7 @@ pub(crate) fn boost_inline_bg(app: &App, base_bg: Option<Color>, accent: Color) 
 }
 
 pub(crate) fn pending_tail_text(count: usize) -> String {
-    format!("... +{} more", count)
+    format!("+{} More", count)
 }
 
 pub(crate) fn diff_line_bg(kind: LineKind, theme: &ResolvedTheme) -> Option<Color> {
@@ -521,7 +521,7 @@ pub(crate) fn truncate_text(text: &str, max_width: usize) -> String {
         return text.to_string();
     }
     let suffix_len = max_width.saturating_sub(3);
-    format!("{}...", &text[..suffix_len])
+    format!("{}…", &text[..suffix_len])
 }
 
 use crate::app::{AnimationPhase, App};

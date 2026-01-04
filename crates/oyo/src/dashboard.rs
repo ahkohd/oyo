@@ -828,7 +828,7 @@ fn truncate_text(text: &str, max_width: usize) -> String {
         acc.push(ch);
         width += ch_width;
     }
-    format!("{acc}...")
+    format!("{acc}…")
 }
 
 fn shorten_hash(hash: &str) -> String {

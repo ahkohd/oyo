@@ -6,6 +6,7 @@ pub(crate) enum PaletteAction {
     ToggleViewMode,
     SetViewMode(ViewMode),
     ToggleLineWrap,
+    ToggleFoldContext,
     ToggleSyntax,
     ToggleHelp,
     ToggleZen,
@@ -175,6 +176,10 @@ impl App {
                 action: PaletteAction::ToggleLineWrap,
             },
             PaletteEntry {
+                label: "Toggle context folding".to_string(),
+                action: PaletteAction::ToggleFoldContext,
+            },
+            PaletteEntry {
                 label: "Toggle syntax highlight".to_string(),
                 action: PaletteAction::ToggleSyntax,
             },
@@ -234,6 +239,7 @@ impl App {
             PaletteAction::ToggleViewMode => self.toggle_view_mode(),
             PaletteAction::SetViewMode(mode) => self.set_view_mode(mode),
             PaletteAction::ToggleLineWrap => self.toggle_line_wrap(),
+            PaletteAction::ToggleFoldContext => self.toggle_fold_context(),
             PaletteAction::ToggleSyntax => self.toggle_syntax(),
             PaletteAction::ToggleHelp => self.toggle_help(),
             PaletteAction::ToggleZen => self.toggle_zen(),
