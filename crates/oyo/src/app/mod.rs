@@ -36,7 +36,7 @@ use types::{
     StepEdgeHint, SyntaxScopeCache,
 };
 use utils::{allow_overscroll_state, max_scroll};
-pub(crate) use utils::{display_metrics, is_fold_line};
+pub(crate) use utils::{display_metrics, is_conflict_marker, is_fold_line};
 
 /// The main application state
 pub struct App {

@@ -5,7 +5,7 @@ use super::{
     pad_spans_bg, pending_tail_text, render_empty_state, slice_spans, spans_to_text, spans_width,
     truncate_text, wrap_count_for_spans, wrap_count_for_text, TAB_WIDTH,
 };
-use crate::app::{is_fold_line, AnimationPhase, App};
+use crate::app::{is_conflict_marker, is_fold_line, AnimationPhase, App};
 use crate::color;
 use crate::config::{DiffForegroundMode, DiffHighlightMode, ModifiedStepMode};
 use crate::syntax::SyntaxSide;
@@ -920,6 +920,16 @@ pub fn render_unified_pane(frame: &mut Frame, app: &mut App, area: Rect) {
         content_spans = app.highlight_search_spans(content_spans, &line_text, is_active_match);
         if italic_line {
             content_spans = super::apply_italic_spans(content_spans);
+        }
+        if is_conflict_marker(view_line) {
+            content_spans = content_spans
+                .into_iter()
+                .map(|span| {
+                    let mut style = span.style;
+                    style = style.fg(app.theme.warning).add_modifier(Modifier::BOLD);
+                    Span::styled(span.content, style)
+                })
+                .collect();
         }
 
         if app.line_wrap {

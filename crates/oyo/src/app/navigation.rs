@@ -1,10 +1,10 @@
 use super::utils::{
-    copy_to_clipboard, inline_text_for_change, is_fold_line, modified_only_text_for_change,
-    old_text_for_change,
+    copy_to_clipboard, inline_text_for_change, is_conflict_marker, is_fold_line,
+    modified_only_text_for_change, old_text_for_change,
 };
 use super::{
-    AnimationPhase, App, HunkBounds, HunkEdge, HunkEdgeHint, HunkStart, PeekMode, PeekScope,
-    PeekState, StepEdge, StepEdgeHint, ViewMode,
+    display_metrics, AnimationPhase, App, HunkBounds, HunkEdge, HunkEdgeHint, HunkStart, PeekMode,
+    PeekScope, PeekState, StepEdge, StepEdgeHint, ViewMode,
 };
 use crate::config::{HunkWrapMode, ModifiedStepMode, StepWrapMode};
 use oyo_core::{git::FileStatus, AnimationFrame, ChangeKind, LineKind, StepState, ViewLine};
@@ -12,6 +12,30 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 const STEP_EDGE_HINT_MS: u64 = 700;
+
+#[derive(Debug, Clone, Copy)]
+struct ConflictMarker {
+    display_idx: usize,
+    change_id: usize,
+}
+
+fn change_has_conflict_marker(change: &oyo_core::change::Change) -> bool {
+    fn text_has_marker(text: &str) -> bool {
+        text.lines().any(|line| {
+            let trimmed = line.trim_start();
+            trimmed.starts_with("<<<<<<<")
+                || trimmed.starts_with("=======")
+                || trimmed.starts_with(">>>>>>>")
+        })
+    }
+
+    let old_text = old_text_for_change(change);
+    if text_has_marker(&old_text) {
+        return true;
+    }
+    let new_text = modified_only_text_for_change(change);
+    text_has_marker(&new_text)
+}
 
 impl App {
     pub fn toggle_peek_old_change(&mut self) {
@@ -487,6 +511,227 @@ impl App {
             return None;
         }
         Some("Last step next")
+    }
+
+    pub fn next_conflict(&mut self) {
+        self.goto_conflict(true);
+    }
+
+    pub fn prev_conflict(&mut self) {
+        self.goto_conflict(false);
+    }
+
+    fn goto_conflict(&mut self, forward: bool) {
+        if self.stepping {
+            let steps = self.collect_conflict_steps();
+            if steps.is_empty() {
+                let markers = self.collect_conflict_markers();
+                if markers.is_empty() {
+                    return;
+                }
+                self.goto_conflict_scroll(forward, markers);
+            } else {
+                self.goto_conflict_step(forward, steps);
+            }
+        } else {
+            let markers = self.collect_conflict_markers();
+            if markers.is_empty() {
+                return;
+            }
+            self.goto_conflict_scroll(forward, markers);
+        }
+    }
+
+    fn goto_conflict_step(&mut self, forward: bool, mut steps: Vec<usize>) {
+        steps.sort_unstable();
+        let current_step = self.multi_diff.current_navigator().state().current_step;
+        let target_step = if forward {
+            steps
+                .iter()
+                .find(|step_idx| **step_idx > current_step)
+                .copied()
+                .unwrap_or(steps[0])
+        } else {
+            steps
+                .iter()
+                .rev()
+                .find(|step_idx| **step_idx < current_step)
+                .copied()
+                .unwrap_or(*steps.last().unwrap())
+        };
+
+        self.jump_to_step(target_step);
+    }
+
+    fn goto_conflict_scroll(&mut self, forward: bool, mut markers: Vec<ConflictMarker>) {
+        markers.sort_by_key(|marker| marker.display_idx);
+        let frame = self.animation_frame();
+        let view = self.current_view_with_frame(frame);
+        let step_direction = self.multi_diff.current_step_direction();
+        let (_, active_idx) = display_metrics(
+            &view,
+            self.view_mode,
+            self.animation_phase,
+            self.scroll_offset,
+            step_direction,
+            self.split_align_lines,
+        );
+        let start = active_idx.unwrap_or(self.scroll_offset);
+        let target = if forward {
+            markers
+                .iter()
+                .find(|marker| marker.display_idx > start)
+                .unwrap_or(&markers[0])
+        } else {
+            markers
+                .iter()
+                .rev()
+                .find(|marker| marker.display_idx < start)
+                .unwrap_or(markers.last().unwrap())
+        };
+        self.scroll_offset = target.display_idx;
+        {
+            let nav = self.multi_diff.current_navigator();
+            let hunk_id = nav
+                .diff()
+                .hunk_for_change(target.change_id)
+                .map(|hunk| hunk.id);
+            if let Some(id) = hunk_id {
+                nav.set_cursor_hunk(id, Some(target.change_id));
+            }
+            nav.set_cursor_override(Some(target.change_id));
+            nav.set_hunk_scope(hunk_id.is_some());
+        }
+        self.centered_once = true;
+        self.needs_scroll_to_active = self.auto_center;
+        self.clear_hunk_edge_hint();
+        self.clear_step_edge_hint();
+    }
+
+    fn collect_conflict_markers(&mut self) -> Vec<ConflictMarker> {
+        let frame = self.animation_frame();
+        let view = self.current_view_with_frame(frame);
+        let mut matches = Vec::new();
+
+        match self.view_mode {
+            ViewMode::UnifiedPane | ViewMode::Blame => {
+                for (display_idx, line) in view.iter().enumerate() {
+                    if is_conflict_marker(line) {
+                        matches.push(ConflictMarker {
+                            display_idx,
+                            change_id: line.change_id,
+                        });
+                    }
+                }
+            }
+            ViewMode::Evolution => {
+                let mut display_idx = 0usize;
+                for line in &view {
+                    let visible = match line.kind {
+                        LineKind::Deleted => false,
+                        LineKind::PendingDelete => {
+                            line.is_active && self.animation_phase != AnimationPhase::Idle
+                        }
+                        _ => true,
+                    };
+                    if !visible {
+                        continue;
+                    }
+                    if is_conflict_marker(line) {
+                        matches.push(ConflictMarker {
+                            display_idx,
+                            change_id: line.change_id,
+                        });
+                    }
+                    display_idx += 1;
+                }
+            }
+            ViewMode::Split => {
+                let mut old_idx = 0usize;
+                let mut new_idx = 0usize;
+                for line in &view {
+                    let has_new = line.new_line.is_some()
+                        && !matches!(line.kind, LineKind::Deleted | LineKind::PendingDelete);
+                    let has_old = line.old_line.is_some();
+                    if has_new {
+                        if is_conflict_marker(line) {
+                            matches.push(ConflictMarker {
+                                display_idx: new_idx,
+                                change_id: line.change_id,
+                            });
+                        }
+                        new_idx += 1;
+                    } else if has_old {
+                        if is_conflict_marker(line) {
+                            matches.push(ConflictMarker {
+                                display_idx: old_idx,
+                                change_id: line.change_id,
+                            });
+                        }
+                        old_idx += 1;
+                    }
+                }
+            }
+        }
+
+        matches
+    }
+
+    fn collect_conflict_steps(&mut self) -> Vec<usize> {
+        let diff = self.multi_diff.current_navigator().diff();
+        let mut out = Vec::new();
+        for (idx, change_id) in diff.significant_changes.iter().enumerate() {
+            let Some(change) = diff.changes.iter().find(|c| c.id == *change_id) else {
+                continue;
+            };
+            if change_has_conflict_marker(change) {
+                out.push(idx + 1);
+            }
+        }
+        out
+    }
+
+    fn jump_to_step(&mut self, target_step: usize) {
+        let current_step = self.multi_diff.current_navigator().state().current_step;
+        if current_step == target_step {
+            return;
+        }
+        self.clear_peek();
+        self.clear_hunk_edge_hint();
+        self.clear_blame_hunk_hint();
+        self.clear_blame_step_hint();
+        self.snap_frame = None;
+        self.snap_frame_started_at = None;
+
+        let forward = target_step > current_step;
+        if !self.animation_enabled && !forward {
+            self.snap_frame = Some(AnimationFrame::FadeOut);
+            self.snap_frame_started_at = Some(Instant::now());
+            self.clear_active_on_next_render = false;
+        }
+
+        if forward {
+            for _ in current_step..target_step {
+                if !self.multi_diff.current_navigator().next() {
+                    break;
+                }
+            }
+        } else {
+            for _ in target_step..current_step {
+                if !self.multi_diff.current_navigator().prev() {
+                    break;
+                }
+            }
+        }
+
+        self.clear_step_edge_hint();
+        if self.animation_enabled {
+            self.start_animation();
+        } else if !forward && self.snap_frame.is_none() {
+            self.clear_active_on_next_render = true;
+        }
+        self.needs_scroll_to_active = true;
+        self.refresh_blame_toggle_hint();
     }
 
     fn trigger_hunk_edge_hint(&mut self, edge: HunkEdge) {
@@ -1847,5 +2092,46 @@ impl App {
                 ViewMode::Blame => ViewMode::UnifiedPane,
             };
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ViewMode;
+    use oyo_core::MultiFileDiff;
+
+    fn make_app_with_conflict_markers() -> App {
+        let old = "line1\nline2\nline3\n".to_string();
+        let new = "line1\n<<<<<<< ours\nfoo\n=======\nbar\n>>>>>>> theirs\nline3\n".to_string();
+        let multi_diff = MultiFileDiff::from_file_pair(
+            std::path::PathBuf::from("a.txt"),
+            std::path::PathBuf::from("a.txt"),
+            old,
+            new,
+        );
+        App::new(multi_diff, ViewMode::UnifiedPane, 0, false, None)
+    }
+
+    #[test]
+    fn test_conflict_navigation_steps_between_markers() {
+        let mut app = make_app_with_conflict_markers();
+        let steps = app.collect_conflict_steps();
+        assert!(
+            steps.len() >= 3,
+            "Expected at least 3 conflict marker steps"
+        );
+
+        app.next_conflict();
+        let state = app.multi_diff.current_navigator().state();
+        assert_eq!(state.current_step, steps[0]);
+
+        app.next_conflict();
+        let state = app.multi_diff.current_navigator().state();
+        assert_eq!(state.current_step, steps[1]);
+
+        app.prev_conflict();
+        let state = app.multi_diff.current_navigator().state();
+        assert_eq!(state.current_step, steps[0]);
     }
 }

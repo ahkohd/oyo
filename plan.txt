@@ -1,4 +1,2 @@
 Possible next features (post‑diff‑viewer completeness)
-1. Conflict view (read‑only): highlight <<<<<<< / ======= / >>>>>>> and jump between them.
-2. Copy patch/hunk: clipboard export in unified diff format.
-3. Performance guardrails: lazy line rendering for huge files.
+1. Performance guardrails: lazy line rendering for huge files.

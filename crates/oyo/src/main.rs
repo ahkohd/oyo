@@ -1437,6 +1437,14 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<AppE
                             app.reset_count();
                             app.search_prev();
                         }
+                        KeyCode::Char('c') => {
+                            app.reset_count();
+                            app.next_conflict();
+                        }
+                        KeyCode::Char('C') => {
+                            app.reset_count();
+                            app.prev_conflict();
+                        }
                         KeyCode::Char('?') => {
                             app.reset_count();
                             // Toggle help popover

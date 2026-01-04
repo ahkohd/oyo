@@ -168,6 +168,14 @@ impl DiffNavigator {
         self.state.cursor_change = change_id;
     }
 
+    /// Override the active cursor without changing applied steps.
+    pub fn set_cursor_override(&mut self, change_id: Option<usize>) {
+        self.state.cursor_change = change_id;
+        self.state.active_change = None;
+        self.state.step_direction = StepDirection::None;
+        self.state.animating_hunk = None;
+    }
+
     /// Set cursor change without altering current hunk.
     pub fn set_cursor_change(&mut self, change_id: Option<usize>) {
         self.state.cursor_change = change_id;

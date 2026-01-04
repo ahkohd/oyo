@@ -6,7 +6,7 @@ use super::{
     spans_width, truncate_text, view_spans_to_text, wrap_count_for_spans, wrap_count_for_text,
     TAB_WIDTH,
 };
-use crate::app::{is_fold_line, AnimationPhase, App};
+use crate::app::{is_conflict_marker, is_fold_line, AnimationPhase, App};
 use crate::syntax::SyntaxSide;
 use oyo_core::{LineKind, StepDirection, ViewLine, ViewSpanKind};
 use ratatui::{
@@ -518,6 +518,16 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
             && has_query
             && line_text.to_ascii_lowercase().contains(&query);
         content_spans = app.highlight_search_spans(content_spans, &line_text, is_active_match);
+        if is_conflict_marker(view_line) {
+            content_spans = content_spans
+                .into_iter()
+                .map(|span| {
+                    let mut style = span.style;
+                    style = style.fg(app.theme.warning).add_modifier(Modifier::BOLD);
+                    Span::styled(span.content, style)
+                })
+                .collect();
+        }
 
         content_spans = expand_tabs_in_spans(&content_spans, TAB_WIDTH);
 

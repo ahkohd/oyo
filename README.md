@@ -216,6 +216,7 @@ command = ["oy", "$left", "$right"]
 | `f` | Toggle context folding |
 | `t` | Toggle syntax highlight |
 | `E` | Toggle evo syntax (context/full) |
+| `c` / `C` | Next/prev conflict |
 | `s` | Toggle stepping (no-step mode) |
 | `S` | Toggle strikethrough |
 | `r` | Replay last step (count supported) |

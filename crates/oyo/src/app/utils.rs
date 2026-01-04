@@ -125,6 +125,11 @@ pub(crate) fn match_ranges(text: &str, regex: &Regex) -> Vec<(usize, usize)> {
     ranges
 }
 
+pub(crate) fn is_conflict_marker(line: &ViewLine) -> bool {
+    let text = line.content.trim_start();
+    text.starts_with("<<<<<<<") || text.starts_with("=======") || text.starts_with(">>>>>>>")
+}
+
 pub(crate) fn apply_highlight_spans(
     spans: Vec<Span<'static>>,
     ranges: &[(usize, usize)],
