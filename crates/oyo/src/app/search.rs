@@ -254,7 +254,7 @@ impl App {
             }
             ViewMode::Evolution => {
                 let mut display_idx = 0usize;
-                for line in &view {
+                for line in view.iter() {
                     let visible = match line.kind {
                         LineKind::Deleted => false,
                         LineKind::PendingDelete => {
@@ -275,7 +275,7 @@ impl App {
             ViewMode::Split => {
                 let mut old_idx = 0usize;
                 let mut new_idx = 0usize;
-                for line in &view {
+                for line in view.iter() {
                     if line.old_line.is_some() {
                         if let Some(text) = self.search_text_split_old(line) {
                             if line_has_query(&text, &regex) {

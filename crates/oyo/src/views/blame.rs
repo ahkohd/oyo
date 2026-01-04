@@ -12,11 +12,11 @@ const CONTENT_GUTTER_WIDTH: u16 = 8;
 const BLAME_BAR: &str = "▌";
 
 pub fn render_blame(frame: &mut Frame, app: &mut App, area: Rect) {
-    app.poll_blame_responses();
     if app.current_file_is_binary() {
         super::render_empty_state(frame, area, &app.theme, false, true);
         return;
     }
+    app.poll_blame_responses();
 
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
@@ -64,6 +64,7 @@ pub fn render_blame(frame: &mut Frame, app: &mut App, area: Rect) {
         wrap_width,
         blame_width: blame_area.width,
         view_len: view_lines.len(),
+        window_start: app.view_window_start(),
         animation_frame,
         cache_rev: app.blame_cache_revision,
         time_bucket,
@@ -80,7 +81,7 @@ pub fn render_blame(frame: &mut Frame, app: &mut App, area: Rect) {
         let mut blame_texts: Vec<Option<String>> = Vec::with_capacity(view_lines.len());
         let mut blame_displays: Vec<Option<BlameDisplay>> = Vec::with_capacity(view_lines.len());
 
-        for view_line in &view_lines {
+        for view_line in view_lines.iter() {
             if let Some(display) = app.blame_display_for_view_line(view_line, now) {
                 blame_keys.push(Some(display.group_key.clone()));
                 blame_texts.push(Some(display.text.clone()));
@@ -129,7 +130,7 @@ pub fn render_blame(frame: &mut Frame, app: &mut App, area: Rect) {
 
         let mut wrap_counts = Vec::with_capacity(view_lines.len());
         if app.line_wrap && wrap_width > 0 {
-            for view_line in &view_lines {
+            for view_line in view_lines.iter() {
                 let mut content_spans = vec![Span::raw(view_line.content.clone())];
                 content_spans = expand_tabs_in_spans(&content_spans, TAB_WIDTH);
                 let wrap_count = wrap_count_for_spans(&content_spans, wrap_width);
@@ -172,9 +173,10 @@ pub fn render_blame(frame: &mut Frame, app: &mut App, area: Rect) {
     let extra_rows_after_line = cache.extra_rows_after_line.clone();
     let wrap_counts = cache.wrap_counts.clone();
 
-    let mut blame_scroll_offset = app.scroll_offset;
-    if !app.line_wrap && app.scroll_offset > 0 {
-        let max_idx = app.scroll_offset.min(extra_rows_after_line.len());
+    let scroll_offset = app.render_scroll_offset();
+    let mut blame_scroll_offset = scroll_offset;
+    if !app.line_wrap && scroll_offset > 0 {
+        let max_idx = scroll_offset.min(extra_rows_after_line.len());
         let extra_before = extra_rows_after_line[..max_idx]
             .iter()
             .copied()

@@ -1,8 +1,15 @@
 use crate::blame::BlameInfo;
+use crate::config::{
+    DiffExtentMarkerMode, DiffExtentMarkerScope, DiffForegroundMode, DiffHighlightMode,
+    FoldContextMode, SyntaxMode,
+};
 use crate::syntax::SyntaxSide;
-use oyo_core::{multi::BlameSource, AnimationFrame};
+use oyo_core::diff::DiffResult;
+use oyo_core::{multi::BlameSource, AnimationFrame, StepDirection};
+use ratatui::text::Line;
 use ratatui::style::Color;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Instant;
 
 /// Animation phase for smooth transitions
@@ -144,6 +151,7 @@ pub(crate) struct BlameRenderKey {
     pub(crate) wrap_width: usize,
     pub(crate) blame_width: u16,
     pub(crate) view_len: usize,
+    pub(crate) window_start: usize,
     pub(crate) animation_frame: AnimationFrame,
     pub(crate) cache_rev: u64,
     pub(crate) time_bucket: i64,
@@ -156,6 +164,60 @@ pub(crate) struct BlameRenderCache {
     pub(crate) extra_texts_after_line: Vec<Vec<String>>,
     pub(crate) display_texts: Vec<String>,
     pub(crate) bar_colors: Vec<Option<Color>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct UnifiedRenderKey {
+    pub(crate) file_index: usize,
+    pub(crate) frame: AnimationFrame,
+    pub(crate) current_step: usize,
+    pub(crate) active_change: Option<usize>,
+    pub(crate) cursor_change: Option<usize>,
+    pub(crate) peek_state: Option<PeekState>,
+    pub(crate) animating_hunk: Option<usize>,
+    pub(crate) step_direction: StepDirection,
+    pub(crate) current_hunk: usize,
+    pub(crate) last_nav_was_hunk: bool,
+    pub(crate) hunk_preview_mode: bool,
+    pub(crate) preview_from_backward: bool,
+    pub(crate) show_hunk_extent_while_stepping: bool,
+    pub(crate) placeholder_view: bool,
+    pub(crate) fold_context: FoldContextMode,
+    pub(crate) viewport_height: usize,
+    pub(crate) windowed: bool,
+    pub(crate) window_start: usize,
+    pub(crate) stepping: bool,
+    pub(crate) line_wrap: bool,
+    pub(crate) wrap_width: usize,
+    pub(crate) scroll_offset: usize,
+    pub(crate) horizontal_scroll: usize,
+    pub(crate) diff_bg: bool,
+    pub(crate) diff_fg: DiffForegroundMode,
+    pub(crate) diff_highlight: DiffHighlightMode,
+    pub(crate) diff_extent_marker: DiffExtentMarkerMode,
+    pub(crate) diff_extent_marker_scope: DiffExtentMarkerScope,
+    pub(crate) diff_extent_marker_context: bool,
+    pub(crate) gutter_signs: bool,
+    pub(crate) strikethrough_deletions: bool,
+    pub(crate) search_query: String,
+    pub(crate) search_active: bool,
+    pub(crate) syntax_mode: SyntaxMode,
+    pub(crate) syntax_theme: String,
+    pub(crate) theme_is_light: bool,
+    pub(crate) step_edge_hint: bool,
+    pub(crate) hunk_edge_hint: bool,
+    pub(crate) blame_hunk_hint: Option<String>,
+}
+
+pub(crate) struct UnifiedRenderModel {
+    pub(crate) key: UnifiedRenderKey,
+    pub(crate) gutter_lines: Vec<Line<'static>>,
+    pub(crate) content_lines: Vec<Line<'static>>,
+    pub(crate) bg_lines: Option<Vec<Line<'static>>>,
+    pub(crate) display_len: usize,
+    pub(crate) max_line_width: usize,
+    pub(crate) primary_display_idx: Option<usize>,
+    pub(crate) active_display_idx: Option<usize>,
 }
 
 #[derive(Clone, Debug)]
@@ -174,6 +236,19 @@ pub(crate) struct BlameResponse {
     pub(crate) start: usize,
     pub(crate) end: usize,
     pub(crate) entries: Vec<(usize, BlameInfo)>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct DiffRequest {
+    pub(crate) file_index: usize,
+    pub(crate) old: Arc<str>,
+    pub(crate) new: Arc<str>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct DiffResponse {
+    pub(crate) file_index: usize,
+    pub(crate) diff: Result<DiffResult, String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

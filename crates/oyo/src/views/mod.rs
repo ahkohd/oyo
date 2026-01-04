@@ -15,7 +15,7 @@ mod tests;
 
 use std::collections::VecDeque;
 
-use oyo_core::{LineKind, ViewSpan};
+use oyo_core::{LineKind, ViewLine, ViewSpan};
 use ratatui::text::Span;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
@@ -565,6 +565,19 @@ pub(crate) fn extent_marker_style(
         },
     };
     Style::default().fg(color)
+}
+
+pub(crate) fn show_extent_marker(app: &App, view_line: &ViewLine) -> bool {
+    if !view_line.show_hunk_extent {
+        return false;
+    }
+    if app.diff_extent_marker_context {
+        return true;
+    }
+    if matches!(view_line.kind, LineKind::Context) && !view_line.has_changes {
+        return false;
+    }
+    true
 }
 
 // ============================================================================

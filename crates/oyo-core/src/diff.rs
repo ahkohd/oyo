@@ -1,7 +1,8 @@
 //! Diff computation engine
 
 use crate::change::{Change, ChangeKind, ChangeSpan};
-use similar::{ChangeTag, TextDiff};
+use similar::{Algorithm, ChangeTag, TextDiff};
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use thiserror::Error;
 
@@ -95,6 +96,8 @@ pub struct DiffEngine {
     word_level: bool,
 }
 
+const LARGE_DIFF_BYTES: u64 = 2 * 1024 * 1024;
+
 impl Default for DiffEngine {
     fn default() -> Self {
         Self {
@@ -121,7 +124,13 @@ impl DiffEngine {
 
     /// Compute diff between two strings
     pub fn diff_strings(&self, old: &str, new: &str) -> DiffResult {
-        let text_diff = TextDiff::from_lines(old, new);
+        let max_len = old.len().max(new.len()) as u64;
+        let algorithm = if max_len > LARGE_DIFF_BYTES {
+            Algorithm::Patience
+        } else {
+            Algorithm::Myers
+        };
+        let text_diff = TextDiff::configure().algorithm(algorithm).diff_lines(old, new);
         let mut changes = Vec::new();
         let mut significant_changes = Vec::new();
         let mut insertions = 0;
@@ -185,6 +194,38 @@ impl DiffEngine {
             &mut insertions,
             &mut deletions,
         );
+
+        let (changes, significant_changes) = if self.context_lines != usize::MAX {
+            let mut id_to_idx = HashMap::new();
+            for (idx, change) in changes.iter().enumerate() {
+                id_to_idx.insert(change.id, idx);
+            }
+            let mut include = vec![false; changes.len()];
+            for &change_id in &significant_changes {
+                if let Some(&idx) = id_to_idx.get(&change_id) {
+                    let start = idx.saturating_sub(self.context_lines);
+                    let end = (idx + self.context_lines).min(changes.len().saturating_sub(1));
+                    for i in start..=end {
+                        include[i] = true;
+                    }
+                }
+            }
+            let significant_set: HashSet<usize> =
+                significant_changes.iter().copied().collect();
+            let mut filtered_changes = Vec::new();
+            let mut filtered_significant = Vec::new();
+            for (idx, change) in changes.into_iter().enumerate() {
+                if include.get(idx).copied().unwrap_or(false) {
+                    if significant_set.contains(&change.id) {
+                        filtered_significant.push(change.id);
+                    }
+                    filtered_changes.push(change);
+                }
+            }
+            (filtered_changes, filtered_significant)
+        } else {
+            (changes, significant_changes)
+        };
 
         // Compute hunks by grouping nearby changes
         let hunks = Self::compute_hunks(&significant_changes, &changes);
@@ -563,5 +604,49 @@ mod tests {
             "KeyModifiers should not be inserted, got insert: '{}'",
             insert_content
         );
+    }
+
+    #[test]
+    fn test_hunks_are_contiguous_in_significant_changes() {
+        let engine = DiffEngine::new();
+        let old = "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\nm\nn\n";
+        let new = "a\nB\nc\nd\ne\nf\ng\nh\nI\nj\nk\nL\nm\nn\n";
+
+        let result = engine.diff_strings(old, new);
+
+        assert!(
+            result.hunks.len() >= 2,
+            "expected multiple hunks for contiguity test"
+        );
+
+        for hunk in &result.hunks {
+            if hunk.change_ids.is_empty() {
+                continue;
+            }
+            let mut positions = Vec::new();
+            for id in &hunk.change_ids {
+                let pos = result
+                    .significant_changes
+                    .iter()
+                    .position(|sid| sid == id)
+                    .expect("hunk change id should exist in significant_changes");
+                positions.push(pos);
+            }
+            for pair in positions.windows(2) {
+                assert_eq!(
+                    pair[1],
+                    pair[0] + 1,
+                    "hunk change ids should be contiguous in significant_changes"
+                );
+            }
+            let start = positions[0];
+            for (offset, id) in hunk.change_ids.iter().enumerate() {
+                assert_eq!(
+                    result.significant_changes[start + offset],
+                    *id,
+                    "hunk change order should match significant_changes"
+                );
+            }
+        }
     }
 }

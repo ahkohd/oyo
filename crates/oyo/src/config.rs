@@ -836,12 +836,24 @@ pub struct DiffConfig {
     /// Inline diff highlight mode: "word", "text", or "none"
     #[serde(default = "diff_highlight_default")]
     pub highlight: DiffHighlightMode,
+    /// Maximum diff size before stepping is disabled (bytes)
+    #[serde(default = "diff_max_bytes_default")]
+    pub max_bytes: u64,
+    /// Defer diff computation for large files (background compute)
+    #[serde(default = "diff_defer_default")]
+    pub defer: bool,
+    /// Idle time (ms) before background diff computation
+    #[serde(default = "diff_idle_ms_default")]
+    pub idle_ms: u64,
     /// Extent marker color mode: "neutral" or "diff"
     #[serde(default = "diff_extent_marker_default")]
     pub extent_marker: DiffExtentMarkerMode,
     /// Extent marker scope: "progress" or "hunk"
     #[serde(default = "diff_extent_marker_scope_default")]
     pub extent_marker_scope: DiffExtentMarkerScope,
+    /// Show extent markers on unchanged context lines within a hunk
+    #[serde(default = "diff_extent_marker_context_default")]
+    pub extent_marker_context: bool,
 }
 
 impl Default for DiffConfig {
@@ -850,8 +862,12 @@ impl Default for DiffConfig {
             bg: diff_bg_default(),
             fg: diff_fg_default(),
             highlight: diff_highlight_default(),
+            max_bytes: diff_max_bytes_default(),
+            defer: diff_defer_default(),
+            idle_ms: diff_idle_ms_default(),
             extent_marker: diff_extent_marker_default(),
             extent_marker_scope: diff_extent_marker_scope_default(),
+            extent_marker_context: diff_extent_marker_context_default(),
         }
     }
 }
@@ -868,12 +884,28 @@ fn diff_highlight_default() -> DiffHighlightMode {
     DiffHighlightMode::Text
 }
 
+fn diff_max_bytes_default() -> u64 {
+    16 * 1024 * 1024
+}
+
+fn diff_defer_default() -> bool {
+    true
+}
+
+fn diff_idle_ms_default() -> u64 {
+    250
+}
+
 fn diff_extent_marker_default() -> DiffExtentMarkerMode {
     DiffExtentMarkerMode::Neutral
 }
 
 fn diff_extent_marker_scope_default() -> DiffExtentMarkerScope {
     DiffExtentMarkerScope::Progress
+}
+
+fn diff_extent_marker_context_default() -> bool {
+    false
 }
 
 /// Context folding display mode

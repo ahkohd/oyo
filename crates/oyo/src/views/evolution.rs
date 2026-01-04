@@ -31,7 +31,7 @@ fn hunk_overflow_wrapped_evolution(
     let mut start: Option<usize> = None;
     let mut end: Option<usize> = None;
 
-    for line in view_lines {
+    for line in view_lines.iter() {
         if matches!(line.kind, LineKind::Deleted | LineKind::PendingDelete) {
             continue;
         }
@@ -82,6 +82,7 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
         .current_navigator()
         .set_show_hunk_extent_while_stepping(show_extent);
     let view_lines = app.current_view_with_frame(animation_frame);
+    let scroll_offset = app.render_scroll_offset();
     let step_direction = app.multi_diff.current_step_direction();
     let mut display_len = 0usize;
     if !app.line_wrap {
@@ -89,12 +90,13 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
             &view_lines,
             app.view_mode,
             app.animation_phase,
-            app.scroll_offset,
+            scroll_offset,
             step_direction,
             app.split_align_lines,
         );
-        app.clamp_scroll(len, visible_height, app.allow_overscroll());
-        display_len = len;
+        let total_len = app.render_total_lines(len);
+        app.clamp_scroll(total_len, visible_height, app.allow_overscroll());
+        display_len = total_len;
     }
     let debug_target = app.syntax_scope_target(&view_lines);
     let pending_insert_only = if app.stepping {
@@ -139,7 +141,7 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
                 &view_lines,
                 current_hunk,
                 visible_width,
-                app.scroll_offset,
+                scroll_offset,
                 visible_height,
             )
             .unwrap_or((false, false))
@@ -170,10 +172,36 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
     let mut active_display_idx: Option<usize> = None;
     let hunk_preview_mode = app.multi_diff.current_navigator().state().hunk_preview_mode;
     let animation_phase = app.animation_phase;
+    let mut has_visible = false;
+    for line in view_lines.iter() {
+        match line.kind {
+            LineKind::Deleted => {}
+            LineKind::PendingDelete => {
+                if hunk_preview_mode {
+                    continue;
+                }
+                if !line.is_active_change {
+                    continue;
+                }
+                if animation_phase != AnimationPhase::Idle {
+                    has_visible = true;
+                    break;
+                }
+            }
+            _ => {
+                has_visible = true;
+                break;
+            }
+        }
+    }
+    let show_deleted_fallback = !has_visible;
     let is_visible = |line: &ViewLine| -> bool {
         match line.kind {
-            LineKind::Deleted => false,
+            LineKind::Deleted => show_deleted_fallback,
             LineKind::PendingDelete => {
+                if show_deleted_fallback {
+                    return true;
+                }
                 if hunk_preview_mode {
                     return false;
                 }
@@ -246,9 +274,7 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
             display_idx += 1;
         }
         cursor_display
-            .map(|idx| {
-                idx >= app.scroll_offset && idx < app.scroll_offset.saturating_add(visible_height)
-            })
+            .map(|idx| idx >= scroll_offset && idx < scroll_offset.saturating_add(visible_height))
             .unwrap_or(false)
     };
     let mut prev_visible_hunk_map: Vec<Option<usize>> = vec![None; view_lines.len()];
@@ -309,7 +335,7 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
         let display_idx = display_line_num - 1;
 
         // Handle scrolling - when wrapping, we need all lines
-        if !app.line_wrap && display_line_num <= app.scroll_offset {
+        if !app.line_wrap && display_line_num <= scroll_offset {
             continue;
         }
         if !app.line_wrap && gutter_lines.len() >= visible_height {
@@ -413,6 +439,7 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
 
         // Gutter marker: primary marker for focus, extent marker for hunk nav, blank otherwise
         let is_primary = view_line.is_primary_active || fallback_primary == Some(raw_idx);
+        let show_extent = super::show_extent_marker(app, view_line);
         let (active_marker, active_style) = if is_primary {
             (
                 primary_marker.as_str(),
@@ -420,7 +447,7 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
                     .fg(app.theme.primary)
                     .add_modifier(Modifier::BOLD),
             )
-        } else if view_line.show_hunk_extent {
+        } else if show_extent {
             (
                 extent_marker.as_str(),
                 super::extent_marker_style(
@@ -748,7 +775,8 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
             display_len,
             primary_display_idx.or(active_display_idx),
         );
-        app.clamp_scroll(display_len, visible_height, app.allow_overscroll());
+        let total_len = app.render_total_lines(display_len);
+        app.clamp_scroll(total_len, visible_height, app.allow_overscroll());
     }
 
     // Clamp horizontal scroll
@@ -761,7 +789,7 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
 
     // Render gutter (no horizontal scroll)
     let mut gutter_paragraph = if app.line_wrap {
-        Paragraph::new(gutter_lines).scroll((app.scroll_offset as u16, 0))
+        Paragraph::new(gutter_lines).scroll((scroll_offset as u16, 0))
     } else {
         Paragraph::new(gutter_lines)
     };
@@ -789,7 +817,7 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
         let mut content_paragraph = if app.line_wrap {
             Paragraph::new(content_lines)
                 .wrap(Wrap { trim: false })
-                .scroll((app.scroll_offset as u16, 0))
+                .scroll((scroll_offset as u16, 0))
         } else {
             Paragraph::new(content_lines)
         };

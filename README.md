@@ -256,8 +256,12 @@ hunk = "none"               # "none" | "hunk" | "file"
 # bg = false                # Full-line diff background (true/false)
 # fg = "theme"              # "theme" or "syntax"
 # highlight = "text"        # "text" | "word" | "none"
+# max_bytes = 16777216      # Defer diffing above this size (bytes)
+# defer = true              # Defer large diffs and compute in background
+# idle_ms = 250             # Idle time before background diff compute
 # extent_marker = "neutral" # "neutral" or "diff"
 # extent_marker_scope = "progress" # "progress" or "hunk"
+# extent_marker_context = false # show extent markers on unchanged lines
 # [ui.blame]
 # enabled = false           # Show git blame hints (opt-in)
 # mode = "one_shot"         # "one_shot" or "toggle"
@@ -324,6 +328,9 @@ name = "tokyonight"
 fg = "syntax"
 bg = true
 highlight = "text"
+max_bytes = 16777216
+defer = true
+idle_ms = 250
 extent_marker = "diff"
 extent_marker_scope = "hunk"
 

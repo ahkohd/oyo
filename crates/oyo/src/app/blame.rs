@@ -39,17 +39,31 @@ impl App {
 
     fn active_view_line(&mut self) -> Option<ViewLine> {
         let frame = oyo_core::AnimationFrame::Idle;
-        let view_lines = self.current_view_with_frame(frame);
-        let mut fallback: Option<ViewLine> = None;
-        for line in view_lines {
-            if line.is_primary_active {
-                return Some(line);
-            }
-            if fallback.is_none() && line.is_active_change {
-                fallback = Some(line);
-            }
-        }
-        fallback
+        let nav = self.multi_diff.current_navigator();
+        let state = nav.state();
+        let primary_change_id = if state.cursor_change.is_some()
+            && state.active_change.is_none()
+            && state.step_direction == oyo_core::StepDirection::None
+        {
+            state.cursor_change
+        } else if state.step_direction == oyo_core::StepDirection::Backward {
+            state
+                .applied_changes
+                .last()
+                .copied()
+                .or(state.active_change)
+        } else {
+            state.active_change
+        };
+
+        let change_id = primary_change_id.or_else(|| {
+            state
+                .animating_hunk
+                .and_then(|hunk_idx| nav.hunks().get(hunk_idx))
+                .and_then(|hunk| hunk.change_ids.first().copied())
+        })?;
+
+        nav.view_line_for_change(frame, change_id)
     }
 
     fn blame_cache_key_for_line(&self, view_line: &ViewLine) -> Option<BlameCacheKey> {
@@ -195,6 +209,9 @@ impl App {
 
     pub(super) fn set_blame_hunk_hint(&mut self) {
         if !self.blame_hunk_hint_enabled {
+            return;
+        }
+        if !self.blame_enabled {
             return;
         }
         if let Some(line) = self.active_view_line() {

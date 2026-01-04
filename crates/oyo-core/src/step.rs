@@ -3,6 +3,8 @@
 use crate::change::{Change, ChangeKind, ChangeSpan};
 use crate::diff::DiffResult;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
+use std::sync::Arc;
 
 /// Direction of the last step action
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -31,6 +33,9 @@ pub struct StepState {
     pub total_steps: usize,
     /// IDs of changes that have been applied up to current step
     pub applied_changes: Vec<usize>,
+    /// Fast membership for applied changes (kept in sync with applied_changes)
+    #[serde(skip, default)]
+    applied_changes_set: HashSet<usize>,
     /// ID of the change being highlighted/animated at current step
     pub active_change: Option<usize>,
     /// Cursor change used for non-stepping navigation (does not imply animation)
@@ -65,6 +70,7 @@ impl StepState {
             current_step: 0,
             total_steps: total_changes + 1, // +1 for initial state
             applied_changes: Vec::new(),
+            applied_changes_set: HashSet::new(),
             active_change: None,
             cursor_change: None,
             animating_hunk: None,
@@ -95,6 +101,48 @@ impl StepState {
         }
         (self.current_step as f64 / (self.total_steps - 1) as f64) * 100.0
     }
+
+    fn rebuild_applied_set(&mut self) {
+        self.applied_changes_set = self.applied_changes.iter().copied().collect();
+    }
+
+    pub fn is_applied(&self, change_id: usize) -> bool {
+        self.applied_changes_set.contains(&change_id)
+    }
+
+    fn push_applied(&mut self, change_id: usize) {
+        if self.applied_changes_set.insert(change_id) {
+            self.applied_changes.push(change_id);
+        }
+    }
+
+    fn pop_applied(&mut self) -> Option<usize> {
+        let change_id = self.applied_changes.pop()?;
+        self.applied_changes_set.remove(&change_id);
+        Some(change_id)
+    }
+
+    fn remove_applied_bulk(&mut self, change_ids: &[usize], keep: Option<usize>) -> usize {
+        let mut removed = 0;
+        for &change_id in change_ids {
+            if Some(change_id) == keep {
+                continue;
+            }
+            if self.applied_changes_set.remove(&change_id) {
+                removed += 1;
+            }
+        }
+        if removed > 0 {
+            self.applied_changes
+                .retain(|id| self.applied_changes_set.contains(id));
+        }
+        removed
+    }
+
+    fn clear_applied(&mut self) {
+        self.applied_changes.clear();
+        self.applied_changes_set.clear();
+    }
 }
 
 /// Navigator for stepping through diff changes
@@ -104,23 +152,114 @@ pub struct DiffNavigator {
     /// Current step state
     state: StepState,
     /// Original content (for reconstructing views)
-    old_content: String,
+    old_content: Arc<str>,
     /// New content (for reconstructing views)
-    new_content: String,
+    new_content: Arc<str>,
     /// Mapping from change ID to hunk index
-    change_to_hunk: std::collections::HashMap<usize, usize>,
+    change_to_hunk: Vec<Option<usize>>,
+    /// Mapping from change ID to change index in the diff
+    change_to_index: Vec<Option<usize>>,
+    /// Skip building full lookup maps for large diffs
+    lazy_maps: bool,
+    /// Step range (start index, length) per hunk for fast hunk progress
+    hunk_step_ranges: Vec<Option<HunkStepRange>>,
+    /// Cached change index range per hunk (inclusive), for O(1) scope checks
+    hunk_change_ranges: Vec<Option<(usize, usize)>>,
+    /// Cached display indices for evolution view (None for hidden deletions)
+    evo_visible_index: Option<Vec<Option<usize>>>,
+    /// Cached visible line count for evolution view
+    evo_visible_len: Option<usize>,
+    /// Cached list of visible change indices (display index -> change index)
+    evo_display_to_change: Option<Vec<usize>>,
+    /// Cached nearest visible change index per change (for evo)
+    evo_nearest_visible: Option<Vec<Option<usize>>>,
+}
+
+const LARGE_CONTEXT_PAD: usize = 3;
+
+#[derive(Debug, Clone, Copy)]
+struct HunkStepRange {
+    start: usize,
+    len: usize,
 }
 
 impl DiffNavigator {
-    pub fn new(diff: DiffResult, old_content: String, new_content: String) -> Self {
+    pub fn new(
+        diff: DiffResult,
+        old_content: Arc<str>,
+        new_content: Arc<str>,
+        lazy_maps: bool,
+    ) -> Self {
         let total_changes = diff.significant_changes.len();
         let total_hunks = diff.hunks.len();
 
-        // Build change ID to hunk index mapping
-        let mut change_to_hunk = std::collections::HashMap::new();
+        // Build change ID lookup maps
+        let mut change_to_hunk = vec![None; diff.changes.len()];
+        let mut max_change_id = 0usize;
+        for change in diff.changes.iter() {
+            max_change_id = max_change_id.max(change.id);
+        }
+        let mut change_to_index = vec![None; max_change_id.saturating_add(1)];
+        for (idx, change) in diff.changes.iter().enumerate() {
+            if let Some(slot) = change_to_index.get_mut(change.id) {
+                *slot = Some(idx);
+            }
+        }
+
+        let mut hunk_change_ranges = vec![None; diff.hunks.len()];
         for (hunk_idx, hunk) in diff.hunks.iter().enumerate() {
+            let mut min_idx = usize::MAX;
+            let mut max_idx = 0usize;
             for &change_id in &hunk.change_ids {
-                change_to_hunk.insert(change_id, hunk_idx);
+                if let Some(Some(idx)) = change_to_index.get(change_id) {
+                    min_idx = min_idx.min(*idx);
+                    max_idx = max_idx.max(*idx);
+                }
+            }
+            if min_idx == usize::MAX {
+                continue;
+            }
+            let start = if lazy_maps {
+                min_idx.saturating_sub(LARGE_CONTEXT_PAD)
+            } else {
+                min_idx
+            };
+            let end = if lazy_maps {
+                (max_idx + LARGE_CONTEXT_PAD).min(diff.changes.len().saturating_sub(1))
+            } else {
+                max_idx
+            };
+            hunk_change_ranges[hunk_idx] = Some((start, end));
+            for idx in start..=end {
+                if let Some(slot) = change_to_hunk.get_mut(idx) {
+                    if slot.is_none() {
+                        *slot = Some(hunk_idx);
+                    }
+                }
+            }
+        }
+
+        let mut change_to_step = std::collections::HashMap::new();
+        for (idx, change_id) in diff.significant_changes.iter().enumerate() {
+            change_to_step.insert(*change_id, idx);
+        }
+        let mut hunk_step_ranges = vec![None; diff.hunks.len()];
+        for (hunk_idx, hunk) in diff.hunks.iter().enumerate() {
+            if hunk.change_ids.is_empty() {
+                continue;
+            }
+            let mut min = usize::MAX;
+            let mut count = 0usize;
+            for change_id in &hunk.change_ids {
+                if let Some(step_idx) = change_to_step.get(change_id) {
+                    if *step_idx < min {
+                        min = *step_idx;
+                    }
+                    count += 1;
+                }
+            }
+            if count > 0 && min != usize::MAX {
+                hunk_step_ranges[hunk_idx] = Some(HunkStepRange { start: min, len: count });
             }
         }
 
@@ -130,6 +269,14 @@ impl DiffNavigator {
             old_content,
             new_content,
             change_to_hunk,
+            change_to_index,
+            lazy_maps,
+            hunk_step_ranges,
+            hunk_change_ranges,
+            evo_visible_index: None,
+            evo_visible_len: None,
+            evo_display_to_change: None,
+            evo_nearest_visible: None,
         }
     }
 
@@ -152,12 +299,197 @@ impl DiffNavigator {
             return false;
         }
         self.state = state;
+        self.state.rebuild_applied_set();
         true
     }
 
     /// Get the diff result
     pub fn diff(&self) -> &DiffResult {
         &self.diff
+    }
+
+    fn change_visible_in_evolution(change: &Change) -> bool {
+        let mut has_old = false;
+        let mut has_new = false;
+        for span in &change.spans {
+            match span.kind {
+                ChangeKind::Insert => has_new = true,
+                ChangeKind::Delete => has_old = true,
+                ChangeKind::Replace => {
+                    has_old = true;
+                    has_new = true;
+                }
+                ChangeKind::Equal => {}
+            }
+        }
+        !(has_old && !has_new)
+    }
+
+    fn change_visible_in_evolution_state(&self, change: &Change) -> bool {
+        let applied = self.state.is_applied(change.id);
+        let mut has_old = false;
+        let mut has_new = false;
+        for span in &change.spans {
+            match span.kind {
+                ChangeKind::Insert => has_new = true,
+                ChangeKind::Delete => has_old = true,
+                ChangeKind::Replace => {
+                    has_old = true;
+                    has_new = true;
+                }
+                ChangeKind::Equal => {}
+            }
+        }
+        if has_old && !has_new {
+            return !applied;
+        }
+        if has_new && !has_old {
+            return applied;
+        }
+        true
+    }
+
+    fn ensure_evo_visible_index(&mut self) {
+        if self.evo_visible_index.is_some() {
+            return;
+        }
+        let mut mapping = Vec::with_capacity(self.diff.changes.len());
+        let mut display_to_change = Vec::new();
+        let mut display_idx = 0usize;
+        for (idx, change) in self.diff.changes.iter().enumerate() {
+            if Self::change_visible_in_evolution(change) {
+                mapping.push(Some(display_idx));
+                display_to_change.push(idx);
+                display_idx += 1;
+            } else {
+                mapping.push(None);
+            }
+        }
+        self.evo_visible_len = Some(display_idx);
+        self.evo_visible_index = Some(mapping);
+        self.evo_display_to_change = Some(display_to_change);
+
+        let mut prev_visible = vec![None; self.diff.changes.len()];
+        let mut last_visible = None;
+        for (idx, change) in self.diff.changes.iter().enumerate() {
+            if Self::change_visible_in_evolution(change) {
+                last_visible = Some(idx);
+            }
+            prev_visible[idx] = last_visible;
+        }
+        let mut next_visible = vec![None; self.diff.changes.len()];
+        let mut next = None;
+        for (idx, change) in self.diff.changes.iter().enumerate().rev() {
+            if Self::change_visible_in_evolution(change) {
+                next = Some(idx);
+            }
+            next_visible[idx] = next;
+        }
+        let mut nearest = vec![None; self.diff.changes.len()];
+        for idx in 0..self.diff.changes.len() {
+            match (prev_visible[idx], next_visible[idx]) {
+                (Some(prev), Some(next)) => {
+                    let prev_dist = idx.saturating_sub(prev);
+                    let next_dist = next.saturating_sub(idx);
+                    nearest[idx] = if next_dist < prev_dist { Some(next) } else { Some(prev) };
+                }
+                (Some(prev), None) => nearest[idx] = Some(prev),
+                (None, Some(next)) => nearest[idx] = Some(next),
+                (None, None) => nearest[idx] = None,
+            }
+        }
+        self.evo_nearest_visible = Some(nearest);
+    }
+
+    pub fn evolution_display_index_for_change(&mut self, change_id: usize) -> Option<usize> {
+        self.ensure_evo_visible_index();
+        let idx = self.change_index_for(change_id)?;
+        self.evo_visible_index
+            .as_ref()
+            .and_then(|mapping| mapping.get(idx).copied().flatten())
+    }
+
+    pub fn evolution_display_index_for_change_index(&mut self, change_idx: usize) -> Option<usize> {
+        self.ensure_evo_visible_index();
+        self.evo_visible_index
+            .as_ref()
+            .and_then(|mapping| mapping.get(change_idx).copied().flatten())
+    }
+
+    pub fn evolution_display_index_or_nearest(&mut self, change_id: usize) -> Option<usize> {
+        if let Some(idx) = self.evolution_display_index_for_change(change_id) {
+            return Some(idx);
+        }
+        self.ensure_evo_visible_index();
+        let change_idx = self.change_index_for(change_id)?;
+        let nearest = self
+            .evo_nearest_visible
+            .as_ref()
+            .and_then(|mapping| mapping.get(change_idx).copied().flatten())?;
+        self.evolution_display_index_for_change_index(nearest)
+    }
+
+    pub fn evolution_nearest_visible_change_id(&mut self, change_id: usize) -> Option<usize> {
+        self.ensure_evo_visible_index();
+        let change_idx = self.change_index_for(change_id)?;
+        let nearest = self
+            .evo_nearest_visible
+            .as_ref()
+            .and_then(|mapping| mapping.get(change_idx).copied().flatten())?;
+        self.diff.changes.get(nearest).map(|change| change.id)
+    }
+
+    pub fn evolution_nearest_visible_change_id_dynamic(
+        &self,
+        change_id: usize,
+        max_scan: usize,
+    ) -> Option<usize> {
+        let idx = self.change_index_for(change_id)?;
+        if self.diff.changes.is_empty() {
+            return None;
+        }
+        let mut offset = 0usize;
+        while offset <= max_scan {
+            if let Some(left) = idx.checked_sub(offset) {
+                let change = &self.diff.changes[left];
+                if self.change_visible_in_evolution_state(change) {
+                    return Some(change.id);
+                }
+            }
+            let right = idx + offset;
+            if right < self.diff.changes.len() {
+                let change = &self.diff.changes[right];
+                if self.change_visible_in_evolution_state(change) {
+                    return Some(change.id);
+                }
+            }
+            offset += 1;
+        }
+        None
+    }
+
+    pub fn evolution_visible_len(&mut self) -> usize {
+        self.ensure_evo_visible_index();
+        self.evo_visible_len.unwrap_or(0)
+    }
+
+    pub fn evolution_change_range_for_display(
+        &mut self,
+        display_idx: usize,
+        radius: usize,
+    ) -> Option<(usize, usize)> {
+        self.ensure_evo_visible_index();
+        let visible_len = self.evo_visible_len?;
+        if visible_len == 0 {
+            return None;
+        }
+        let display_idx = display_idx.min(visible_len.saturating_sub(1));
+        let start_display = display_idx.saturating_sub(radius);
+        let end_display = (display_idx + radius).min(visible_len.saturating_sub(1));
+        let display_to_change = self.evo_display_to_change.as_ref()?;
+        let start_change = *display_to_change.get(start_display)?;
+        let end_change = *display_to_change.get(end_display)?;
+        Some((start_change, end_change))
     }
 
     /// Set a non-animated cursor for classic (no-step) navigation.
@@ -212,7 +544,7 @@ impl DiffNavigator {
         let change_idx = self.state.current_step;
         if change_idx < self.diff.significant_changes.len() {
             let change_id = self.diff.significant_changes[change_idx];
-            self.state.applied_changes.push(change_id);
+            self.state.push_applied(change_id);
             self.state.active_change = Some(change_id);
 
             // Update current hunk
@@ -256,9 +588,10 @@ impl DiffNavigator {
         self.state
             .applied_changes
             .retain(|&id| !hunk.change_ids.contains(&id) || id == first_change);
+        self.state.rebuild_applied_set();
 
         // Apply second change
-        self.state.applied_changes.push(second_change);
+        self.state.push_applied(second_change);
 
         // Update current_step to reflect actual applied changes
         self.state.current_step = self.state.applied_changes.len();
@@ -292,7 +625,7 @@ impl DiffNavigator {
         self.state.current_step -= 1;
 
         // Pop the change and set it as active for backward animation
-        if let Some(unapplied_change_id) = self.state.applied_changes.pop() {
+        if let Some(unapplied_change_id) = self.state.pop_applied() {
             self.state.active_change = Some(unapplied_change_id);
 
             // Update current hunk based on last applied change
@@ -335,9 +668,7 @@ impl DiffNavigator {
         self.state.animating_hunk = Some(current_hunk_idx);
 
         // Unapply all changes in this hunk
-        for &change_id in &hunk.change_ids {
-            self.state.applied_changes.retain(|&id| id != change_id);
-        }
+        self.state.remove_applied_bulk(&hunk.change_ids, None);
 
         // Update current_step to reflect actual applied changes
         self.state.current_step = self.state.applied_changes.len();
@@ -375,7 +706,7 @@ impl DiffNavigator {
 
         // Reset to start
         self.state.current_step = 0;
-        self.state.applied_changes.clear();
+        self.state.clear_applied();
         self.state.active_change = None;
         self.state.cursor_change = None;
         self.state.animating_hunk = None;
@@ -384,9 +715,23 @@ impl DiffNavigator {
         self.state.hunk_preview_mode = false; // Clear preview mode on goto
         self.state.preview_from_backward = false;
 
-        // Apply changes up to target step
-        for _ in 0..target_step {
-            self.next();
+        if self.lazy_maps {
+            if target_step > 0 {
+                let end = target_step.min(self.diff.significant_changes.len());
+                self.state.applied_changes =
+                    self.diff.significant_changes[..end].iter().copied().collect();
+                self.state.rebuild_applied_set();
+                self.state.current_step = end;
+                self.state.active_change = self.state.applied_changes.last().copied();
+                self.state.step_direction = StepDirection::Forward;
+            } else {
+                self.state.step_direction = StepDirection::None;
+            }
+        } else {
+            // Apply changes up to target step
+            for _ in 0..target_step {
+                self.next();
+            }
         }
 
         // Update which hunk we're in
@@ -425,14 +770,14 @@ impl DiffNavigator {
         let has_applied_in_current = current_hunk
             .change_ids
             .iter()
-            .any(|id| self.state.applied_changes.contains(id));
+            .any(|id| self.state.is_applied(*id));
 
         // If current hunk has no applied changes, apply ALL changes (full preview)
         if !has_applied_in_current {
             let mut moved = false;
             for &change_id in &current_hunk.change_ids {
-                if !self.state.applied_changes.contains(&change_id) {
-                    self.state.applied_changes.push(change_id);
+                if !self.state.is_applied(change_id) {
+                    self.state.push_applied(change_id);
                     self.state.current_step += 1;
                     moved = true;
                 }
@@ -455,8 +800,8 @@ impl DiffNavigator {
         self.state.preview_from_backward = false;
         let mut completed_any = false;
         for &change_id in &current_hunk.change_ids {
-            if !self.state.applied_changes.contains(&change_id) {
-                self.state.applied_changes.push(change_id);
+            if !self.state.is_applied(change_id) {
+                self.state.push_applied(change_id);
                 self.state.current_step += 1;
                 completed_any = true;
             }
@@ -482,8 +827,8 @@ impl DiffNavigator {
         // Apply ALL changes of next hunk (full preview)
         let mut moved = false;
         for &change_id in &hunk.change_ids {
-            if !self.state.applied_changes.contains(&change_id) {
-                self.state.applied_changes.push(change_id);
+            if !self.state.is_applied(change_id) {
+                self.state.push_applied(change_id);
                 self.state.current_step += 1;
                 moved = true;
             }
@@ -522,7 +867,7 @@ impl DiffNavigator {
             let has_applied = hunk
                 .change_ids
                 .iter()
-                .any(|id| self.state.applied_changes.contains(id));
+                .any(|id| self.state.is_applied(*id));
             if !has_applied {
                 // No movement, restore preview mode
                 self.state.hunk_preview_mode = was_in_preview;
@@ -538,17 +883,12 @@ impl DiffNavigator {
         let mut moved = false;
 
         // Unapply changes from current hunk that are applied
-        for &change_id in current_hunk.change_ids.iter().rev() {
-            if let Some(pos) = self
-                .state
-                .applied_changes
-                .iter()
-                .position(|&id| id == change_id)
-            {
-                self.state.applied_changes.remove(pos);
-                self.state.current_step = self.state.current_step.saturating_sub(1);
-                moved = true;
-            }
+        let removed = self
+            .state
+            .remove_applied_bulk(&current_hunk.change_ids, None);
+        if removed > 0 {
+            self.state.current_step = self.state.applied_changes.len();
+            moved = true;
         }
 
         // Set animating hunk for whole-hunk animation (keep pointing at the hunk
@@ -563,7 +903,7 @@ impl DiffNavigator {
             let still_has_applied = current_hunk
                 .change_ids
                 .iter()
-                .any(|id| self.state.applied_changes.contains(id));
+                .any(|id| self.state.is_applied(*id));
             if !still_has_applied && self.state.current_hunk > 0 {
                 self.state.current_hunk -= 1;
             }
@@ -609,7 +949,7 @@ impl DiffNavigator {
         for idx in 0..hunk_idx {
             let hunk = &self.diff.hunks[idx];
             for &change_id in &hunk.change_ids {
-                self.state.applied_changes.push(change_id);
+                self.state.push_applied(change_id);
                 self.state.current_step += 1;
             }
         }
@@ -617,7 +957,7 @@ impl DiffNavigator {
         // Apply ALL changes of target hunk (full preview)
         let hunk = &self.diff.hunks[hunk_idx];
         for &change_id in &hunk.change_ids {
-            self.state.applied_changes.push(change_id);
+            self.state.push_applied(change_id);
             self.state.current_step += 1;
         }
 
@@ -644,23 +984,17 @@ impl DiffNavigator {
         };
 
         // Must have at least first change applied to be "inside" hunk
-        if !self.state.applied_changes.contains(&first_change) {
+        if !self.state.is_applied(first_change) {
             return false;
         }
 
         // Unapply all changes in this hunk except the first
-        let mut unapplied_any = false;
-        for &change_id in &hunk.change_ids[1..] {
-            if let Some(pos) = self
-                .state
-                .applied_changes
-                .iter()
-                .position(|&id| id == change_id)
-            {
-                self.state.applied_changes.remove(pos);
-                self.state.current_step = self.state.current_step.saturating_sub(1);
-                unapplied_any = true;
-            }
+        let removed = self
+            .state
+            .remove_applied_bulk(&hunk.change_ids, Some(first_change));
+        let unapplied_any = removed > 0;
+        if removed > 0 {
+            self.state.current_step = self.state.applied_changes.len();
         }
 
         // No-op if already at start (nothing unapplied and cursor on first)
@@ -686,7 +1020,7 @@ impl DiffNavigator {
         let has_applied = hunk
             .change_ids
             .iter()
-            .any(|id| self.state.applied_changes.contains(id));
+            .any(|id| self.state.is_applied(*id));
         if !has_applied {
             return false;
         }
@@ -695,8 +1029,8 @@ impl DiffNavigator {
 
         // Apply all unapplied changes in this hunk
         for &change_id in &hunk.change_ids {
-            if !self.state.applied_changes.contains(&change_id) {
-                self.state.applied_changes.push(change_id);
+            if !self.state.is_applied(change_id) {
+                self.state.push_applied(change_id);
                 self.state.current_step += 1;
             }
         }
@@ -751,21 +1085,42 @@ impl DiffNavigator {
 
     /// Check if a change belongs to the hunk currently being animated
     fn is_change_in_animating_hunk(&self, change_id: usize) -> bool {
-        if let Some(hunk_idx) = self.state.animating_hunk {
-            if let Some(hunk) = self.diff.hunks.get(hunk_idx) {
-                return hunk.change_ids.contains(&change_id);
-            }
-        }
-        false
+        self.state
+            .animating_hunk
+            .and_then(|hunk_idx| self.hunk_index_for_change(change_id).map(|id| id == hunk_idx))
+            .unwrap_or(false)
     }
 
-    /// Check if a change belongs to the current hunk (for persistent extent markers)
-    fn is_change_in_current_hunk(&self, change_id: usize) -> bool {
-        self.diff
-            .hunks
-            .get(self.state.current_hunk)
-            .map(|hunk| hunk.change_ids.contains(&change_id))
-            .unwrap_or(false)
+    fn hunk_index_for_change(&self, change_id: usize) -> Option<usize> {
+        let idx = self.change_to_index.get(change_id).copied().flatten()?;
+        self.change_to_hunk.get(idx).copied().flatten()
+    }
+
+    fn hunk_change_index_range(&self, hunk_idx: usize) -> Option<(usize, usize)> {
+        self.hunk_change_ranges
+            .get(hunk_idx)
+            .copied()
+            .flatten()
+    }
+
+    fn change_index(&self, change_id: usize) -> Option<usize> {
+        self.change_to_index.get(change_id).copied().flatten()
+    }
+
+    pub fn hunk_index_for_change_id(&self, change_id: usize) -> Option<usize> {
+        self.hunk_index_for_change(change_id)
+    }
+
+    pub fn change_index_for(&self, change_id: usize) -> Option<usize> {
+        self.change_index(change_id)
+    }
+
+    pub fn hunk_step_range(&self, hunk_idx: usize) -> Option<(usize, usize)> {
+        self.hunk_step_ranges
+            .get(hunk_idx)
+            .copied()
+            .flatten()
+            .map(|range| (range.start, range.len))
     }
 
     /// Get the currently active change
@@ -782,7 +1137,7 @@ impl DiffNavigator {
             .iter()
             .filter(|c| c.has_changes())
             .map(|c| {
-                let applied = self.state.applied_changes.contains(&c.id);
+                let applied = self.state.is_applied(c.id);
                 let active = self.state.active_change == Some(c.id);
                 (c, applied, active)
             })
@@ -798,6 +1153,154 @@ impl DiffNavigator {
     /// Phase-aware view for word-level animation
     /// CLI should pass its current animation phase for proper fade animations
     pub fn current_view_with_frame(&self, frame: AnimationFrame) -> Vec<ViewLine> {
+        self.view_for_changes(self.diff.changes.iter(), frame)
+    }
+
+    pub fn view_line_for_change(
+        &self,
+        frame: AnimationFrame,
+        change_id: usize,
+    ) -> Option<ViewLine> {
+        let change = self.diff.changes.iter().find(|c| c.id == change_id)?;
+        let is_applied = self.state.is_applied(change_id);
+        let is_in_hunk = self.is_change_in_animating_hunk(change_id);
+        let is_active_change = self.state.active_change == Some(change_id);
+        let is_active = is_active_change || is_in_hunk;
+        let scope_hunk = if self.state.last_nav_was_hunk {
+            self.state
+                .cursor_change
+                .and_then(|id| self.hunk_index_for_change(id))
+                .unwrap_or(self.state.current_hunk)
+        } else {
+            self.state.current_hunk
+        };
+        let in_scope = if self.state.last_nav_was_hunk {
+            let scope_range = self.hunk_change_index_range(scope_hunk);
+            let idx = self.change_to_index.get(change_id).copied().flatten();
+            match (scope_range, idx) {
+                (Some((start, end)), Some(idx)) => idx >= start && idx <= end,
+                _ => self.hunk_index_for_change(change_id) == Some(scope_hunk),
+            }
+        } else {
+            self.hunk_index_for_change(change_id) == Some(scope_hunk)
+        };
+        let show_hunk_extent = is_in_hunk
+            || (in_scope
+                && (self.state.last_nav_was_hunk
+                    || self.state.show_hunk_extent_while_stepping));
+
+        let primary_change_id = if self.state.cursor_change.is_some()
+            && self.state.active_change.is_none()
+            && self.state.step_direction == StepDirection::None
+        {
+            self.state.cursor_change
+        } else if self.state.step_direction == StepDirection::Backward {
+            self.state
+                .applied_changes
+                .last()
+                .copied()
+                .or(self.state.active_change)
+        } else {
+            self.state.active_change
+        };
+
+        let is_primary_active =
+            primary_change_id == Some(change_id) || (primary_change_id.is_none() && is_in_hunk);
+
+        if change.spans.len() > 1 {
+            self.build_word_level_line(
+                change,
+                is_applied,
+                is_active,
+                is_active_change,
+                is_primary_active,
+                show_hunk_extent,
+                frame,
+            )
+        } else {
+            let span = change.spans.first()?;
+            self.build_single_span_line(
+                span,
+                change_id,
+                is_applied,
+                is_active,
+                is_active_change,
+                is_primary_active,
+                show_hunk_extent,
+                frame,
+            )
+        }
+    }
+
+    pub fn current_view_for_hunk(
+        &self,
+        frame: AnimationFrame,
+        hunk_idx: usize,
+        context_lines: usize,
+    ) -> Vec<ViewLine> {
+        if self.diff.changes.is_empty() {
+            return Vec::new();
+        }
+        let Some(hunk) = self.diff.hunks.get(hunk_idx) else {
+            return self.current_view_with_frame(frame);
+        };
+        let mut min_idx = None;
+        let mut max_idx = None;
+        for change_id in &hunk.change_ids {
+            if let Some(idx) = self.change_index(*change_id) {
+                min_idx = Some(min_idx.map_or(idx, |v: usize| v.min(idx)));
+                max_idx = Some(max_idx.map_or(idx, |v: usize| v.max(idx)));
+            }
+        }
+        let Some(min_idx) = min_idx else {
+            return self.current_view_with_frame(frame);
+        };
+        let Some(max_idx) = max_idx else {
+            return self.current_view_with_frame(frame);
+        };
+        let start = min_idx.saturating_sub(context_lines);
+        let end = (max_idx + context_lines).min(self.diff.changes.len().saturating_sub(1));
+        self.view_for_changes(self.diff.changes[start..=end].iter(), frame)
+    }
+
+    pub fn current_view_for_change_window(
+        &self,
+        frame: AnimationFrame,
+        change_id: usize,
+        radius: usize,
+    ) -> Vec<ViewLine> {
+        let Some(idx) = self.change_index(change_id) else {
+            return self.current_view_with_frame(frame);
+        };
+        if self.diff.changes.is_empty() {
+            return Vec::new();
+        }
+        let start = idx.saturating_sub(radius);
+        let end = (idx + radius).min(self.diff.changes.len().saturating_sub(1));
+        self.view_for_changes(self.diff.changes[start..=end].iter(), frame)
+    }
+
+    pub fn current_view_for_change_range(
+        &self,
+        frame: AnimationFrame,
+        start: usize,
+        end: usize,
+    ) -> Vec<ViewLine> {
+        if self.diff.changes.is_empty() {
+            return Vec::new();
+        }
+        let start = start.min(self.diff.changes.len().saturating_sub(1));
+        let end = end.min(self.diff.changes.len().saturating_sub(1));
+        if start > end {
+            return Vec::new();
+        }
+        self.view_for_changes(self.diff.changes[start..=end].iter(), frame)
+    }
+
+    fn view_for_changes<'a, I>(&self, changes: I, frame: AnimationFrame) -> Vec<ViewLine>
+    where
+        I: IntoIterator<Item = &'a Change>,
+    {
         let mut lines = Vec::new();
 
         // Primary cursor destination: last applied change on backward, active_change on forward
@@ -819,9 +1322,22 @@ impl DiffNavigator {
 
         // Track if we've assigned a primary active line (for fallback when primary_change_id is None)
         let mut primary_assigned = false;
+        let scope_hunk = if self.state.last_nav_was_hunk {
+            self.state
+                .cursor_change
+                .and_then(|id| self.hunk_index_for_change(id))
+                .unwrap_or(self.state.current_hunk)
+        } else {
+            self.state.current_hunk
+        };
+        let scope_range = if self.state.last_nav_was_hunk {
+            self.hunk_change_index_range(scope_hunk)
+        } else {
+            None
+        };
 
-        for change in &self.diff.changes {
-            let is_applied = self.state.applied_changes.contains(&change.id);
+        for change in changes {
+            let is_applied = self.state.is_applied(change.id);
 
             // Primary active: cursor destination (decoupled from animation target on backward)
             let is_primary_active = primary_change_id == Some(change.id);
@@ -832,8 +1348,15 @@ impl DiffNavigator {
             // Active if: (1) the active_change, or (2) in animating hunk (lights up whole hunk during animation)
             let is_active = is_active_change || is_in_hunk;
             // Show extent marker if animating hunk OR (last nav was hunk AND change in current hunk)
+            let change_idx = scope_range
+                .and_then(|_| self.change_to_index.get(change.id).copied().flatten());
+            let in_scope = if let (Some((start, end)), Some(idx)) = (scope_range, change_idx) {
+                idx >= start && idx <= end
+            } else {
+                self.hunk_index_for_change(change.id) == Some(scope_hunk)
+            };
             let show_hunk_extent = is_in_hunk
-                || (self.is_change_in_current_hunk(change.id)
+                || (in_scope
                     && (self.state.last_nav_was_hunk
                         || self.state.show_hunk_extent_while_stepping));
 
@@ -1031,7 +1554,7 @@ impl DiffNavigator {
         };
 
         // Populate hunk metadata
-        let hunk_index = self.change_to_hunk.get(&change.id).copied();
+        let hunk_index = self.hunk_index_for_change(change.id);
         let has_changes = change.has_changes();
 
         Some(ViewLine {
@@ -1127,7 +1650,7 @@ impl DiffNavigator {
         }
 
         // Populate hunk metadata
-        let hunk_index = self.change_to_hunk.get(&change_id).copied();
+        let hunk_index = self.hunk_index_for_change(change_id);
         let has_changes = !matches!(span.kind, ChangeKind::Equal);
 
         Some(ViewLine {
@@ -1151,12 +1674,12 @@ impl DiffNavigator {
 
     /// Get old content
     pub fn old_content(&self) -> &str {
-        &self.old_content
+        self.old_content.as_ref()
     }
 
     /// Get new content
     pub fn new_content(&self) -> &str {
-        &self.new_content
+        self.new_content.as_ref()
     }
 }
 
@@ -1228,6 +1751,20 @@ mod tests {
     use super::*;
     use crate::diff::DiffEngine;
 
+    fn assert_applied_is_prefix(nav: &DiffNavigator) {
+        let applied = &nav.state().applied_changes;
+        let sig = &nav.diff.significant_changes;
+        assert!(
+            applied.len() <= sig.len(),
+            "applied changes should not exceed significant changes"
+        );
+        assert_eq!(
+            &sig[..applied.len()],
+            applied.as_slice(),
+            "applied changes should remain a prefix of significant_changes"
+        );
+    }
+
     #[test]
     fn test_navigation() {
         let old = "foo\nbar\nbaz";
@@ -1235,7 +1772,7 @@ mod tests {
 
         let engine = DiffEngine::new();
         let diff = engine.diff_strings(old, new);
-        let mut nav = DiffNavigator::new(diff, old.to_string(), new.to_string());
+        let mut nav = DiffNavigator::new(diff, Arc::from(old), Arc::from(new), false);
 
         assert!(nav.state().is_at_start());
         assert!(!nav.state().is_at_end());
@@ -1260,7 +1797,7 @@ mod tests {
 
         let engine = DiffEngine::new();
         let diff = engine.diff_strings(old, new);
-        let mut nav = DiffNavigator::new(diff, old.to_string(), new.to_string());
+        let mut nav = DiffNavigator::new(diff, Arc::from(old), Arc::from(new), false);
 
         assert_eq!(nav.state().progress(), 0.0);
 
@@ -1275,7 +1812,7 @@ mod tests {
 
         let engine = DiffEngine::new().with_word_level(true);
         let diff = engine.diff_strings(old, new);
-        let mut nav = DiffNavigator::new(diff, old.to_string(), new.to_string());
+        let mut nav = DiffNavigator::new(diff, Arc::from(old), Arc::from(new), false);
 
         // At start, should show original line
         let view = nav.current_view();
@@ -1307,7 +1844,7 @@ mod tests {
             diff.hunks.len()
         );
 
-        let mut nav = DiffNavigator::new(diff, old.to_string(), new.to_string());
+        let mut nav = DiffNavigator::new(diff, Arc::from(old), Arc::from(new), false);
 
         // Apply both hunks
         nav.next_hunk();
@@ -1356,7 +1893,7 @@ mod tests {
 
         let engine = DiffEngine::new();
         let diff = engine.diff_strings(old, new);
-        let mut nav = DiffNavigator::new(diff, old.to_string(), new.to_string());
+        let mut nav = DiffNavigator::new(diff, Arc::from(old), Arc::from(new), false);
 
         // Apply first change (no hunk preview)
         nav.next();
@@ -1392,7 +1929,7 @@ mod tests {
 
         let engine = DiffEngine::new();
         let diff = engine.diff_strings(old, new);
-        let mut nav = DiffNavigator::new(diff, old.to_string(), new.to_string());
+        let mut nav = DiffNavigator::new(diff, Arc::from(old), Arc::from(new), false);
 
         // Apply first hunk
         nav.next_hunk();
@@ -1435,7 +1972,7 @@ mod tests {
         let diff = engine.diff_strings(old, new);
         assert!(diff.hunks.len() >= 2, "Fixture must produce 2 hunks");
 
-        let mut nav = DiffNavigator::new(diff, old.to_string(), new.to_string());
+        let mut nav = DiffNavigator::new(diff, Arc::from(old), Arc::from(new), false);
 
         // Apply both hunks
         nav.next_hunk(); // hunk 0 (LINE2)
@@ -1488,7 +2025,7 @@ mod tests {
             "Hunk 0 must have at least 2 changes for this test"
         );
 
-        let mut nav = DiffNavigator::new(diff, old.to_string(), new.to_string());
+        let mut nav = DiffNavigator::new(diff, Arc::from(old), Arc::from(new), false);
 
         // Apply hunk 0
         nav.next_hunk();
@@ -1521,7 +2058,7 @@ mod tests {
             "Hunk 0 must have at least 2 changes"
         );
 
-        let mut nav = DiffNavigator::new(diff, old.to_string(), new.to_string());
+        let mut nav = DiffNavigator::new(diff, Arc::from(old), Arc::from(new), false);
 
         // next_hunk applies ALL changes (full preview), cursor at first
         nav.next_hunk();
@@ -1564,7 +2101,7 @@ mod tests {
         let diff = engine.diff_strings(old, new);
         assert!(diff.hunks.len() >= 2, "Must have 2 hunks");
 
-        let mut nav = DiffNavigator::new(diff, old.to_string(), new.to_string());
+        let mut nav = DiffNavigator::new(diff, Arc::from(old), Arc::from(new), false);
 
         // First next_hunk: apply all changes in hunk 0 (full preview)
         nav.next_hunk();
@@ -1610,7 +2147,7 @@ mod tests {
             "Hunk must have 2 changes"
         );
 
-        let mut nav = DiffNavigator::new(diff, old.to_string(), new.to_string());
+        let mut nav = DiffNavigator::new(diff, Arc::from(old), Arc::from(new), false);
 
         // First next_hunk: apply all changes (full preview)
         let moved1 = nav.next_hunk();
@@ -1625,6 +2162,22 @@ mod tests {
     }
 
     #[test]
+    fn test_hunk_change_range_cached_for_large_hunk() {
+        let old = "a\nb\nc\nd\ne";
+        let new = "A\nB\nC\nD\nE";
+
+        let engine = DiffEngine::new();
+        let diff = engine.diff_strings(old, new);
+        assert_eq!(diff.hunks.len(), 1, "single hunk for full replace");
+
+        let nav = DiffNavigator::new(diff, Arc::from(old), Arc::from(new), true);
+        let range = nav.hunk_change_index_range(0);
+        assert!(range.is_some(), "expected cached range for hunk 0");
+        let (start, end) = range.unwrap();
+        assert!(start <= end, "range should be valid");
+    }
+
+    #[test]
     fn test_markers_persist_within_hunk() {
         // Stepping within a hunk after next_hunk should preserve extent markers
         let old = "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8";
@@ -1633,7 +2186,7 @@ mod tests {
         let engine = DiffEngine::new();
         let diff = engine.diff_strings(old, new);
 
-        let mut nav = DiffNavigator::new(diff, old.to_string(), new.to_string());
+        let mut nav = DiffNavigator::new(diff, Arc::from(old), Arc::from(new), false);
 
         nav.next_hunk();
         assert!(
@@ -1660,7 +2213,7 @@ mod tests {
         let diff = engine.diff_strings(old, new);
         assert!(diff.hunks.len() >= 2, "Must have 2 hunks");
 
-        let mut nav = DiffNavigator::new(diff, old.to_string(), new.to_string());
+        let mut nav = DiffNavigator::new(diff, Arc::from(old), Arc::from(new), false);
 
         // Apply hunk 0 via next_hunk
         nav.next_hunk();
@@ -1689,7 +2242,7 @@ mod tests {
             "Expected 2 changes in the hunk"
         );
 
-        let mut nav = DiffNavigator::new(diff, old.to_string(), new.to_string());
+        let mut nav = DiffNavigator::new(diff, Arc::from(old), Arc::from(new), false);
         nav.next_hunk();
 
         let view = nav.current_view_with_frame(AnimationFrame::FadeIn);
@@ -1720,7 +2273,7 @@ mod tests {
 
         let engine = DiffEngine::new().with_word_level(true);
         let diff = engine.diff_strings(old, new);
-        let mut nav = DiffNavigator::new(diff, old.to_string(), new.to_string());
+        let mut nav = DiffNavigator::new(diff, Arc::from(old), Arc::from(new), false);
 
         // Apply the change (makes it active)
         nav.next();
@@ -1759,7 +2312,7 @@ mod tests {
 
         let engine = DiffEngine::new().with_word_level(true);
         let diff = engine.diff_strings(old, new);
-        let mut nav = DiffNavigator::new(diff, old.to_string(), new.to_string());
+        let mut nav = DiffNavigator::new(diff, Arc::from(old), Arc::from(new), false);
 
         // Apply the change
         nav.next();
@@ -1791,7 +2344,7 @@ mod tests {
 
         let engine = DiffEngine::new().with_word_level(true);
         let diff = engine.diff_strings(old, new);
-        let mut nav = DiffNavigator::new(diff, old.to_string(), new.to_string());
+        let mut nav = DiffNavigator::new(diff, Arc::from(old), Arc::from(new), false);
 
         // Apply the change
         nav.next();
@@ -1824,7 +2377,7 @@ mod tests {
 
         let engine = DiffEngine::new().with_word_level(true);
         let diff = engine.diff_strings(old, new);
-        let mut nav = DiffNavigator::new(diff, old.to_string(), new.to_string());
+        let mut nav = DiffNavigator::new(diff, Arc::from(old), Arc::from(new), false);
 
         // Apply then unapply
         nav.next();
@@ -1858,7 +2411,7 @@ mod tests {
             diff.significant_changes.len()
         );
 
-        let mut nav = DiffNavigator::new(diff, old.to_string(), new.to_string());
+        let mut nav = DiffNavigator::new(diff, Arc::from(old), Arc::from(new), false);
 
         // Apply both changes
         nav.next(); // step 1: first change applied
@@ -1914,7 +2467,7 @@ mod tests {
             diff.significant_changes.len()
         );
 
-        let mut nav = DiffNavigator::new(diff, old.to_string(), new.to_string());
+        let mut nav = DiffNavigator::new(diff, Arc::from(old), Arc::from(new), false);
 
         // Apply both changes, then step back
         nav.next();
@@ -1962,7 +2515,7 @@ mod tests {
 
         let engine = DiffEngine::new().with_word_level(true);
         let diff = engine.diff_strings(old, new);
-        let mut nav = DiffNavigator::new(diff, old.to_string(), new.to_string());
+        let mut nav = DiffNavigator::new(diff, Arc::from(old), Arc::from(new), false);
 
         nav.next(); // active change
 
@@ -1990,7 +2543,7 @@ mod tests {
         let old = "a\nb\nc\n";
         let new = "a\nB\nc\n";
         let diff = DiffEngine::new().diff_strings(old, new);
-        let mut nav = DiffNavigator::new(diff, old.to_string(), new.to_string());
+        let mut nav = DiffNavigator::new(diff, Arc::from(old), Arc::from(new), false);
 
         nav.next();
         let view = nav.current_view_with_frame(AnimationFrame::FadeIn);
@@ -2021,7 +2574,7 @@ mod tests {
             "Fixture should produce a single hunk; adjust the unchanged gap if this fails"
         );
 
-        let mut nav = DiffNavigator::new(diff, old.to_string(), new.to_string());
+        let mut nav = DiffNavigator::new(diff, Arc::from(old), Arc::from(new), false);
 
         nav.next_hunk();
         let view = nav.current_view_with_frame(AnimationFrame::FadeOut);
@@ -2051,7 +2604,7 @@ mod tests {
         let old = "one\ntwo\nthree\nfour\n";
         let new = "ONE\nTWO\nthree\nfour\n";
         let diff = DiffEngine::new().diff_strings(old, new);
-        let mut nav = DiffNavigator::new(diff, old.to_string(), new.to_string());
+        let mut nav = DiffNavigator::new(diff, Arc::from(old), Arc::from(new), false);
 
         nav.next();
         nav.set_show_hunk_extent_while_stepping(true);
@@ -2065,13 +2618,69 @@ mod tests {
     }
 
     #[test]
+    fn test_applied_changes_stay_prefix_during_hunk_ops() {
+        let old = "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\nl11\nl12\n";
+        let new = "l1\nL2\nL3\nl4\nl5\nl6\nl7\nl8\nL9\nl10\nl11\nl12\n";
+        let diff = DiffEngine::new().diff_strings(old, new);
+        let mut nav = DiffNavigator::new(diff, Arc::from(old), Arc::from(new), false);
+
+        assert_applied_is_prefix(&nav);
+
+        nav.next_hunk();
+        assert_applied_is_prefix(&nav);
+
+        nav.next();
+        assert_applied_is_prefix(&nav);
+
+        nav.next_hunk();
+        assert_applied_is_prefix(&nav);
+
+        nav.prev_hunk();
+        assert_applied_is_prefix(&nav);
+    }
+
+    #[test]
+    fn test_applied_prefix_after_preview_step_down() {
+        // One hunk with multiple changes so preview mode is used.
+        let old = "a\nb\nc\n";
+        let new = "A\nB\nc\n";
+        let diff = DiffEngine::new().diff_strings(old, new);
+        let mut nav = DiffNavigator::new(diff, Arc::from(old), Arc::from(new), false);
+
+        nav.next_hunk();
+        assert!(nav.state().hunk_preview_mode);
+        assert_applied_is_prefix(&nav);
+
+        nav.next(); // dissolve preview for step down
+        assert!(!nav.state().hunk_preview_mode);
+        assert_applied_is_prefix(&nav);
+    }
+
+    #[test]
+    fn test_applied_prefix_after_preview_step_up() {
+        // Two hunks so stepping up from preview exits to previous hunk.
+        let old = "a\nb\nc\nd\ne\nf\ng\nh\n";
+        let new = "A\nb\nc\nd\ne\nf\nG\nh\n";
+        let diff = DiffEngine::new().diff_strings(old, new);
+        let mut nav = DiffNavigator::new(diff, Arc::from(old), Arc::from(new), false);
+
+        nav.next_hunk();
+        assert!(nav.state().hunk_preview_mode);
+        assert_applied_is_prefix(&nav);
+
+        nav.prev(); // dissolve preview for step up
+        assert!(!nav.state().hunk_preview_mode);
+        assert_applied_is_prefix(&nav);
+    }
+
+    #[test]
     fn test_primary_active_fallback_when_active_change_none() {
         // When active_change is None but animating_hunk is set,
         // the first line in the hunk should become primary and be active
         let old = "a\nb\nc\n";
         let new = "A\nb\nC\n"; // two changes in same hunk
         let diff = DiffEngine::new().diff_strings(old, new);
-        let mut nav = DiffNavigator::new(diff, old.to_string(), new.to_string());
+        let mut nav = DiffNavigator::new(diff, Arc::from(old), Arc::from(new), false);
 
         // Force animating hunk without active_change
         nav.state_mut().animating_hunk = Some(0);

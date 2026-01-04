@@ -27,9 +27,29 @@ pub struct SyntaxSpan {
 
 #[derive(Clone, Debug)]
 pub struct SyntaxCache {
-    old: Vec<Vec<SyntaxSpan>>,
-    new: Vec<Vec<SyntaxSpan>>,
+    old: SyntaxStore,
+    new: SyntaxStore,
 }
+
+#[derive(Clone, Debug)]
+enum SyntaxStore {
+    Full(Vec<Vec<SyntaxSpan>>),
+    Lazy(LazySyntaxCache),
+}
+
+#[derive(Clone, Debug)]
+struct LazySyntaxCache {
+    syntax_set: std::sync::Arc<SyntaxSet>,
+    theme: std::sync::Arc<Theme>,
+    plain: TuiColor,
+    lines: Vec<String>,
+    spans: Vec<Option<Vec<SyntaxSpan>>>,
+    checkpoints: Vec<Option<(syntect::highlighting::HighlightState, ParseState)>>,
+    stride: usize,
+}
+
+const MAX_LAZY_SYNTAX_BYTES: usize = 512 * 1024;
+const SYNTAX_CHECKPOINT_STRIDE: usize = 200;
 
 struct EmbeddedTmTheme {
     name: &'static str,
@@ -279,50 +299,32 @@ const EMBEDDED_TMTHEMES: &[EmbeddedTmTheme] = &[
 ];
 
 pub struct SyntaxEngine {
-    syntax_set: SyntaxSet,
-    theme: Theme,
+    syntax_set: std::sync::Arc<SyntaxSet>,
+    theme: std::sync::Arc<Theme>,
     plain: TuiColor,
 }
 
 impl SyntaxEngine {
     pub fn new(syntax_theme: &str, light_mode: bool) -> Self {
-        let syntax_set = two_face::syntax::extra_newlines();
+        let syntax_set = std::sync::Arc::new(two_face::syntax::extra_newlines());
         let (syntax_theme, plain) = resolve_syntax_theme(syntax_theme, light_mode);
         Self {
             syntax_set,
-            theme: syntax_theme,
+            theme: std::sync::Arc::new(syntax_theme),
             plain,
         }
     }
 
     pub fn highlight(&self, content: &str, file_name: &str) -> Vec<Vec<SyntaxSpan>> {
         let syntax = self.syntax_for_file(file_name);
-        let mut highlighter = HighlightLines::new(syntax, &self.theme);
+        let mut highlighter = HighlightLines::new(syntax, self.theme.as_ref());
         let mut out = Vec::new();
 
         for line in LinesWithEndings::from(content) {
-            let mut spans = Vec::new();
             let ranges = highlighter
                 .highlight_line(line, &self.syntax_set)
                 .unwrap_or_default();
-            for (style, text) in ranges {
-                let text = text.strip_suffix('\n').unwrap_or(text);
-                let text = text.strip_suffix('\r').unwrap_or(text);
-                if text.is_empty() {
-                    continue;
-                }
-                spans.push(SyntaxSpan {
-                    text: text.to_string(),
-                    style: syntect_style_to_tui(style),
-                });
-            }
-            if spans.is_empty() {
-                spans.push(SyntaxSpan {
-                    text: String::new(),
-                    style: Style::default().fg(self.plain),
-                });
-            }
-            out.push(spans);
+            out.push(ranges_to_spans(ranges, self.plain));
         }
 
         // Handle empty file (no lines)
@@ -357,6 +359,26 @@ impl SyntaxEngine {
 
     pub fn syntax_name_for_file(&self, file_name: &str) -> &str {
         &self.syntax_for_file(file_name).name
+    }
+
+    pub fn syntax_ref(&self, file_name: &str) -> SyntaxReference {
+        self.syntax_for_file(file_name).clone()
+    }
+
+    pub fn syntax_set(&self) -> std::sync::Arc<SyntaxSet> {
+        self.syntax_set.clone()
+    }
+
+    pub fn theme(&self) -> &Theme {
+        self.theme.as_ref()
+    }
+
+    pub fn theme_arc(&self) -> std::sync::Arc<Theme> {
+        self.theme.clone()
+    }
+
+    pub fn plain(&self) -> TuiColor {
+        self.plain
     }
 
     pub fn scopes_for_line(
@@ -644,18 +666,169 @@ fn normalize_theme_key(value: &str) -> String {
 }
 
 impl SyntaxCache {
-    pub fn new(engine: &SyntaxEngine, old: &str, new: &str, file_name: &str) -> Self {
-        let old = engine.highlight(old, file_name);
-        let new = engine.highlight(new, file_name);
-        Self { old, new }
-    }
-
-    pub fn spans(&self, side: SyntaxSide, line_index: usize) -> Option<&[SyntaxSpan]> {
-        match side {
-            SyntaxSide::Old => self.old.get(line_index).map(|v| v.as_slice()),
-            SyntaxSide::New => self.new.get(line_index).map(|v| v.as_slice()),
+    pub fn new(
+        engine: &SyntaxEngine,
+        old: &str,
+        new: &str,
+        file_name: &str,
+        force_lazy: bool,
+    ) -> Self {
+        let max_len = old.len().max(new.len());
+        let lazy = force_lazy || max_len > MAX_LAZY_SYNTAX_BYTES;
+        if lazy {
+            let old = LazySyntaxCache::new(engine, old, file_name);
+            let new = LazySyntaxCache::new(engine, new, file_name);
+            Self {
+                old: SyntaxStore::Lazy(old),
+                new: SyntaxStore::Lazy(new),
+            }
+        } else {
+            let old = engine.highlight(old, file_name);
+            let new = engine.highlight(new, file_name);
+            Self {
+                old: SyntaxStore::Full(old),
+                new: SyntaxStore::Full(new),
+            }
         }
     }
+
+    pub fn spans(&mut self, side: SyntaxSide, line_index: usize) -> Option<&[SyntaxSpan]> {
+        match side {
+            SyntaxSide::Old => match &mut self.old {
+                SyntaxStore::Full(lines) => lines.get(line_index).map(|v| v.as_slice()),
+                SyntaxStore::Lazy(cache) => cache.spans(line_index),
+            },
+            SyntaxSide::New => match &mut self.new {
+                SyntaxStore::Full(lines) => lines.get(line_index).map(|v| v.as_slice()),
+                SyntaxStore::Lazy(cache) => cache.spans(line_index),
+            },
+        }
+    }
+}
+
+impl LazySyntaxCache {
+    fn new(engine: &SyntaxEngine, content: &str, file_name: &str) -> Self {
+        let syntax = engine.syntax_ref(file_name);
+        let lines: Vec<String> = LinesWithEndings::from(content)
+            .map(|line| line.to_string())
+            .collect();
+        let mut lines = if lines.is_empty() {
+            vec![String::new()]
+        } else {
+            lines
+        };
+
+        if lines.len() == 1 && lines[0].is_empty() {
+            lines[0].push_str("");
+        }
+
+        let stride = SYNTAX_CHECKPOINT_STRIDE.max(1);
+        let checkpoint_len = lines.len().saturating_sub(1) / stride + 1;
+        let mut checkpoints = vec![None; checkpoint_len];
+        let highlighter = HighlightLines::new(&syntax, engine.theme());
+        checkpoints[0] = Some(highlighter.state());
+
+        Self {
+            syntax_set: engine.syntax_set(),
+            theme: engine.theme_arc(),
+            plain: engine.plain(),
+            spans: vec![None; lines.len()],
+            lines,
+            checkpoints,
+            stride,
+        }
+    }
+
+    fn spans(&mut self, line_index: usize) -> Option<&[SyntaxSpan]> {
+        if line_index >= self.lines.len() {
+            return None;
+        }
+        let needs_fill = self
+            .spans
+            .get(line_index)
+            .map(|spans| spans.is_none())
+            .unwrap_or(true);
+        if !needs_fill {
+            return self.spans.get(line_index).and_then(|s| s.as_deref());
+        }
+
+        let chunk = line_index / self.stride;
+        let (state, start) = self.ensure_checkpoint(chunk)?;
+        let mut highlighter = HighlightLines::from_state(self.theme.as_ref(), state.0, state.1);
+
+        let chunk_start = start;
+        let chunk_end = ((chunk + 1) * self.stride).min(self.lines.len());
+
+        for idx in chunk_start..chunk_end {
+            let line = &self.lines[idx];
+            let ranges = highlighter
+                .highlight_line(line, &self.syntax_set)
+                .unwrap_or_default();
+            let spans = ranges_to_spans(ranges, self.plain);
+            self.spans[idx] = Some(spans);
+            if idx == line_index {
+                // keep going so checkpoint is consistent when chunk completes
+            }
+        }
+
+        if chunk_end == (chunk + 1) * self.stride && self.checkpoints.len() > chunk + 1 {
+            self.checkpoints[chunk + 1] = Some(highlighter.state());
+        }
+
+        self.spans.get(line_index).and_then(|s| s.as_deref())
+    }
+
+    fn ensure_checkpoint(
+        &mut self,
+        chunk: usize,
+    ) -> Option<((syntect::highlighting::HighlightState, ParseState), usize)> {
+        if let Some(state) = self.checkpoints.get(chunk).and_then(|c| c.clone()) {
+            return Some((state, chunk * self.stride));
+        }
+        if chunk == 0 {
+            return None;
+        }
+        let prev_chunk = chunk - 1;
+        let (state, start) = self.ensure_checkpoint(prev_chunk)?;
+        let mut highlighter = HighlightLines::from_state(self.theme.as_ref(), state.0, state.1);
+        let chunk_start = start;
+        let chunk_end = (chunk * self.stride).min(self.lines.len());
+        for idx in chunk_start..chunk_end {
+            let line = &self.lines[idx];
+            let ranges = highlighter
+                .highlight_line(line, &self.syntax_set)
+                .unwrap_or_default();
+            let spans = ranges_to_spans(ranges, self.plain);
+            self.spans[idx] = Some(spans);
+        }
+        let state = highlighter.state();
+        if let Some(slot) = self.checkpoints.get_mut(chunk) {
+            *slot = Some(state.clone());
+        }
+        Some((state, chunk * self.stride))
+    }
+}
+
+fn ranges_to_spans(ranges: Vec<(SynStyle, &str)>, plain: TuiColor) -> Vec<SyntaxSpan> {
+    let mut spans = Vec::new();
+    for (style, text) in ranges {
+        let text = text.strip_suffix('\n').unwrap_or(text);
+        let text = text.strip_suffix('\r').unwrap_or(text);
+        if text.is_empty() {
+            continue;
+        }
+        spans.push(SyntaxSpan {
+            text: text.to_string(),
+            style: syntect_style_to_tui(style),
+        });
+    }
+    if spans.is_empty() {
+        spans.push(SyntaxSpan {
+            text: String::new(),
+            style: Style::default().fg(plain),
+        });
+    }
+    spans
 }
 
 fn syntect_style_to_tui(style: SynStyle) -> Style {

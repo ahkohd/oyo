@@ -1,9 +1,12 @@
 //! Multi-file diff support
 
-use crate::diff::DiffEngine;
+use crate::change::{Change, ChangeSpan};
+use crate::diff::{DiffEngine, DiffResult};
 use crate::git::{ChangedFile, FileStatus};
 use crate::step::{DiffNavigator, StepDirection};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -34,15 +37,21 @@ pub struct MultiFileDiff {
     pub selected_index: usize,
     /// Navigators for each file (lazy loaded)
     navigators: Vec<Option<DiffNavigator>>,
+    /// True when the current navigator is built from a placeholder diff
+    navigator_is_placeholder: Vec<bool>,
     /// Repository root (if in git mode)
     #[allow(dead_code)]
     repo_root: Option<PathBuf>,
     /// Git diff mode (if in git mode)
     git_mode: Option<GitDiffMode>,
     /// Old contents for each file
-    old_contents: Vec<String>,
+    old_contents: Vec<Arc<str>>,
     /// New contents for each file
-    new_contents: Vec<String>,
+    new_contents: Vec<Arc<str>>,
+    /// Precomputed diffs (used for large files to avoid expensive diffing on demand)
+    precomputed_diffs: Vec<Option<PrecomputedDiff>>,
+    /// Diff readiness state per file
+    diff_statuses: Vec<DiffStatus>,
 }
 
 #[derive(Debug, Clone)]
@@ -61,8 +70,46 @@ pub enum BlameSource {
     Commit(String),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiffStatus {
+    Ready,
+    Deferred,
+    Computing,
+    Failed,
+    Disabled,
+}
+
+#[derive(Debug, Clone)]
+enum PrecomputedDiff {
+    Placeholder(DiffResult),
+    Ready(DiffResult),
+}
+
+const DEFAULT_DIFF_MAX_BYTES: u64 = 16 * 1024 * 1024;
+static DIFF_MAX_BYTES: AtomicU64 = AtomicU64::new(DEFAULT_DIFF_MAX_BYTES);
+static DIFF_DEFER: AtomicBool = AtomicBool::new(true);
+
 impl MultiFileDiff {
-    const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
+    const MAX_TEXT_BYTES: u64 = 32 * 1024 * 1024;
+    const MAX_WORD_LEVEL_BYTES: u64 = 2 * 1024 * 1024;
+    const MAX_LINE_CHARS: usize = 16_384;
+
+    pub fn set_diff_max_bytes(max_bytes: u64) {
+        let limit = max_bytes.max(1);
+        DIFF_MAX_BYTES.store(limit, Ordering::Relaxed);
+    }
+
+    pub fn set_diff_defer(enabled: bool) {
+        DIFF_DEFER.store(enabled, Ordering::Relaxed);
+    }
+
+    fn diff_max_bytes() -> u64 {
+        DIFF_MAX_BYTES.load(Ordering::Relaxed)
+    }
+
+    fn diff_defer_enabled() -> bool {
+        DIFF_DEFER.load(Ordering::Relaxed)
+    }
 
     fn decode_bytes(bytes: Vec<u8>) -> (String, bool) {
         if bytes.is_empty() {
@@ -71,16 +118,17 @@ impl MultiFileDiff {
         if bytes.contains(&0) || std::str::from_utf8(&bytes).is_err() {
             return (String::new(), true);
         }
-        (String::from_utf8_lossy(&bytes).to_string(), false)
+        let text = String::from_utf8_lossy(&bytes).to_string();
+        (Self::normalize_text(text), false)
     }
 
-    fn file_too_large(size: u64) -> bool {
-        size > Self::MAX_FILE_BYTES
+    fn text_too_large(size: u64) -> bool {
+        size > Self::MAX_TEXT_BYTES
     }
 
     fn read_text_or_binary(path: &Path) -> (String, bool) {
         if let Ok(metadata) = path.metadata() {
-            if Self::file_too_large(metadata.len()) {
+            if Self::text_too_large(metadata.len()) {
                 return (String::new(), true);
             }
         }
@@ -90,7 +138,7 @@ impl MultiFileDiff {
 
     fn read_git_commit_or_binary(repo_root: &Path, commit: &str, path: &Path) -> (String, bool) {
         if let Some(size) = crate::git::get_file_at_commit_size(repo_root, commit, path) {
-            if Self::file_too_large(size) {
+            if Self::text_too_large(size) {
                 return (String::new(), true);
             }
         }
@@ -101,12 +149,135 @@ impl MultiFileDiff {
 
     fn read_git_index_or_binary(repo_root: &Path, path: &Path) -> (String, bool) {
         if let Some(size) = crate::git::get_staged_content_size(repo_root, path) {
-            if Self::file_too_large(size) {
+            if Self::text_too_large(size) {
                 return (String::new(), true);
             }
         }
         let bytes = crate::git::get_staged_content_bytes(repo_root, path).unwrap_or_default();
         Self::decode_bytes(bytes)
+    }
+
+    fn diff_strings(old: &str, new: &str) -> crate::diff::DiffResult {
+        let max_len = old.len().max(new.len()) as u64;
+        let word_level = max_len <= Self::MAX_WORD_LEVEL_BYTES;
+        let context_lines = if max_len > Self::diff_max_bytes() {
+            3
+        } else {
+            usize::MAX
+        };
+        DiffEngine::new()
+            .with_word_level(word_level)
+            .with_context(context_lines)
+            .diff_strings(old, new)
+    }
+
+    pub fn compute_diff(old: &str, new: &str) -> crate::diff::DiffResult {
+        Self::diff_strings(old, new)
+    }
+
+    fn should_defer_diff(old: &str, new: &str) -> bool {
+        let max_len = old.len().max(new.len()) as u64;
+        max_len > Self::diff_max_bytes()
+    }
+
+    fn context_only_diff(text: &str) -> DiffResult {
+        let mut changes = Vec::new();
+        let mut change_id = 0usize;
+        let mut line_num = 1usize;
+
+        for line in text.split('\n') {
+            let span = ChangeSpan::equal(line).with_lines(Some(line_num), Some(line_num));
+            changes.push(Change::single(change_id, span));
+            change_id += 1;
+            line_num += 1;
+        }
+
+        DiffResult {
+            changes,
+            significant_changes: Vec::new(),
+            hunks: Vec::new(),
+            insertions: 0,
+            deletions: 0,
+        }
+    }
+
+    fn diff_stats(old: &str, new: &str, binary: bool) -> (usize, usize) {
+        if binary {
+            return (0, 0);
+        }
+        let max_len = old.len().max(new.len()) as u64;
+        if max_len > Self::MAX_WORD_LEVEL_BYTES {
+            let old_lines = old.lines().count();
+            let new_lines = new.lines().count();
+            if old_lines == 0 {
+                return (new_lines, 0);
+            }
+            if new_lines == 0 {
+                return (0, old_lines);
+            }
+            return (0, 0);
+        }
+        let diff = Self::diff_strings(old, new);
+        (diff.insertions, diff.deletions)
+    }
+
+    fn normalize_text(text: String) -> String {
+        if !text.lines().any(|line| line.len() > Self::MAX_LINE_CHARS) {
+            return text;
+        }
+        let mut out = String::new();
+        for chunk in text.split_inclusive('\n') {
+            let (line, has_newline) = if let Some(line) = chunk.strip_suffix('\n') {
+                (line, true)
+            } else {
+                (chunk, false)
+            };
+            if line.len() > Self::MAX_LINE_CHARS {
+                let cutoff = line
+                    .char_indices()
+                    .nth(Self::MAX_LINE_CHARS)
+                    .map(|(idx, _)| idx)
+                    .unwrap_or_else(|| line.len());
+                out.push_str(&line[..cutoff]);
+                out.push('…');
+            } else {
+                out.push_str(line);
+            }
+            if has_newline {
+                out.push('\n');
+            }
+        }
+        out
+    }
+
+    fn maybe_defer_diff(
+        old_content: String,
+        new_content: String,
+        binary: bool,
+    ) -> (String, String, Option<PrecomputedDiff>, DiffStatus) {
+        if binary {
+            return (String::new(), String::new(), None, DiffStatus::Disabled);
+        }
+        if Self::should_defer_diff(&old_content, &new_content) {
+            let display = if new_content.is_empty() {
+                old_content.clone()
+            } else {
+                new_content.clone()
+            };
+            let diff = Self::context_only_diff(&display);
+            let status = if Self::diff_defer_enabled() {
+                DiffStatus::Deferred
+            } else {
+                DiffStatus::Disabled
+            };
+            return (
+                old_content,
+                new_content,
+                Some(PrecomputedDiff::Placeholder(diff)),
+                status,
+            );
+        }
+        (old_content, new_content, None, DiffStatus::Ready)
     }
 
     /// Create from a list of changed files (git mode)
@@ -117,8 +288,8 @@ impl MultiFileDiff {
         let mut files = Vec::new();
         let mut old_contents = Vec::new();
         let mut new_contents = Vec::new();
-        let engine = DiffEngine::new().with_word_level(true);
-
+        let mut precomputed_diffs = Vec::new();
+        let mut diff_statuses = Vec::new();
         for change in changes {
             // Get old and new content
             let (old_content, old_binary) = match change.status {
@@ -135,37 +306,40 @@ impl MultiFileDiff {
             };
 
             let binary = old_binary || new_binary;
-            let (old_content, new_content, diff) = if binary {
-                (String::new(), String::new(), engine.diff_strings("", ""))
-            } else {
-                let diff = engine.diff_strings(&old_content, &new_content);
-                (old_content, new_content, diff)
-            };
+            let (insertions, deletions) = Self::diff_stats(&old_content, &new_content, binary);
+            let (old_content, new_content, precomputed, diff_status) =
+                Self::maybe_defer_diff(old_content, new_content, binary);
 
             files.push(FileEntry {
                 display_name: change.path.display().to_string(),
                 path: change.path,
                 old_path: change.old_path,
                 status: change.status,
-                insertions: diff.insertions,
-                deletions: diff.deletions,
+                insertions,
+                deletions,
                 binary,
             });
 
-            old_contents.push(old_content);
-            new_contents.push(new_content);
+            old_contents.push(Arc::from(old_content));
+            new_contents.push(Arc::from(new_content));
+            precomputed_diffs.push(precomputed);
+            diff_statuses.push(diff_status);
         }
 
         let navigators: Vec<Option<DiffNavigator>> = (0..files.len()).map(|_| None).collect();
+        let navigator_is_placeholder = vec![false; files.len()];
 
         Ok(Self {
             files,
             selected_index: 0,
             navigators,
+            navigator_is_placeholder,
             repo_root: Some(repo_root),
             git_mode: Some(GitDiffMode::Uncommitted),
             old_contents,
             new_contents,
+            precomputed_diffs,
+            diff_statuses,
         })
     }
 
@@ -177,8 +351,8 @@ impl MultiFileDiff {
         let mut files = Vec::new();
         let mut old_contents = Vec::new();
         let mut new_contents = Vec::new();
-        let engine = DiffEngine::new().with_word_level(true);
-
+        let mut precomputed_diffs = Vec::new();
+        let mut diff_statuses = Vec::new();
         for change in changes {
             let old_path = change
                 .old_path
@@ -195,37 +369,40 @@ impl MultiFileDiff {
             };
 
             let binary = old_binary || new_binary;
-            let (old_content, new_content, diff) = if binary {
-                (String::new(), String::new(), engine.diff_strings("", ""))
-            } else {
-                let diff = engine.diff_strings(&old_content, &new_content);
-                (old_content, new_content, diff)
-            };
+            let (insertions, deletions) = Self::diff_stats(&old_content, &new_content, binary);
+            let (old_content, new_content, precomputed, diff_status) =
+                Self::maybe_defer_diff(old_content, new_content, binary);
 
             files.push(FileEntry {
                 display_name: change.path.display().to_string(),
                 path: change.path,
                 old_path: change.old_path,
                 status: change.status,
-                insertions: diff.insertions,
-                deletions: diff.deletions,
+                insertions,
+                deletions,
                 binary,
             });
 
-            old_contents.push(old_content);
-            new_contents.push(new_content);
+            old_contents.push(Arc::from(old_content));
+            new_contents.push(Arc::from(new_content));
+            precomputed_diffs.push(precomputed);
+            diff_statuses.push(diff_status);
         }
 
         let navigators: Vec<Option<DiffNavigator>> = (0..files.len()).map(|_| None).collect();
+        let navigator_is_placeholder = vec![false; files.len()];
 
         Ok(Self {
             files,
             selected_index: 0,
             navigators,
+            navigator_is_placeholder,
             repo_root: Some(repo_root),
             git_mode: Some(GitDiffMode::Staged),
             old_contents,
             new_contents,
+            precomputed_diffs,
+            diff_statuses,
         })
     }
 
@@ -239,8 +416,8 @@ impl MultiFileDiff {
         let mut files = Vec::new();
         let mut old_contents = Vec::new();
         let mut new_contents = Vec::new();
-        let engine = DiffEngine::new().with_word_level(true);
-
+        let mut precomputed_diffs = Vec::new();
+        let mut diff_statuses = Vec::new();
         for change in changes {
             let old_path = change
                 .old_path
@@ -269,37 +446,40 @@ impl MultiFileDiff {
             };
 
             let binary = old_binary || new_binary;
-            let (old_content, new_content, diff) = if binary {
-                (String::new(), String::new(), engine.diff_strings("", ""))
-            } else {
-                let diff = engine.diff_strings(&old_content, &new_content);
-                (old_content, new_content, diff)
-            };
+            let (insertions, deletions) = Self::diff_stats(&old_content, &new_content, binary);
+            let (old_content, new_content, precomputed, diff_status) =
+                Self::maybe_defer_diff(old_content, new_content, binary);
 
             files.push(FileEntry {
                 display_name: change.path.display().to_string(),
                 path: change.path,
                 old_path: change.old_path,
                 status: change.status,
-                insertions: diff.insertions,
-                deletions: diff.deletions,
+                insertions,
+                deletions,
                 binary,
             });
 
-            old_contents.push(old_content);
-            new_contents.push(new_content);
+            old_contents.push(Arc::from(old_content));
+            new_contents.push(Arc::from(new_content));
+            precomputed_diffs.push(precomputed);
+            diff_statuses.push(diff_status);
         }
 
         let navigators: Vec<Option<DiffNavigator>> = (0..files.len()).map(|_| None).collect();
+        let navigator_is_placeholder = vec![false; files.len()];
 
         Ok(Self {
             files,
             selected_index: 0,
             navigators,
+            navigator_is_placeholder,
             repo_root: Some(repo_root),
             git_mode: Some(GitDiffMode::IndexRange { from, to_index }),
             old_contents,
             new_contents,
+            precomputed_diffs,
+            diff_statuses,
         })
     }
 
@@ -313,8 +493,8 @@ impl MultiFileDiff {
         let mut files = Vec::new();
         let mut old_contents = Vec::new();
         let mut new_contents = Vec::new();
-        let engine = DiffEngine::new().with_word_level(true);
-
+        let mut precomputed_diffs = Vec::new();
+        let mut diff_statuses = Vec::new();
         for change in changes {
             let old_path = change
                 .old_path
@@ -331,37 +511,40 @@ impl MultiFileDiff {
             };
 
             let binary = old_binary || new_binary;
-            let (old_content, new_content, diff) = if binary {
-                (String::new(), String::new(), engine.diff_strings("", ""))
-            } else {
-                let diff = engine.diff_strings(&old_content, &new_content);
-                (old_content, new_content, diff)
-            };
+            let (insertions, deletions) = Self::diff_stats(&old_content, &new_content, binary);
+            let (old_content, new_content, precomputed, diff_status) =
+                Self::maybe_defer_diff(old_content, new_content, binary);
 
             files.push(FileEntry {
                 display_name: change.path.display().to_string(),
                 path: change.path,
                 old_path: change.old_path,
                 status: change.status,
-                insertions: diff.insertions,
-                deletions: diff.deletions,
+                insertions,
+                deletions,
                 binary,
             });
 
-            old_contents.push(old_content);
-            new_contents.push(new_content);
+            old_contents.push(Arc::from(old_content));
+            new_contents.push(Arc::from(new_content));
+            precomputed_diffs.push(precomputed);
+            diff_statuses.push(diff_status);
         }
 
         let navigators: Vec<Option<DiffNavigator>> = (0..files.len()).map(|_| None).collect();
+        let navigator_is_placeholder = vec![false; files.len()];
 
         Ok(Self {
             files,
             selected_index: 0,
             navigators,
+            navigator_is_placeholder,
             repo_root: Some(repo_root),
             git_mode: Some(GitDiffMode::Range { from, to }),
             old_contents,
             new_contents,
+            precomputed_diffs,
+            diff_statuses,
         })
     }
 
@@ -370,8 +553,8 @@ impl MultiFileDiff {
         let mut files = Vec::new();
         let mut old_contents = Vec::new();
         let mut new_contents = Vec::new();
-        let engine = DiffEngine::new().with_word_level(true);
-
+        let mut precomputed_diffs = Vec::new();
+        let mut diff_statuses = Vec::new();
         // Collect all files from both directories
         let mut all_files = std::collections::HashSet::new();
 
@@ -402,7 +585,7 @@ impl MultiFileDiff {
 
             let (old_content, old_binary, old_bytes) = if old_exists {
                 if let Ok(metadata) = old_path.metadata() {
-                    if Self::file_too_large(metadata.len()) {
+                    if Self::text_too_large(metadata.len()) {
                         (String::new(), true, Vec::new())
                     } else {
                         let bytes = std::fs::read(&old_path).unwrap_or_default();
@@ -417,7 +600,7 @@ impl MultiFileDiff {
             };
             let (new_content, new_binary, new_bytes) = if new_exists {
                 if let Ok(metadata) = new_path.metadata() {
-                    if Self::file_too_large(metadata.len()) {
+                    if Self::text_too_large(metadata.len()) {
                         (String::new(), true, Vec::new())
                     } else {
                         let bytes = std::fs::read(&new_path).unwrap_or_default();
@@ -437,37 +620,40 @@ impl MultiFileDiff {
                 continue;
             }
 
-            let (old_content, new_content, diff) = if binary {
-                (String::new(), String::new(), engine.diff_strings("", ""))
-            } else {
-                let diff = engine.diff_strings(&old_content, &new_content);
-                (old_content, new_content, diff)
-            };
+            let (insertions, deletions) = Self::diff_stats(&old_content, &new_content, binary);
+            let (old_content, new_content, precomputed, diff_status) =
+                Self::maybe_defer_diff(old_content, new_content, binary);
 
             files.push(FileEntry {
                 display_name: rel_path.display().to_string(),
                 path: rel_path,
                 old_path: None,
                 status,
-                insertions: diff.insertions,
-                deletions: diff.deletions,
+                insertions,
+                deletions,
                 binary,
             });
 
-            old_contents.push(old_content);
-            new_contents.push(new_content);
+            old_contents.push(Arc::from(old_content));
+            new_contents.push(Arc::from(new_content));
+            precomputed_diffs.push(precomputed);
+            diff_statuses.push(diff_status);
         }
 
         let navigators: Vec<Option<DiffNavigator>> = (0..files.len()).map(|_| None).collect();
+        let navigator_is_placeholder = vec![false; files.len()];
 
         Ok(Self {
             files,
             selected_index: 0,
             navigators,
+            navigator_is_placeholder,
             repo_root: None,
             git_mode: None,
             old_contents,
             new_contents,
+            precomputed_diffs,
+            diff_statuses,
         })
     }
 
@@ -483,24 +669,20 @@ impl MultiFileDiff {
 
     /// Create from a single file pair (bytes, with binary detection).
     pub fn from_file_pair_bytes(new_path: PathBuf, old_bytes: Vec<u8>, new_bytes: Vec<u8>) -> Self {
-        let engine = DiffEngine::new().with_word_level(true);
         let (old_content, old_binary) = Self::decode_bytes(old_bytes);
         let (new_content, new_binary) = Self::decode_bytes(new_bytes);
         let binary = old_binary || new_binary;
-        let (old_content, new_content, diff) = if binary {
-            (String::new(), String::new(), engine.diff_strings("", ""))
-        } else {
-            let diff = engine.diff_strings(&old_content, &new_content);
-            (old_content, new_content, diff)
-        };
+        let (insertions, deletions) = Self::diff_stats(&old_content, &new_content, binary);
+        let (old_content, new_content, precomputed, diff_status) =
+            Self::maybe_defer_diff(old_content, new_content, binary);
 
         let files = vec![FileEntry {
             display_name: new_path.display().to_string(),
             path: new_path,
             old_path: None,
             status: FileStatus::Modified,
-            insertions: diff.insertions,
-            deletions: diff.deletions,
+            insertions,
+            deletions,
             binary,
         }];
 
@@ -508,68 +690,93 @@ impl MultiFileDiff {
             files,
             selected_index: 0,
             navigators: vec![None],
+            navigator_is_placeholder: vec![false],
             repo_root: None,
             git_mode: None,
-            old_contents: vec![old_content],
-            new_contents: vec![new_content],
+            old_contents: vec![Arc::from(old_content)],
+            new_contents: vec![Arc::from(new_content)],
+            precomputed_diffs: vec![precomputed],
+            diff_statuses: vec![diff_status],
         }
     }
 
     /// Create from multiple file pairs.
     pub fn from_file_pairs(pairs: Vec<(PathBuf, String, String)>) -> Self {
-        let engine = DiffEngine::new().with_word_level(true);
         let mut files = Vec::with_capacity(pairs.len());
         let mut old_contents = Vec::with_capacity(pairs.len());
         let mut new_contents = Vec::with_capacity(pairs.len());
+        let mut precomputed_diffs = Vec::with_capacity(pairs.len());
+        let mut diff_statuses = Vec::with_capacity(pairs.len());
 
         for (path, old_content, new_content) in pairs {
             let (old_content, old_binary) = Self::decode_bytes(old_content.into_bytes());
             let (new_content, new_binary) = Self::decode_bytes(new_content.into_bytes());
             let binary = old_binary || new_binary;
-            let (old_content, new_content, diff) = if binary {
-                (String::new(), String::new(), engine.diff_strings("", ""))
-            } else {
-                let diff = engine.diff_strings(&old_content, &new_content);
-                (old_content, new_content, diff)
-            };
+            let (insertions, deletions) = Self::diff_stats(&old_content, &new_content, binary);
+            let (old_content, new_content, precomputed, diff_status) =
+                Self::maybe_defer_diff(old_content, new_content, binary);
             files.push(FileEntry {
                 display_name: path.display().to_string(),
                 path,
                 old_path: None,
                 status: FileStatus::Modified,
-                insertions: diff.insertions,
-                deletions: diff.deletions,
+                insertions,
+                deletions,
                 binary,
             });
-            old_contents.push(old_content);
-            new_contents.push(new_content);
+            old_contents.push(Arc::from(old_content));
+            new_contents.push(Arc::from(new_content));
+            precomputed_diffs.push(precomputed);
+            diff_statuses.push(diff_status);
         }
 
         Self {
             files,
             selected_index: 0,
             navigators: (0..old_contents.len()).map(|_| None).collect(),
+            navigator_is_placeholder: vec![false; old_contents.len()],
             repo_root: None,
             git_mode: None,
             old_contents,
             new_contents,
+            precomputed_diffs,
+            diff_statuses,
         }
     }
 
     /// Get the navigator for the currently selected file
     pub fn current_navigator(&mut self) -> &mut DiffNavigator {
         if self.navigators[self.selected_index].is_none() {
-            let engine = DiffEngine::new().with_word_level(true);
-            let diff = engine.diff_strings(
-                &self.old_contents[self.selected_index],
-                &self.new_contents[self.selected_index],
-            );
+            let mut placeholder = false;
+            let lazy_maps = self.file_is_large(self.selected_index);
+            let diff = if let Some(slot) = self.precomputed_diffs.get_mut(self.selected_index) {
+                match slot.take() {
+                    Some(PrecomputedDiff::Placeholder(diff)) => {
+                        placeholder = true;
+                        diff
+                    }
+                    Some(PrecomputedDiff::Ready(diff)) => diff,
+                    None => Self::diff_strings(
+                        self.old_contents[self.selected_index].as_ref(),
+                        self.new_contents[self.selected_index].as_ref(),
+                    ),
+                }
+            } else {
+                Self::diff_strings(
+                    self.old_contents[self.selected_index].as_ref(),
+                    self.new_contents[self.selected_index].as_ref(),
+                )
+            };
             let navigator = DiffNavigator::new(
                 diff,
                 self.old_contents[self.selected_index].clone(),
                 self.new_contents[self.selected_index].clone(),
+                lazy_maps,
             );
             self.navigators[self.selected_index] = Some(navigator);
+            if let Some(flag) = self.navigator_is_placeholder.get_mut(self.selected_index) {
+                *flag = placeholder;
+            }
         }
         self.navigators[self.selected_index].as_mut().unwrap()
     }
@@ -579,12 +786,134 @@ impl MultiFileDiff {
         self.files.get(self.selected_index)
     }
 
+    pub fn file_contents(&self, idx: usize) -> Option<(&str, &str)> {
+        let old = self.old_contents.get(idx)?;
+        let new = self.new_contents.get(idx)?;
+        Some((old.as_ref(), new.as_ref()))
+    }
+
+    pub fn file_contents_arc(&self, idx: usize) -> Option<(Arc<str>, Arc<str>)> {
+        let old = self.old_contents.get(idx)?;
+        let new = self.new_contents.get(idx)?;
+        Some((old.clone(), new.clone()))
+    }
+
     /// Check if the current file is binary
     pub fn current_file_is_binary(&self) -> bool {
         self.files
             .get(self.selected_index)
             .map(|f| f.binary)
             .unwrap_or(false)
+    }
+
+    /// True when diffing is not ready for the current file (deferred/disabled)
+    pub fn current_file_diff_disabled(&self) -> bool {
+        matches!(
+            self.diff_statuses.get(self.selected_index),
+            Some(
+                DiffStatus::Deferred
+                    | DiffStatus::Computing
+                    | DiffStatus::Failed
+                    | DiffStatus::Disabled
+            )
+        )
+    }
+
+    pub fn diff_status(&self, idx: usize) -> DiffStatus {
+        self.diff_statuses
+            .get(idx)
+            .copied()
+            .unwrap_or(DiffStatus::Ready)
+    }
+
+    pub fn file_is_large(&self, idx: usize) -> bool {
+        let old_len = self.old_contents.get(idx).map(|s| s.len()).unwrap_or(0);
+        let new_len = self.new_contents.get(idx).map(|s| s.len()).unwrap_or(0);
+        (old_len.max(new_len) as u64) > Self::diff_max_bytes()
+    }
+
+    pub fn current_file_is_large(&self) -> bool {
+        self.file_is_large(self.selected_index)
+    }
+
+    pub fn current_navigator_is_placeholder(&self) -> bool {
+        self.navigator_is_placeholder
+            .get(self.selected_index)
+            .copied()
+            .unwrap_or(false)
+    }
+
+    pub fn current_file_diff_status(&self) -> DiffStatus {
+        self.diff_status(self.selected_index)
+    }
+
+    pub fn mark_diff_computing(&mut self, idx: usize) {
+        if let Some(status) = self.diff_statuses.get_mut(idx) {
+            *status = DiffStatus::Computing;
+        }
+    }
+
+    pub fn mark_diff_failed(&mut self, idx: usize) {
+        if let Some(status) = self.diff_statuses.get_mut(idx) {
+            *status = DiffStatus::Failed;
+        }
+    }
+
+    pub fn apply_diff_result(&mut self, idx: usize, diff: DiffResult) {
+        if let Some(status) = self.diff_statuses.get_mut(idx) {
+            *status = DiffStatus::Ready;
+        }
+        let insertions = diff.insertions;
+        let deletions = diff.deletions;
+        if let Some(slot) = self.precomputed_diffs.get_mut(idx) {
+            *slot = Some(PrecomputedDiff::Ready(diff));
+        }
+        if let Some(file) = self.files.get_mut(idx) {
+            file.insertions = insertions;
+            file.deletions = deletions;
+        }
+    }
+
+    pub fn ensure_full_navigator(&mut self, idx: usize) {
+        if !matches!(self.diff_status(idx), DiffStatus::Ready) {
+            return;
+        }
+        let needs_refresh = self
+            .navigator_is_placeholder
+            .get(idx)
+            .copied()
+            .unwrap_or(false);
+        if self.navigators.get(idx).and_then(|n| n.as_ref()).is_some() && !needs_refresh {
+            return;
+        }
+        let diff = if let Some(slot) = self.precomputed_diffs.get_mut(idx) {
+            match slot.take() {
+                Some(PrecomputedDiff::Ready(diff)) => diff,
+                Some(PrecomputedDiff::Placeholder(diff)) => diff,
+                None => Self::diff_strings(
+                    self.old_contents[idx].as_ref(),
+                    self.new_contents[idx].as_ref(),
+                ),
+            }
+        } else {
+            Self::diff_strings(
+                self.old_contents[idx].as_ref(),
+                self.new_contents[idx].as_ref(),
+            )
+        };
+        let lazy_maps = self.file_is_large(idx);
+        let navigator = DiffNavigator::new(
+            diff,
+            self.old_contents[idx].clone(),
+            self.new_contents[idx].clone(),
+            lazy_maps,
+        );
+        if let Some(slot) = self.navigators.get_mut(idx) {
+            *slot = Some(navigator);
+        }
+        if let Some(flag) = self.navigator_is_placeholder.get_mut(idx) {
+            *flag = false;
+        }
     }
 
     /// Select next file
@@ -739,8 +1068,8 @@ impl MultiFileDiff {
         let mut files = Vec::new();
         let mut old_contents = Vec::new();
         let mut new_contents = Vec::new();
-        let engine = DiffEngine::new().with_word_level(true);
-
+        let mut precomputed_diffs = Vec::new();
+        let mut diff_statuses = Vec::new();
         for change in changes {
             let old_path = change
                 .old_path
@@ -809,33 +1138,36 @@ impl MultiFileDiff {
             };
 
             let binary = old_binary || new_binary;
-            let (old_content, new_content, diff) = if binary {
-                (String::new(), String::new(), engine.diff_strings("", ""))
-            } else {
-                let diff = engine.diff_strings(&old_content, &new_content);
-                (old_content, new_content, diff)
-            };
+            let (insertions, deletions) = Self::diff_stats(&old_content, &new_content, binary);
+            let (old_content, new_content, precomputed, diff_status) =
+                Self::maybe_defer_diff(old_content, new_content, binary);
 
             files.push(FileEntry {
                 display_name: change.path.display().to_string(),
                 path: change.path,
                 old_path: change.old_path,
                 status: change.status,
-                insertions: diff.insertions,
-                deletions: diff.deletions,
+                insertions,
+                deletions,
                 binary,
             });
 
-            old_contents.push(old_content);
-            new_contents.push(new_content);
+            old_contents.push(Arc::from(old_content));
+            new_contents.push(Arc::from(new_content));
+            precomputed_diffs.push(precomputed);
+            diff_statuses.push(diff_status);
         }
 
         // Update state
         let navigators: Vec<Option<DiffNavigator>> = (0..files.len()).map(|_| None).collect();
+        let navigator_is_placeholder = vec![false; files.len()];
         self.files = files;
         self.old_contents = old_contents;
         self.new_contents = new_contents;
+        self.precomputed_diffs = precomputed_diffs;
+        self.diff_statuses = diff_statuses;
         self.navigators = navigators;
+        self.navigator_is_placeholder = navigator_is_placeholder;
 
         // Clamp selected index to valid range
         if self.selected_index >= self.files.len() {
@@ -916,7 +1248,7 @@ impl MultiFileDiff {
                 _ => {
                     let (new_content, new_binary) = Self::read_text_or_binary(&file.path);
                     (
-                        self.old_contents[idx].clone(),
+                        self.old_contents[idx].as_ref().to_string(),
                         false,
                         new_content,
                         new_binary,
@@ -924,23 +1256,28 @@ impl MultiFileDiff {
                 }
             };
 
-        let engine = DiffEngine::new().with_word_level(true);
         let binary = old_binary || new_binary;
-        let (old_content, new_content, diff) = if binary {
-            (String::new(), String::new(), engine.diff_strings("", ""))
-        } else {
-            let diff = engine.diff_strings(&old_content, &new_content);
-            (old_content, new_content, diff)
-        };
+        let (insertions, deletions) = Self::diff_stats(&old_content, &new_content, binary);
+        let (old_content, new_content, precomputed, diff_status) =
+            Self::maybe_defer_diff(old_content, new_content, binary);
 
-        self.old_contents[idx] = old_content;
-        self.new_contents[idx] = new_content;
+        self.old_contents[idx] = Arc::from(old_content);
+        self.new_contents[idx] = Arc::from(new_content);
         self.files[idx].binary = binary;
-        self.files[idx].insertions = diff.insertions;
-        self.files[idx].deletions = diff.deletions;
+        self.files[idx].insertions = insertions;
+        self.files[idx].deletions = deletions;
+        if let Some(slot) = self.precomputed_diffs.get_mut(idx) {
+            *slot = precomputed;
+        }
+        if let Some(status) = self.diff_statuses.get_mut(idx) {
+            *status = diff_status;
+        }
 
         // Clear the navigator so it gets rebuilt on next access
         self.navigators[idx] = None;
+        if let Some(flag) = self.navigator_is_placeholder.get_mut(idx) {
+            *flag = false;
+        }
     }
 }
 
@@ -981,4 +1318,38 @@ fn format_ref(reference: &str) -> String {
 
 fn shorten_hash(hash: &str) -> String {
     hash.chars().take(7).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    static DIFF_SETTINGS_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn deferred_diff_upgrades_to_ready() {
+        let _guard = DIFF_SETTINGS_LOCK.lock().unwrap();
+        MultiFileDiff::set_diff_max_bytes(32);
+        MultiFileDiff::set_diff_defer(true);
+
+        let content = "a".repeat(128);
+        let mut diff = MultiFileDiff::from_file_pair_bytes(
+            PathBuf::from("file.txt"),
+            content.clone().into_bytes(),
+            content.into_bytes(),
+        );
+
+        assert_eq!(diff.diff_status(0), DiffStatus::Deferred);
+
+        let computed = MultiFileDiff::compute_diff(
+            diff.old_contents[0].as_ref(),
+            diff.new_contents[0].as_ref(),
+        );
+        diff.apply_diff_result(0, computed);
+        assert_eq!(diff.diff_status(0), DiffStatus::Ready);
+
+        MultiFileDiff::set_diff_max_bytes(DEFAULT_DIFF_MAX_BYTES);
+        MultiFileDiff::set_diff_defer(true);
+    }
 }

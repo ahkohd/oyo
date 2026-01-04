@@ -6,6 +6,9 @@ use ratatui::text::Span;
 
 impl App {
     pub fn syntax_enabled(&self) -> bool {
+        if self.multi_diff.current_file_is_binary() {
+            return false;
+        }
         match self.syntax_mode {
             crate::config::SyntaxMode::On => true,
             crate::config::SyntaxMode::Off => false,
@@ -86,7 +89,7 @@ impl App {
         Some((display_idx, label))
     }
 
-    fn ensure_syntax_cache(&mut self) -> Option<&SyntaxCache> {
+    fn ensure_syntax_cache(&mut self) -> Option<&mut SyntaxCache> {
         if !self.syntax_enabled() {
             return None;
         }
@@ -96,10 +99,9 @@ impl App {
         }
         if self.syntax_caches[idx].is_none() {
             let file_name = self.current_file_path();
-            let (old_content, new_content) = {
-                let nav = self.multi_diff.current_navigator();
-                (nav.old_content().to_string(), nav.new_content().to_string())
-            };
+            let (old_content, new_content) = self.multi_diff.file_contents_arc(idx)?;
+            let force_lazy = self.multi_diff.current_file_diff_disabled()
+                || self.multi_diff.current_file_is_large();
             if self.syntax_engine.is_none() {
                 self.syntax_engine =
                     Some(SyntaxEngine::new(&self.syntax_theme, self.theme_is_light));
@@ -107,12 +109,13 @@ impl App {
             let engine = self.syntax_engine.as_ref()?;
             self.syntax_caches[idx] = Some(SyntaxCache::new(
                 engine,
-                &old_content,
-                &new_content,
+                old_content.as_ref(),
+                new_content.as_ref(),
                 &file_name,
+                force_lazy,
             ));
         }
-        self.syntax_caches[idx].as_ref()
+        self.syntax_caches[idx].as_mut()
     }
 
     fn syntax_line_for_display(

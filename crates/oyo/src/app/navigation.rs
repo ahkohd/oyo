@@ -6,7 +6,7 @@ use super::{
     display_metrics, AnimationPhase, App, HunkBounds, HunkEdge, HunkEdgeHint, HunkStart, PeekMode,
     PeekScope, PeekState, StepEdge, StepEdgeHint, ViewMode,
 };
-use crate::config::{HunkWrapMode, ModifiedStepMode, StepWrapMode};
+use crate::config::{FoldContextMode, HunkWrapMode, ModifiedStepMode, StepWrapMode};
 use oyo_core::{git::FileStatus, AnimationFrame, ChangeKind, LineKind, StepState, ViewLine};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -38,6 +38,34 @@ fn change_has_conflict_marker(change: &oyo_core::change::Change) -> bool {
 }
 
 impl App {
+    fn hunk_cache_key_unified(&mut self) -> (usize, ViewMode, FoldContextMode, usize, usize) {
+        let file_index = self.multi_diff.selected_index;
+        let view_mode = self.view_mode;
+        let fold_context = self.fold_context;
+        let state = self.multi_diff.current_navigator().state();
+        (
+            file_index,
+            view_mode,
+            fold_context,
+            state.total_steps,
+            state.total_hunks,
+        )
+    }
+
+    fn hunk_cache_key_split(&mut self) -> (usize, FoldContextMode, bool, usize, usize) {
+        let file_index = self.multi_diff.selected_index;
+        let fold_context = self.fold_context;
+        let split_align = self.split_align_lines;
+        let state = self.multi_diff.current_navigator().state();
+        (
+            file_index,
+            fold_context,
+            split_align,
+            state.total_steps,
+            state.total_hunks,
+        )
+    }
+
     pub fn toggle_peek_old_change(&mut self) {
         self.cycle_peek_change();
     }
@@ -441,6 +469,14 @@ impl App {
         self.hunk_edge_hint = None;
     }
 
+    pub(crate) fn step_edge_hint_active(&self) -> bool {
+        self.step_edge_hint.is_some()
+    }
+
+    pub(crate) fn hunk_edge_hint_active(&self) -> bool {
+        self.hunk_edge_hint.is_some()
+    }
+
     pub(crate) fn step_edge_hint_for_change(&self, change_id: usize) -> Option<&'static str> {
         let hint = self.step_edge_hint?;
         if Instant::now() > hint.until {
@@ -626,7 +662,7 @@ impl App {
             }
             ViewMode::Evolution => {
                 let mut display_idx = 0usize;
-                for line in &view {
+                for line in view.iter() {
                     let visible = match line.kind {
                         LineKind::Deleted => false,
                         LineKind::PendingDelete => {
@@ -649,7 +685,7 @@ impl App {
             ViewMode::Split => {
                 let mut old_idx = 0usize;
                 let mut new_idx = 0usize;
-                for line in &view {
+                for line in view.iter() {
                     let has_new = line.new_line.is_some()
                         && !matches!(line.kind, LineKind::Deleted | LineKind::PendingDelete);
                     let has_old = line.old_line.is_some();
@@ -678,12 +714,14 @@ impl App {
     }
 
     fn collect_conflict_steps(&mut self) -> Vec<usize> {
-        let diff = self.multi_diff.current_navigator().diff();
+        let nav = self.multi_diff.current_navigator();
+        let diff = nav.diff();
         let mut out = Vec::new();
         for (idx, change_id) in diff.significant_changes.iter().enumerate() {
-            let Some(change) = diff.changes.iter().find(|c| c.id == *change_id) else {
+            let Some(change_idx) = nav.change_index_for(*change_id) else {
                 continue;
             };
+            let change = &diff.changes[change_idx];
             if change_has_conflict_marker(change) {
                 out.push(idx + 1);
             }
@@ -763,6 +801,11 @@ impl App {
     }
 
     pub(super) fn step_forward(&mut self) -> bool {
+        if !self.current_file_diff_ready() {
+            return false;
+        }
+        self.multi_diff
+            .ensure_full_navigator(self.multi_diff.selected_index);
         self.clear_peek();
         self.clear_hunk_edge_hint();
         self.clear_blame_hunk_hint();
@@ -797,6 +840,11 @@ impl App {
     }
 
     pub(super) fn step_backward(&mut self) -> bool {
+        if !self.current_file_diff_ready() {
+            return false;
+        }
+        self.multi_diff
+            .ensure_full_navigator(self.multi_diff.selected_index);
         self.clear_peek();
         self.clear_hunk_edge_hint();
         self.clear_blame_hunk_hint();
@@ -839,13 +887,31 @@ impl App {
 
     /// Compute hunk starts for unified/evolution view (display index + change id).
     fn compute_hunk_starts_unified(&mut self) -> Vec<Option<HunkStart>> {
+        if !self.stepping {
+            let key = self.hunk_cache_key_unified();
+            if let Some((cache_key, starts)) = self.hunk_starts_unified_cache.as_ref() {
+                if *cache_key == key {
+                    return starts.clone();
+                }
+            }
+            let starts = self.compute_hunk_starts_unified_uncached();
+            self.hunk_starts_unified_cache = Some((key, starts.clone()));
+            return starts;
+        }
+        self.compute_hunk_starts_unified_uncached()
+    }
+
+    fn compute_hunk_starts_unified_uncached(&mut self) -> Vec<Option<HunkStart>> {
+        if self.multi_diff.current_file_is_large() && !self.fold_context.is_enabled() {
+            return self.compute_hunk_starts_unified_fast();
+        }
         let view = self.current_view_with_frame(AnimationFrame::Idle);
         let (_, total_hunks) = self.hunk_info();
 
         let mut hunk_starts = vec![None; total_hunks];
         let mut display_idx = 0;
 
-        for line in &view {
+        for line in view.iter() {
             let is_visible = match self.view_mode {
                 ViewMode::Evolution => {
                     !matches!(line.kind, LineKind::Deleted | LineKind::PendingDelete)
@@ -870,13 +936,31 @@ impl App {
 
     /// Compute hunk bounds for unified/evolution view (display start/end + change id).
     fn compute_hunk_bounds_unified(&mut self) -> Vec<Option<HunkBounds>> {
+        if !self.stepping {
+            let key = self.hunk_cache_key_unified();
+            if let Some((cache_key, bounds)) = self.hunk_bounds_unified_cache.as_ref() {
+                if *cache_key == key {
+                    return bounds.clone();
+                }
+            }
+            let bounds = self.compute_hunk_bounds_unified_uncached();
+            self.hunk_bounds_unified_cache = Some((key, bounds.clone()));
+            return bounds;
+        }
+        self.compute_hunk_bounds_unified_uncached()
+    }
+
+    fn compute_hunk_bounds_unified_uncached(&mut self) -> Vec<Option<HunkBounds>> {
+        if self.multi_diff.current_file_is_large() && !self.fold_context.is_enabled() {
+            return self.compute_hunk_bounds_unified_fast();
+        }
         let view = self.current_view_with_frame(AnimationFrame::Idle);
         let (_, total_hunks) = self.hunk_info();
 
         let mut bounds: Vec<Option<HunkBounds>> = vec![None; total_hunks];
         let mut display_idx = 0;
 
-        for line in &view {
+        for line in view.iter() {
             let is_visible = match self.view_mode {
                 ViewMode::Evolution => {
                     !matches!(line.kind, LineKind::Deleted | LineKind::PendingDelete)
@@ -909,61 +993,283 @@ impl App {
 
     /// Compute hunk starts for split view (per-pane display index + change id).
     fn compute_hunk_starts_split(&mut self) -> (Vec<Option<HunkStart>>, Vec<Option<HunkStart>>) {
-        let view = self.current_view_with_frame(AnimationFrame::Idle);
-        let (_, total_hunks) = self.hunk_info();
+        let key = self.hunk_cache_key_split();
+        if let Some((cache_key, starts)) = self.hunk_starts_split_cache.as_ref() {
+            if *cache_key == key {
+                return starts.clone();
+            }
+        }
+        let starts = if self.multi_diff.current_file_is_large() && !self.fold_context.is_enabled()
+        {
+            self.compute_hunk_starts_split_fast()
+        } else {
+            let view = self.current_view_with_frame(AnimationFrame::Idle);
+            let (_, total_hunks) = self.hunk_info();
+
+            let mut old_starts = vec![None; total_hunks];
+            let mut new_starts = vec![None; total_hunks];
+            let mut old_idx = 0usize;
+            let mut new_idx = 0usize;
+
+            for line in view.iter() {
+                let fold_line = is_fold_line(line);
+                if line.old_line.is_some() || fold_line {
+                    if let Some(hidx) = line.hunk_index {
+                        if hidx < total_hunks && old_starts[hidx].is_none() {
+                            old_starts[hidx] = Some(HunkStart {
+                                idx: old_idx,
+                                change_id: Some(line.change_id),
+                            });
+                        }
+                    }
+                    old_idx += 1;
+                }
+                if line.new_line.is_some() || fold_line {
+                    if let Some(hidx) = line.hunk_index {
+                        if hidx < total_hunks && new_starts[hidx].is_none() {
+                            new_starts[hidx] = Some(HunkStart {
+                                idx: new_idx,
+                                change_id: Some(line.change_id),
+                            });
+                        }
+                    }
+                    new_idx += 1;
+                }
+            }
+
+            (old_starts, new_starts)
+        };
+        self.hunk_starts_split_cache = Some((key, starts.clone()));
+        starts
+    }
+
+    /// Compute hunk bounds for split view (per-pane display start/end + change id).
+    fn compute_hunk_bounds_split(&mut self) -> (Vec<Option<HunkBounds>>, Vec<Option<HunkBounds>>) {
+        let key = self.hunk_cache_key_split();
+        if let Some((cache_key, bounds)) = self.hunk_bounds_split_cache.as_ref() {
+            if *cache_key == key {
+                return bounds.clone();
+            }
+        }
+        let bounds =
+            if self.multi_diff.current_file_is_large() && !self.fold_context.is_enabled() {
+                self.compute_hunk_bounds_split_fast()
+            } else {
+                let view = self.current_view_with_frame(AnimationFrame::Idle);
+                let (_, total_hunks) = self.hunk_info();
+
+                let mut old_bounds: Vec<Option<HunkBounds>> = vec![None; total_hunks];
+                let mut new_bounds: Vec<Option<HunkBounds>> = vec![None; total_hunks];
+                let mut old_idx = 0usize;
+                let mut new_idx = 0usize;
+
+                for line in view.iter() {
+                    let fold_line = is_fold_line(line);
+                    if line.old_line.is_some() || fold_line {
+                        if let Some(hidx) = line.hunk_index {
+                            if hidx < total_hunks {
+                                let start = HunkStart {
+                                    idx: old_idx,
+                                    change_id: Some(line.change_id),
+                                };
+                                if let Some(existing) = old_bounds[hidx] {
+                                    old_bounds[hidx] = Some(HunkBounds {
+                                        start: existing.start,
+                                        end: start,
+                                    });
+                                } else {
+                                    old_bounds[hidx] = Some(HunkBounds { start, end: start });
+                                }
+                            }
+                        }
+                        old_idx += 1;
+                    }
+                    if line.new_line.is_some() || fold_line {
+                        if let Some(hidx) = line.hunk_index {
+                            if hidx < total_hunks {
+                                let start = HunkStart {
+                                    idx: new_idx,
+                                    change_id: Some(line.change_id),
+                                };
+                                if let Some(existing) = new_bounds[hidx] {
+                                    new_bounds[hidx] = Some(HunkBounds {
+                                        start: existing.start,
+                                        end: start,
+                                    });
+                                } else {
+                                    new_bounds[hidx] = Some(HunkBounds { start, end: start });
+                                }
+                            }
+                        }
+                        new_idx += 1;
+                    }
+                }
+
+                (old_bounds, new_bounds)
+            };
+        self.hunk_bounds_split_cache = Some((key, bounds.clone()));
+        bounds
+    }
+
+    fn change_visible_in_evolution(change: &oyo_core::change::Change) -> bool {
+        let mut has_old = false;
+        let mut has_new = false;
+        for span in &change.spans {
+            match span.kind {
+                ChangeKind::Insert => has_new = true,
+                ChangeKind::Delete => has_old = true,
+                ChangeKind::Replace => {
+                    has_old = true;
+                    has_new = true;
+                }
+                ChangeKind::Equal => {}
+            }
+        }
+        !(has_old && !has_new)
+    }
+
+    fn compute_hunk_starts_unified_fast(&mut self) -> Vec<Option<HunkStart>> {
+        let nav = self.multi_diff.current_navigator();
+        let total_hunks = nav.state().total_hunks;
+        let mut starts = vec![None; total_hunks];
+        let mut display_idx = 0usize;
+
+        for change in nav.diff().changes.iter() {
+            let is_visible = match self.view_mode {
+                ViewMode::Evolution => Self::change_visible_in_evolution(change),
+                _ => true,
+            };
+            if !is_visible {
+                continue;
+            }
+            if let Some(hidx) = nav.hunk_index_for_change_id(change.id) {
+                if hidx < total_hunks && starts[hidx].is_none() {
+                    starts[hidx] = Some(HunkStart {
+                        idx: display_idx,
+                        change_id: Some(change.id),
+                    });
+                }
+            }
+            display_idx += 1;
+        }
+        starts
+    }
+
+    fn compute_hunk_bounds_unified_fast(&mut self) -> Vec<Option<HunkBounds>> {
+        let nav = self.multi_diff.current_navigator();
+        let total_hunks = nav.state().total_hunks;
+        let mut bounds: Vec<Option<HunkBounds>> = vec![None; total_hunks];
+        let mut display_idx = 0usize;
+
+        for change in nav.diff().changes.iter() {
+            let is_visible = match self.view_mode {
+                ViewMode::Evolution => Self::change_visible_in_evolution(change),
+                _ => true,
+            };
+            if !is_visible {
+                continue;
+            }
+            if let Some(hidx) = nav.hunk_index_for_change_id(change.id) {
+                if hidx < total_hunks {
+                    let start = HunkStart {
+                        idx: display_idx,
+                        change_id: Some(change.id),
+                    };
+                    if let Some(existing) = bounds[hidx] {
+                        bounds[hidx] = Some(HunkBounds {
+                            start: existing.start,
+                            end: start,
+                        });
+                    } else {
+                        bounds[hidx] = Some(HunkBounds { start, end: start });
+                    }
+                }
+            }
+            display_idx += 1;
+        }
+        bounds
+    }
+
+    fn compute_hunk_starts_split_fast(
+        &mut self,
+    ) -> (Vec<Option<HunkStart>>, Vec<Option<HunkStart>>) {
+        let nav = self.multi_diff.current_navigator();
+        let total_hunks = nav.state().total_hunks;
 
         let mut old_starts = vec![None; total_hunks];
         let mut new_starts = vec![None; total_hunks];
         let mut old_idx = 0usize;
         let mut new_idx = 0usize;
 
-        for line in &view {
-            let fold_line = is_fold_line(line);
-            if line.old_line.is_some() || fold_line {
-                if let Some(hidx) = line.hunk_index {
-                    if hidx < total_hunks && old_starts[hidx].is_none() {
+        for change in nav.diff().changes.iter() {
+            let mut has_old = false;
+            let mut has_new = false;
+            for span in &change.spans {
+                if span.old_line.is_some() {
+                    has_old = true;
+                }
+                if span.new_line.is_some() {
+                    has_new = true;
+                }
+            }
+            let old_visible = has_old || (self.split_align_lines && has_new);
+            let new_visible = has_new || (self.split_align_lines && has_old);
+            if let Some(hidx) = nav.hunk_index_for_change_id(change.id) {
+                if hidx < total_hunks {
+                    if old_visible && old_starts[hidx].is_none() {
                         old_starts[hidx] = Some(HunkStart {
                             idx: old_idx,
-                            change_id: Some(line.change_id),
+                            change_id: Some(change.id),
                         });
                     }
-                }
-                old_idx += 1;
-            }
-            if line.new_line.is_some() || fold_line {
-                if let Some(hidx) = line.hunk_index {
-                    if hidx < total_hunks && new_starts[hidx].is_none() {
+                    if new_visible && new_starts[hidx].is_none() {
                         new_starts[hidx] = Some(HunkStart {
                             idx: new_idx,
-                            change_id: Some(line.change_id),
+                            change_id: Some(change.id),
                         });
                     }
                 }
+            }
+            if old_visible {
+                old_idx += 1;
+            }
+            if new_visible {
                 new_idx += 1;
             }
         }
-
         (old_starts, new_starts)
     }
 
-    /// Compute hunk bounds for split view (per-pane display start/end + change id).
-    fn compute_hunk_bounds_split(&mut self) -> (Vec<Option<HunkBounds>>, Vec<Option<HunkBounds>>) {
-        let view = self.current_view_with_frame(AnimationFrame::Idle);
-        let (_, total_hunks) = self.hunk_info();
+    fn compute_hunk_bounds_split_fast(
+        &mut self,
+    ) -> (Vec<Option<HunkBounds>>, Vec<Option<HunkBounds>>) {
+        let nav = self.multi_diff.current_navigator();
+        let total_hunks = nav.state().total_hunks;
 
         let mut old_bounds: Vec<Option<HunkBounds>> = vec![None; total_hunks];
         let mut new_bounds: Vec<Option<HunkBounds>> = vec![None; total_hunks];
         let mut old_idx = 0usize;
         let mut new_idx = 0usize;
 
-        for line in &view {
-            let fold_line = is_fold_line(line);
-            if line.old_line.is_some() || fold_line {
-                if let Some(hidx) = line.hunk_index {
-                    if hidx < total_hunks {
+        for change in nav.diff().changes.iter() {
+            let mut has_old = false;
+            let mut has_new = false;
+            for span in &change.spans {
+                if span.old_line.is_some() {
+                    has_old = true;
+                }
+                if span.new_line.is_some() {
+                    has_new = true;
+                }
+            }
+            let old_visible = has_old || (self.split_align_lines && has_new);
+            let new_visible = has_new || (self.split_align_lines && has_old);
+            if let Some(hidx) = nav.hunk_index_for_change_id(change.id) {
+                if hidx < total_hunks {
+                    if old_visible {
                         let start = HunkStart {
                             idx: old_idx,
-                            change_id: Some(line.change_id),
+                            change_id: Some(change.id),
                         };
                         if let Some(existing) = old_bounds[hidx] {
                             old_bounds[hidx] = Some(HunkBounds {
@@ -974,15 +1280,10 @@ impl App {
                             old_bounds[hidx] = Some(HunkBounds { start, end: start });
                         }
                     }
-                }
-                old_idx += 1;
-            }
-            if line.new_line.is_some() || fold_line {
-                if let Some(hidx) = line.hunk_index {
-                    if hidx < total_hunks {
+                    if new_visible {
                         let start = HunkStart {
                             idx: new_idx,
-                            change_id: Some(line.change_id),
+                            change_id: Some(change.id),
                         };
                         if let Some(existing) = new_bounds[hidx] {
                             new_bounds[hidx] = Some(HunkBounds {
@@ -994,10 +1295,14 @@ impl App {
                         }
                     }
                 }
+            }
+            if old_visible {
+                old_idx += 1;
+            }
+            if new_visible {
                 new_idx += 1;
             }
         }
-
         (old_bounds, new_bounds)
     }
 
@@ -1181,7 +1486,7 @@ impl App {
         let mut display_idx = 0usize;
         let mut cursor_line = None;
 
-        for line in &view {
+        for line in view.iter() {
             let visible = match self.view_mode {
                 ViewMode::Evolution => {
                     !matches!(line.kind, LineKind::Deleted | LineKind::PendingDelete)
@@ -1215,6 +1520,11 @@ impl App {
 
     /// Scroll to the next hunk (no-step mode)
     pub fn next_hunk_scroll(&mut self) {
+        if !self.current_file_diff_ready() {
+            return;
+        }
+        self.multi_diff
+            .ensure_full_navigator(self.multi_diff.selected_index);
         self.clear_blame_hunk_hint();
         let auto_center = self.auto_center;
         let (current_hunk, cursor_set) = {
@@ -1292,6 +1602,11 @@ impl App {
 
     /// Scroll to the previous hunk (no-step mode)
     pub fn prev_hunk_scroll(&mut self) {
+        if !self.current_file_diff_ready() {
+            return;
+        }
+        self.multi_diff
+            .ensure_full_navigator(self.multi_diff.selected_index);
         self.clear_blame_hunk_hint();
         let auto_center = self.auto_center;
         let (current_hunk, cursor_set) = {
@@ -1368,6 +1683,11 @@ impl App {
 
     /// Move to the next hunk (group of related changes)
     pub fn next_hunk(&mut self) {
+        if !self.current_file_diff_ready() {
+            return;
+        }
+        self.multi_diff
+            .ensure_full_navigator(self.multi_diff.selected_index);
         self.clear_peek();
         self.clear_blame_step_hint();
         self.clear_blame_hunk_hint();
@@ -1406,6 +1726,11 @@ impl App {
 
     /// Move to the previous hunk (group of related changes)
     pub fn prev_hunk(&mut self) {
+        if !self.current_file_diff_ready() {
+            return;
+        }
+        self.multi_diff
+            .ensure_full_navigator(self.multi_diff.selected_index);
         self.clear_peek();
         self.clear_blame_step_hint();
         self.clear_blame_hunk_hint();
@@ -1453,17 +1778,11 @@ impl App {
     pub fn hunk_step_info(&mut self) -> Option<(usize, usize)> {
         let nav = self.multi_diff.current_navigator();
         let state = nav.state();
-        let hunk = nav.current_hunk()?;
-        let total = hunk.change_ids.len();
+        let (start, total) = nav.hunk_step_range(state.current_hunk)?;
         if total == 0 {
             return None;
         }
-        let mut applied = 0usize;
-        for id in &hunk.change_ids {
-            if state.applied_changes.contains(id) {
-                applied += 1;
-            }
-        }
+        let applied = state.current_step.saturating_sub(start).min(total);
         Some((applied, total))
     }
 
@@ -1511,7 +1830,7 @@ impl App {
             if !is_insert_only(change) {
                 break;
             }
-            if state.applied_changes.contains(change_id) {
+            if state.is_applied(*change_id) {
                 continue;
             }
             pending += 1;
@@ -1522,6 +1841,11 @@ impl App {
 
     /// Jump to first change of current hunk
     pub fn goto_hunk_start(&mut self) {
+        if !self.current_file_diff_ready() {
+            return;
+        }
+        self.multi_diff
+            .ensure_full_navigator(self.multi_diff.selected_index);
         self.clear_peek();
         self.clear_blame_step_hint();
         self.clear_blame_hunk_hint();
@@ -1537,6 +1861,11 @@ impl App {
 
     /// Jump to the start of the current hunk (no-step mode)
     pub fn goto_hunk_start_scroll(&mut self) {
+        if !self.current_file_diff_ready() {
+            return;
+        }
+        self.multi_diff
+            .ensure_full_navigator(self.multi_diff.selected_index);
         self.clear_blame_hunk_hint();
         let (current_hunk, in_hunk_scope) = {
             let state = self.multi_diff.current_navigator().state();
@@ -1590,6 +1919,11 @@ impl App {
 
     /// Jump to last change of current hunk
     pub fn goto_hunk_end(&mut self) {
+        if !self.current_file_diff_ready() {
+            return;
+        }
+        self.multi_diff
+            .ensure_full_navigator(self.multi_diff.selected_index);
         self.clear_peek();
         self.clear_blame_step_hint();
         self.clear_blame_hunk_hint();
@@ -1605,6 +1939,11 @@ impl App {
 
     /// Jump to the end of the current hunk (no-step mode)
     pub fn goto_hunk_end_scroll(&mut self) {
+        if !self.current_file_diff_ready() {
+            return;
+        }
+        self.multi_diff
+            .ensure_full_navigator(self.multi_diff.selected_index);
         self.clear_blame_hunk_hint();
         let (current_hunk, in_hunk_scope) = {
             let state = self.multi_diff.current_navigator().state();
@@ -1722,6 +2061,13 @@ impl App {
     }
 
     pub fn goto_start(&mut self) {
+        if self.stepping && !self.current_file_diff_ready() {
+            return;
+        }
+        if self.stepping {
+            self.multi_diff
+                .ensure_full_navigator(self.multi_diff.selected_index);
+        }
         self.clear_peek();
         self.clear_blame_step_hint();
         self.clear_blame_hunk_hint();
@@ -1743,6 +2089,13 @@ impl App {
     }
 
     pub fn goto_end(&mut self) {
+        if self.stepping && !self.current_file_diff_ready() {
+            return;
+        }
+        if self.stepping {
+            self.multi_diff
+                .ensure_full_navigator(self.multi_diff.selected_index);
+        }
         self.clear_peek();
         self.clear_blame_step_hint();
         self.clear_blame_hunk_hint();
@@ -1764,6 +2117,11 @@ impl App {
     }
 
     pub fn goto_first_step(&mut self) {
+        if !self.current_file_diff_ready() {
+            return;
+        }
+        self.multi_diff
+            .ensure_full_navigator(self.multi_diff.selected_index);
         self.clear_peek();
         self.clear_blame_step_hint();
         self.clear_blame_hunk_hint();
@@ -1776,6 +2134,11 @@ impl App {
     }
 
     pub fn goto_last_step(&mut self) {
+        if !self.current_file_diff_ready() {
+            return;
+        }
+        self.multi_diff
+            .ensure_full_navigator(self.multi_diff.selected_index);
         self.clear_peek();
         self.clear_blame_step_hint();
         self.clear_blame_hunk_hint();
@@ -1788,6 +2151,11 @@ impl App {
     }
 
     pub(super) fn goto_step_number(&mut self, step_number: usize) {
+        if !self.current_file_diff_ready() {
+            return;
+        }
+        self.multi_diff
+            .ensure_full_navigator(self.multi_diff.selected_index);
         if !self.stepping {
             return;
         }
@@ -1809,6 +2177,11 @@ impl App {
     }
 
     pub(super) fn goto_hunk_number(&mut self, hunk_number: usize) {
+        if !self.current_file_diff_ready() {
+            return;
+        }
+        self.multi_diff
+            .ensure_full_navigator(self.multi_diff.selected_index);
         let total_hunks = self.multi_diff.current_navigator().state().total_hunks;
         if total_hunks == 0 {
             return;
@@ -1823,6 +2196,11 @@ impl App {
     }
 
     pub(super) fn goto_hunk_index(&mut self, hunk_idx: usize) {
+        if !self.current_file_diff_ready() {
+            return;
+        }
+        self.multi_diff
+            .ensure_full_navigator(self.multi_diff.selected_index);
         self.clear_peek();
         self.clear_blame_step_hint();
         self.clear_blame_hunk_hint();
@@ -1838,6 +2216,11 @@ impl App {
     }
 
     pub fn goto_first_hunk_scroll(&mut self) {
+        if !self.current_file_diff_ready() {
+            return;
+        }
+        self.multi_diff
+            .ensure_full_navigator(self.multi_diff.selected_index);
         let total = self.multi_diff.current_navigator().state().total_hunks;
         if total == 0 {
             return;
@@ -1846,6 +2229,11 @@ impl App {
     }
 
     pub fn goto_last_hunk_scroll(&mut self) {
+        if !self.current_file_diff_ready() {
+            return;
+        }
+        self.multi_diff
+            .ensure_full_navigator(self.multi_diff.selected_index);
         let total = self.multi_diff.current_navigator().state().total_hunks;
         if total == 0 {
             return;
@@ -1854,6 +2242,11 @@ impl App {
     }
 
     pub(super) fn goto_hunk_index_scroll(&mut self, hunk_idx: usize) {
+        if !self.current_file_diff_ready() {
+            return;
+        }
+        self.multi_diff
+            .ensure_full_navigator(self.multi_diff.selected_index);
         self.clear_blame_hunk_hint();
         let target = match self.view_mode {
             ViewMode::Split => {
@@ -1888,6 +2281,13 @@ impl App {
     }
 
     pub(super) fn goto_line_number(&mut self, line_number: usize) {
+        if self.stepping && !self.current_file_diff_ready() {
+            return;
+        }
+        if self.stepping {
+            self.multi_diff
+                .ensure_full_navigator(self.multi_diff.selected_index);
+        }
         self.clear_peek();
         let view = self.current_view_with_frame(AnimationFrame::Idle);
         let target_idx = match self.view_mode {
@@ -1900,7 +2300,7 @@ impl App {
                 let mut new_max_line = 0usize;
                 let mut old_match = None;
                 let mut new_match = None;
-                for line in &view {
+                for line in view.iter() {
                     let fold_line = is_fold_line(line);
                     if let Some(old_line) = line.old_line {
                         old_max_line = old_max_line.max(old_line);
@@ -2042,6 +2442,9 @@ impl App {
                 ViewMode::Blame => ViewMode::UnifiedPane,
             };
         }
+        if self.stepping && self.view_mode == ViewMode::Evolution {
+            self.needs_scroll_to_active = true;
+        }
     }
 
     pub fn set_view_mode(&mut self, target: ViewMode) {
@@ -2064,6 +2467,9 @@ impl App {
         }
 
         self.view_mode = target;
+        if self.stepping && self.view_mode == ViewMode::Evolution {
+            self.needs_scroll_to_active = true;
+        }
     }
 
     pub fn toggle_view_mode_reverse(&mut self) {
@@ -2091,6 +2497,9 @@ impl App {
                 ViewMode::Evolution => ViewMode::Split,
                 ViewMode::Blame => ViewMode::UnifiedPane,
             };
+        }
+        if self.stepping && self.view_mode == ViewMode::Evolution {
+            self.needs_scroll_to_active = true;
         }
     }
 }

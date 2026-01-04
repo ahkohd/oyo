@@ -18,8 +18,8 @@ use app::{App, ViewMode};
 use clap::{Parser, Subcommand};
 use crossterm::{
     event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
-        MouseButton, MouseEventKind,
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers, MouseButton, MouseEventKind,
     },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -243,8 +243,11 @@ fn apply_config_to_app(app: &mut App, config: &config::Config, args: &Args, ligh
     app.diff_bg = config.ui.diff.bg;
     app.diff_fg = config.ui.diff.fg;
     app.diff_highlight = config.ui.diff.highlight;
+    app.diff_defer = config.ui.diff.defer;
+    app.diff_idle_ms = config.ui.diff.idle_ms;
     app.diff_extent_marker = config.ui.diff.extent_marker;
     app.diff_extent_marker_scope = config.ui.diff.extent_marker_scope;
+    app.diff_extent_marker_context = config.ui.diff.extent_marker_context;
     app.blame_enabled = config.ui.blame.enabled;
     app.blame_mode = config.ui.blame.mode;
     app.blame_hunk_hint_enabled = config.ui.blame.hunk_hint;
@@ -556,6 +559,8 @@ fn main() -> Result<()> {
             config.ui.syntax.theme = "ansi".to_string();
         }
     }
+    MultiFileDiff::set_diff_max_bytes(config.ui.diff.max_bytes);
+    MultiFileDiff::set_diff_defer(config.ui.diff.defer);
 
     // Compute theme mode: CLI overrides config, default to dark
     let light_mode = match args.theme_mode {
@@ -754,6 +759,7 @@ fn main() -> Result<()> {
 
 fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<AppExit> {
     let tick_rate = Duration::from_millis(16);
+    let mut pending_event: Option<Event> = None;
 
     loop {
         terminal.draw(|f| ui::draw(f, app))?;
@@ -764,8 +770,17 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<AppE
             app.clear_active_on_next_render = false;
         }
 
-        if event::poll(tick_rate)? {
-            match event::read()? {
+        let event = if let Some(event) = pending_event.take() {
+            Some(event)
+        } else if event::poll(tick_rate)? {
+            Some(event::read()?)
+        } else {
+            None
+        };
+
+        if let Some(event) = event {
+            app.mark_user_input();
+            match event {
                 Event::Mouse(me) => {
                     if app.show_help || app.show_path_popup {
                         continue;
@@ -823,7 +838,7 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<AppE
                         MouseEventKind::ScrollUp => {
                             if app.file_list_focused {
                                 app.prev_file();
-                            } else if app.stepping {
+                            } else if app.stepping && app.current_file_diff_ready() {
                                 app.prev_step();
                             } else {
                                 app.scroll_up();
@@ -832,7 +847,7 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<AppE
                         MouseEventKind::ScrollDown => {
                             if app.file_list_focused {
                                 app.next_file();
-                            } else if app.stepping {
+                            } else if app.stepping && app.current_file_diff_ready() {
                                 app.next_step();
                             } else {
                                 app.scroll_down();
@@ -841,7 +856,9 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<AppE
                         _ => {}
                     }
                 }
-                Event::Key(key) if key.kind == KeyEventKind::Press => {
+                Event::Key(key)
+                    if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
+                {
                     if app.show_help {
                         match key.code {
                             KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?') => {
@@ -1114,7 +1131,11 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<AppE
                         }
                         // Step navigation (supports count)
                         KeyCode::Down | KeyCode::Char('j') => {
-                            let count = app.take_count();
+                            let count = if app.pending_count.is_some() {
+                                app.take_count()
+                            } else {
+                                coalesce_key_repeats(key, &mut pending_event)?
+                            };
                             for _ in 0..count {
                                 if app.file_list_focused {
                                     app.next_file();
@@ -1126,7 +1147,11 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<AppE
                             }
                         }
                         KeyCode::Up | KeyCode::Char('k') => {
-                            let count = app.take_count();
+                            let count = if app.pending_count.is_some() {
+                                app.take_count()
+                            } else {
+                                coalesce_key_repeats(key, &mut pending_event)?
+                            };
                             for _ in 0..count {
                                 if app.file_list_focused {
                                     app.prev_file();
@@ -1139,25 +1164,33 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<AppE
                         }
                         // Hunk navigation (h/l and arrow keys, supports count)
                         KeyCode::Right | KeyCode::Char('l') => {
-                            if app.stepping {
-                                let count = app.take_count();
-                                for _ in 0..count {
-                                    app.next_hunk();
-                                }
+                            let count = if app.pending_count.is_some() {
+                                app.take_count()
                             } else {
-                                // Scroll-only navigation in no-step mode
-                                app.next_hunk_scroll();
+                                coalesce_key_repeats(key, &mut pending_event)?
+                            };
+                            for _ in 0..count {
+                                if app.stepping {
+                                    app.next_hunk();
+                                } else {
+                                    // Scroll-only navigation in no-step mode
+                                    app.next_hunk_scroll();
+                                }
                             }
                         }
                         KeyCode::Left | KeyCode::Char('h') => {
-                            if app.stepping {
-                                let count = app.take_count();
-                                for _ in 0..count {
-                                    app.prev_hunk();
-                                }
+                            let count = if app.pending_count.is_some() {
+                                app.take_count()
                             } else {
-                                // Scroll-only navigation in no-step mode
-                                app.prev_hunk_scroll();
+                                coalesce_key_repeats(key, &mut pending_event)?
+                            };
+                            for _ in 0..count {
+                                if app.stepping {
+                                    app.prev_hunk();
+                                } else {
+                                    // Scroll-only navigation in no-step mode
+                                    app.prev_hunk_scroll();
+                                }
                             }
                         }
                         // Jump to begin/end of current hunk
@@ -1470,6 +1503,32 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<AppE
             return Ok(AppExit::Quit);
         }
     }
+}
+
+fn coalesce_key_repeats(
+    first: KeyEvent,
+    pending_event: &mut Option<Event>,
+) -> std::io::Result<usize> {
+    let mut count = 1usize;
+    let same_key = |next: &KeyEvent| {
+        next.code == first.code && next.modifiers == first.modifiers
+    };
+    while event::poll(Duration::from_millis(0))? {
+        let next = event::read()?;
+        match next {
+            Event::Key(key)
+                if same_key(&key)
+                    && matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
+            {
+                count += 1;
+            }
+            _ => {
+                *pending_event = Some(next);
+                break;
+            }
+        }
+    }
+    Ok(count)
 }
 
 fn run_dashboard<B: Backend>(

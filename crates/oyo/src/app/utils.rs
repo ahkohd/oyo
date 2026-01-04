@@ -305,10 +305,35 @@ pub(crate) fn evolution_display_metrics(
     let mut primary_idx: Option<usize> = None;
     let mut any_active_idx: Option<usize> = None;
 
+    let mut has_visible = false;
+    for line in view {
+        match line.kind {
+            LineKind::Deleted => {}
+            LineKind::PendingDelete => {
+                if line.is_active && animation_phase != AnimationPhase::Idle {
+                    has_visible = true;
+                    break;
+                }
+            }
+            _ => {
+                has_visible = true;
+                break;
+            }
+        }
+    }
+
+    let show_deleted_fallback = !has_visible;
+
     for line in view {
         let visible = match line.kind {
-            LineKind::Deleted => false,
-            LineKind::PendingDelete => line.is_active && animation_phase != AnimationPhase::Idle,
+            LineKind::Deleted => show_deleted_fallback,
+            LineKind::PendingDelete => {
+                if show_deleted_fallback {
+                    true
+                } else {
+                    line.is_active && animation_phase != AnimationPhase::Idle
+                }
+            }
             _ => true,
         };
 

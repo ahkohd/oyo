@@ -5,11 +5,14 @@ use super::{
     pad_spans_bg, pending_tail_text, render_empty_state, slice_spans, spans_to_text, spans_width,
     truncate_text, wrap_count_for_spans, wrap_count_for_text, TAB_WIDTH,
 };
-use crate::app::{is_conflict_marker, is_fold_line, AnimationPhase, App};
+use crate::app::{
+    is_conflict_marker, is_fold_line, AnimationPhase, App, UnifiedRenderKey,
+    UnifiedRenderModel,
+};
 use crate::color;
 use crate::config::{DiffForegroundMode, DiffHighlightMode, ModifiedStepMode};
 use crate::syntax::SyntaxSide;
-use oyo_core::{Change, ChangeKind, LineKind, ViewLine, ViewSpan, ViewSpanKind};
+use oyo_core::{AnimationFrame, Change, ChangeKind, LineKind, ViewLine, ViewSpan, ViewSpanKind};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -32,7 +35,7 @@ fn hunk_overflow_wrapped_unified(
     let mut start: Option<usize> = None;
     let mut end: Option<usize> = None;
 
-    for line in view_lines {
+    for line in view_lines.iter() {
         let text = super::view_spans_to_text(&line.spans);
         let wrap_count = wrap_count_for_text(&text, wrap_width).max(1);
         if line.hunk_index == Some(hunk_idx) {
@@ -42,6 +45,45 @@ fn hunk_overflow_wrapped_unified(
             end = Some(display_idx.saturating_add(wrap_count.saturating_sub(1)));
         }
         display_idx = display_idx.saturating_add(wrap_count);
+    }
+
+    let (start, end) = match (start, end) {
+        (Some(start), Some(end)) => (start, end),
+        _ => return None,
+    };
+    let visible_start = scroll_offset;
+    let visible_end = scroll_offset.saturating_add(viewport_height.saturating_sub(1));
+    Some((start < visible_start, end > visible_end))
+}
+
+fn hunk_overflow_unified(
+    view_lines: &[ViewLine],
+    hunk_idx: usize,
+    scroll_offset: usize,
+    viewport_height: usize,
+    view_mode: crate::app::ViewMode,
+) -> Option<(bool, bool)> {
+    let mut display_idx = 0usize;
+    let mut start: Option<usize> = None;
+    let mut end: Option<usize> = None;
+
+    for line in view_lines.iter() {
+        let is_visible = match view_mode {
+            crate::app::ViewMode::Evolution => {
+                !matches!(line.kind, LineKind::Deleted | LineKind::PendingDelete)
+            }
+            _ => true,
+        };
+        if !is_visible {
+            continue;
+        }
+        if line.hunk_index == Some(hunk_idx) {
+            if start.is_none() {
+                start = Some(display_idx);
+            }
+            end = Some(display_idx);
+        }
+        display_idx = display_idx.saturating_add(1);
     }
 
     let (start, end) = match (start, end) {
@@ -221,66 +263,83 @@ fn build_modified_only_spans(
     }
 }
 
-/// Render the unified pane morphing view
-pub fn render_unified_pane(frame: &mut Frame, app: &mut App, area: Rect) {
-    let visible_height = area.height as usize;
-    let visible_width = area.width.saturating_sub(GUTTER_WIDTH) as usize;
-    if !app.line_wrap {
-        app.clamp_horizontal_scroll_cached(visible_width);
+fn unified_render_key(
+    app: &mut App,
+    frame: AnimationFrame,
+    visible_height: usize,
+    wrap_width: usize,
+    scroll_offset: usize,
+) -> UnifiedRenderKey {
+    let file_index = app.multi_diff.selected_index;
+    let placeholder_view = app.multi_diff.current_navigator_is_placeholder();
+    let peek_state = app.peek_state();
+    let state = app.multi_diff.current_navigator().state();
+    UnifiedRenderKey {
+        file_index,
+        frame,
+        current_step: state.current_step,
+        active_change: state.active_change,
+        cursor_change: state.cursor_change,
+        peek_state,
+        animating_hunk: state.animating_hunk,
+        step_direction: state.step_direction,
+        current_hunk: state.current_hunk,
+        last_nav_was_hunk: state.last_nav_was_hunk,
+        hunk_preview_mode: state.hunk_preview_mode,
+        preview_from_backward: state.preview_from_backward,
+        show_hunk_extent_while_stepping: state.show_hunk_extent_while_stepping,
+        placeholder_view,
+        fold_context: app.fold_context,
+        viewport_height: visible_height,
+        windowed: app.view_windowed(),
+        window_start: app.view_window_start(),
+        stepping: app.stepping,
+        line_wrap: app.line_wrap,
+        wrap_width,
+        scroll_offset,
+        horizontal_scroll: app.horizontal_scroll,
+        diff_bg: app.diff_bg,
+        diff_fg: app.diff_fg,
+        diff_highlight: app.diff_highlight,
+        diff_extent_marker: app.diff_extent_marker,
+        diff_extent_marker_scope: app.diff_extent_marker_scope,
+        diff_extent_marker_context: app.diff_extent_marker_context,
+        gutter_signs: app.gutter_signs,
+        strikethrough_deletions: app.strikethrough_deletions,
+        search_query: app.search_query().trim().to_string(),
+        search_active: app.search_active(),
+        syntax_mode: app.syntax_mode,
+        syntax_theme: app.syntax_theme.clone(),
+        theme_is_light: app.theme_is_light,
+        step_edge_hint: app.step_edge_hint_active(),
+        hunk_edge_hint: app.hunk_edge_hint_active(),
+        blame_hunk_hint: app.blame_hunk_hint_text().map(|text| text.to_string()),
     }
-    if app.current_file_is_binary() {
-        render_empty_state(frame, area, &app.theme, false, true);
-        return;
-    }
+}
 
-    // Clone markers to avoid borrow conflicts
+fn build_unified_render_model(
+    app: &mut App,
+    key: UnifiedRenderKey,
+    view_lines: &[ViewLine],
+    visible_height: usize,
+    visible_width: usize,
+    scroll_offset: usize,
+    blame_extra_rows: Option<&[usize]>,
+) -> UnifiedRenderModel {
     let primary_marker = app.primary_marker.clone();
     let extent_marker = app.extent_marker.clone();
-
-    if app.line_wrap {
-        app.handle_search_scroll_if_needed(visible_height);
-    } else {
-        app.ensure_active_visible_if_needed(visible_height);
-    }
-    let animation_frame = app.animation_frame();
-    let show_extent = app.stepping && !app.multi_diff.current_navigator().state().is_at_start();
-    app.multi_diff
-        .current_navigator()
-        .set_show_hunk_extent_while_stepping(show_extent);
-    let view_lines = app.current_view_with_frame(animation_frame);
-    let blame_extra_rows = if matches!(app.view_mode, crate::app::ViewMode::Blame) {
-        app.blame_extra_rows.clone()
-    } else {
-        None
-    };
-    let extra_total = blame_extra_rows
-        .as_ref()
-        .map(|rows| rows.iter().copied().sum::<usize>())
-        .unwrap_or(0);
-    if !app.line_wrap {
-        app.clamp_scroll(
-            view_lines.len().saturating_add(extra_total),
-            visible_height,
-            app.allow_overscroll(),
-        );
-    }
-    let debug_target = app.syntax_scope_target(&view_lines);
+    let debug_target = app.syntax_scope_target(view_lines);
     let mut bg_lines: Option<Vec<Line<'static>>> = if app.line_wrap && app.diff_bg {
         Some(Vec::new())
     } else {
         None
     };
 
-    // Split area into gutter (fixed) and content (scrollable)
-    let chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Length(GUTTER_WIDTH), Constraint::Min(0)])
-        .split(area);
+    let extra_total = blame_extra_rows
+        .as_ref()
+        .map(|rows| rows.iter().copied().sum::<usize>())
+        .unwrap_or(0);
 
-    let gutter_area = chunks[0];
-    let content_area = chunks[1];
-
-    // Build separate line number and content lines
     let mut gutter_lines: Vec<Line> = Vec::new();
     let mut content_lines: Vec<Line> = Vec::new();
     let mut max_line_width: usize = 0;
@@ -288,7 +347,8 @@ pub fn render_unified_pane(frame: &mut Frame, app: &mut App, area: Rect) {
     let mut display_len = if app.line_wrap {
         0
     } else {
-        view_lines.len().saturating_add(extra_total)
+        app.render_total_lines(view_lines.len())
+            .saturating_add(extra_total)
     };
     let mut primary_display_idx: Option<usize> = None;
     let mut active_display_idx: Option<usize> = None;
@@ -343,24 +403,28 @@ pub fn render_unified_pane(frame: &mut Frame, app: &mut App, area: Rect) {
         view_lines
             .iter()
             .position(|line| line.is_primary_active)
-            .map(|idx| {
-                idx >= app.scroll_offset && idx < app.scroll_offset.saturating_add(visible_height)
-            })
+            .map(|idx| idx >= scroll_offset && idx < scroll_offset.saturating_add(visible_height))
             .unwrap_or(false)
     };
     let (overflow_above, overflow_below) = if virtual_text.is_some() {
         if app.line_wrap {
             hunk_overflow_wrapped_unified(
-                &view_lines,
+                view_lines,
                 preview_hunk,
                 wrap_width,
-                app.scroll_offset,
+                scroll_offset,
                 visible_height,
             )
             .unwrap_or((false, false))
         } else {
-            app.hunk_hint_overflow(preview_hunk, visible_height)
-                .unwrap_or((false, false))
+            hunk_overflow_unified(
+                view_lines,
+                preview_hunk,
+                scroll_offset,
+                visible_height,
+                app.view_mode,
+            )
+            .unwrap_or((false, false))
         }
     } else {
         (false, false)
@@ -408,9 +472,7 @@ pub fn render_unified_pane(frame: &mut Frame, app: &mut App, area: Rect) {
     let mut prev_visible_hunk: Option<usize> = None;
     let mut virtual_inserted = false;
     for (idx, view_line) in view_lines.iter().enumerate() {
-        // When wrapping, we need all lines for proper wrap calculation
-        // When not wrapping, skip lines before scroll offset
-        if !app.line_wrap && idx < app.scroll_offset {
+        if !app.line_wrap && idx < scroll_offset {
             continue;
         }
         if !app.line_wrap && gutter_lines.len() >= visible_height {
@@ -478,7 +540,6 @@ pub fn render_unified_pane(frame: &mut Frame, app: &mut App, area: Rect) {
             format!("{:4}", line_num)
         };
 
-        // Line number color from theme - use gradient base for diff types
         let insert_base = color::gradient_color(&app.theme.insert, 0.5);
         let delete_base = color::gradient_color(&app.theme.delete, 0.5);
         let modify_base = color::gradient_color(&app.theme.modify, 0.5);
@@ -502,7 +563,6 @@ pub fn render_unified_pane(frame: &mut Frame, app: &mut App, area: Rect) {
             None
         };
 
-        // Sign column should fade with the line animation
         let (mut line_prefix, mut sign_style) = match view_line.kind {
             LineKind::Context => (" ", Style::default().fg(app.theme.diff_line_number)),
             LineKind::Inserted | LineKind::PendingInsert => {
@@ -563,7 +623,7 @@ pub fn render_unified_pane(frame: &mut Frame, app: &mut App, area: Rect) {
             sign_style = Style::default();
         }
 
-        // Gutter marker: primary marker for focus, extent marker for hunk nav, blank otherwise
+        let show_extent = super::show_extent_marker(app, view_line);
         let (active_marker, active_style) = if view_line.is_primary_active {
             (
                 primary_marker.as_str(),
@@ -571,7 +631,7 @@ pub fn render_unified_pane(frame: &mut Frame, app: &mut App, area: Rect) {
                     .fg(app.theme.primary)
                     .add_modifier(Modifier::BOLD),
             )
-        } else if view_line.show_hunk_extent {
+        } else if show_extent {
             (
                 extent_marker.as_str(),
                 super::extent_marker_style(
@@ -586,9 +646,8 @@ pub fn render_unified_pane(frame: &mut Frame, app: &mut App, area: Rect) {
             (" ", Style::default())
         };
 
-        // Build gutter line (fixed, no horizontal scroll)
         let mut gutter_spans = vec![
-            Span::styled(active_marker, active_style),
+            Span::styled(active_marker.to_string(), active_style),
             Span::styled(line_num_str, line_num_style),
             Span::styled(" ", Style::default()),
             Span::styled(line_prefix, sign_style),
@@ -609,7 +668,6 @@ pub fn render_unified_pane(frame: &mut Frame, app: &mut App, area: Rect) {
         }
         gutter_lines.push(Line::from(gutter_spans));
 
-        // Build content line (scrollable)
         let mut content_spans: Vec<Span<'static>> = Vec::new();
         let highlight_allowed =
             matches!(view_line.kind, LineKind::Modified | LineKind::PendingModify)
@@ -827,7 +885,6 @@ pub fn render_unified_pane(frame: &mut Frame, app: &mut App, area: Rect) {
                         _ => {}
                     }
                 }
-                // For deleted spans, don't strikethrough leading whitespace
                 if app.strikethrough_deletions
                     && matches!(
                         view_span.kind,
@@ -838,7 +895,6 @@ pub fn render_unified_pane(frame: &mut Frame, app: &mut App, area: Rect) {
                     let trimmed = text.trim_start();
                     let leading_ws_len = text.len() - trimmed.len();
                     if leading_ws_len > 0 && !trimmed.is_empty() {
-                        // Render leading whitespace without strikethrough
                         let ws_style = style.remove_modifier(Modifier::CROSSED_OUT);
                         content_spans
                             .push(Span::styled(text[..leading_ws_len].to_string(), ws_style));
@@ -943,7 +999,6 @@ pub fn render_unified_pane(frame: &mut Frame, app: &mut App, area: Rect) {
 
         content_spans = expand_tabs_in_spans(&content_spans, TAB_WIDTH);
 
-        // Track max line width for horizontal scroll clamping
         let line_width = spans_width(&content_spans);
         max_line_width = max_line_width.max(line_width);
 
@@ -971,7 +1026,7 @@ pub fn render_unified_pane(frame: &mut Frame, app: &mut App, area: Rect) {
         }
         content_lines.push(Line::from(display_spans));
         if app.line_wrap && wrap_count > 1 {
-            let (wrap_marker, wrap_style) = if view_line.show_hunk_extent {
+            let (wrap_marker, wrap_style) = if show_extent {
                 (
                     extent_marker.as_str(),
                     super::extent_marker_style(
@@ -989,11 +1044,11 @@ pub fn render_unified_pane(frame: &mut Frame, app: &mut App, area: Rect) {
                 if let Some(bg) = line_bg_gutter {
                     let pad = " ".repeat(GUTTER_WIDTH as usize - 1);
                     gutter_lines.push(Line::from(vec![
-                        Span::styled(wrap_marker, wrap_style),
+                    Span::styled(wrap_marker.to_string(), wrap_style),
                         Span::styled(pad, Style::default().bg(bg)),
                     ]));
                 } else {
-                    gutter_lines.push(Line::from(Span::styled(wrap_marker, wrap_style)));
+                gutter_lines.push(Line::from(Span::styled(wrap_marker.to_string(), wrap_style)));
                 }
             }
         }
@@ -1222,6 +1277,68 @@ pub fn render_unified_pane(frame: &mut Frame, app: &mut App, area: Rect) {
         }
     }
 
+    UnifiedRenderModel {
+        key,
+        gutter_lines,
+        content_lines,
+        bg_lines,
+        display_len,
+        max_line_width,
+        primary_display_idx,
+        active_display_idx,
+    }
+}
+
+fn render_unified_pane_cached(frame: &mut Frame, app: &mut App, area: Rect) {
+    let visible_height = area.height as usize;
+    let visible_width = area.width.saturating_sub(GUTTER_WIDTH) as usize;
+    if !app.line_wrap {
+        app.clamp_horizontal_scroll_cached(visible_width);
+    }
+    if app.current_file_is_binary() {
+        render_empty_state(frame, area, &app.theme, false, true);
+        return;
+    }
+    if app.line_wrap {
+        app.handle_search_scroll_if_needed(visible_height);
+    } else {
+        app.ensure_active_visible_if_needed(visible_height);
+    }
+    let animation_frame = app.animation_frame();
+    let show_extent = app.stepping && !app.multi_diff.current_navigator().state().is_at_start();
+    app.multi_diff
+        .current_navigator()
+        .set_show_hunk_extent_while_stepping(show_extent);
+    let view_lines = app.current_view_with_frame(animation_frame);
+    let scroll_offset = app.render_scroll_offset();
+
+    let key = unified_render_key(app, animation_frame, visible_height, visible_width, scroll_offset);
+    let rebuild = app
+        .unified_render_cache
+        .as_ref()
+        .map(|cache| cache.key != key)
+        .unwrap_or(true);
+    if rebuild {
+        let model = build_unified_render_model(
+            app,
+            key,
+            &view_lines,
+            visible_height,
+            visible_width,
+            scroll_offset,
+            None,
+        );
+        app.unified_render_cache = Some(model);
+    }
+
+    let model = match app.unified_render_cache.take() {
+        Some(model) => model,
+        None => return,
+    };
+    let display_len = model.display_len;
+    let primary_display_idx = model.primary_display_idx;
+    let active_display_idx = model.active_display_idx;
+    let max_line_width = model.max_line_width;
     if app.line_wrap {
         app.ensure_active_visible_if_needed_wrapped(
             visible_height,
@@ -1230,26 +1347,39 @@ pub fn render_unified_pane(frame: &mut Frame, app: &mut App, area: Rect) {
         );
         app.clamp_scroll(display_len, visible_height, app.allow_overscroll());
     }
-    // Clamp horizontal scroll
+
     app.clamp_horizontal_scroll(max_line_width, visible_width);
     app.set_current_max_line_width(max_line_width);
 
-    // Background style (if set)
-    let bg_style = app.theme.background.map(|bg| Style::default().bg(bg));
+    render_unified_model(frame, app, area, &model, scroll_offset);
+    app.unified_render_cache = Some(model);
+}
 
-    // Render gutter (no horizontal scroll)
+fn render_unified_model(
+    frame: &mut Frame,
+    app: &mut App,
+    area: Rect,
+    model: &UnifiedRenderModel,
+    scroll_offset: usize,
+) {
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(GUTTER_WIDTH), Constraint::Min(0)])
+        .split(area);
+    let gutter_area = chunks[0];
+    let content_area = chunks[1];
+    let bg_style = app.theme.background.map(|bg| Style::default().bg(bg));
     let mut gutter_paragraph = if app.line_wrap {
-        Paragraph::new(gutter_lines).scroll((app.scroll_offset as u16, 0))
+        Paragraph::new(model.gutter_lines.clone()).scroll((scroll_offset as u16, 0))
     } else {
-        Paragraph::new(gutter_lines)
+        Paragraph::new(model.gutter_lines.clone())
     };
     if let Some(style) = bg_style {
         gutter_paragraph = gutter_paragraph.style(style);
     }
     frame.render_widget(gutter_paragraph, gutter_area);
 
-    // Render content with horizontal scroll (or empty state)
-    if content_lines.is_empty() {
+    if model.content_lines.is_empty() {
         let has_changes = !app
             .multi_diff
             .current_navigator()
@@ -1265,15 +1395,15 @@ pub fn render_unified_pane(frame: &mut Frame, app: &mut App, area: Rect) {
         );
     } else {
         let mut content_paragraph = if app.line_wrap {
-            Paragraph::new(content_lines)
+            Paragraph::new(model.content_lines.clone())
                 .wrap(Wrap { trim: false })
-                .scroll((app.scroll_offset as u16, 0))
+                .scroll((scroll_offset as u16, 0))
         } else {
-            Paragraph::new(content_lines)
+            Paragraph::new(model.content_lines.clone())
         };
-        let has_bg_overlay = bg_lines.is_some();
-        if let Some(bg_lines) = bg_lines {
-            let mut bg_paragraph = Paragraph::new(bg_lines).scroll((app.scroll_offset as u16, 0));
+        let has_bg_overlay = model.bg_lines.is_some();
+        if let Some(bg_lines) = model.bg_lines.clone() {
+            let mut bg_paragraph = Paragraph::new(bg_lines).scroll((scroll_offset as u16, 0));
             if let Some(style) = bg_style {
                 bg_paragraph = bg_paragraph.style(style);
             }
@@ -1286,22 +1416,15 @@ pub fn render_unified_pane(frame: &mut Frame, app: &mut App, area: Rect) {
         }
         frame.render_widget(content_paragraph, content_area);
 
-        // Render scrollbar (if enabled)
         if app.scrollbar_visible {
             let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
                 .begin_symbol(Some("↑"))
                 .end_symbol(Some("↓"));
-
-            let total_lines = if app.line_wrap {
-                display_len
-            } else {
-                view_lines.len()
-            };
+            let total_lines = model.display_len;
             let visible_lines = content_area.height as usize;
             if total_lines > visible_lines {
                 let mut scrollbar_state =
-                    ScrollbarState::new(total_lines).position(app.scroll_offset);
-
+                    ScrollbarState::new(total_lines).position(scroll_offset);
                 frame.render_stateful_widget(
                     scrollbar,
                     area.inner(ratatui::layout::Margin {
@@ -1313,6 +1436,74 @@ pub fn render_unified_pane(frame: &mut Frame, app: &mut App, area: Rect) {
             }
         }
     }
+}
+
+/// Render the unified pane morphing view
+pub fn render_unified_pane(frame: &mut Frame, app: &mut App, area: Rect) {
+    if matches!(app.view_mode, crate::app::ViewMode::UnifiedPane) {
+        render_unified_pane_cached(frame, app, area);
+        return;
+    }
+    render_unified_pane_uncached(frame, app, area);
+}
+
+fn render_unified_pane_uncached(frame: &mut Frame, app: &mut App, area: Rect) {
+    let visible_height = area.height as usize;
+    let visible_width = area.width.saturating_sub(GUTTER_WIDTH) as usize;
+    if !app.line_wrap {
+        app.clamp_horizontal_scroll_cached(visible_width);
+    }
+    if app.current_file_is_binary() {
+        render_empty_state(frame, area, &app.theme, false, true);
+        return;
+    }
+    if app.line_wrap {
+        app.handle_search_scroll_if_needed(visible_height);
+    } else {
+        app.ensure_active_visible_if_needed(visible_height);
+    }
+    let animation_frame = app.animation_frame();
+    let show_extent = app.stepping && !app.multi_diff.current_navigator().state().is_at_start();
+    app.multi_diff
+        .current_navigator()
+        .set_show_hunk_extent_while_stepping(show_extent);
+    let view_lines = app.current_view_with_frame(animation_frame);
+    let scroll_offset = app.render_scroll_offset();
+    if !app.line_wrap {
+        let extra_total = app
+            .blame_extra_rows
+            .as_ref()
+            .map(|rows| rows.iter().copied().sum::<usize>())
+            .unwrap_or(0);
+        let total_lines = app.render_total_lines(view_lines.len()).saturating_add(extra_total);
+        app.clamp_scroll(total_lines, visible_height, app.allow_overscroll());
+    }
+    let blame_extra_rows = if matches!(app.view_mode, crate::app::ViewMode::Blame) {
+        app.blame_extra_rows.clone()
+    } else {
+        None
+    };
+    let key = unified_render_key(app, animation_frame, visible_height, visible_width, scroll_offset);
+    let model = build_unified_render_model(
+        app,
+        key,
+        &view_lines,
+        visible_height,
+        visible_width,
+        scroll_offset,
+        blame_extra_rows.as_deref(),
+    );
+    if app.line_wrap {
+        app.ensure_active_visible_if_needed_wrapped(
+            visible_height,
+            model.display_len,
+            model.primary_display_idx.or(model.active_display_idx),
+        );
+        app.clamp_scroll(model.display_len, visible_height, app.allow_overscroll());
+    }
+    app.clamp_horizontal_scroll(model.max_line_width, visible_width);
+    app.set_current_max_line_width(model.max_line_width);
+    render_unified_model(frame, app, area, &model, scroll_offset);
 }
 
 fn get_span_style(

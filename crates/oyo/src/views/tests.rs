@@ -1,9 +1,11 @@
 use std::path::PathBuf;
 
 use crate::app::{AnimationPhase, App, ViewMode};
-use crate::config::{DiffForegroundMode, DiffHighlightMode, EvoSyntaxMode, SyntaxMode};
+use crate::config::{
+    DiffForegroundMode, DiffHighlightMode, EvoSyntaxMode, ModifiedStepMode, SyntaxMode,
+};
 use crate::views::{render_blame, render_evolution, render_split, render_unified_pane};
-use oyo_core::MultiFileDiff;
+use oyo_core::{AnimationFrame, MultiFileDiff};
 use ratatui::{backend::TestBackend, buffer::Buffer, Terminal};
 
 fn make_app(old: &str, new: &str, view_mode: ViewMode) -> App {
@@ -92,6 +94,24 @@ fn test_unified_modified_lifecycle_render() {
 }
 
 #[test]
+fn test_unified_peek_change_updates_render() {
+    let old = "line1\nOLDTOKEN\nline3\n";
+    let new = "line1\nNEWTOKEN\nline3\n";
+    let mut app = make_app(old, new, ViewMode::UnifiedPane);
+    app.unified_modified_step_mode = ModifiedStepMode::Mixed;
+
+    app.next_step();
+    let before = buffer_text(&render_buffer(&mut app, 80, 20)).join("\n");
+    assert!(before.contains("OLDTOKEN"));
+    assert!(before.contains("NEWTOKEN"));
+
+    app.toggle_peek_old_change();
+    let after = buffer_text(&render_buffer(&mut app, 80, 20)).join("\n");
+    assert!(!after.contains("OLDTOKEN"));
+    assert!(after.contains("NEWTOKEN"));
+}
+
+#[test]
 fn test_split_modified_lifecycle_render() {
     let old = "line1\nOLDSPLIT\nline3\n";
     let new = "line1\nNEWSPLIT\nline3\n";
@@ -135,6 +155,63 @@ fn test_evolution_deleted_active_fallback_marker() {
     assert!(
         rendered.contains("▶"),
         "cursor marker should remain visible when deleted line is hidden"
+    );
+}
+
+#[test]
+fn test_evolution_window_cache_scroll_offset() {
+    let old = (0..600)
+        .map(|i| format!("line {i}\n"))
+        .collect::<String>();
+    let new = (0..600)
+        .filter(|i| *i >= 50)
+        .map(|i| format!("line {i} new\n"))
+        .collect::<String>();
+    let mut app = make_app(&old, &new, ViewMode::Evolution);
+    app.last_viewport_height = 10;
+    app.auto_center = false;
+    app.needs_scroll_to_active = false;
+    app.stepping = false;
+    app.scroll_offset = 400;
+    let (_window_start, display_start) = {
+        let nav = app.multi_diff.current_navigator();
+        let span = app.last_viewport_height.max(20).saturating_mul(4).max(200);
+        let window_start = app.scroll_offset.min(
+            nav.diff()
+                .changes
+                .len()
+                .saturating_sub(1)
+                .max(span),
+        );
+        let display_start = nav
+            .evolution_display_index_for_change_index(window_start)
+            .unwrap_or(0);
+        assert!(
+            display_start < window_start,
+            "expected evolution display start to differ from raw change index"
+        );
+        (window_start, display_start)
+    };
+
+    let _ = app.current_view_with_frame(AnimationFrame::Idle);
+    let start_first = app.view_window_start();
+    assert_eq!(
+        start_first, display_start,
+        "window start should use evolution display index"
+    );
+
+    app.scroll_offset = start_first + 5;
+    let view = app.current_view_with_frame(AnimationFrame::Idle);
+    let start_second = app.view_window_start();
+    let render_scroll = app.render_scroll_offset();
+
+    assert_eq!(
+        start_first, start_second,
+        "cached view should preserve window start"
+    );
+    assert!(
+        render_scroll < view.len(),
+        "render scroll should stay inside windowed view"
     );
 }
 
@@ -235,5 +312,31 @@ fn test_extent_markers_clear_at_start() {
     assert!(
         !column_contains(&after_buf, 0, "E"),
         "extent markers should clear after hunk-out"
+    );
+}
+
+#[test]
+fn test_extent_markers_skip_context_by_default() {
+    let old = "CTX\nOLD1\nOLD2\n";
+    let new = "CTX\nNEW1\nNEW2\n";
+    let mut app = make_app(old, new, ViewMode::UnifiedPane);
+    app.extent_marker = "E".to_string();
+
+    app.next_hunk();
+    let buf = render_buffer(&mut app, 40, 8);
+    assert!(
+        column_contains(&buf, 0, "E"),
+        "extent markers should show for changed lines"
+    );
+
+    let lines = buffer_text(&buf);
+    let ctx_row = lines
+        .iter()
+        .position(|line| line.contains("CTX"))
+        .expect("context line should render");
+    assert_ne!(
+        buf[(0, ctx_row as u16)].symbol(),
+        "E",
+        "context lines should not show extent markers by default"
     );
 }

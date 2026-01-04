@@ -117,12 +117,24 @@ Applies to unified/split only (ignored in evolution):
 - `word`: like `text`, but leading whitespace is not highlighted.
 - `none`: disable inline highlights.
 
+### Diff size limit (diff.max_bytes)
+
+- Files larger than `ui.diff.max_bytes` are deferred and diffed in the background.
+- While deferred, the file renders immediately (scroll-only) and upgrades to a
+  full diff once computation completes.
+
+### Deferred diffing
+
+- `ui.diff.defer = true`: enable deferred diff computation for large files.
+- `ui.diff.idle_ms`: delay before background diffing starts after the last input.
+
 ### Extent markers
 
 - `ui.diff.extent_marker = "neutral"`: hunk extent markers use the neutral marker color.
 - `ui.diff.extent_marker = "diff"`: hunk extent markers take the line’s diff color.
 - `ui.diff.extent_marker_scope = "progress"`: only already-applied change lines use diff colors.
 - `ui.diff.extent_marker_scope = "hunk"`: all lines in the current hunk use diff colors.
+- `ui.diff.extent_marker_context = true`: show extent markers on unchanged context lines.
 
 ## Line Wrap
 
@@ -137,8 +149,12 @@ Applies to unified/split only (ignored in evolution):
 bg = false            # true | false
 fg = "theme"          # theme | syntax
 highlight = "text"    # text | word | none
+max_bytes = 16777216  # defer diffing above this size (bytes)
+defer = true          # enable deferred diffing for large files
+idle_ms = 250         # idle time before background diffing starts
 extent_marker = "neutral" # neutral | diff
 extent_marker_scope = "progress" # progress | hunk
+extent_marker_context = false # show markers on unchanged lines
 
 [ui.evo]
 syntax = "context"    # context | full
