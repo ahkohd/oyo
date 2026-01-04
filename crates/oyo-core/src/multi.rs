@@ -1,6 +1,6 @@
 //! Multi-file diff support
 
-use crate::diff::{DiffEngine, DiffResult};
+use crate::diff::DiffEngine;
 use crate::git::{ChangedFile, FileStatus};
 use crate::step::{DiffNavigator, StepDirection};
 use std::path::{Path, PathBuf};
@@ -62,6 +62,8 @@ pub enum BlameSource {
 }
 
 impl MultiFileDiff {
+    const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
+
     fn decode_bytes(bytes: Vec<u8>) -> (String, bool) {
         if bytes.is_empty() {
             return (String::new(), false);
@@ -72,30 +74,39 @@ impl MultiFileDiff {
         (String::from_utf8_lossy(&bytes).to_string(), false)
     }
 
+    fn file_too_large(size: u64) -> bool {
+        size > Self::MAX_FILE_BYTES
+    }
+
     fn read_text_or_binary(path: &Path) -> (String, bool) {
+        if let Ok(metadata) = path.metadata() {
+            if Self::file_too_large(metadata.len()) {
+                return (String::new(), true);
+            }
+        }
         let bytes = std::fs::read(path).unwrap_or_default();
         Self::decode_bytes(bytes)
     }
 
-    fn diff_from_bytes(
-        engine: &DiffEngine,
-        old_bytes: Vec<u8>,
-        new_bytes: Vec<u8>,
-    ) -> (String, String, bool, DiffResult) {
-        let (old_content, old_binary) = Self::decode_bytes(old_bytes);
-        let (new_content, new_binary) = Self::decode_bytes(new_bytes);
-        let binary = old_binary || new_binary;
-        if binary {
-            (
-                String::new(),
-                String::new(),
-                true,
-                engine.diff_strings("", ""),
-            )
-        } else {
-            let diff = engine.diff_strings(&old_content, &new_content);
-            (old_content, new_content, false, diff)
+    fn read_git_commit_or_binary(repo_root: &Path, commit: &str, path: &Path) -> (String, bool) {
+        if let Some(size) = crate::git::get_file_at_commit_size(repo_root, commit, path) {
+            if Self::file_too_large(size) {
+                return (String::new(), true);
+            }
         }
+        let bytes =
+            crate::git::get_file_at_commit_bytes(repo_root, commit, path).unwrap_or_default();
+        Self::decode_bytes(bytes)
+    }
+
+    fn read_git_index_or_binary(repo_root: &Path, path: &Path) -> (String, bool) {
+        if let Some(size) = crate::git::get_staged_content_size(repo_root, path) {
+            if Self::file_too_large(size) {
+                return (String::new(), true);
+            }
+        }
+        let bytes = crate::git::get_staged_content_bytes(repo_root, path).unwrap_or_default();
+        Self::decode_bytes(bytes)
     }
 
     /// Create from a list of changed files (git mode)
@@ -112,11 +123,7 @@ impl MultiFileDiff {
             // Get old and new content
             let (old_content, old_binary) = match change.status {
                 FileStatus::Added | FileStatus::Untracked => (String::new(), false),
-                _ => {
-                    let bytes = crate::git::get_head_content_bytes(&repo_root, &change.path)
-                        .unwrap_or_default();
-                    Self::decode_bytes(bytes)
-                }
+                _ => Self::read_git_commit_or_binary(&repo_root, "HEAD", &change.path),
             };
 
             let (new_content, new_binary) = match change.status {
@@ -179,20 +186,12 @@ impl MultiFileDiff {
                 .unwrap_or_else(|| change.path.clone());
             let (old_content, old_binary) = match change.status {
                 FileStatus::Added | FileStatus::Untracked => (String::new(), false),
-                _ => {
-                    let bytes = crate::git::get_head_content_bytes(&repo_root, &old_path)
-                        .unwrap_or_default();
-                    Self::decode_bytes(bytes)
-                }
+                _ => Self::read_git_commit_or_binary(&repo_root, "HEAD", &old_path),
             };
 
             let (new_content, new_binary) = match change.status {
                 FileStatus::Deleted => (String::new(), false),
-                _ => {
-                    let bytes = crate::git::get_staged_content_bytes(&repo_root, &change.path)
-                        .unwrap_or_default();
-                    Self::decode_bytes(bytes)
-                }
+                _ => Self::read_git_index_or_binary(&repo_root, &change.path),
             };
 
             let binary = old_binary || new_binary;
@@ -250,39 +249,21 @@ impl MultiFileDiff {
             let (old_content, old_binary, new_content, new_binary) = if to_index {
                 let (old_content, old_binary) = match change.status {
                     FileStatus::Added | FileStatus::Untracked => (String::new(), false),
-                    _ => {
-                        let bytes =
-                            crate::git::get_file_at_commit_bytes(&repo_root, &from, &old_path)
-                                .unwrap_or_default();
-                        Self::decode_bytes(bytes)
-                    }
+                    _ => Self::read_git_commit_or_binary(&repo_root, &from, &old_path),
                 };
                 let (new_content, new_binary) = match change.status {
                     FileStatus::Deleted => (String::new(), false),
-                    _ => {
-                        let bytes = crate::git::get_staged_content_bytes(&repo_root, &change.path)
-                            .unwrap_or_default();
-                        Self::decode_bytes(bytes)
-                    }
+                    _ => Self::read_git_index_or_binary(&repo_root, &change.path),
                 };
                 (old_content, old_binary, new_content, new_binary)
             } else {
                 let (old_content, old_binary) = match change.status {
                     FileStatus::Added | FileStatus::Untracked => (String::new(), false),
-                    _ => {
-                        let bytes = crate::git::get_staged_content_bytes(&repo_root, &old_path)
-                            .unwrap_or_default();
-                        Self::decode_bytes(bytes)
-                    }
+                    _ => Self::read_git_index_or_binary(&repo_root, &old_path),
                 };
                 let (new_content, new_binary) = match change.status {
                     FileStatus::Deleted => (String::new(), false),
-                    _ => {
-                        let bytes =
-                            crate::git::get_file_at_commit_bytes(&repo_root, &from, &change.path)
-                                .unwrap_or_default();
-                        Self::decode_bytes(bytes)
-                    }
+                    _ => Self::read_git_commit_or_binary(&repo_root, &from, &change.path),
                 };
                 (old_content, old_binary, new_content, new_binary)
             };
@@ -341,20 +322,12 @@ impl MultiFileDiff {
                 .unwrap_or_else(|| change.path.clone());
             let (old_content, old_binary) = match change.status {
                 FileStatus::Added | FileStatus::Untracked => (String::new(), false),
-                _ => {
-                    let bytes = crate::git::get_file_at_commit_bytes(&repo_root, &from, &old_path)
-                        .unwrap_or_default();
-                    Self::decode_bytes(bytes)
-                }
+                _ => Self::read_git_commit_or_binary(&repo_root, &from, &old_path),
             };
 
             let (new_content, new_binary) = match change.status {
                 FileStatus::Deleted => (String::new(), false),
-                _ => {
-                    let bytes = crate::git::get_file_at_commit_bytes(&repo_root, &to, &change.path)
-                        .unwrap_or_default();
-                    Self::decode_bytes(bytes)
-                }
+                _ => Self::read_git_commit_or_binary(&repo_root, &to, &change.path),
             };
 
             let binary = old_binary || new_binary;
@@ -427,23 +400,40 @@ impl MultiFileDiff {
                 FileStatus::Modified
             };
 
-            let old_bytes = if old_exists {
-                std::fs::read(&old_path).unwrap_or_default()
+            let (old_content, old_binary, old_bytes) = if old_exists {
+                if let Ok(metadata) = old_path.metadata() {
+                    if Self::file_too_large(metadata.len()) {
+                        (String::new(), true, Vec::new())
+                    } else {
+                        let bytes = std::fs::read(&old_path).unwrap_or_default();
+                        let (content, binary) = Self::decode_bytes(bytes.clone());
+                        (content, binary, bytes)
+                    }
+                } else {
+                    (String::new(), false, Vec::new())
+                }
             } else {
-                Vec::new()
+                (String::new(), false, Vec::new())
             };
-            let new_bytes = if new_exists {
-                std::fs::read(&new_path).unwrap_or_default()
+            let (new_content, new_binary, new_bytes) = if new_exists {
+                if let Ok(metadata) = new_path.metadata() {
+                    if Self::file_too_large(metadata.len()) {
+                        (String::new(), true, Vec::new())
+                    } else {
+                        let bytes = std::fs::read(&new_path).unwrap_or_default();
+                        let (content, binary) = Self::decode_bytes(bytes.clone());
+                        (content, binary, bytes)
+                    }
+                } else {
+                    (String::new(), false, Vec::new())
+                }
             } else {
-                Vec::new()
+                (String::new(), false, Vec::new())
             };
-
-            let (old_content, old_binary) = Self::decode_bytes(old_bytes.clone());
-            let (new_content, new_binary) = Self::decode_bytes(new_bytes.clone());
             let binary = old_binary || new_binary;
 
             // Skip if no changes
-            if old_bytes == new_bytes {
+            if !binary && old_bytes == new_bytes {
                 continue;
             }
 
@@ -756,81 +746,75 @@ impl MultiFileDiff {
                 .old_path
                 .clone()
                 .unwrap_or_else(|| change.path.clone());
-            let (old_bytes, new_bytes) = match mode {
+            let (old_content, old_binary, new_content, new_binary) = match mode {
                 GitDiffMode::Uncommitted => {
-                    let old_bytes = match change.status {
-                        FileStatus::Added | FileStatus::Untracked => Vec::new(),
-                        _ => crate::git::get_head_content_bytes(&repo_root, &old_path)
-                            .unwrap_or_default(),
+                    let (old_content, old_binary) = match change.status {
+                        FileStatus::Added | FileStatus::Untracked => (String::new(), false),
+                        _ => Self::read_git_commit_or_binary(&repo_root, "HEAD", &old_path),
                     };
-                    let new_bytes = match change.status {
-                        FileStatus::Deleted => Vec::new(),
+                    let (new_content, new_binary) = match change.status {
+                        FileStatus::Deleted => (String::new(), false),
                         _ => {
                             let full_path = repo_root.join(&change.path);
-                            std::fs::read(&full_path).unwrap_or_default()
+                            Self::read_text_or_binary(&full_path)
                         }
                     };
-                    (old_bytes, new_bytes)
+                    (old_content, old_binary, new_content, new_binary)
                 }
                 GitDiffMode::Staged => {
-                    let old_bytes = match change.status {
-                        FileStatus::Added | FileStatus::Untracked => Vec::new(),
-                        _ => crate::git::get_head_content_bytes(&repo_root, &old_path)
-                            .unwrap_or_default(),
+                    let (old_content, old_binary) = match change.status {
+                        FileStatus::Added | FileStatus::Untracked => (String::new(), false),
+                        _ => Self::read_git_commit_or_binary(&repo_root, "HEAD", &old_path),
                     };
-                    let new_bytes = match change.status {
-                        FileStatus::Deleted => Vec::new(),
-                        _ => crate::git::get_staged_content_bytes(&repo_root, &change.path)
-                            .unwrap_or_default(),
+                    let (new_content, new_binary) = match change.status {
+                        FileStatus::Deleted => (String::new(), false),
+                        _ => Self::read_git_index_or_binary(&repo_root, &change.path),
                     };
-                    (old_bytes, new_bytes)
+                    (old_content, old_binary, new_content, new_binary)
                 }
                 GitDiffMode::Range { ref from, ref to } => {
-                    let old_bytes = match change.status {
-                        FileStatus::Added | FileStatus::Untracked => Vec::new(),
-                        _ => crate::git::get_file_at_commit_bytes(&repo_root, from, &old_path)
-                            .unwrap_or_default(),
+                    let (old_content, old_binary) = match change.status {
+                        FileStatus::Added | FileStatus::Untracked => (String::new(), false),
+                        _ => Self::read_git_commit_or_binary(&repo_root, from, &old_path),
                     };
-                    let new_bytes = match change.status {
-                        FileStatus::Deleted => Vec::new(),
-                        _ => crate::git::get_file_at_commit_bytes(&repo_root, to, &change.path)
-                            .unwrap_or_default(),
+                    let (new_content, new_binary) = match change.status {
+                        FileStatus::Deleted => (String::new(), false),
+                        _ => Self::read_git_commit_or_binary(&repo_root, to, &change.path),
                     };
-                    (old_bytes, new_bytes)
+                    (old_content, old_binary, new_content, new_binary)
                 }
                 GitDiffMode::IndexRange { ref from, to_index } => {
                     if to_index {
-                        let old_bytes = match change.status {
-                            FileStatus::Added | FileStatus::Untracked => Vec::new(),
-                            _ => crate::git::get_file_at_commit_bytes(&repo_root, from, &old_path)
-                                .unwrap_or_default(),
+                        let (old_content, old_binary) = match change.status {
+                            FileStatus::Added | FileStatus::Untracked => (String::new(), false),
+                            _ => Self::read_git_commit_or_binary(&repo_root, from, &old_path),
                         };
-                        let new_bytes = match change.status {
-                            FileStatus::Deleted => Vec::new(),
-                            _ => crate::git::get_staged_content_bytes(&repo_root, &change.path)
-                                .unwrap_or_default(),
+                        let (new_content, new_binary) = match change.status {
+                            FileStatus::Deleted => (String::new(), false),
+                            _ => Self::read_git_index_or_binary(&repo_root, &change.path),
                         };
-                        (old_bytes, new_bytes)
+                        (old_content, old_binary, new_content, new_binary)
                     } else {
-                        let old_bytes = match change.status {
-                            FileStatus::Added | FileStatus::Untracked => Vec::new(),
-                            _ => crate::git::get_staged_content_bytes(&repo_root, &old_path)
-                                .unwrap_or_default(),
+                        let (old_content, old_binary) = match change.status {
+                            FileStatus::Added | FileStatus::Untracked => (String::new(), false),
+                            _ => Self::read_git_index_or_binary(&repo_root, &old_path),
                         };
-                        let new_bytes = match change.status {
-                            FileStatus::Deleted => Vec::new(),
-                            _ => {
-                                crate::git::get_file_at_commit_bytes(&repo_root, from, &change.path)
-                                    .unwrap_or_default()
-                            }
+                        let (new_content, new_binary) = match change.status {
+                            FileStatus::Deleted => (String::new(), false),
+                            _ => Self::read_git_commit_or_binary(&repo_root, from, &change.path),
                         };
-                        (old_bytes, new_bytes)
+                        (old_content, old_binary, new_content, new_binary)
                     }
                 }
             };
 
-            let (old_content, new_content, binary, diff) =
-                Self::diff_from_bytes(&engine, old_bytes, new_bytes);
+            let binary = old_binary || new_binary;
+            let (old_content, new_content, diff) = if binary {
+                (String::new(), String::new(), engine.diff_strings("", ""))
+            } else {
+                let diff = engine.diff_strings(&old_content, &new_content);
+                (old_content, new_content, diff)
+            };
 
             files.push(FileEntry {
                 display_name: change.path.display().to_string(),
@@ -868,85 +852,86 @@ impl MultiFileDiff {
         let old_path = file.old_path.clone().unwrap_or_else(|| file.path.clone());
 
         // Get fresh content based on mode
-        let (old_bytes, new_bytes) =
+        let (old_content, old_binary, new_content, new_binary) =
             match (&self.repo_root, &self.git_mode) {
                 (Some(repo_root), Some(GitDiffMode::Uncommitted)) => {
-                    let old_bytes = match file.status {
-                        FileStatus::Added | FileStatus::Untracked => Vec::new(),
-                        _ => crate::git::get_head_content_bytes(repo_root, &old_path)
-                            .unwrap_or_default(),
+                    let (old_content, old_binary) = match file.status {
+                        FileStatus::Added | FileStatus::Untracked => (String::new(), false),
+                        _ => Self::read_git_commit_or_binary(repo_root, "HEAD", &old_path),
                     };
-                    let new_bytes = match file.status {
-                        FileStatus::Deleted => Vec::new(),
+                    let (new_content, new_binary) = match file.status {
+                        FileStatus::Deleted => (String::new(), false),
                         _ => {
                             let full_path = repo_root.join(&file.path);
-                            std::fs::read(&full_path).unwrap_or_default()
+                            Self::read_text_or_binary(&full_path)
                         }
                     };
-                    (old_bytes, new_bytes)
+                    (old_content, old_binary, new_content, new_binary)
                 }
                 (Some(repo_root), Some(GitDiffMode::Staged)) => {
-                    let old_bytes = match file.status {
-                        FileStatus::Added | FileStatus::Untracked => Vec::new(),
-                        _ => crate::git::get_head_content_bytes(repo_root, &old_path)
-                            .unwrap_or_default(),
+                    let (old_content, old_binary) = match file.status {
+                        FileStatus::Added | FileStatus::Untracked => (String::new(), false),
+                        _ => Self::read_git_commit_or_binary(repo_root, "HEAD", &old_path),
                     };
-                    let new_bytes = match file.status {
-                        FileStatus::Deleted => Vec::new(),
-                        _ => crate::git::get_staged_content_bytes(repo_root, &file.path)
-                            .unwrap_or_default(),
+                    let (new_content, new_binary) = match file.status {
+                        FileStatus::Deleted => (String::new(), false),
+                        _ => Self::read_git_index_or_binary(repo_root, &file.path),
                     };
-                    (old_bytes, new_bytes)
+                    (old_content, old_binary, new_content, new_binary)
                 }
                 (Some(repo_root), Some(GitDiffMode::Range { from, to })) => {
-                    let old_bytes = match file.status {
-                        FileStatus::Added | FileStatus::Untracked => Vec::new(),
-                        _ => crate::git::get_file_at_commit_bytes(repo_root, from, &old_path)
-                            .unwrap_or_default(),
+                    let (old_content, old_binary) = match file.status {
+                        FileStatus::Added | FileStatus::Untracked => (String::new(), false),
+                        _ => Self::read_git_commit_or_binary(repo_root, from, &old_path),
                     };
-                    let new_bytes = match file.status {
-                        FileStatus::Deleted => Vec::new(),
-                        _ => crate::git::get_file_at_commit_bytes(repo_root, to, &file.path)
-                            .unwrap_or_default(),
+                    let (new_content, new_binary) = match file.status {
+                        FileStatus::Deleted => (String::new(), false),
+                        _ => Self::read_git_commit_or_binary(repo_root, to, &file.path),
                     };
-                    (old_bytes, new_bytes)
+                    (old_content, old_binary, new_content, new_binary)
                 }
                 (Some(repo_root), Some(GitDiffMode::IndexRange { from, to_index })) => {
                     if *to_index {
-                        let old_bytes = match file.status {
-                            FileStatus::Added | FileStatus::Untracked => Vec::new(),
-                            _ => crate::git::get_file_at_commit_bytes(repo_root, from, &old_path)
-                                .unwrap_or_default(),
+                        let (old_content, old_binary) = match file.status {
+                            FileStatus::Added | FileStatus::Untracked => (String::new(), false),
+                            _ => Self::read_git_commit_or_binary(repo_root, from, &old_path),
                         };
-                        let new_bytes = match file.status {
-                            FileStatus::Deleted => Vec::new(),
-                            _ => crate::git::get_staged_content_bytes(repo_root, &file.path)
-                                .unwrap_or_default(),
+                        let (new_content, new_binary) = match file.status {
+                            FileStatus::Deleted => (String::new(), false),
+                            _ => Self::read_git_index_or_binary(repo_root, &file.path),
                         };
-                        (old_bytes, new_bytes)
+                        (old_content, old_binary, new_content, new_binary)
                     } else {
-                        let old_bytes = match file.status {
-                            FileStatus::Added | FileStatus::Untracked => Vec::new(),
-                            _ => crate::git::get_staged_content_bytes(repo_root, &old_path)
-                                .unwrap_or_default(),
+                        let (old_content, old_binary) = match file.status {
+                            FileStatus::Added | FileStatus::Untracked => (String::new(), false),
+                            _ => Self::read_git_index_or_binary(repo_root, &old_path),
                         };
-                        let new_bytes = match file.status {
-                            FileStatus::Deleted => Vec::new(),
-                            _ => crate::git::get_file_at_commit_bytes(repo_root, from, &file.path)
-                                .unwrap_or_default(),
+                        let (new_content, new_binary) = match file.status {
+                            FileStatus::Deleted => (String::new(), false),
+                            _ => Self::read_git_commit_or_binary(repo_root, from, &file.path),
                         };
-                        (old_bytes, new_bytes)
+                        (old_content, old_binary, new_content, new_binary)
                     }
                 }
                 _ => {
-                    let new_bytes = std::fs::read(&file.path).unwrap_or_default();
-                    (self.old_contents[idx].clone().into_bytes(), new_bytes)
+                    let (new_content, new_binary) = Self::read_text_or_binary(&file.path);
+                    (
+                        self.old_contents[idx].clone(),
+                        false,
+                        new_content,
+                        new_binary,
+                    )
                 }
             };
 
         let engine = DiffEngine::new().with_word_level(true);
-        let (old_content, new_content, binary, diff) =
-            Self::diff_from_bytes(&engine, old_bytes, new_bytes);
+        let binary = old_binary || new_binary;
+        let (old_content, new_content, diff) = if binary {
+            (String::new(), String::new(), engine.diff_strings("", ""))
+        } else {
+            let diff = engine.diff_strings(&old_content, &new_content);
+            (old_content, new_content, diff)
+        };
 
         self.old_contents[idx] = old_content;
         self.new_contents[idx] = new_content;

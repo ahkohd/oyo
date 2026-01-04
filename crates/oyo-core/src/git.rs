@@ -333,6 +333,23 @@ pub fn get_file_at_commit_bytes(
     Ok(output.stdout)
 }
 
+pub fn get_file_at_commit_size(repo_path: &Path, commit: &str, file: &Path) -> Option<u64> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .arg("cat-file")
+        .arg("-s")
+        .arg(format!("{}:{}", commit, file.display()))
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    String::from_utf8_lossy(&output.stdout).trim().parse().ok()
+}
+
 /// Get the staged content of a file
 pub fn get_staged_content(repo_path: &Path, file: &Path) -> Result<String, GitError> {
     let output = Command::new("git")
@@ -363,6 +380,23 @@ pub fn get_staged_content_bytes(repo_path: &Path, file: &Path) -> Result<Vec<u8>
     }
 
     Ok(output.stdout)
+}
+
+pub fn get_staged_content_size(repo_path: &Path, file: &Path) -> Option<u64> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .arg("cat-file")
+        .arg("-s")
+        .arg(format!(":{}", file.display()))
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    String::from_utf8_lossy(&output.stdout).trim().parse().ok()
 }
 
 pub fn get_head_content_bytes(repo_path: &Path, file: &Path) -> Result<Vec<u8>, GitError> {
