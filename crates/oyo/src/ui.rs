@@ -1253,7 +1253,7 @@ fn draw_help_popover(frame: &mut Frame, app: &mut App) {
     push_help_line(&mut lines, "^G", "Show full file path");
     push_help_line(&mut lines, "z", "Center on active");
     push_help_line(&mut lines, "w", "Toggle line wrap");
-    push_help_line(&mut lines, "v", "Toggle context folding");
+    push_help_line(&mut lines, "f", "Toggle context folding");
     push_help_line(&mut lines, "t", "Toggle syntax highlight");
     if app.view_mode == ViewMode::Evolution {
         push_help_line(&mut lines, "E", "Toggle evo syntax (context/full)");
@@ -1284,7 +1284,7 @@ fn draw_help_popover(frame: &mut Frame, app: &mut App) {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(" Files", section_style)));
         push_help_line(&mut lines, "[ / ]", "Prev/next file");
-        push_help_line(&mut lines, "f", "Toggle file panel");
+        push_help_line(&mut lines, "Ctrl+F", "Toggle file panel");
         push_help_line(&mut lines, "Enter", "Focus file list");
         push_help_line(&mut lines, "j / k / ↑↓", "Move selection (focused)");
         push_help_line(&mut lines, "/", "Filter files (when focused)");

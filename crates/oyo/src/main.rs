@@ -1386,14 +1386,14 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<AppE
                                 app.refresh_current_file();
                             }
                         }
-                        KeyCode::Char('f') => {
+                        KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             app.reset_count();
                             // Toggle file panel visibility
                             if app.is_multi_file() {
                                 app.toggle_file_panel();
                             }
                         }
-                        KeyCode::Char('v') => {
+                        KeyCode::Char('f') => {
                             app.reset_count();
                             app.toggle_fold_context();
                         }

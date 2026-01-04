@@ -212,14 +212,14 @@ command = ["oy", "$left", "$right"]
 | `Z` | Toggle zen mode |
 | `a` | Toggle animations |
 | `w` | Toggle line wrap |
-| `v` | Toggle context folding |
+| `f` | Toggle context folding |
 | `t` | Toggle syntax highlight |
 | `E` | Toggle evo syntax (context/full) |
 | `s` | Toggle stepping (no-step mode) |
 | `S` | Toggle strikethrough |
 | `r` | Replay last step (count supported) |
 | `R` | Refresh file (or all files when file list focused) |
-| `f` | Toggle file panel |
+| `Ctrl+f` | Toggle file panel |
 | `Enter` | Focus file list |
 | `]` | Next file (supports count) |
 | `[` | Previous file (supports count) |
