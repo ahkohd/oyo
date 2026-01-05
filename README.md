@@ -23,7 +23,7 @@ Review all changes at once, scroll freely, and jump between hunks, just like a t
 - No stepping required
 
 Enable with:
-- `oyo --no-step`
+- `oy --no-step`
 - Toggle in-TUI with `s`
 - Set `stepping = false` in config
 
