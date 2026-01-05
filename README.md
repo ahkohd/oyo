@@ -73,6 +73,12 @@ oyo does **not** replace classic diffs, it adds a new way to review them.
 brew install ahkohd/oyo/oy
 ```
 
+### AUR (Arch Linux)
+
+```bash
+paru -S oyo
+```
+
 ### Cargo
 
 ```bash
