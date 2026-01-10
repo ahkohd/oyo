@@ -1,34 +1,80 @@
 {
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable-small";
+    systems.url = "github:nix-systems/default";
     rust-overlay.url = "github:oxalica/rust-overlay";
   };
 
-  outputs = { self, nixpkgs, rust-overlay }:
+  outputs =
+    {
+      nixpkgs,
+      rust-overlay,
+      systems,
+      ...
+    }:
     let
-      overlays = [ rust-overlay.overlays.default ];
+      forEachSystem = nixpkgs.lib.genAttrs (import systems);
 
-      pkgs = import nixpkgs {
-        system = "aarch64-darwin";
-        inherit overlays;
-      };
+      cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
+      inherit (cargoToml.workspace.package) version;
+    in
+    {
+      packages = forEachSystem (
+        system:
+        let
+          pkgs = import nixpkgs {
+            inherit system;
+            overlays = [ rust-overlay.overlays.default ];
+          };
+          rustToolchain = pkgs.rust-bin.stable.latest.default.override {
+            targets = [ pkgs.stdenv.hostPlatform.rust.rustcTarget ];
+          };
+          rustPlatform = pkgs.makeRustPlatform {
+            cargo = rustToolchain;
+            rustc = rustToolchain;
+          };
+        in
+        rec {
+          default = oyo;
+          oyo = rustPlatform.buildRustPackage {
+            pname = "oyo";
+            inherit version;
+            src = ./.;
+            cargoLock.lockFile = ./Cargo.lock;
+            nativeBuildInputs = [ pkgs.pkg-config ];
+            meta.mainProgram = "oy";
+          };
+        }
+      );
 
-      rustToolchainExtensions = [ "rust-src" "rust-analyzer" "clippy" ];
-      rustToolchain = pkgs.rust-bin.stable.latest.default.override {
-        targets = [ "aarch64-apple-darwin" ];
-        extensions = rustToolchainExtensions;
-      };
-
-      commonPackages = p: with p; [ bacon ];
-
-    in {
-      devShells = {
-        aarch64-darwin.default = pkgs.mkShell {
-          packages = [ rustToolchain ] ++ (commonPackages pkgs);
-          shellHook = ''
-            echo "=== DEV SHELL (APPLE SILICON) ==="
-          '';
-        };
-      };
+      devShells = forEachSystem (
+        system:
+        let
+          pkgs = import nixpkgs {
+            inherit system;
+            overlays = [ rust-overlay.overlays.default ];
+          };
+          rustToolchain = pkgs.rust-bin.stable.latest.default.override {
+            targets = [ pkgs.stdenv.hostPlatform.rust.rustcTarget ];
+            extensions = [
+              "rust-src"
+              "rust-analyzer"
+              "clippy"
+            ];
+          };
+        in
+        {
+          default = pkgs.mkShell {
+            packages = [
+              rustToolchain
+              pkgs.bacon
+              pkgs.pkg-config
+            ];
+            shellHook = ''
+              echo "=== DEV SHELL (${system}) ==="
+            '';
+          };
+        }
+      );
     };
 }

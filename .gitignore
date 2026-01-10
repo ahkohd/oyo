@@ -21,3 +21,4 @@ node_modules/
 # Nix/direnv
 .direnv/
 .envrc
+result
