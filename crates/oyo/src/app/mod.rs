@@ -15,7 +15,10 @@ use ratatui::style::Color;
 use regex::Regex;
 use rustc_hash::FxHashMap;
 use std::collections::VecDeque;
-use std::sync::mpsc;
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::path::PathBuf;
+use std::sync::{mpsc, OnceLock};
 use std::time::{Duration, Instant};
 
 mod blame;
@@ -402,6 +405,28 @@ struct ViewWindow {
 }
 
 impl App {
+    fn window_debug_path() -> Option<&'static PathBuf> {
+        static WINDOW_DEBUG_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
+        WINDOW_DEBUG_PATH.get_or_init(|| {
+            if std::env::var_os("OYO_WINDOW_DEBUG").is_none() {
+                return None;
+            }
+            let path = std::env::var_os("OYO_WINDOW_DEBUG_FILE")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| std::env::temp_dir().join("oyo_window_debug.log"));
+            Some(path)
+        });
+        WINDOW_DEBUG_PATH.get().and_then(|opt| opt.as_ref())
+    }
+
+    pub(crate) fn log_window_debug<S: AsRef<str>>(&self, message: S) {
+        let Some(path) = Self::window_debug_path() else {
+            return;
+        };
+        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+            let _ = writeln!(file, "{}", message.as_ref());
+        }
+    }
     pub fn new(
         multi_diff: MultiFileDiff,
         view_mode: ViewMode,
@@ -1020,25 +1045,30 @@ impl App {
 
     fn compute_view_window(&mut self) -> Option<ViewWindow> {
         if self.line_wrap {
+            self.log_window_debug("window: skip line_wrap");
             return None;
         }
         if !self.multi_diff.current_file_is_large() {
+            self.log_window_debug("window: skip small_file");
             return None;
         }
         let allow_split = self.view_mode == ViewMode::Split
             && self.split_align_lines
             && !self.fold_context.is_enabled();
         if !matches!(self.view_mode, ViewMode::UnifiedPane | ViewMode::Blame) && !allow_split {
+            self.log_window_debug("window: skip view_mode");
             return None;
         }
 
         let nav = self.multi_diff.current_navigator();
         let total_len = nav.diff().changes.len();
         if total_len == 0 {
+            self.log_window_debug("window: skip empty");
             return None;
         }
 
         let span = self.last_viewport_height.max(20).saturating_mul(4).max(200);
+        let margin = span / 4;
 
         if self.stepping {
             let state = nav.state();
@@ -1047,8 +1077,21 @@ impl App {
                 .or(state.applied_changes.last().copied())
                 .or_else(|| nav.diff().significant_changes.first().copied())?;
             let idx = nav.change_index_for(change_id)?;
-            let start = idx.saturating_sub(span);
-            let end = (idx + span).min(total_len.saturating_sub(1));
+            let mut start = idx.saturating_sub(span);
+            let mut end = (idx + span).min(total_len.saturating_sub(1));
+            let scroll = self.scroll_offset.min(total_len.saturating_sub(1));
+            if !self.needs_scroll_to_active {
+                let inside_window = scroll >= start.saturating_add(margin)
+                    && scroll <= end.saturating_sub(margin);
+                if !inside_window {
+                    start = scroll.saturating_sub(margin);
+                    end = (start + span).min(total_len.saturating_sub(1));
+                }
+            }
+            self.log_window_debug(format!(
+                "window: stepping total_len={} scroll={} start={} end={} span={} margin={} needs_scroll={}",
+                total_len, self.scroll_offset, start, end, span, margin, self.needs_scroll_to_active
+            ));
             return Some(ViewWindow {
                 start,
                 end,
@@ -1056,8 +1099,41 @@ impl App {
             });
         }
 
-        let start = self.scroll_offset.min(total_len.saturating_sub(1));
-        let end = (start + span).min(total_len.saturating_sub(1));
+        let scroll = self.scroll_offset.min(total_len.saturating_sub(1));
+        if total_len <= span {
+            self.log_window_debug(format!(
+                "window: full total_len={} scroll={} span={}",
+                total_len, scroll, span
+            ));
+            return Some(ViewWindow {
+                start: 0,
+                end: total_len.saturating_sub(1),
+                total_len,
+            });
+        }
+        let mut start = scroll.saturating_sub(margin);
+        let mut end = (start + span).min(total_len.saturating_sub(1));
+        if self.view_window_total_len.is_some() {
+            let current_start = self.view_window_start;
+            let current_end = (current_start + span).min(total_len.saturating_sub(1));
+            let inside_window = scroll >= current_start.saturating_add(margin)
+                && scroll <= current_end.saturating_sub(margin);
+            if inside_window {
+                start = current_start;
+                end = current_end;
+            }
+        }
+        self.log_window_debug(format!(
+            "window: nostep total_len={} scroll={} start={} end={} span={} margin={} prev_start={} prev_total={:?}",
+            total_len,
+            scroll,
+            start,
+            end,
+            span,
+            margin,
+            self.view_window_start,
+            self.view_window_total_len
+        ));
         Some(ViewWindow {
             start,
             end,
@@ -1182,6 +1258,13 @@ impl App {
         let applied_total = window_total_override.or(window.map(|w| w.total_len));
         self.view_window_start = applied_start;
         self.view_window_total_len = applied_total;
+        self.log_window_debug(format!(
+            "window: apply start={} total={:?} view_len={} windowed={}",
+            self.view_window_start,
+            self.view_window_total_len,
+            lines.len(),
+            windowed
+        ));
         self.view_cache = Some(ViewCache {
             key,
             lines: lines.clone(),

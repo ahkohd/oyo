@@ -1311,6 +1311,23 @@ fn render_unified_pane_cached(frame: &mut Frame, app: &mut App, area: Rect) {
         .set_show_hunk_extent_while_stepping(show_extent);
     let view_lines = app.current_view_with_frame(animation_frame);
     let scroll_offset = app.render_scroll_offset();
+    app.log_window_debug(format!(
+        "render: view_len={} scroll_offset={} raw_scroll={} window_start={} window_total={:?}",
+        view_lines.len(),
+        scroll_offset,
+        app.scroll_offset,
+        app.view_window_start(),
+        app.render_total_lines(view_lines.len())
+    ));
+    if !app.line_wrap {
+        let extra_total = app
+            .blame_extra_rows
+            .as_ref()
+            .map(|rows| rows.iter().copied().sum::<usize>())
+            .unwrap_or(0);
+        let total_lines = app.render_total_lines(view_lines.len()).saturating_add(extra_total);
+        app.clamp_scroll(total_lines, visible_height, app.allow_overscroll());
+    }
 
     let key = unified_render_key(app, animation_frame, visible_height, visible_width, scroll_offset);
     let rebuild = app
