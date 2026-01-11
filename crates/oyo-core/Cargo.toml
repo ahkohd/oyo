@@ -15,7 +15,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
-similar = { workspace = true }
+imara-diff = { workspace = true }
 
 [dev-dependencies]
 criterion = "0.5"
