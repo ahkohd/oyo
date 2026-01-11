@@ -560,6 +560,7 @@ fn main() -> Result<()> {
         }
     }
     MultiFileDiff::set_diff_max_bytes(config.ui.diff.max_bytes);
+    MultiFileDiff::set_full_context_max_bytes(config.ui.diff.full_context_max_bytes);
     MultiFileDiff::set_diff_defer(config.ui.diff.defer);
 
     // Compute theme mode: CLI overrides config, default to dark

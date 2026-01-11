@@ -1806,7 +1806,10 @@ impl App {
             Some(idx) => idx,
             None => return 0,
         };
-        let get_change = |id| nav.diff().changes.iter().find(|c| c.id == id);
+        let get_change = |id| {
+            nav.change_index_for(id)
+                .and_then(|idx| nav.diff().changes.get(idx))
+        };
         let is_insert_only = |change: &oyo_core::Change| {
             change
                 .spans

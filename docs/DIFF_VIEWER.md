@@ -120,6 +120,10 @@ Applies to unified/split only (ignored in evolution):
 ### Diff size limit (diff.max_bytes)
 
 - Files larger than `ui.diff.max_bytes` are deferred and diffed in the background.
+
+### Full-context limit (diff.full_context_max_bytes)
+
+- Files larger than `ui.diff.full_context_max_bytes` use limited context lines for rendering.
 - While deferred, the file renders immediately (scroll-only) and upgrades to a
   full diff once computation completes.
 
@@ -150,6 +154,7 @@ bg = false            # true | false
 fg = "theme"          # theme | syntax
 highlight = "text"    # text | word | none
 max_bytes = 16777216  # defer diffing above this size (bytes)
+full_context_max_bytes = 2097152  # full-context render up to this size (bytes)
 defer = true          # enable deferred diffing for large files
 idle_ms = 250         # idle time before background diffing starts
 extent_marker = "neutral" # neutral | diff

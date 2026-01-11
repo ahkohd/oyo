@@ -839,6 +839,9 @@ pub struct DiffConfig {
     /// Maximum diff size before stepping is disabled (bytes)
     #[serde(default = "diff_max_bytes_default")]
     pub max_bytes: u64,
+    /// Maximum file size to render with full context (bytes)
+    #[serde(default = "diff_full_context_max_bytes_default")]
+    pub full_context_max_bytes: u64,
     /// Defer diff computation for large files (background compute)
     #[serde(default = "diff_defer_default")]
     pub defer: bool,
@@ -863,6 +866,7 @@ impl Default for DiffConfig {
             fg: diff_fg_default(),
             highlight: diff_highlight_default(),
             max_bytes: diff_max_bytes_default(),
+            full_context_max_bytes: diff_full_context_max_bytes_default(),
             defer: diff_defer_default(),
             idle_ms: diff_idle_ms_default(),
             extent_marker: diff_extent_marker_default(),
@@ -886,6 +890,10 @@ fn diff_highlight_default() -> DiffHighlightMode {
 
 fn diff_max_bytes_default() -> u64 {
     16 * 1024 * 1024
+}
+
+fn diff_full_context_max_bytes_default() -> u64 {
+    2 * 1024 * 1024
 }
 
 fn diff_defer_default() -> bool {

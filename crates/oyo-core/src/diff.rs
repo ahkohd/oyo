@@ -303,6 +303,11 @@ impl DiffEngine {
             return hunks;
         }
 
+        let mut id_to_index = HashMap::with_capacity(changes.len());
+        for (idx, change) in changes.iter().enumerate() {
+            id_to_index.insert(change.id, idx);
+        }
+
         let mut current_hunk_changes: Vec<usize> = Vec::new();
         let mut current_hunk_old_start: Option<usize> = None;
         let mut current_hunk_new_start: Option<usize> = None;
@@ -313,7 +318,10 @@ impl DiffEngine {
         let mut hunk_id = 0;
 
         for &change_id in significant_changes {
-            let change = match changes.iter().find(|c| c.id == change_id) {
+            let change = match id_to_index
+                .get(&change_id)
+                .and_then(|idx| changes.get(*idx))
+            {
                 Some(c) => c,
                 None => continue,
             };

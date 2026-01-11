@@ -86,7 +86,9 @@ enum PrecomputedDiff {
 }
 
 const DEFAULT_DIFF_MAX_BYTES: u64 = 16 * 1024 * 1024;
+const DEFAULT_FULL_CONTEXT_MAX_BYTES: u64 = 2 * 1024 * 1024;
 static DIFF_MAX_BYTES: AtomicU64 = AtomicU64::new(DEFAULT_DIFF_MAX_BYTES);
+static FULL_CONTEXT_MAX_BYTES: AtomicU64 = AtomicU64::new(DEFAULT_FULL_CONTEXT_MAX_BYTES);
 static DIFF_DEFER: AtomicBool = AtomicBool::new(true);
 
 impl MultiFileDiff {
@@ -99,12 +101,21 @@ impl MultiFileDiff {
         DIFF_MAX_BYTES.store(limit, Ordering::Relaxed);
     }
 
+    pub fn set_full_context_max_bytes(max_bytes: u64) {
+        let limit = max_bytes.max(1);
+        FULL_CONTEXT_MAX_BYTES.store(limit, Ordering::Relaxed);
+    }
+
     pub fn set_diff_defer(enabled: bool) {
         DIFF_DEFER.store(enabled, Ordering::Relaxed);
     }
 
     fn diff_max_bytes() -> u64 {
         DIFF_MAX_BYTES.load(Ordering::Relaxed)
+    }
+
+    fn full_context_max_bytes() -> u64 {
+        FULL_CONTEXT_MAX_BYTES.load(Ordering::Relaxed)
     }
 
     fn diff_defer_enabled() -> bool {
@@ -160,7 +171,9 @@ impl MultiFileDiff {
     fn diff_strings(old: &str, new: &str) -> crate::diff::DiffResult {
         let max_len = old.len().max(new.len()) as u64;
         let word_level = max_len <= Self::MAX_WORD_LEVEL_BYTES;
-        let context_lines = if max_len > Self::diff_max_bytes() {
+        let context_lines = if max_len > Self::full_context_max_bytes() {
+            3
+        } else if max_len > Self::diff_max_bytes() {
             3
         } else {
             usize::MAX
