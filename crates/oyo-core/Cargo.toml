@@ -16,6 +16,7 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 imara-diff = { workspace = true }
+rustc-hash = { workspace = true }
 
 [dev-dependencies]
 criterion = "0.5"

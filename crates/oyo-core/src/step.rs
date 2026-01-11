@@ -2,8 +2,8 @@
 
 use crate::change::{Change, ChangeKind, ChangeSpan};
 use crate::diff::DiffResult;
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
 use std::sync::Arc;
 
 /// Direction of the last step action
@@ -35,7 +35,7 @@ pub struct StepState {
     pub applied_changes: Vec<usize>,
     /// Fast membership for applied changes (kept in sync with applied_changes)
     #[serde(skip, default)]
-    applied_changes_set: HashSet<usize>,
+    applied_changes_set: FxHashSet<usize>,
     /// ID of the change being highlighted/animated at current step
     pub active_change: Option<usize>,
     /// Cursor change used for non-stepping navigation (does not imply animation)
@@ -70,7 +70,7 @@ impl StepState {
             current_step: 0,
             total_steps: total_changes + 1, // +1 for initial state
             applied_changes: Vec::new(),
-            applied_changes_set: HashSet::new(),
+            applied_changes_set: FxHashSet::default(),
             active_change: None,
             cursor_change: None,
             animating_hunk: None,
@@ -239,7 +239,7 @@ impl DiffNavigator {
             }
         }
 
-        let mut change_to_step = std::collections::HashMap::new();
+        let mut change_to_step = FxHashMap::default();
         for (idx, change_id) in diff.significant_changes.iter().enumerate() {
             change_to_step.insert(*change_id, idx);
         }

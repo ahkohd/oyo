@@ -785,27 +785,49 @@ impl LazySyntaxCache {
         if let Some(state) = self.checkpoints.get(chunk).and_then(|c| c.clone()) {
             return Some((state, chunk * self.stride));
         }
-        if chunk == 0 {
+        if self.checkpoints.is_empty() {
             return None;
         }
-        let prev_chunk = chunk - 1;
-        let (state, start) = self.ensure_checkpoint(prev_chunk)?;
+
+        let mut start_chunk = chunk;
+        while start_chunk > 0
+            && self
+                .checkpoints
+                .get(start_chunk)
+                .and_then(|c| c.as_ref())
+                .is_none()
+        {
+            start_chunk = start_chunk.saturating_sub(1);
+        }
+        let state = self.checkpoints.get(start_chunk).and_then(|c| c.clone())?;
         let mut highlighter = HighlightLines::from_state(self.theme.as_ref(), state.0, state.1);
-        let chunk_start = start;
-        let chunk_end = (chunk * self.stride).min(self.lines.len());
-        for idx in chunk_start..chunk_end {
-            let line = &self.lines[idx];
-            let ranges = highlighter
-                .highlight_line(line, &self.syntax_set)
-                .unwrap_or_default();
-            let spans = ranges_to_spans(ranges, self.plain);
-            self.spans[idx] = Some(spans);
+        let mut line_idx = start_chunk * self.stride;
+
+        for next_chunk in (start_chunk + 1)..=chunk {
+            let chunk_end = (next_chunk * self.stride).min(self.lines.len());
+            for idx in line_idx..chunk_end {
+                let line = &self.lines[idx];
+                let ranges = highlighter
+                    .highlight_line(line, &self.syntax_set)
+                    .unwrap_or_default();
+                let spans = ranges_to_spans(ranges, self.plain);
+                self.spans[idx] = Some(spans);
+            }
+            let state = highlighter.state();
+            if let Some(slot) = self.checkpoints.get_mut(next_chunk) {
+                *slot = Some(state.clone());
+            }
+            if next_chunk == chunk {
+                return Some((state, chunk * self.stride));
+            }
+            highlighter = HighlightLines::from_state(self.theme.as_ref(), state.0, state.1);
+            line_idx = chunk_end;
         }
-        let state = highlighter.state();
-        if let Some(slot) = self.checkpoints.get_mut(chunk) {
-            *slot = Some(state.clone());
-        }
-        Some((state, chunk * self.stride))
+
+        self.checkpoints
+            .get(chunk)
+            .and_then(|c| c.clone())
+            .map(|state| (state, chunk * self.stride))
     }
 }
 

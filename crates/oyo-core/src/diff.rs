@@ -3,7 +3,7 @@
 use crate::change::{Change, ChangeKind, ChangeSpan};
 use imara_diff::intern::{InternedInput, TokenSource};
 use imara_diff::{Algorithm, Sink};
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::hash::Hash;
 use std::ops::Range;
 use std::path::Path;
@@ -250,7 +250,7 @@ impl DiffEngine {
         );
 
         let (changes, significant_changes) = if self.context_lines != usize::MAX {
-            let mut id_to_idx = HashMap::new();
+            let mut id_to_idx = FxHashMap::default();
             for (idx, change) in changes.iter().enumerate() {
                 id_to_idx.insert(change.id, idx);
             }
@@ -264,7 +264,7 @@ impl DiffEngine {
                     }
                 }
             }
-            let significant_set: HashSet<usize> =
+            let significant_set: FxHashSet<usize> =
                 significant_changes.iter().copied().collect();
             let mut filtered_changes = Vec::new();
             let mut filtered_significant = Vec::new();
@@ -303,7 +303,8 @@ impl DiffEngine {
             return hunks;
         }
 
-        let mut id_to_index = HashMap::with_capacity(changes.len());
+        let mut id_to_index =
+            FxHashMap::with_capacity_and_hasher(changes.len(), Default::default());
         for (idx, change) in changes.iter().enumerate() {
             id_to_index.insert(change.id, idx);
         }
