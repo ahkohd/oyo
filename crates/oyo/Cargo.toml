@@ -31,3 +31,4 @@ regex = { workspace = true }
 unicode-width = { workspace = true }
 unicode-segmentation = { workspace = true }
 time = { workspace = true }
+rustc-hash = { workspace = true }

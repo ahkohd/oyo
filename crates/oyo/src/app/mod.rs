@@ -13,7 +13,8 @@ use oyo_core::{
 };
 use ratatui::style::Color;
 use regex::Regex;
-use std::collections::{HashMap, VecDeque};
+use rustc_hash::FxHashMap;
+use std::collections::VecDeque;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -208,37 +209,41 @@ pub struct App {
     /// Cached git user name for blame display
     blame_user_name: Option<String>,
     /// Cached blame entries
-    blame_cache: HashMap<BlameCacheKey, BlameInfo>,
+    blame_cache: FxHashMap<BlameCacheKey, BlameInfo>,
     /// Cached blame display text (used as fallback while loading)
-    blame_display_cache: HashMap<BlameCacheKey, BlameDisplay>,
+    blame_display_cache: FxHashMap<BlameCacheKey, BlameDisplay>,
     /// Cached blame bar colors (used as fallback while loading)
-    blame_bar_cache: HashMap<BlameCacheKey, Color>,
+    blame_bar_cache: FxHashMap<BlameCacheKey, Color>,
     /// Cached blame time ranges (min/max) per file/source
-    blame_time_ranges: HashMap<BlamePrefetchKey, (i64, i64)>,
+    blame_time_ranges: FxHashMap<BlamePrefetchKey, (i64, i64)>,
     /// Cached unified hunk starts for no-step mode
-    hunk_starts_unified_cache:
-        Option<((usize, ViewMode, FoldContextMode, usize, usize), Vec<Option<HunkStart>>)>,
+    hunk_starts_unified_cache: Option<(
+        (usize, ViewMode, FoldContextMode, bool, usize, usize, usize),
+        Vec<Option<HunkStart>>,
+    )>,
     /// Cached unified hunk bounds for no-step mode
-    hunk_bounds_unified_cache:
-        Option<((usize, ViewMode, FoldContextMode, usize, usize), Vec<Option<HunkBounds>>)>,
+    hunk_bounds_unified_cache: Option<(
+        (usize, ViewMode, FoldContextMode, bool, usize, usize, usize),
+        Vec<Option<HunkBounds>>,
+    )>,
     /// Cached split hunk starts for no-step mode
     hunk_starts_split_cache: Option<(
-        (usize, FoldContextMode, bool, usize, usize),
+        (usize, FoldContextMode, bool, bool, usize, usize, usize),
         (Vec<Option<HunkStart>>, Vec<Option<HunkStart>>),
     )>,
     /// Cached split hunk bounds for no-step mode
     hunk_bounds_split_cache: Option<(
-        (usize, FoldContextMode, bool, usize, usize),
+        (usize, FoldContextMode, bool, bool, usize, usize, usize),
         (Vec<Option<HunkBounds>>, Vec<Option<HunkBounds>>),
     )>,
     /// Cached blame prefetch windows
-    blame_prefetch: HashMap<BlamePrefetchKey, BlamePrefetchRange>,
+    blame_prefetch: FxHashMap<BlamePrefetchKey, BlamePrefetchRange>,
     /// Cached blame render layout (for scroll performance)
     pub(crate) blame_render_cache: Option<BlameRenderCache>,
     /// Revision for blame cache updates
     pub(crate) blame_cache_revision: u64,
     /// Blame prefetch requests currently in flight
-    blame_pending: HashMap<BlamePrefetchKey, BlamePrefetchRange>,
+    blame_pending: FxHashMap<BlamePrefetchKey, BlamePrefetchRange>,
     /// Throttle blame prefetch to avoid repeated git calls
     blame_prefetch_at: Option<Instant>,
     blame_worker_tx: Option<mpsc::Sender<BlameRequest>>,
@@ -488,18 +493,18 @@ impl App {
             blame_hunk_hint_enabled: true,
             blame_toggle: false,
             blame_user_name: None,
-            blame_cache: HashMap::new(),
-            blame_display_cache: HashMap::new(),
-            blame_bar_cache: HashMap::new(),
-            blame_time_ranges: HashMap::new(),
+            blame_cache: FxHashMap::default(),
+            blame_display_cache: FxHashMap::default(),
+            blame_bar_cache: FxHashMap::default(),
+            blame_time_ranges: FxHashMap::default(),
             hunk_starts_unified_cache: None,
             hunk_bounds_unified_cache: None,
             hunk_starts_split_cache: None,
             hunk_bounds_split_cache: None,
-            blame_prefetch: HashMap::new(),
+            blame_prefetch: FxHashMap::default(),
             blame_render_cache: None,
             blame_cache_revision: 0,
-            blame_pending: HashMap::new(),
+            blame_pending: FxHashMap::default(),
             blame_prefetch_at: None,
             blame_worker_tx: None,
             blame_worker_rx: None,

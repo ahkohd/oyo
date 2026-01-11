@@ -38,7 +38,9 @@ fn change_has_conflict_marker(change: &oyo_core::change::Change) -> bool {
 }
 
 impl App {
-    fn hunk_cache_key_unified(&mut self) -> (usize, ViewMode, FoldContextMode, usize, usize) {
+    fn hunk_cache_key_unified(
+        &mut self,
+    ) -> (usize, ViewMode, FoldContextMode, bool, usize, usize, usize) {
         let file_index = self.multi_diff.selected_index;
         let view_mode = self.view_mode;
         let fold_context = self.fold_context;
@@ -47,12 +49,16 @@ impl App {
             file_index,
             view_mode,
             fold_context,
+            self.stepping,
+            state.current_step,
             state.total_steps,
             state.total_hunks,
         )
     }
 
-    fn hunk_cache_key_split(&mut self) -> (usize, FoldContextMode, bool, usize, usize) {
+    fn hunk_cache_key_split(
+        &mut self,
+    ) -> (usize, FoldContextMode, bool, bool, usize, usize, usize) {
         let file_index = self.multi_diff.selected_index;
         let fold_context = self.fold_context;
         let split_align = self.split_align_lines;
@@ -61,6 +67,8 @@ impl App {
             file_index,
             fold_context,
             split_align,
+            self.stepping,
+            state.current_step,
             state.total_steps,
             state.total_hunks,
         )
@@ -887,18 +895,15 @@ impl App {
 
     /// Compute hunk starts for unified/evolution view (display index + change id).
     fn compute_hunk_starts_unified(&mut self) -> Vec<Option<HunkStart>> {
-        if !self.stepping {
-            let key = self.hunk_cache_key_unified();
-            if let Some((cache_key, starts)) = self.hunk_starts_unified_cache.as_ref() {
-                if *cache_key == key {
-                    return starts.clone();
-                }
+        let key = self.hunk_cache_key_unified();
+        if let Some((cache_key, starts)) = self.hunk_starts_unified_cache.as_ref() {
+            if *cache_key == key {
+                return starts.clone();
             }
-            let starts = self.compute_hunk_starts_unified_uncached();
-            self.hunk_starts_unified_cache = Some((key, starts.clone()));
-            return starts;
         }
-        self.compute_hunk_starts_unified_uncached()
+        let starts = self.compute_hunk_starts_unified_uncached();
+        self.hunk_starts_unified_cache = Some((key, starts.clone()));
+        starts
     }
 
     fn compute_hunk_starts_unified_uncached(&mut self) -> Vec<Option<HunkStart>> {
@@ -936,18 +941,15 @@ impl App {
 
     /// Compute hunk bounds for unified/evolution view (display start/end + change id).
     fn compute_hunk_bounds_unified(&mut self) -> Vec<Option<HunkBounds>> {
-        if !self.stepping {
-            let key = self.hunk_cache_key_unified();
-            if let Some((cache_key, bounds)) = self.hunk_bounds_unified_cache.as_ref() {
-                if *cache_key == key {
-                    return bounds.clone();
-                }
+        let key = self.hunk_cache_key_unified();
+        if let Some((cache_key, bounds)) = self.hunk_bounds_unified_cache.as_ref() {
+            if *cache_key == key {
+                return bounds.clone();
             }
-            let bounds = self.compute_hunk_bounds_unified_uncached();
-            self.hunk_bounds_unified_cache = Some((key, bounds.clone()));
-            return bounds;
         }
-        self.compute_hunk_bounds_unified_uncached()
+        let bounds = self.compute_hunk_bounds_unified_uncached();
+        self.hunk_bounds_unified_cache = Some((key, bounds.clone()));
+        bounds
     }
 
     fn compute_hunk_bounds_unified_uncached(&mut self) -> Vec<Option<HunkBounds>> {

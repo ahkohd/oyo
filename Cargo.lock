@@ -777,6 +777,7 @@ dependencies = [
  "oyo-core",
  "ratatui",
  "regex",
+ "rustc-hash",
  "serde",
  "serde_json",
  "syntect",
