@@ -129,6 +129,8 @@ impl App {
         self.restore_scroll_position_for(self.multi_diff.selected_index);
         self.animation_phase = AnimationPhase::Idle;
         self.animation_progress = 1.0;
+        self.view_build_defer = false;
+        self.view_build_pending = false;
         self.reset_search_for_file_switch();
         self.centered_once = false;
         self.update_file_list_scroll();

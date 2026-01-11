@@ -127,6 +127,10 @@ pub struct App {
     pub pending_count: Option<usize>,
     /// Pending "g" prefix for vim-style commands (e.g., gg)
     pub pending_g_prefix: bool,
+    /// Defer heavy view rebuild by one frame (for large-file jumps)
+    view_build_defer: bool,
+    /// True while a deferred view rebuild is pending
+    view_build_pending: bool,
     /// Horizontal scroll offset (for long lines)
     pub horizontal_scroll: usize,
     /// Per-file horizontal scroll offsets when stepping
@@ -476,6 +480,8 @@ impl App {
             animation_duration: 150,
             pending_count: None,
             pending_g_prefix: false,
+            view_build_defer: false,
+            view_build_pending: false,
             horizontal_scroll: 0,
             horizontal_scrolls_step: vec![0; file_count],
             horizontal_scrolls_no_step: vec![0; file_count],
@@ -1043,6 +1049,23 @@ impl App {
         self.view_window_total_len.unwrap_or(view_len)
     }
 
+    pub(crate) fn view_build_pending(&self) -> bool {
+        self.view_build_pending
+    }
+
+    pub(crate) fn defer_view_build_for_jump(&mut self) {
+        if !self.multi_diff.current_file_is_large() {
+            return;
+        }
+        if !self.current_file_diff_ready() {
+            return;
+        }
+        if self.view_cache.is_none() {
+            return;
+        }
+        self.view_build_defer = true;
+    }
+
     fn compute_view_window(&mut self) -> Option<ViewWindow> {
         if self.line_wrap {
             self.log_window_debug("window: skip line_wrap");
@@ -1155,8 +1178,23 @@ impl App {
             if cache.key == key {
                 self.view_window_start = cache.window_start;
                 self.view_window_total_len = cache.window_total_len;
+                self.view_build_pending = false;
                 return cache.lines.clone();
             }
+        }
+        if self.view_build_defer {
+            self.view_build_defer = false;
+            if let Some(cache) = &self.view_cache {
+                if cache.key.file_index == self.multi_diff.selected_index {
+                    self.view_window_start = cache.window_start;
+                    self.view_window_total_len = cache.window_total_len;
+                    self.view_build_pending = true;
+                    return cache.lines.clone();
+                }
+            }
+            self.view_build_pending = false;
+        } else {
+            self.view_build_pending = false;
         }
         let mut view = if let Some(window) = window {
             let nav = self.multi_diff.current_navigator();

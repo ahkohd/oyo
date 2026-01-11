@@ -1170,6 +1170,7 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<AppE
                             } else {
                                 coalesce_key_repeats(key, &mut pending_event)?
                             };
+                            app.defer_view_build_for_jump();
                             for _ in 0..count {
                                 if app.stepping {
                                     app.next_hunk();
@@ -1185,6 +1186,7 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<AppE
                             } else {
                                 coalesce_key_repeats(key, &mut pending_event)?
                             };
+                            app.defer_view_build_for_jump();
                             for _ in 0..count {
                                 if app.stepping {
                                     app.prev_hunk();
@@ -1197,6 +1199,7 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<AppE
                         // Jump to begin/end of current hunk
                         KeyCode::Char('b') => {
                             app.reset_count();
+                            app.defer_view_build_for_jump();
                             if app.stepping {
                                 app.goto_hunk_start();
                             } else {
@@ -1205,6 +1208,7 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<AppE
                         }
                         KeyCode::Char('e') => {
                             app.reset_count();
+                            app.defer_view_build_for_jump();
                             if app.stepping {
                                 app.goto_hunk_end();
                             } else {
@@ -1240,6 +1244,7 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<AppE
                         }
                         KeyCode::Home => {
                             app.reset_count();
+                            app.defer_view_build_for_jump();
                             app.goto_start();
                         }
                         KeyCode::Char('g') => {
@@ -1248,10 +1253,12 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<AppE
                         }
                         KeyCode::End | KeyCode::Char('G') => {
                             app.reset_count();
+                            app.defer_view_build_for_jump();
                             app.goto_end();
                         }
                         KeyCode::Char('<') => {
                             app.reset_count();
+                            app.defer_view_build_for_jump();
                             if app.stepping {
                                 app.goto_first_step();
                             } else {
@@ -1260,6 +1267,7 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<AppE
                         }
                         KeyCode::Char('>') => {
                             app.reset_count();
+                            app.defer_view_build_for_jump();
                             if app.stepping {
                                 app.goto_last_step();
                             } else {
