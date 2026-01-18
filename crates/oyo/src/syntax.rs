@@ -45,11 +45,18 @@ struct LazySyntaxCache {
     lines: Vec<String>,
     spans: Vec<Option<Vec<SyntaxSpan>>>,
     checkpoints: Vec<Option<(syntect::highlighting::HighlightState, ParseState)>>,
+    chunk_states: Vec<Option<ChunkProgress>>,
     stride: usize,
 }
 
 const MAX_LAZY_SYNTAX_BYTES: usize = 512 * 1024;
 const SYNTAX_CHECKPOINT_STRIDE: usize = 200;
+
+#[derive(Clone, Debug)]
+struct ChunkProgress {
+    next_line: usize,
+    state: (syntect::highlighting::HighlightState, ParseState),
+}
 
 struct EmbeddedTmTheme {
     name: &'static str,
@@ -735,6 +742,7 @@ impl LazySyntaxCache {
             spans: vec![None; lines.len()],
             lines,
             checkpoints,
+            chunk_states: vec![None; checkpoint_len],
             stride,
         }
     }
@@ -753,26 +761,46 @@ impl LazySyntaxCache {
         }
 
         let chunk = line_index / self.stride;
-        let (state, start) = self.ensure_checkpoint(chunk)?;
-        let mut highlighter = HighlightLines::from_state(self.theme.as_ref(), state.0, state.1);
-
-        let chunk_start = start;
+        let state = self.ensure_checkpoint(chunk)?;
+        let chunk_start = chunk * self.stride;
         let chunk_end = ((chunk + 1) * self.stride).min(self.lines.len());
+        let progress = self
+            .chunk_states
+            .get_mut(chunk)
+            .and_then(|slot| slot.take());
 
-        for idx in chunk_start..chunk_end {
-            let line = &self.lines[idx];
+        let (mut next_line, mut highlighter) = if let Some(progress) = progress {
+            (
+                progress.next_line,
+                HighlightLines::from_state(self.theme.as_ref(), progress.state.0, progress.state.1),
+            )
+        } else {
+            (
+                chunk_start,
+                HighlightLines::from_state(self.theme.as_ref(), state.0, state.1),
+            )
+        };
+
+        if next_line < chunk_start {
+            next_line = chunk_start;
+        }
+
+        let lines = &self.lines;
+        let spans = &mut self.spans;
+        for idx in next_line..=line_index {
+            let line = &lines[idx];
             let ranges = highlighter
                 .highlight_line(line, &self.syntax_set)
                 .unwrap_or_default();
-            let spans = ranges_to_spans(ranges, self.plain);
-            self.spans[idx] = Some(spans);
-            if idx == line_index {
-                // keep going so checkpoint is consistent when chunk completes
-            }
+            spans[idx] = Some(ranges_to_spans(ranges, self.plain));
         }
 
-        if chunk_end == (chunk + 1) * self.stride && self.checkpoints.len() > chunk + 1 {
-            self.checkpoints[chunk + 1] = Some(highlighter.state());
+        let next_line = (line_index + 1).min(chunk_end);
+        let state = highlighter.state();
+        if next_line == chunk_end && self.checkpoints.len() > chunk + 1 {
+            self.checkpoints[chunk + 1] = Some(state);
+        } else if let Some(slot) = self.chunk_states.get_mut(chunk) {
+            *slot = Some(ChunkProgress { next_line, state });
         }
 
         self.spans.get(line_index).and_then(|s| s.as_deref())
@@ -781,9 +809,9 @@ impl LazySyntaxCache {
     fn ensure_checkpoint(
         &mut self,
         chunk: usize,
-    ) -> Option<((syntect::highlighting::HighlightState, ParseState), usize)> {
+    ) -> Option<(syntect::highlighting::HighlightState, ParseState)> {
         if let Some(state) = self.checkpoints.get(chunk).and_then(|c| c.clone()) {
-            return Some((state, chunk * self.stride));
+            return Some(state);
         }
         if self.checkpoints.is_empty() {
             return None;
@@ -807,27 +835,20 @@ impl LazySyntaxCache {
             let chunk_end = (next_chunk * self.stride).min(self.lines.len());
             for idx in line_idx..chunk_end {
                 let line = &self.lines[idx];
-                let ranges = highlighter
-                    .highlight_line(line, &self.syntax_set)
-                    .unwrap_or_default();
-                let spans = ranges_to_spans(ranges, self.plain);
-                self.spans[idx] = Some(spans);
+                let _ = highlighter.highlight_line(line, &self.syntax_set);
             }
             let state = highlighter.state();
             if let Some(slot) = self.checkpoints.get_mut(next_chunk) {
                 *slot = Some(state.clone());
             }
             if next_chunk == chunk {
-                return Some((state, chunk * self.stride));
+                return Some(state);
             }
             highlighter = HighlightLines::from_state(self.theme.as_ref(), state.0, state.1);
             line_idx = chunk_end;
         }
 
-        self.checkpoints
-            .get(chunk)
-            .and_then(|c| c.clone())
-            .map(|state| (state, chunk * self.stride))
+        self.checkpoints.get(chunk).and_then(|c| c.clone())
     }
 }
 
@@ -972,6 +993,54 @@ fn to_syntect(color: TuiColor) -> Color {
             b: 255,
             a: 0xFF,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lazy_cache_only_fills_requested_lines() {
+        let engine = SyntaxEngine::new("aura", false);
+        let content = "alpha\nbeta\ngamma\n";
+        let mut cache = LazySyntaxCache::new(&engine, content, "sample.rs");
+
+        assert!(cache.spans[0].is_none());
+        let _ = cache.spans(0).expect("expected spans for line 0");
+        assert!(cache.spans[0].is_some());
+        assert!(cache.spans[1].is_none());
+    }
+
+    #[test]
+    fn lazy_cache_advances_within_chunk() {
+        let engine = SyntaxEngine::new("aura", false);
+        let content = "one\ntwo\nthree\nfour\nfive\n";
+        let mut cache = LazySyntaxCache::new(&engine, content, "sample.rs");
+
+        let _ = cache.spans(0).expect("expected spans for line 0");
+        let _ = cache.spans(3).expect("expected spans for line 3");
+
+        assert!(cache.spans[1].is_some());
+        assert!(cache.spans[2].is_some());
+        assert!(cache.spans[3].is_some());
+    }
+
+    #[test]
+    fn lazy_cache_checkpointing_skips_intermediate_spans() {
+        let engine = SyntaxEngine::new("aura", false);
+        let mut content = String::new();
+        for idx in 0..500 {
+            content.push_str(&format!("line {idx}\n"));
+        }
+        let mut cache = LazySyntaxCache::new(&engine, &content, "sample.rs");
+
+        let _ = cache.spans(450).expect("expected spans for line 450");
+
+        assert!(cache.spans[0].is_none());
+        assert!(cache.spans[199].is_none());
+        assert!(cache.spans[399].is_none());
+        assert!(cache.spans[400].is_some());
     }
 }
 
