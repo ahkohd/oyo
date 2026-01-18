@@ -2,7 +2,7 @@
 
 use crate::change::{Change, ChangeKind, ChangeSpan};
 use crate::diff::DiffResult;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashSet;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -122,21 +122,16 @@ impl StepState {
         Some(change_id)
     }
 
-    fn remove_applied_bulk(&mut self, change_ids: &[usize], keep: Option<usize>) -> usize {
-        let mut removed = 0;
-        for &change_id in change_ids {
-            if Some(change_id) == keep {
-                continue;
-            }
-            if self.applied_changes_set.remove(&change_id) {
-                removed += 1;
-            }
+    fn truncate_applied_to(&mut self, new_len: usize) -> usize {
+        let old_len = self.applied_changes.len();
+        if new_len >= old_len {
+            return 0;
         }
-        if removed > 0 {
-            self.applied_changes
-                .retain(|id| self.applied_changes_set.contains(id));
+        for change_id in &self.applied_changes[new_len..] {
+            self.applied_changes_set.remove(change_id);
         }
-        removed
+        self.applied_changes.truncate(new_len);
+        old_len - new_len
     }
 
     fn clear_applied(&mut self) {
@@ -161,6 +156,8 @@ pub struct DiffNavigator {
     change_id_to_hunk_exact: Vec<Option<usize>>,
     /// Mapping from change ID to change index in the diff
     change_to_index: Vec<Option<usize>>,
+    /// Mapping from change ID to step index (significant_changes order)
+    change_to_step_index: Vec<Option<usize>>,
     /// Skip building full lookup maps for large diffs
     lazy_maps: bool,
     /// Step range (start index, length) per hunk for fast hunk progress
@@ -209,6 +206,12 @@ impl DiffNavigator {
                 *slot = Some(idx);
             }
         }
+        let mut change_to_step_index = vec![None; max_change_id.saturating_add(1)];
+        for (idx, change_id) in diff.significant_changes.iter().enumerate() {
+            if let Some(slot) = change_to_step_index.get_mut(*change_id) {
+                *slot = Some(idx);
+            }
+        }
 
         let mut change_id_to_hunk_exact = vec![None; max_change_id.saturating_add(1)];
         let mut hunk_change_ranges = vec![None; diff.hunks.len()];
@@ -249,10 +252,6 @@ impl DiffNavigator {
             }
         }
 
-        let mut change_to_step = FxHashMap::default();
-        for (idx, change_id) in diff.significant_changes.iter().enumerate() {
-            change_to_step.insert(*change_id, idx);
-        }
         let mut hunk_step_ranges = vec![None; diff.hunks.len()];
         for (hunk_idx, hunk) in diff.hunks.iter().enumerate() {
             if hunk.change_ids.is_empty() {
@@ -261,7 +260,7 @@ impl DiffNavigator {
             let mut min = usize::MAX;
             let mut count = 0usize;
             for change_id in &hunk.change_ids {
-                if let Some(step_idx) = change_to_step.get(change_id) {
+                if let Some(Some(step_idx)) = change_to_step_index.get(*change_id) {
                     if *step_idx < min {
                         min = *step_idx;
                     }
@@ -281,6 +280,7 @@ impl DiffNavigator {
             change_to_hunk,
             change_id_to_hunk_exact,
             change_to_index,
+            change_to_step_index,
             lazy_maps,
             hunk_step_ranges,
             hunk_change_ranges,
@@ -583,24 +583,29 @@ impl DiffNavigator {
             return self.next();
         }
 
-        let hunk = &self.diff.hunks[self.state.current_hunk];
+        let current_hunk_idx = self.state.current_hunk;
+        let hunk_len = self
+            .diff
+            .hunks
+            .get(current_hunk_idx)
+            .map(|hunk| hunk.change_ids.len())
+            .unwrap_or(0);
 
         // If hunk has only one change, stepping down exits the hunk
-        if hunk.change_ids.len() <= 1 {
+        if hunk_len <= 1 {
             self.state.hunk_preview_mode = false;
             // Let normal next() handle moving to next change/hunk
             return self.next();
         }
 
         // Keep only first change, unapply the rest
-        let first_change = hunk.change_ids[0];
-        let second_change = hunk.change_ids[1];
+        let (first_change, second_change) = {
+            let hunk = &self.diff.hunks[current_hunk_idx];
+            (hunk.change_ids[0], hunk.change_ids[1])
+        };
 
         // Remove all changes in this hunk except the first
-        self.state
-            .applied_changes
-            .retain(|&id| !hunk.change_ids.contains(&id) || id == first_change);
-        self.state.rebuild_applied_set();
+        self.remove_applied_bulk_for_hunk(current_hunk_idx, Some(first_change));
 
         // Apply second change
         self.state.push_applied(second_change);
@@ -674,13 +679,12 @@ impl DiffNavigator {
         }
 
         let current_hunk_idx = self.state.current_hunk;
-        let hunk = &self.diff.hunks[current_hunk_idx];
 
         // Set animating hunk for backward fade animation
         self.state.animating_hunk = Some(current_hunk_idx);
 
         // Unapply all changes in this hunk
-        self.state.remove_applied_bulk(&hunk.change_ids, None);
+        self.remove_applied_bulk_for_hunk(current_hunk_idx, None);
 
         // Update current_step to reflect actual applied changes
         self.state.current_step = self.state.applied_changes.len();
@@ -710,6 +714,54 @@ impl DiffNavigator {
         }
         self.state.animating_hunk = None;
         self.state.step_direction = StepDirection::None;
+    }
+
+    fn remove_applied_bulk_for_hunk(&mut self, hunk_idx: usize, keep: Option<usize>) -> usize {
+        let (diff, change_to_step_index, state) =
+            (&self.diff, &self.change_to_step_index, &mut self.state);
+        let Some(hunk) = diff.hunks.get(hunk_idx) else {
+            return 0;
+        };
+
+        let mut min_index: Option<usize> = None;
+        let mut keep_index: Option<usize> = None;
+
+        for &change_id in &hunk.change_ids {
+            if Some(change_id) == keep {
+                keep_index = change_to_step_index
+                    .get(change_id)
+                    .copied()
+                    .flatten();
+                continue;
+            }
+            if !state.is_applied(change_id) {
+                continue;
+            }
+            if let Some(step_idx) = change_to_step_index
+                .get(change_id)
+                .copied()
+                .flatten()
+            {
+                min_index = Some(min_index.map_or(step_idx, |min| min.min(step_idx)));
+            }
+        }
+
+        let new_len = if let Some(keep_id) = keep {
+            let Some(step_idx) = keep_index else {
+                return 0;
+            };
+            if !state.is_applied(keep_id) {
+                return 0;
+            }
+            step_idx + 1
+        } else {
+            let Some(step_idx) = min_index else {
+                return 0;
+            };
+            step_idx
+        };
+
+        state.truncate_applied_to(new_len)
     }
 
     /// Jump to a specific step
@@ -891,13 +943,10 @@ impl DiffNavigator {
 
         // If we have applied changes in current hunk, unapply them
         let current_hunk_idx = self.state.current_hunk;
-        let current_hunk = &self.diff.hunks[current_hunk_idx];
         let mut moved = false;
 
         // Unapply changes from current hunk that are applied
-        let removed = self
-            .state
-            .remove_applied_bulk(&current_hunk.change_ids, None);
+        let removed = self.remove_applied_bulk_for_hunk(current_hunk_idx, None);
         if removed > 0 {
             self.state.current_step = self.state.applied_changes.len();
             moved = true;
@@ -906,16 +955,22 @@ impl DiffNavigator {
         // Set animating hunk for whole-hunk animation (keep pointing at the hunk
         // being removed so is_change_in_animating_hunk returns true during fade)
         self.state.animating_hunk = Some(current_hunk_idx);
-        self.state.active_change = current_hunk.change_ids.first().copied();
+        self.state.active_change = self
+            .diff
+            .hunks
+            .get(current_hunk_idx)
+            .and_then(|hunk| hunk.change_ids.first().copied());
 
         // Move to previous hunk if current is now empty of applied changes
         // (current_hunk tracks cursor position, animating_hunk tracks animation)
         if moved {
             // Check if we should move to previous hunk
-            let still_has_applied = current_hunk
-                .change_ids
-                .iter()
-                .any(|id| self.state.is_applied(*id));
+            let still_has_applied = self
+                .diff
+                .hunks
+                .get(current_hunk_idx)
+                .map(|hunk| hunk.change_ids.iter().any(|id| self.state.is_applied(*id)))
+                .unwrap_or(false);
             if !still_has_applied && self.state.current_hunk > 0 {
                 self.state.current_hunk -= 1;
             }
@@ -989,9 +1044,14 @@ impl DiffNavigator {
             return false;
         }
 
-        let hunk = &self.diff.hunks[self.state.current_hunk];
-        let first_change = match hunk.change_ids.first() {
-            Some(&id) => id,
+        let current_hunk_idx = self.state.current_hunk;
+        let first_change = match self
+            .diff
+            .hunks
+            .get(current_hunk_idx)
+            .and_then(|hunk| hunk.change_ids.first().copied())
+        {
+            Some(id) => id,
             None => return false,
         };
 
@@ -1001,9 +1061,7 @@ impl DiffNavigator {
         }
 
         // Unapply all changes in this hunk except the first
-        let removed = self
-            .state
-            .remove_applied_bulk(&hunk.change_ids, Some(first_change));
+        let removed = self.remove_applied_bulk_for_hunk(current_hunk_idx, Some(first_change));
         let unapplied_any = removed > 0;
         if removed > 0 {
             self.state.current_step = self.state.applied_changes.len();

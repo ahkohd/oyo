@@ -92,6 +92,16 @@ mode = "on"         # "on" or "off"
 theme = "tokyonight"
 ```
 
+Optional warmup budgets for large files:
+
+```toml
+[ui.syntax.warmup]
+active_lines = 100
+pending_lines = 300
+idle_lines = 1000
+debounce_ms = 80
+```
+
 Defaults:
 - If `ui.syntax.theme` is empty, it inherits `ui.theme.name`.
 - If it still can't be resolved, it falls back to `ansi`.

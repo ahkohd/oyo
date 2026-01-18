@@ -35,8 +35,9 @@ cargo run -p oyo --bin oy-profile -- profile.json.gz --report --top 15
 ```
 
 Add `--verbose` to include the full ranked function table with `--report`.
-By default the report treats common poll/sleep functions as idle and excludes
-them from the percent columns. Disable or customize this with:
+By default the report includes idle samples (percent columns are total). To
+exclude idle samples (poll/sleep/etc), pass `--no-idle`. Customize the idle
+matcher with:
 
 ```bash
 cargo run -p oyo --bin oy-profile -- profile.json.gz --report --no-idle

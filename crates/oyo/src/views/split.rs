@@ -213,6 +213,11 @@ pub fn render_split(frame: &mut Frame, app: &mut App, area: Rect) {
     let scroll_offset = app.render_scroll_offset();
     let step_direction = app.multi_diff.current_step_direction();
     let preview_hunk = app.multi_diff.current_navigator().state().current_hunk;
+    let debug_enabled = super::view_debug_enabled();
+    if debug_enabled {
+        crate::syntax::syntax_debug_reset();
+    }
+    app.begin_syntax_warmup_frame();
 
     // Split into two panes
     let chunks = Layout::default()
@@ -226,21 +231,14 @@ pub fn render_split(frame: &mut Frame, app: &mut App, area: Rect) {
     let new_width = chunks[1]
         .width
         .saturating_sub(NEW_GUTTER_WIDTH + NEW_MARKER_WIDTH) as usize;
-    if super::view_debug_enabled() {
-        let extra = format!(
+    let debug_extra = if debug_enabled {
+        Some(format!(
             "split old_width={} new_width={} align_lines={}",
             old_width, new_width, app.split_align_lines
-        );
-        super::maybe_log_view_debug(
-            app,
-            view_lines.as_ref(),
-            "split",
-            visible_height,
-            area.width as usize,
-            scroll_offset,
-            Some(extra),
-        );
-    }
+        ))
+    } else {
+        None
+    };
     let hunk_overflow = if app.line_wrap {
         split_hunk_overflow_wrapped(
             app,
@@ -322,6 +320,19 @@ pub fn render_split(frame: &mut Frame, app: &mut App, area: Rect) {
         show_virtual_new,
         scroll_offset,
     );
+    app.commit_syntax_warmup_frame();
+    if debug_enabled {
+        let extra = super::merge_debug_extra(debug_extra, super::syntax_debug_extra());
+        super::maybe_log_view_debug(
+            app,
+            view_lines.as_ref(),
+            "split",
+            visible_height,
+            area.width as usize,
+            scroll_offset,
+            extra,
+        );
+    }
 }
 
 fn render_old_pane(
@@ -339,6 +350,12 @@ fn render_old_pane(
     let view_lines = app.current_view_with_frame(AnimationFrame::Idle);
     let visible_height = area.height as usize;
     let visible_width = area.width.saturating_sub(GUTTER_WIDTH + 1) as usize; // +1 for border
+    let syntax_window = if app.line_wrap {
+        Some(super::syntax_highlight_window(scroll_offset, visible_height))
+    } else {
+        None
+    };
+    let warmup_window = super::syntax_highlight_window(scroll_offset, visible_height);
     let debug_target = app.syntax_scope_target(&view_lines);
     let mut bg_lines: Option<Vec<Line<'static>>> = if app.line_wrap && app.diff_bg {
         Some(Vec::new())
@@ -650,6 +667,25 @@ fn render_old_pane(
             } else {
                 Some(old_line_num)
             };
+            let (line_display_start, line_display_end) = if app.line_wrap {
+                let wrap_hint = split_old_line_wrap_count(app, view_line, visible_width).max(1);
+                let line_display_start = content_lines.len();
+                let line_display_end =
+                    line_display_start.saturating_add(wrap_hint.saturating_sub(1));
+                (line_display_start, line_display_end)
+            } else {
+                (line_idx, line_idx)
+            };
+            let in_syntax_window = if app.line_wrap {
+                super::in_syntax_window(syntax_window, line_display_start, line_display_end)
+            } else {
+                true
+            };
+            let in_warmup_window = if app.line_wrap {
+                super::in_syntax_window(Some(warmup_window), line_display_start, line_display_end)
+            } else {
+                true
+            };
             // Build content line
             let mut content_spans: Vec<Span<'static>> = Vec::new();
             let mut used_syntax = false;
@@ -677,11 +713,17 @@ fn render_old_pane(
                 let modified_line =
                     matches!(view_line.kind, LineKind::Modified | LineKind::PendingModify);
                 let can_use_diff_syntax = wants_diff_syntax && !modified_line;
-                if app.syntax_enabled()
+                if in_syntax_window
+                    && app.syntax_enabled()
                     && !preview_modified
                     && !view_line.is_active_change
                     && (pure_context || can_use_diff_syntax || in_preview_hunk)
                 {
+                    if in_warmup_window {
+                        if let Some(line_num) = syntax_line_num {
+                            app.record_syntax_warmup_line(SyntaxSide::Old, line_num);
+                        }
+                    }
                     if let Some(spans) = app.syntax_spans_for_line(SyntaxSide::Old, syntax_line_num)
                     {
                         content_spans = spans;
@@ -821,10 +863,11 @@ fn render_old_pane(
             if app.syntax_enabled() {
                 if used_syntax {
                     italic_line = super::line_is_italic(&content_spans);
-                } else if let Some(spans) =
-                    app.syntax_spans_for_line(SyntaxSide::Old, syntax_line_num)
-                {
-                    italic_line = super::line_is_italic(&spans);
+                } else if in_syntax_window {
+                    if let Some(spans) = app.syntax_spans_for_line(SyntaxSide::Old, syntax_line_num)
+                    {
+                        italic_line = super::line_is_italic(&spans);
+                    }
                 }
             }
 
@@ -1119,6 +1162,12 @@ fn render_new_pane(
     let animation_frame = app.animation_frame();
     let view_lines = app.current_view_with_frame(animation_frame);
     let visible_height = area.height as usize;
+    let syntax_window = if app.line_wrap {
+        Some(super::syntax_highlight_window(scroll_offset, visible_height))
+    } else {
+        None
+    };
+    let warmup_window = super::syntax_highlight_window(scroll_offset, visible_height);
     let debug_target = app.syntax_scope_target(&view_lines);
     let mut bg_lines: Option<Vec<Line<'static>>> = if app.line_wrap && app.diff_bg {
         Some(Vec::new())
@@ -1426,6 +1475,25 @@ fn render_new_pane(
             } else {
                 Some(new_line_num)
             };
+            let (line_display_start, line_display_end) = if app.line_wrap {
+                let wrap_hint = split_new_line_wrap_count(app, view_line, visible_width).max(1);
+                let line_display_start = content_lines.len();
+                let line_display_end =
+                    line_display_start.saturating_add(wrap_hint.saturating_sub(1));
+                (line_display_start, line_display_end)
+            } else {
+                (line_idx, line_idx)
+            };
+            let in_syntax_window = if app.line_wrap {
+                super::in_syntax_window(syntax_window, line_display_start, line_display_end)
+            } else {
+                true
+            };
+            let in_warmup_window = if app.line_wrap {
+                super::in_syntax_window(Some(warmup_window), line_display_start, line_display_end)
+            } else {
+                true
+            };
             // Build content line
             let mut content_spans: Vec<Span<'static>> = Vec::new();
             let mut used_syntax = false;
@@ -1453,7 +1521,8 @@ fn render_new_pane(
                 let modified_line =
                     matches!(view_line.kind, LineKind::Modified | LineKind::PendingModify);
                 let can_use_diff_syntax = wants_diff_syntax && !modified_line;
-                if app.syntax_enabled()
+                if in_syntax_window
+                    && app.syntax_enabled()
                     && !preview_modified
                     && !view_line.is_active_change
                     && (pure_context || can_use_diff_syntax || in_preview_hunk)
@@ -1469,6 +1538,11 @@ fn render_new_pane(
                     } else {
                         syntax_line_num
                     };
+                    if in_warmup_window {
+                        if let Some(line_num) = line_num {
+                            app.record_syntax_warmup_line(side, line_num);
+                        }
+                    }
                     if let Some(spans) = app.syntax_spans_for_line(side, line_num) {
                         content_spans = spans;
                         used_syntax = true;
@@ -1596,7 +1670,7 @@ fn render_new_pane(
             if app.syntax_enabled() {
                 if used_syntax {
                     italic_line = super::line_is_italic(&content_spans);
-                } else {
+                } else if in_syntax_window {
                     let use_old = view_line.kind == LineKind::Context && view_line.has_changes;
                     let side = if use_old {
                         SyntaxSide::Old

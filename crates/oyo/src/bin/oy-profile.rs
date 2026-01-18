@@ -9,11 +9,22 @@ use serde_json::Value;
 
 const DEFAULT_IDLE_PATTERNS: &[&str] = &[
     "crossterm::event::poll",
+    "crossterm::event::read",
+    "crossterm::event::source::",
+    "EventSource::try_read",
     "clock_gettime",
+    "epoll_pwait",
     "epoll_wait",
     "kevent",
     "nanosleep",
+    "pselect",
+    "poll",
+    "ppoll",
+    "select",
+    "std::thread::park",
     "std::thread::sleep",
+    "parking_lot::park",
+    "futex",
 ];
 
 #[derive(ValueEnum, Clone, Copy, Debug)]
@@ -65,7 +76,7 @@ struct Args {
     #[arg(long)]
     verbose: bool,
 
-    /// Disable idle classification in reports
+    /// Exclude idle samples from report output
     #[arg(long)]
     no_idle: bool,
 
@@ -214,7 +225,7 @@ fn main() -> Result<()> {
         .ok_or_else(|| anyhow!("profile missing threads array"))?;
 
     let units = sample_units(&profile);
-    let idle_classifier = if args.report && !args.no_idle {
+    let idle_classifier = if args.report && args.no_idle {
         let patterns = if args.idle_pattern.is_empty() {
             DEFAULT_IDLE_PATTERNS
                 .iter()
@@ -750,6 +761,8 @@ fn print_report(
             active_percent
         );
         println!("  percent columns are of active samples");
+    } else {
+        println!("  idle filtering disabled; percent columns are of total samples");
     }
 
     print_hotspots(

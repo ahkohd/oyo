@@ -1093,6 +1093,7 @@ pub enum SyntaxMode {
 pub struct SyntaxConfig {
     pub mode: SyntaxMode,
     pub theme: String,
+    pub warmup: SyntaxWarmupConfig,
 }
 
 impl Default for SyntaxConfig {
@@ -1100,6 +1101,36 @@ impl Default for SyntaxConfig {
         Self {
             mode: SyntaxMode::On,
             theme: String::new(),
+            warmup: SyntaxWarmupConfig::default(),
+        }
+    }
+}
+
+/// Syntax warmup configuration (background checkpointing)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct SyntaxWarmupConfig {
+    /// Lines per tick when actively navigating
+    #[serde(default = "syntax_warmup_active_lines_default")]
+    pub active_lines: usize,
+    /// Lines per tick when waiting on a pending checkpoint
+    #[serde(default = "syntax_warmup_pending_lines_default")]
+    pub pending_lines: usize,
+    /// Lines per tick when idle
+    #[serde(default = "syntax_warmup_idle_lines_default")]
+    pub idle_lines: usize,
+    /// Debounce window (ms) before warming a new viewport target
+    #[serde(default = "syntax_warmup_debounce_ms_default")]
+    pub debounce_ms: u64,
+}
+
+impl Default for SyntaxWarmupConfig {
+    fn default() -> Self {
+        Self {
+            active_lines: syntax_warmup_active_lines_default(),
+            pending_lines: syntax_warmup_pending_lines_default(),
+            idle_lines: syntax_warmup_idle_lines_default(),
+            debounce_ms: syntax_warmup_debounce_ms_default(),
         }
     }
 }
@@ -1112,6 +1143,7 @@ enum SyntaxConfigDef {
         #[serde(default)]
         mode: SyntaxMode,
         theme: Option<String>,
+        warmup: Option<SyntaxWarmupConfig>,
     },
 }
 
@@ -1122,12 +1154,29 @@ impl From<SyntaxConfigDef> for SyntaxConfig {
                 mode,
                 ..Self::default()
             },
-            SyntaxConfigDef::Detailed { mode, theme } => Self {
+            SyntaxConfigDef::Detailed { mode, theme, warmup } => Self {
                 mode,
                 theme: theme.unwrap_or_default(),
+                warmup: warmup.unwrap_or_default(),
             },
         }
     }
+}
+
+fn syntax_warmup_active_lines_default() -> usize {
+    100
+}
+
+fn syntax_warmup_pending_lines_default() -> usize {
+    300
+}
+
+fn syntax_warmup_idle_lines_default() -> usize {
+    1_000
+}
+
+fn syntax_warmup_debounce_ms_default() -> u64 {
+    80
 }
 
 /// Playback configuration

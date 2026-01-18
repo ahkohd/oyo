@@ -256,6 +256,10 @@ fn apply_config_to_app(app: &mut App, config: &config::Config, args: &Args, ligh
     app.blame_hunk_hint_enabled = config.ui.blame.hunk_hint;
     app.syntax_mode = config.ui.syntax.mode;
     app.syntax_theme = config.ui.syntax.theme.clone();
+    app.syntax_warmup_active_lines = config.ui.syntax.warmup.active_lines;
+    app.syntax_warmup_pending_lines = config.ui.syntax.warmup.pending_lines;
+    app.syntax_warmup_idle_lines = config.ui.syntax.warmup.idle_lines;
+    app.syntax_warmup_debounce_ms = config.ui.syntax.warmup.debounce_ms;
     app.unified_modified_step_mode = config.ui.unified.modified_step_mode;
     app.split_align_lines = config.ui.split.align_lines;
     app.split_align_fill = config.ui.split.align_fill.clone();

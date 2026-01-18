@@ -283,6 +283,24 @@ pub struct App {
     pub syntax_mode: SyntaxMode,
     /// Syntax theme selection
     pub syntax_theme: String,
+    /// Syntax warmup budget while actively navigating (lines per tick)
+    pub syntax_warmup_active_lines: usize,
+    /// Syntax warmup budget when waiting on a pending checkpoint (lines per tick)
+    pub syntax_warmup_pending_lines: usize,
+    /// Syntax warmup budget when idle (lines per tick)
+    pub syntax_warmup_idle_lines: usize,
+    /// Syntax warmup debounce window (ms)
+    pub syntax_warmup_debounce_ms: u64,
+    /// Warmup range (old side) accumulated for the current frame
+    syntax_warmup_frame_old: Option<WarmupRange>,
+    /// Warmup range (new side) accumulated for the current frame
+    syntax_warmup_frame_new: Option<WarmupRange>,
+    /// Latest warmup target from the viewport
+    syntax_warmup_target: Option<SyntaxWarmupTarget>,
+    /// Last warmup target applied to the cache
+    syntax_warmup_target_applied: Option<SyntaxWarmupTarget>,
+    /// Timestamp of the last warmup target update
+    syntax_warmup_target_at: Option<Instant>,
     /// Syntax highlighter (lazy initialized)
     syntax_engine: Option<SyntaxEngine>,
     /// Per-file syntax cache (old/new spans)
@@ -403,6 +421,19 @@ struct ViewWindow {
     start: usize,
     end: usize,
     total_len: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct WarmupRange {
+    pub(crate) start: usize,
+    pub(crate) end: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SyntaxWarmupTarget {
+    file_index: usize,
+    old: Option<WarmupRange>,
+    new: Option<WarmupRange>,
 }
 
 impl App {
@@ -530,6 +561,15 @@ impl App {
             evo_syntax: crate::config::EvoSyntaxMode::Context,
             syntax_mode: SyntaxMode::On,
             syntax_theme: "ansi".to_string(),
+            syntax_warmup_active_lines: 100,
+            syntax_warmup_pending_lines: 300,
+            syntax_warmup_idle_lines: 1_000,
+            syntax_warmup_debounce_ms: 80,
+            syntax_warmup_frame_old: None,
+            syntax_warmup_frame_new: None,
+            syntax_warmup_target: None,
+            syntax_warmup_target_applied: None,
+            syntax_warmup_target_at: None,
             syntax_engine: None,
             syntax_caches: vec![None; file_count],
             show_syntax_scopes: false,
@@ -1571,6 +1611,8 @@ impl App {
                 self.last_autoplay_tick = now;
             }
         }
+
+        self.maybe_warm_syntax_cache();
     }
 }
 

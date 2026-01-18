@@ -3,6 +3,7 @@ use super::{display_metrics, AnimationPhase, App, ViewMode};
 use crate::syntax::{SyntaxCache, SyntaxEngine, SyntaxSide};
 use oyo_core::{LineKind, ViewLine};
 use ratatui::text::Span;
+use std::time::Instant;
 
 impl App {
     pub fn syntax_enabled(&self) -> bool {
@@ -13,6 +14,28 @@ impl App {
             crate::config::SyntaxMode::On => true,
             crate::config::SyntaxMode::Off => false,
         }
+    }
+
+    pub(crate) fn syntax_cache_epoch(&self) -> u64 {
+        if !self.syntax_enabled() {
+            return 0;
+        }
+        self.syntax_caches
+            .get(self.multi_diff.selected_index)
+            .and_then(|cache| cache.as_ref())
+            .map(|cache| cache.epoch())
+            .unwrap_or(0)
+    }
+
+    pub(crate) fn syntax_warmup_pending(&self) -> bool {
+        if !self.syntax_enabled() {
+            return false;
+        }
+        self.syntax_caches
+            .get(self.multi_diff.selected_index)
+            .and_then(|cache| cache.as_ref())
+            .map(|cache| cache.warm_pending())
+            .unwrap_or(false)
     }
 
     pub fn syntax_spans_for_line(
@@ -28,13 +51,118 @@ impl App {
             return None;
         }
         let cache = self.ensure_syntax_cache()?;
-        let spans = cache.spans(side, line_num - 1)?;
-        Some(
-            spans
-                .iter()
-                .map(|span| Span::styled(span.text.clone(), span.style))
-                .collect(),
-        )
+        cache.rendered_spans(side, line_num - 1)
+    }
+
+    pub(crate) fn maybe_warm_syntax_cache(&mut self) {
+        if !self.syntax_enabled() {
+            return;
+        }
+        if self.animation_phase != AnimationPhase::Idle || self.snap_frame.is_some() {
+            return;
+        }
+        let idle = self.diff_last_input.elapsed().as_millis();
+        let idle_threshold = self.diff_idle_ms as u128;
+        let debounce = self.syntax_warmup_debounce_ms;
+        let active_lines = self.syntax_warmup_active_lines;
+        let pending_lines = self.syntax_warmup_pending_lines;
+        let idle_lines = self.syntax_warmup_idle_lines;
+
+        let now = Instant::now();
+        let target_ready = self
+            .syntax_warmup_target_at
+            .map(|at| now.duration_since(at).as_millis() >= debounce as u128)
+            .unwrap_or(true);
+        if self.syntax_warmup_target.is_some() && !target_ready {
+            return;
+        }
+        let target = if target_ready {
+            self.syntax_warmup_target
+        } else {
+            None
+        };
+        let target_applied = self.syntax_warmup_target_applied;
+        let current_index = self.multi_diff.selected_index;
+
+        let (apply_target, clear_target) = {
+            let Some(cache) = self.ensure_syntax_cache() else {
+                return;
+            };
+
+            let mut apply_target = None;
+            let mut clear_target = false;
+            if let Some(target) = target {
+                if target.file_index == current_index {
+                    if target_applied != Some(target) {
+                        cache.set_warmup_targets(target.old, target.new);
+                        apply_target = Some(target);
+                    }
+                } else {
+                    clear_target = true;
+                }
+            }
+
+            let warm_pending = cache.warm_pending();
+            if idle < idle_threshold && !warm_pending {
+                return;
+            }
+            let budget = if idle >= idle_threshold {
+                idle_lines
+            } else if warm_pending {
+                pending_lines
+            } else {
+                active_lines
+            };
+            let _ = cache.warm_checkpoints(budget);
+            (apply_target, clear_target)
+        };
+
+        if clear_target {
+            self.syntax_warmup_target = None;
+            self.syntax_warmup_target_applied = None;
+        }
+        if let Some(target) = apply_target {
+            self.syntax_warmup_target_applied = Some(target);
+        }
+        if target_ready && self.syntax_warmup_target.is_some() {
+            self.syntax_warmup_target_at = None;
+        }
+    }
+
+    pub(crate) fn begin_syntax_warmup_frame(&mut self) {
+        self.syntax_warmup_frame_old = None;
+        self.syntax_warmup_frame_new = None;
+    }
+
+    pub(crate) fn record_syntax_warmup_line(&mut self, side: SyntaxSide, line_num: usize) {
+        if line_num == 0 {
+            return;
+        }
+        let line_idx = line_num.saturating_sub(1);
+        match side {
+            SyntaxSide::Old => update_warmup_range(&mut self.syntax_warmup_frame_old, line_idx),
+            SyntaxSide::New => update_warmup_range(&mut self.syntax_warmup_frame_new, line_idx),
+        }
+    }
+
+    pub(crate) fn commit_syntax_warmup_frame(&mut self) {
+        if !self.syntax_enabled() {
+            return;
+        }
+        let old = self.syntax_warmup_frame_old;
+        let new = self.syntax_warmup_frame_new;
+        if old.is_none() && new.is_none() {
+            return;
+        }
+        let target = super::SyntaxWarmupTarget {
+            file_index: self.multi_diff.selected_index,
+            old,
+            new,
+        };
+        if self.syntax_warmup_target != Some(target) {
+            self.syntax_warmup_target = Some(target);
+            self.syntax_warmup_target_at = Some(Instant::now());
+        }
     }
 
     pub fn syntax_scope_target(&mut self, view: &[ViewLine]) -> Option<(usize, String)> {
@@ -193,6 +321,21 @@ impl App {
                     old_line.map(|line_num| (SyntaxSide::Old, line_num))
                 }
             }
+        }
+    }
+}
+
+fn update_warmup_range(range: &mut Option<super::WarmupRange>, line_idx: usize) {
+    match range {
+        Some(existing) => {
+            existing.start = existing.start.min(line_idx);
+            existing.end = existing.end.max(line_idx);
+        }
+        None => {
+            *range = Some(super::WarmupRange {
+                start: line_idx,
+                end: line_idx,
+            });
         }
     }
 }

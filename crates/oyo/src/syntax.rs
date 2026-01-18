@@ -2,10 +2,13 @@
 
 use crate::config::Config;
 use ratatui::style::{Color as TuiColor, Modifier, Style};
+use ratatui::text::Span;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::OnceLock;
 use syntect::{
     easy::HighlightLines,
     highlighting::{Color, FontStyle, Style as SynStyle, Theme, ThemeSet},
@@ -25,16 +28,33 @@ pub struct SyntaxSpan {
     pub style: Style,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct SyntaxDebugStats {
+    pub(crate) requests: usize,
+    pub(crate) rendered_hits: usize,
+    pub(crate) rendered_misses: usize,
+    pub(crate) highlight_lines: usize,
+    pub(crate) cached_lines: usize,
+    pub(crate) warm_lines: usize,
+}
+
 #[derive(Clone, Debug)]
 pub struct SyntaxCache {
     old: SyntaxStore,
     new: SyntaxStore,
+    epoch: u64,
 }
 
 #[derive(Clone, Debug)]
 enum SyntaxStore {
-    Full(Vec<Vec<SyntaxSpan>>),
+    Full(FullSyntaxCache),
     Lazy(LazySyntaxCache),
+}
+
+#[derive(Clone, Debug)]
+struct FullSyntaxCache {
+    lines: Vec<Vec<SyntaxSpan>>,
+    rendered: Vec<Option<Vec<Span<'static>>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -44,18 +64,54 @@ struct LazySyntaxCache {
     plain: TuiColor,
     lines: Vec<String>,
     spans: Vec<Option<Vec<SyntaxSpan>>>,
+    rendered: Vec<Option<Vec<Span<'static>>>>,
     checkpoints: Vec<Option<(syntect::highlighting::HighlightState, ParseState)>>,
     chunk_states: Vec<Option<ChunkProgress>>,
+    warm_progress: Option<WarmProgress>,
     stride: usize,
 }
 
 const MAX_LAZY_SYNTAX_BYTES: usize = 512 * 1024;
 const SYNTAX_CHECKPOINT_STRIDE: usize = 200;
+#[cfg(test)]
+const MAX_SYNC_SYNTAX_LINES: usize = 200;
+#[cfg(not(test))]
+const MAX_SYNC_SYNTAX_LINES: usize = 5_000;
 
 #[derive(Clone, Debug)]
 struct ChunkProgress {
     next_line: usize,
     state: (syntect::highlighting::HighlightState, ParseState),
+}
+
+#[derive(Clone, Debug)]
+struct WarmProgress {
+    next_line: usize,
+    next_chunk: usize,
+    target_chunk: usize,
+    state: (syntect::highlighting::HighlightState, ParseState),
+}
+
+struct SyntaxDebugCounters {
+    requests: AtomicUsize,
+    rendered_hits: AtomicUsize,
+    rendered_misses: AtomicUsize,
+    highlight_lines: AtomicUsize,
+    cached_lines: AtomicUsize,
+    warm_lines: AtomicUsize,
+}
+
+impl Default for SyntaxDebugCounters {
+    fn default() -> Self {
+        Self {
+            requests: AtomicUsize::new(0),
+            rendered_hits: AtomicUsize::new(0),
+            rendered_misses: AtomicUsize::new(0),
+            highlight_lines: AtomicUsize::new(0),
+            cached_lines: AtomicUsize::new(0),
+            warm_lines: AtomicUsize::new(0),
+        }
+    }
 }
 
 struct EmbeddedTmTheme {
@@ -688,28 +744,131 @@ impl SyntaxCache {
             Self {
                 old: SyntaxStore::Lazy(old),
                 new: SyntaxStore::Lazy(new),
+                epoch: 0,
             }
         } else {
             let old = engine.highlight(old, file_name);
             let new = engine.highlight(new, file_name);
             Self {
-                old: SyntaxStore::Full(old),
-                new: SyntaxStore::Full(new),
+                old: SyntaxStore::Full(FullSyntaxCache {
+                    rendered: vec![None; old.len()],
+                    lines: old,
+                }),
+                new: SyntaxStore::Full(FullSyntaxCache {
+                    rendered: vec![None; new.len()],
+                    lines: new,
+                }),
+                epoch: 0,
             }
         }
     }
 
-    pub fn spans(&mut self, side: SyntaxSide, line_index: usize) -> Option<&[SyntaxSpan]> {
+    pub fn rendered_spans(&mut self, side: SyntaxSide, line_index: usize) -> Option<Vec<Span<'static>>> {
+        syntax_debug_request();
         match side {
-            SyntaxSide::Old => match &mut self.old {
-                SyntaxStore::Full(lines) => lines.get(line_index).map(|v| v.as_slice()),
-                SyntaxStore::Lazy(cache) => cache.spans(line_index),
-            },
-            SyntaxSide::New => match &mut self.new {
-                SyntaxStore::Full(lines) => lines.get(line_index).map(|v| v.as_slice()),
-                SyntaxStore::Lazy(cache) => cache.spans(line_index),
-            },
+            SyntaxSide::Old => rendered_spans_for_store(&mut self.old, line_index),
+            SyntaxSide::New => rendered_spans_for_store(&mut self.new, line_index),
         }
+    }
+
+    pub(crate) fn warm_checkpoints(&mut self, max_lines: usize) -> usize {
+        if max_lines == 0 {
+            return 0;
+        }
+        let new_pending_before = warm_pending_for_store(&self.new);
+        let old_pending_before = warm_pending_for_store(&self.old);
+        let mut remaining = max_lines;
+        if new_pending_before || old_pending_before {
+            if new_pending_before {
+                remaining =
+                    remaining.saturating_sub(warm_checkpoints_for_store(&mut self.new, remaining));
+            }
+            if old_pending_before {
+                remaining =
+                    remaining.saturating_sub(warm_checkpoints_for_store(&mut self.old, remaining));
+            }
+        } else {
+            remaining = remaining.saturating_sub(warm_checkpoints_for_store(&mut self.new, remaining));
+            remaining = remaining.saturating_sub(warm_checkpoints_for_store(&mut self.old, remaining));
+        }
+        if new_pending_before && !warm_pending_for_store(&self.new) {
+            self.bump_epoch();
+        }
+        if old_pending_before && !warm_pending_for_store(&self.old) {
+            self.bump_epoch();
+        }
+        max_lines - remaining
+    }
+
+    pub(crate) fn warm_pending(&self) -> bool {
+        warm_pending_for_store(&self.old) || warm_pending_for_store(&self.new)
+    }
+
+    pub(crate) fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    fn bump_epoch(&mut self) {
+        self.epoch = self.epoch.wrapping_add(1);
+    }
+
+    pub(crate) fn set_warmup_targets(
+        &mut self,
+        old: Option<crate::app::WarmupRange>,
+        new: Option<crate::app::WarmupRange>,
+    ) {
+        set_warmup_target_for_store(&mut self.old, old);
+        set_warmup_target_for_store(&mut self.new, new);
+    }
+}
+
+fn rendered_spans_for_store(
+    store: &mut SyntaxStore,
+    line_index: usize,
+) -> Option<Vec<Span<'static>>> {
+    match store {
+        SyntaxStore::Full(cache) => {
+            if line_index >= cache.lines.len() {
+                return None;
+            }
+            if let Some(rendered) = cache.rendered.get(line_index).and_then(|v| v.as_ref()) {
+                syntax_debug_rendered_hit();
+                return Some(rendered.clone());
+            }
+            syntax_debug_rendered_miss();
+            let spans = cache.lines.get(line_index)?;
+            let rendered = syntax_spans_to_ratatui(spans);
+            cache.rendered[line_index] = Some(rendered.clone());
+            Some(rendered)
+        }
+        SyntaxStore::Lazy(cache) => cache.rendered_spans(line_index),
+    }
+}
+
+fn warm_checkpoints_for_store(store: &mut SyntaxStore, max_lines: usize) -> usize {
+    match store {
+        SyntaxStore::Full(_) => 0,
+        SyntaxStore::Lazy(cache) => cache.warm_checkpoints(max_lines),
+    }
+}
+
+fn warm_pending_for_store(store: &SyntaxStore) -> bool {
+    match store {
+        SyntaxStore::Full(_) => false,
+        SyntaxStore::Lazy(cache) => cache.warm_pending(),
+    }
+}
+
+fn set_warmup_target_for_store(
+    store: &mut SyntaxStore,
+    range: Option<crate::app::WarmupRange>,
+) {
+    match store {
+        SyntaxStore::Full(_) => {}
+        SyntaxStore::Lazy(cache) => match range {
+            Some(range) => cache.set_warmup_target(range.start, range.end),
+            None => cache.clear_warmup_target(),
+        },
     }
 }
 
@@ -740,9 +899,11 @@ impl LazySyntaxCache {
             theme: engine.theme_arc(),
             plain: engine.plain(),
             spans: vec![None; lines.len()],
+            rendered: vec![None; lines.len()],
             lines,
             checkpoints,
             chunk_states: vec![None; checkpoint_len],
+            warm_progress: None,
             stride,
         }
     }
@@ -787,6 +948,11 @@ impl LazySyntaxCache {
 
         let lines = &self.lines;
         let spans = &mut self.spans;
+        let to_process = line_index.saturating_sub(next_line).saturating_add(1);
+        if to_process > 0 {
+            syntax_debug_highlight_lines(to_process);
+            syntax_debug_cached_lines(to_process);
+        }
         for idx in next_line..=line_index {
             let line = &lines[idx];
             let ranges = highlighter
@@ -804,6 +970,141 @@ impl LazySyntaxCache {
         }
 
         self.spans.get(line_index).and_then(|s| s.as_deref())
+    }
+
+    fn rendered_spans(&mut self, line_index: usize) -> Option<Vec<Span<'static>>> {
+        if line_index >= self.lines.len() {
+            return None;
+        }
+        if let Some(rendered) = self.rendered.get(line_index).and_then(|v| v.as_ref()) {
+            syntax_debug_rendered_hit();
+            return Some(rendered.clone());
+        }
+        syntax_debug_rendered_miss();
+        let spans = self.spans(line_index)?;
+        let rendered = syntax_spans_to_ratatui(spans);
+        self.rendered[line_index] = Some(rendered.clone());
+        Some(rendered)
+    }
+
+    fn warm_checkpoints(&mut self, max_lines: usize) -> usize {
+        if max_lines == 0 || self.checkpoints.len() <= 1 {
+            return 0;
+        }
+        let mut progress = self.warm_progress.take();
+        if progress.is_none() {
+            let Some(state) = self.checkpoints.get(0).and_then(|c| c.clone()) else {
+                return 0;
+            };
+            progress = Some(WarmProgress {
+                next_line: 0,
+                next_chunk: 1,
+                target_chunk: self.checkpoints.len().saturating_sub(1),
+                state,
+            });
+        }
+        let mut progress = progress.expect("warm progress");
+        let target_chunk = progress
+            .target_chunk
+            .min(self.checkpoints.len().saturating_sub(1));
+        if progress.next_chunk > target_chunk {
+            self.warm_progress = None;
+            return 0;
+        }
+
+        while progress.next_chunk <= target_chunk {
+            let Some(state) = self.checkpoints.get(progress.next_chunk).and_then(|c| c.clone())
+            else {
+                break;
+            };
+            progress.state = state;
+            progress.next_line = progress.next_chunk.saturating_mul(self.stride);
+            progress.next_chunk += 1;
+        }
+        if progress.next_chunk > target_chunk {
+            self.warm_progress = None;
+            return 0;
+        }
+
+        let mut highlighter =
+            HighlightLines::from_state(self.theme.as_ref(), progress.state.0, progress.state.1);
+        let mut processed = 0usize;
+        let line_len = self.lines.len();
+
+        while processed < max_lines && progress.next_chunk <= target_chunk {
+            let chunk_end = (progress.next_chunk * self.stride).min(line_len);
+            if progress.next_line >= chunk_end {
+                let (highlight_state, parse_state) = highlighter.state();
+                if let Some(slot) = self.checkpoints.get_mut(progress.next_chunk) {
+                    *slot = Some((highlight_state.clone(), parse_state.clone()));
+                }
+                highlighter =
+                    HighlightLines::from_state(self.theme.as_ref(), highlight_state, parse_state);
+                progress.next_chunk += 1;
+                progress.next_line = chunk_end;
+                continue;
+            }
+
+            let line = &self.lines[progress.next_line];
+            let _ = highlighter.highlight_line(line, &self.syntax_set);
+            progress.next_line = progress.next_line.saturating_add(1);
+            processed += 1;
+        }
+
+        progress.state = highlighter.state();
+        if progress.next_chunk > target_chunk {
+            self.warm_progress = None;
+        } else {
+            self.warm_progress = Some(progress);
+        }
+        syntax_debug_warm_lines(processed);
+        processed
+    }
+
+    fn warm_pending(&self) -> bool {
+        self.warm_progress.is_some()
+    }
+
+    fn clear_warmup_target(&mut self) {
+        self.warm_progress = None;
+    }
+
+    fn set_warmup_target(&mut self, start: usize, end: usize) {
+        if self.checkpoints.is_empty() || self.lines.is_empty() {
+            return;
+        }
+        let last_line = self.lines.len().saturating_sub(1);
+        let mut start = start.min(last_line);
+        let mut end = end.min(last_line);
+        if start > end {
+            std::mem::swap(&mut start, &mut end);
+        }
+        let target_chunk = end / self.stride;
+        if target_chunk >= self.checkpoints.len() {
+            return;
+        }
+        if self.checkpoints[target_chunk].is_some() {
+            self.warm_progress = None;
+            return;
+        }
+        let mut start_chunk = start / self.stride;
+        while start_chunk > 0 && self.checkpoints[start_chunk].is_none() {
+            start_chunk = start_chunk.saturating_sub(1);
+        }
+        let Some(state) = self.checkpoints.get(start_chunk).and_then(|c| c.clone()) else {
+            return;
+        };
+        if let Some(existing) = self.warm_progress.as_ref() {
+            if existing.target_chunk == target_chunk {
+                return;
+            }
+        }
+        self.warm_progress = Some(WarmProgress {
+            next_line: start_chunk * self.stride,
+            next_chunk: start_chunk.saturating_add(1),
+            target_chunk,
+            state,
+        });
     }
 
     fn ensure_checkpoint(
@@ -828,11 +1129,26 @@ impl LazySyntaxCache {
             start_chunk = start_chunk.saturating_sub(1);
         }
         let state = self.checkpoints.get(start_chunk).and_then(|c| c.clone())?;
-        let mut highlighter = HighlightLines::from_state(self.theme.as_ref(), state.0, state.1);
         let mut line_idx = start_chunk * self.stride;
+        let chunk_start = (chunk * self.stride).min(self.lines.len());
+        let lines_to_process = chunk_start.saturating_sub(line_idx);
+        if lines_to_process > MAX_SYNC_SYNTAX_LINES {
+            self.warm_progress = Some(WarmProgress {
+                next_line: line_idx,
+                next_chunk: start_chunk.saturating_add(1),
+                target_chunk: chunk,
+                state,
+            });
+            return None;
+        }
+        let mut highlighter = HighlightLines::from_state(self.theme.as_ref(), state.0, state.1);
 
         for next_chunk in (start_chunk + 1)..=chunk {
             let chunk_end = (next_chunk * self.stride).min(self.lines.len());
+            let checkpoint_lines = chunk_end.saturating_sub(line_idx);
+            if checkpoint_lines > 0 {
+                syntax_debug_highlight_lines(checkpoint_lines);
+            }
             for idx in line_idx..chunk_end {
                 let line = &self.lines[idx];
                 let _ = highlighter.highlight_line(line, &self.syntax_set);
@@ -872,6 +1188,100 @@ fn ranges_to_spans(ranges: Vec<(SynStyle, &str)>, plain: TuiColor) -> Vec<Syntax
         });
     }
     spans
+}
+
+fn syntax_spans_to_ratatui(spans: &[SyntaxSpan]) -> Vec<Span<'static>> {
+    spans
+        .iter()
+        .map(|span| Span::styled(span.text.clone(), span.style))
+        .collect()
+}
+
+fn syntax_debug_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("OYO_DEBUG_VIEW").is_some())
+}
+
+fn syntax_debug_counters() -> &'static SyntaxDebugCounters {
+    static COUNTERS: OnceLock<SyntaxDebugCounters> = OnceLock::new();
+    COUNTERS.get_or_init(SyntaxDebugCounters::default)
+}
+
+pub(crate) fn syntax_debug_reset() {
+    if !syntax_debug_enabled() {
+        return;
+    }
+    let counters = syntax_debug_counters();
+    counters.requests.store(0, Ordering::Relaxed);
+    counters.rendered_hits.store(0, Ordering::Relaxed);
+    counters.rendered_misses.store(0, Ordering::Relaxed);
+    counters.highlight_lines.store(0, Ordering::Relaxed);
+    counters.cached_lines.store(0, Ordering::Relaxed);
+}
+
+pub(crate) fn syntax_debug_stats() -> Option<SyntaxDebugStats> {
+    if !syntax_debug_enabled() {
+        return None;
+    }
+    let counters = syntax_debug_counters();
+    Some(SyntaxDebugStats {
+        requests: counters.requests.load(Ordering::Relaxed),
+        rendered_hits: counters.rendered_hits.load(Ordering::Relaxed),
+        rendered_misses: counters.rendered_misses.load(Ordering::Relaxed),
+        highlight_lines: counters.highlight_lines.load(Ordering::Relaxed),
+        cached_lines: counters.cached_lines.load(Ordering::Relaxed),
+        warm_lines: counters.warm_lines.swap(0, Ordering::Relaxed),
+    })
+}
+
+fn syntax_debug_request() {
+    if !syntax_debug_enabled() {
+        return;
+    }
+    let counters = syntax_debug_counters();
+    counters.requests.fetch_add(1, Ordering::Relaxed);
+}
+
+fn syntax_debug_rendered_hit() {
+    if !syntax_debug_enabled() {
+        return;
+    }
+    let counters = syntax_debug_counters();
+    counters.rendered_hits.fetch_add(1, Ordering::Relaxed);
+}
+
+fn syntax_debug_rendered_miss() {
+    if !syntax_debug_enabled() {
+        return;
+    }
+    let counters = syntax_debug_counters();
+    counters.rendered_misses.fetch_add(1, Ordering::Relaxed);
+}
+
+fn syntax_debug_highlight_lines(count: usize) {
+    if count == 0 || !syntax_debug_enabled() {
+        return;
+    }
+    let counters = syntax_debug_counters();
+    counters
+        .highlight_lines
+        .fetch_add(count, Ordering::Relaxed);
+}
+
+fn syntax_debug_cached_lines(count: usize) {
+    if count == 0 || !syntax_debug_enabled() {
+        return;
+    }
+    let counters = syntax_debug_counters();
+    counters.cached_lines.fetch_add(count, Ordering::Relaxed);
+}
+
+fn syntax_debug_warm_lines(count: usize) {
+    if count == 0 || !syntax_debug_enabled() {
+        return;
+    }
+    let counters = syntax_debug_counters();
+    counters.warm_lines.fetch_add(count, Ordering::Relaxed);
 }
 
 fn syntect_style_to_tui(style: SynStyle) -> Style {
@@ -1035,12 +1445,93 @@ mod tests {
         }
         let mut cache = LazySyntaxCache::new(&engine, &content, "sample.rs");
 
+        let _ = cache.warm_checkpoints(1_000);
         let _ = cache.spans(450).expect("expected spans for line 450");
 
         assert!(cache.spans[0].is_none());
         assert!(cache.spans[199].is_none());
         assert!(cache.spans[399].is_none());
         assert!(cache.spans[400].is_some());
+    }
+
+    #[test]
+    fn lazy_cache_rendered_spans_cache_single_line() {
+        let engine = SyntaxEngine::new("aura", false);
+        let content = "alpha\nbeta\ngamma\n";
+        let mut cache = LazySyntaxCache::new(&engine, content, "sample.rs");
+
+        assert!(cache.rendered[0].is_none());
+        let spans = cache.rendered_spans(0).expect("expected rendered spans");
+        assert!(!spans.is_empty());
+        assert!(cache.rendered[0].is_some());
+        assert!(cache.rendered[1].is_none());
+    }
+
+    #[test]
+    fn lazy_cache_warmup_fills_checkpoints_without_spans() {
+        let engine = SyntaxEngine::new("aura", false);
+        let mut content = String::new();
+        for idx in 0..450 {
+            content.push_str(&format!("line {idx}\n"));
+        }
+        let mut cache = LazySyntaxCache::new(&engine, &content, "sample.rs");
+
+        assert!(cache.checkpoints.get(1).and_then(|c| c.as_ref()).is_none());
+        let processed = cache.warm_checkpoints(300);
+        assert!(processed > 0);
+        assert!(cache.checkpoints.get(1).and_then(|c| c.as_ref()).is_some());
+        assert!(cache.spans[0].is_none());
+        assert!(cache.rendered[0].is_none());
+    }
+
+    #[test]
+    fn lazy_cache_warmup_progresses_across_calls() {
+        let engine = SyntaxEngine::new("aura", false);
+        let mut content = String::new();
+        for idx in 0..260 {
+            content.push_str(&format!("line {idx}\n"));
+        }
+        let mut cache = LazySyntaxCache::new(&engine, &content, "sample.rs");
+
+        let processed = cache.warm_checkpoints(50);
+        assert!(processed > 0);
+        assert!(cache.checkpoints.get(1).and_then(|c| c.as_ref()).is_none());
+
+        let _ = cache.warm_checkpoints(200);
+        assert!(cache.checkpoints.get(1).and_then(|c| c.as_ref()).is_some());
+    }
+
+    #[test]
+    fn lazy_cache_defers_large_checkpoint_and_warms() {
+        let engine = SyntaxEngine::new("aura", false);
+        let mut content = String::new();
+        for idx in 0..600 {
+            content.push_str(&format!("line {idx}\n"));
+        }
+        let mut cache = LazySyntaxCache::new(&engine, &content, "sample.rs");
+
+        assert!(cache.spans(450).is_none());
+        for _ in 0..20 {
+            let _ = cache.warm_checkpoints(200);
+        }
+        assert!(cache.spans(450).is_some());
+    }
+
+    #[test]
+    fn lazy_cache_warmup_target_prioritizes_range() {
+        let engine = SyntaxEngine::new("aura", false);
+        let mut content = String::new();
+        for idx in 0..800 {
+            content.push_str(&format!("line {idx}\n"));
+        }
+        let mut cache = LazySyntaxCache::new(&engine, &content, "sample.rs");
+
+        cache.set_warmup_target(600, 650);
+        for _ in 0..20 {
+            let _ = cache.warm_checkpoints(200);
+        }
+
+        assert!(cache.spans(650).is_some());
     }
 }
 

@@ -204,6 +204,7 @@ pub(crate) struct UnifiedRenderKey {
     pub(crate) syntax_mode: SyntaxMode,
     pub(crate) syntax_theme: String,
     pub(crate) theme_is_light: bool,
+    pub(crate) syntax_epoch: u64,
     pub(crate) step_edge_hint: bool,
     pub(crate) hunk_edge_hint: bool,
     pub(crate) blame_hunk_hint: Option<String>,

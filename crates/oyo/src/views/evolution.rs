@@ -83,16 +83,9 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
         .set_show_hunk_extent_while_stepping(show_extent);
     let view_lines = app.current_view_with_frame(animation_frame);
     let scroll_offset = app.render_scroll_offset();
-    if super::view_debug_enabled() {
-        super::maybe_log_view_debug(
-            app,
-            view_lines.as_ref(),
-            "evolution",
-            visible_height,
-            visible_width,
-            scroll_offset,
-            None,
-        );
+    let debug_enabled = super::view_debug_enabled();
+    if debug_enabled {
+        crate::syntax::syntax_debug_reset();
     }
     let step_direction = app.multi_diff.current_step_direction();
     let mut display_len = 0usize;
@@ -179,6 +172,13 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
     let mut display_line_num = 0usize;
     let mut max_line_width: usize = 0;
     let wrap_width = visible_width;
+    let syntax_window = if app.line_wrap {
+        Some(super::syntax_highlight_window(scroll_offset, visible_height))
+    } else {
+        None
+    };
+    let warmup_window = super::syntax_highlight_window(scroll_offset, visible_height);
+    app.begin_syntax_warmup_frame();
     let mut primary_display_idx: Option<usize> = None;
     let mut active_display_idx: Option<usize> = None;
     let hunk_preview_mode = app.multi_diff.current_navigator().state().hunk_preview_mode;
@@ -487,7 +487,27 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
         // Build content line (scrollable)
         let mut content_spans: Vec<Span<'static>> = Vec::new();
         let mut used_syntax = false;
-        let allow_syntax = app.syntax_enabled()
+        let (line_display_start, line_display_end) = if app.line_wrap {
+            let text = view_spans_to_text(&view_line.spans);
+            let wrap_hint = wrap_count_for_text(&text, wrap_width).max(1);
+            let line_display_start = display_len;
+            let line_display_end = line_display_start.saturating_add(wrap_hint.saturating_sub(1));
+            (line_display_start, line_display_end)
+        } else {
+            (display_line_num, display_line_num)
+        };
+        let in_syntax_window = if app.line_wrap {
+            super::in_syntax_window(syntax_window, line_display_start, line_display_end)
+        } else {
+            true
+        };
+        let in_warmup_window = if app.line_wrap {
+            super::in_syntax_window(Some(warmup_window), line_display_start, line_display_end)
+        } else {
+            true
+        };
+        let allow_syntax = in_syntax_window
+            && app.syntax_enabled()
             && match app.evo_syntax {
                 crate::config::EvoSyntaxMode::Context => !view_line.has_changes,
                 crate::config::EvoSyntaxMode::Full => !view_line.is_active_change,
@@ -512,6 +532,11 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
                 view_line.new_line.or(view_line.old_line)
             };
             let line_num = line_num.filter(|num| *num > 0);
+            if in_warmup_window {
+                if let Some(line_num) = line_num {
+                    app.record_syntax_warmup_line(side, line_num);
+                }
+            }
             if let Some(spans) = app.syntax_spans_for_line(side, line_num) {
                 content_spans = spans;
                 used_syntax = true;
@@ -780,6 +805,8 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
         }
     }
 
+    app.commit_syntax_warmup_frame();
+
     if app.line_wrap {
         app.ensure_active_visible_if_needed_wrapped(
             visible_height,
@@ -794,6 +821,18 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
     app.clamp_horizontal_scroll(max_line_width, visible_width);
 
     app.set_current_max_line_width(max_line_width);
+    if debug_enabled {
+        let extra = super::syntax_debug_extra();
+        super::maybe_log_view_debug(
+            app,
+            view_lines.as_ref(),
+            "evolution",
+            visible_height,
+            visible_width,
+            scroll_offset,
+            extra,
+        );
+    }
 
     // Background style (if set)
     let bg_style = app.theme.background.map(|bg| Style::default().bg(bg));

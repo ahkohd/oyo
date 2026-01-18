@@ -43,6 +43,53 @@ pub(crate) fn view_spans_to_text(spans: &[ViewSpan]) -> String {
     out
 }
 
+pub(crate) fn syntax_debug_extra() -> Option<String> {
+    let stats = crate::syntax::syntax_debug_stats()?;
+    Some(format!(
+        "syntax requests={} rendered_hit={} rendered_miss={} highlight_lines={} cached_lines={} warm_lines={}",
+        stats.requests,
+        stats.rendered_hits,
+        stats.rendered_misses,
+        stats.highlight_lines,
+        stats.cached_lines,
+        stats.warm_lines
+    ))
+}
+
+pub(crate) fn merge_debug_extra(base: Option<String>, extra: Option<String>) -> Option<String> {
+    match (base, extra) {
+        (Some(mut base), Some(extra)) => {
+            base.push(' ');
+            base.push_str(&extra);
+            Some(base)
+        }
+        (Some(base), None) => Some(base),
+        (None, Some(extra)) => Some(extra),
+        (None, None) => None,
+    }
+}
+
+pub(crate) fn syntax_highlight_window(
+    scroll_offset: usize,
+    visible_height: usize,
+) -> (usize, usize) {
+    let pad = (visible_height / 3).max(8).min(32);
+    let start = scroll_offset.saturating_sub(pad);
+    let end = scroll_offset.saturating_add(visible_height + pad);
+    (start, end)
+}
+
+pub(crate) fn in_syntax_window(
+    window: Option<(usize, usize)>,
+    line_start: usize,
+    line_end: usize,
+) -> bool {
+    match window {
+        Some((start, end)) => line_end >= start && line_start < end,
+        None => true,
+    }
+}
+
 pub(crate) fn spans_width(spans: &[Span]) -> usize {
     spans
         .iter()

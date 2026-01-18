@@ -311,6 +311,7 @@ fn unified_render_key(
         syntax_mode: app.syntax_mode,
         syntax_theme: app.syntax_theme.clone(),
         theme_is_light: app.theme_is_light,
+        syntax_epoch: app.syntax_cache_epoch(),
         step_edge_hint: app.step_edge_hint_active(),
         hunk_edge_hint: app.hunk_edge_hint_active(),
         blame_hunk_hint: app.blame_hunk_hint_text().map(|text| text.to_string()),
@@ -344,6 +345,13 @@ fn build_unified_render_model(
     let mut content_lines: Vec<Line> = Vec::new();
     let mut max_line_width: usize = 0;
     let wrap_width = visible_width;
+    let syntax_window = if app.line_wrap {
+        Some(super::syntax_highlight_window(scroll_offset, visible_height))
+    } else {
+        None
+    };
+    let warmup_window = super::syntax_highlight_window(scroll_offset, visible_height);
+    app.begin_syntax_warmup_frame();
     let mut display_len = if app.line_wrap {
         0
     } else {
@@ -740,9 +748,29 @@ fn build_unified_render_model(
         let can_use_diff_syntax = wants_diff_syntax
             && !has_peek
             && !matches!(view_line.kind, LineKind::Modified | LineKind::PendingModify);
+        let (line_display_start, line_display_end) = if app.line_wrap {
+            let text = super::view_spans_to_text(&view_line.spans);
+            let wrap_hint = wrap_count_for_text(&text, wrap_width).max(1);
+            let line_display_start = display_len;
+            let line_display_end = line_display_start.saturating_add(wrap_hint.saturating_sub(1));
+            (line_display_start, line_display_end)
+        } else {
+            (idx, idx)
+        };
+        let in_syntax_window = if app.line_wrap {
+            super::in_syntax_window(syntax_window, line_display_start, line_display_end)
+        } else {
+            true
+        };
+        let in_warmup_window = if app.line_wrap {
+            super::in_syntax_window(Some(warmup_window), line_display_start, line_display_end)
+        } else {
+            true
+        };
         if !used_inline_modified
             && app.syntax_enabled()
             && !view_line.is_active_change
+            && in_syntax_window
             && (pure_context || can_use_diff_syntax || in_preview_hunk)
         {
             let use_old = view_line.kind == LineKind::Context && view_line.has_changes;
@@ -758,6 +786,11 @@ fn build_unified_render_model(
             } else {
                 view_line.new_line.or(view_line.old_line)
             };
+            if in_warmup_window {
+                if let Some(line_num) = line_num {
+                    app.record_syntax_warmup_line(side, line_num);
+                }
+            }
             if let Some(spans) = app.syntax_spans_for_line(side, line_num) {
                 content_spans = spans;
                 used_syntax = true;
@@ -949,7 +982,7 @@ fn build_unified_render_model(
         if app.syntax_enabled() {
             if used_syntax {
                 italic_line = super::line_is_italic(&content_spans);
-            } else {
+            } else if in_syntax_window {
                 let use_old = view_line.kind == LineKind::Context && view_line.has_changes;
                 let side = if use_old {
                     SyntaxSide::Old
@@ -1277,6 +1310,8 @@ fn build_unified_render_model(
         }
     }
 
+    app.commit_syntax_warmup_frame();
+
     UnifiedRenderModel {
         key,
         gutter_lines,
@@ -1311,16 +1346,9 @@ fn render_unified_pane_cached(frame: &mut Frame, app: &mut App, area: Rect) {
         .set_show_hunk_extent_while_stepping(show_extent);
     let view_lines = app.current_view_with_frame(animation_frame);
     let scroll_offset = app.render_scroll_offset();
-    if super::view_debug_enabled() {
-        super::maybe_log_view_debug(
-            app,
-            view_lines.as_ref(),
-            "unified",
-            visible_height,
-            visible_width,
-            scroll_offset,
-            None,
-        );
+    let debug_enabled = super::view_debug_enabled();
+    if debug_enabled {
+        crate::syntax::syntax_debug_reset();
     }
     if !app.line_wrap {
         let extra_total = app
@@ -1371,6 +1399,18 @@ fn render_unified_pane_cached(frame: &mut Frame, app: &mut App, area: Rect) {
     app.clamp_horizontal_scroll(max_line_width, visible_width);
     app.set_current_max_line_width(max_line_width);
 
+    if debug_enabled {
+        let extra = super::syntax_debug_extra();
+        super::maybe_log_view_debug(
+            app,
+            view_lines.as_ref(),
+            "unified",
+            visible_height,
+            visible_width,
+            scroll_offset,
+            extra,
+        );
+    }
     render_unified_model(frame, app, area, &model, scroll_offset);
     app.unified_render_cache = Some(model);
 }
@@ -1489,16 +1529,9 @@ fn render_unified_pane_uncached(frame: &mut Frame, app: &mut App, area: Rect) {
         .set_show_hunk_extent_while_stepping(show_extent);
     let view_lines = app.current_view_with_frame(animation_frame);
     let scroll_offset = app.render_scroll_offset();
-    if super::view_debug_enabled() {
-        super::maybe_log_view_debug(
-            app,
-            view_lines.as_ref(),
-            "unified",
-            visible_height,
-            visible_width,
-            scroll_offset,
-            None,
-        );
+    let debug_enabled = super::view_debug_enabled();
+    if debug_enabled {
+        crate::syntax::syntax_debug_reset();
     }
     if !app.line_wrap {
         let extra_total = app
@@ -1534,6 +1567,18 @@ fn render_unified_pane_uncached(frame: &mut Frame, app: &mut App, area: Rect) {
     }
     app.clamp_horizontal_scroll(model.max_line_width, visible_width);
     app.set_current_max_line_width(model.max_line_width);
+    if debug_enabled {
+        let extra = super::syntax_debug_extra();
+        super::maybe_log_view_debug(
+            app,
+            view_lines.as_ref(),
+            "unified",
+            visible_height,
+            visible_width,
+            scroll_offset,
+            extra,
+        );
+    }
     render_unified_model(frame, app, area, &model, scroll_offset);
 }
 
