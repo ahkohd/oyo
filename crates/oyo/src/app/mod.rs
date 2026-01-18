@@ -1054,6 +1054,9 @@ impl App {
     }
 
     pub(crate) fn defer_view_build_for_jump(&mut self) {
+        if !self.stepping {
+            return;
+        }
         if !self.multi_diff.current_file_is_large() {
             return;
         }

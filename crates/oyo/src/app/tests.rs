@@ -3,6 +3,72 @@ use super::utils::{
 };
 use super::*;
 use oyo_core::{LineKind, MultiFileDiff, StepDirection, ViewLine};
+use std::sync::{Mutex, MutexGuard};
+
+const DEFAULT_DIFF_MAX_BYTES: u64 = 16 * 1024 * 1024;
+static DIFF_SETTINGS_LOCK: Mutex<()> = Mutex::new(());
+static VIEW_DEBUG_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+struct DiffSettingsGuard {
+    _lock: MutexGuard<'static, ()>,
+}
+
+impl DiffSettingsGuard {
+    fn new(diff_max_bytes: u64) -> Self {
+        let lock = DIFF_SETTINGS_LOCK.lock().unwrap();
+        MultiFileDiff::set_diff_max_bytes(diff_max_bytes);
+        Self { _lock: lock }
+    }
+}
+
+impl Drop for DiffSettingsGuard {
+    fn drop(&mut self) {
+        MultiFileDiff::set_diff_max_bytes(DEFAULT_DIFF_MAX_BYTES);
+        MultiFileDiff::set_diff_defer(true);
+    }
+}
+
+struct ViewDebugEnvGuard {
+    _lock: MutexGuard<'static, ()>,
+    old_view: Option<std::ffi::OsString>,
+    old_view_nav: Option<std::ffi::OsString>,
+    old_view_file: Option<std::ffi::OsString>,
+}
+
+impl ViewDebugEnvGuard {
+    fn new(path: &std::path::Path) -> Self {
+        let lock = VIEW_DEBUG_ENV_LOCK.lock().unwrap();
+        let old_view = std::env::var_os("OYO_DEBUG_VIEW");
+        let old_view_nav = std::env::var_os("OYO_DEBUG_VIEW_NAV");
+        let old_view_file = std::env::var_os("OYO_DEBUG_VIEW_FILE");
+        std::env::set_var("OYO_DEBUG_VIEW", "1");
+        std::env::set_var("OYO_DEBUG_VIEW_NAV", "1");
+        std::env::set_var("OYO_DEBUG_VIEW_FILE", path);
+        Self {
+            _lock: lock,
+            old_view,
+            old_view_nav,
+            old_view_file,
+        }
+    }
+}
+
+impl Drop for ViewDebugEnvGuard {
+    fn drop(&mut self) {
+        match &self.old_view {
+            Some(val) => std::env::set_var("OYO_DEBUG_VIEW", val),
+            None => std::env::remove_var("OYO_DEBUG_VIEW"),
+        }
+        match &self.old_view_nav {
+            Some(val) => std::env::set_var("OYO_DEBUG_VIEW_NAV", val),
+            None => std::env::remove_var("OYO_DEBUG_VIEW_NAV"),
+        }
+        match &self.old_view_file {
+            Some(val) => std::env::set_var("OYO_DEBUG_VIEW_FILE", val),
+            None => std::env::remove_var("OYO_DEBUG_VIEW_FILE"),
+        }
+    }
+}
 
 #[test]
 fn test_allow_overscroll_state() {
@@ -175,6 +241,30 @@ fn make_app_with_unified_hunk_two_changes() -> App {
         new,
     );
     App::new(multi_diff, ViewMode::UnifiedPane, 0, false, None)
+}
+
+fn make_large_app(lines: usize, change_line: usize) -> App {
+    let old_lines: Vec<String> = (0..lines).map(|i| format!("line{}", i)).collect();
+    let mut new_lines = old_lines.clone();
+    new_lines[change_line] = format!("LINE{}", change_line);
+    let old = old_lines.join("\n");
+    let new = new_lines.join("\n");
+
+    let mut multi_diff = MultiFileDiff::from_file_pair(
+        std::path::PathBuf::from("a.txt"),
+        std::path::PathBuf::from("a.txt"),
+        old.clone(),
+        new.clone(),
+    );
+    let diff = MultiFileDiff::compute_diff(&old, &new);
+    multi_diff.apply_diff_result(0, diff);
+    multi_diff.ensure_full_navigator(0);
+
+    let mut app = App::new(multi_diff, ViewMode::UnifiedPane, 0, false, None);
+    app.stepping = false;
+    app.no_step_auto_jump_on_enter = false;
+    app.enter_no_step_mode();
+    app
 }
 
 #[test]
@@ -356,4 +446,69 @@ fn test_no_step_cursor_stable_through_file_cycles() {
     let cursor_after = app.multi_diff.current_navigator().state().cursor_change;
 
     assert_eq!(first_cursor, cursor_after);
+}
+
+#[test]
+fn test_windowed_view_tracks_scroll_offset_in_no_step_large_file() {
+    let _guard = DiffSettingsGuard::new(64);
+    let mut app = make_large_app(600, 320);
+    app.last_viewport_height = 25;
+    app.scroll_offset = 250;
+
+    let view = app.current_view_with_frame(AnimationFrame::Idle);
+
+    assert!(app.view_windowed());
+    let start = app.view_window_start();
+    assert!(start <= app.scroll_offset);
+    assert_eq!(app.render_scroll_offset(), app.scroll_offset - start);
+
+    let span = app
+        .last_viewport_height
+        .max(20)
+        .saturating_mul(4)
+        .max(200);
+    assert!(view.len() <= span.saturating_add(1));
+}
+
+#[test]
+fn test_no_step_hunk_scope_shows_extent_in_windowed_view() {
+    let _guard = DiffSettingsGuard::new(64);
+    let mut app = make_large_app(600, 320);
+    app.last_viewport_height = 25;
+
+    app.next_hunk_scroll();
+    let view = app.current_view_with_frame(AnimationFrame::Idle);
+
+    let state = app.multi_diff.current_navigator().state();
+    assert!(state.last_nav_was_hunk);
+    assert!(state.cursor_change.is_some());
+    assert!(app.view_windowed());
+    assert!(view.iter().any(|line| line.show_hunk_extent));
+}
+
+#[test]
+fn test_view_nav_logging_emits_entry() {
+    let path = std::env::temp_dir().join(format!(
+        "oyo_view_nav_test_{}.log",
+        std::process::id()
+    ));
+    let _guard = ViewDebugEnvGuard::new(&path);
+    let _ = std::fs::remove_file(&path);
+
+    let old = "line1\nline2\nline3\n";
+    let new = "line1\nLINE2\nline3\n";
+    let diff = MultiFileDiff::from_file_pair(
+        std::path::PathBuf::from("a.txt"),
+        std::path::PathBuf::from("a.txt"),
+        old.to_string(),
+        new.to_string(),
+    );
+    let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+
+    app.next_step();
+
+    let log = std::fs::read_to_string(&path).expect("read nav log");
+    assert!(log.contains("OYO_VIEW_NAV"), "missing nav log header");
+    assert!(log.contains("action=step_down"), "missing step_down action");
+    assert!(log.contains("moved=true"), "expected moved=true for step");
 }

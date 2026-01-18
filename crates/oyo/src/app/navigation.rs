@@ -7,7 +7,9 @@ use super::{
     PeekScope, PeekState, StepEdge, StepEdgeHint, ViewMode,
 };
 use crate::config::{FoldContextMode, HunkWrapMode, ModifiedStepMode, StepWrapMode};
-use oyo_core::{git::FileStatus, AnimationFrame, ChangeKind, LineKind, StepState, ViewLine};
+use oyo_core::{
+    git::FileStatus, AnimationFrame, ChangeKind, DiffNavigator, LineKind, StepState, ViewLine,
+};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -35,6 +37,21 @@ fn change_has_conflict_marker(change: &oyo_core::change::Change) -> bool {
     }
     let new_text = modified_only_text_for_change(change);
     text_has_marker(&new_text)
+}
+
+fn build_hunk_change_index_map(nav: &DiffNavigator) -> Vec<Option<usize>> {
+    let mut map = vec![None; nav.diff().changes.len()];
+    for hunk in nav.hunks() {
+        let hidx = hunk.id;
+        for change_id in &hunk.change_ids {
+            if let Some(idx) = nav.change_index_for(*change_id) {
+                if idx < map.len() {
+                    map[idx] = Some(hidx);
+                }
+            }
+        }
+    }
+    map
 }
 
 impl App {
@@ -428,11 +445,13 @@ impl App {
     }
 
     pub fn next_step(&mut self) {
-        self.step_forward();
+        let moved = self.step_forward();
+        crate::views::log_view_nav_event(self, "step_down", moved);
     }
 
     pub fn prev_step(&mut self) {
-        self.step_backward();
+        let moved = self.step_backward();
+        crate::views::log_view_nav_event(self, "step_up", moved);
     }
 
     pub fn replay_step(&mut self) {
@@ -1134,9 +1153,10 @@ impl App {
         let nav = self.multi_diff.current_navigator();
         let total_hunks = nav.state().total_hunks;
         let mut starts = vec![None; total_hunks];
+        let hunk_map = build_hunk_change_index_map(nav);
         let mut display_idx = 0usize;
 
-        for change in nav.diff().changes.iter() {
+        for (change_idx, change) in nav.diff().changes.iter().enumerate() {
             let is_visible = match self.view_mode {
                 ViewMode::Evolution => Self::change_visible_in_evolution(change),
                 _ => true,
@@ -1144,7 +1164,7 @@ impl App {
             if !is_visible {
                 continue;
             }
-            if let Some(hidx) = nav.hunk_index_for_change_id(change.id) {
+            if let Some(hidx) = hunk_map.get(change_idx).copied().flatten() {
                 if hidx < total_hunks && starts[hidx].is_none() {
                     starts[hidx] = Some(HunkStart {
                         idx: display_idx,
@@ -1161,9 +1181,10 @@ impl App {
         let nav = self.multi_diff.current_navigator();
         let total_hunks = nav.state().total_hunks;
         let mut bounds: Vec<Option<HunkBounds>> = vec![None; total_hunks];
+        let hunk_map = build_hunk_change_index_map(nav);
         let mut display_idx = 0usize;
 
-        for change in nav.diff().changes.iter() {
+        for (change_idx, change) in nav.diff().changes.iter().enumerate() {
             let is_visible = match self.view_mode {
                 ViewMode::Evolution => Self::change_visible_in_evolution(change),
                 _ => true,
@@ -1171,7 +1192,7 @@ impl App {
             if !is_visible {
                 continue;
             }
-            if let Some(hidx) = nav.hunk_index_for_change_id(change.id) {
+            if let Some(hidx) = hunk_map.get(change_idx).copied().flatten() {
                 if hidx < total_hunks {
                     let start = HunkStart {
                         idx: display_idx,
@@ -1200,10 +1221,11 @@ impl App {
 
         let mut old_starts = vec![None; total_hunks];
         let mut new_starts = vec![None; total_hunks];
+        let hunk_map = build_hunk_change_index_map(nav);
         let mut old_idx = 0usize;
         let mut new_idx = 0usize;
 
-        for change in nav.diff().changes.iter() {
+        for (change_idx, change) in nav.diff().changes.iter().enumerate() {
             let mut has_old = false;
             let mut has_new = false;
             for span in &change.spans {
@@ -1216,7 +1238,7 @@ impl App {
             }
             let old_visible = has_old || (self.split_align_lines && has_new);
             let new_visible = has_new || (self.split_align_lines && has_old);
-            if let Some(hidx) = nav.hunk_index_for_change_id(change.id) {
+            if let Some(hidx) = hunk_map.get(change_idx).copied().flatten() {
                 if hidx < total_hunks {
                     if old_visible && old_starts[hidx].is_none() {
                         old_starts[hidx] = Some(HunkStart {
@@ -1250,10 +1272,11 @@ impl App {
 
         let mut old_bounds: Vec<Option<HunkBounds>> = vec![None; total_hunks];
         let mut new_bounds: Vec<Option<HunkBounds>> = vec![None; total_hunks];
+        let hunk_map = build_hunk_change_index_map(nav);
         let mut old_idx = 0usize;
         let mut new_idx = 0usize;
 
-        for change in nav.diff().changes.iter() {
+        for (change_idx, change) in nav.diff().changes.iter().enumerate() {
             let mut has_old = false;
             let mut has_new = false;
             for span in &change.spans {
@@ -1266,7 +1289,7 @@ impl App {
             }
             let old_visible = has_old || (self.split_align_lines && has_new);
             let new_visible = has_new || (self.split_align_lines && has_old);
-            if let Some(hidx) = nav.hunk_index_for_change_id(change.id) {
+            if let Some(hidx) = hunk_map.get(change_idx).copied().flatten() {
                 if hidx < total_hunks {
                     if old_visible {
                         let start = HunkStart {
@@ -1522,7 +1545,9 @@ impl App {
 
     /// Scroll to the next hunk (no-step mode)
     pub fn next_hunk_scroll(&mut self) {
+        let mut moved = false;
         if !self.current_file_diff_ready() {
+            crate::views::log_view_nav_event(self, "hunk_down", moved);
             return;
         }
         self.multi_diff
@@ -1591,20 +1616,25 @@ impl App {
             self.clear_hunk_edge_hint();
             self.set_blame_hunk_hint();
             self.refresh_blame_toggle_hint();
+            moved = true;
         } else if matches!(self.hunk_wrap, HunkWrapMode::File) {
             if self.wrap_to_file_hunk(true, false) {
                 self.clear_hunk_edge_hint();
+                moved = true;
             } else {
                 self.trigger_hunk_edge_hint(HunkEdge::Last);
             }
         } else {
             self.trigger_hunk_edge_hint(HunkEdge::Last);
         }
+        crate::views::log_view_nav_event(self, "hunk_down", moved);
     }
 
     /// Scroll to the previous hunk (no-step mode)
     pub fn prev_hunk_scroll(&mut self) {
+        let mut moved = false;
         if !self.current_file_diff_ready() {
+            crate::views::log_view_nav_event(self, "hunk_up", moved);
             return;
         }
         self.multi_diff
@@ -1672,20 +1702,25 @@ impl App {
             self.clear_hunk_edge_hint();
             self.set_blame_hunk_hint();
             self.refresh_blame_toggle_hint();
+            moved = true;
         } else if matches!(self.hunk_wrap, HunkWrapMode::File) {
             if self.wrap_to_file_hunk(false, false) {
                 self.clear_hunk_edge_hint();
+                moved = true;
             } else {
                 self.trigger_hunk_edge_hint(HunkEdge::First);
             }
         } else {
             self.trigger_hunk_edge_hint(HunkEdge::First);
         }
+        crate::views::log_view_nav_event(self, "hunk_up", moved);
     }
 
     /// Move to the next hunk (group of related changes)
     pub fn next_hunk(&mut self) {
+        let mut moved = false;
         if !self.current_file_diff_ready() {
+            crate::views::log_view_nav_event(self, "hunk_down", moved);
             return;
         }
         self.multi_diff
@@ -1701,6 +1736,7 @@ impl App {
             self.clear_hunk_edge_hint();
             self.set_blame_hunk_hint();
             self.refresh_blame_toggle_hint();
+            moved = true;
         } else {
             match self.hunk_wrap {
                 HunkWrapMode::Hunk => {
@@ -1708,6 +1744,7 @@ impl App {
                     if total > 0 {
                         self.goto_hunk_index(0);
                         self.clear_hunk_edge_hint();
+                        moved = true;
                     } else {
                         self.trigger_hunk_edge_hint(HunkEdge::Last);
                     }
@@ -1715,6 +1752,7 @@ impl App {
                 HunkWrapMode::File => {
                     if self.wrap_to_file_hunk(true, true) {
                         self.clear_hunk_edge_hint();
+                        moved = true;
                     } else {
                         self.trigger_hunk_edge_hint(HunkEdge::Last);
                     }
@@ -1724,11 +1762,14 @@ impl App {
                 }
             }
         }
+        crate::views::log_view_nav_event(self, "hunk_down", moved);
     }
 
     /// Move to the previous hunk (group of related changes)
     pub fn prev_hunk(&mut self) {
+        let mut moved = false;
         if !self.current_file_diff_ready() {
+            crate::views::log_view_nav_event(self, "hunk_up", moved);
             return;
         }
         self.multi_diff
@@ -1746,6 +1787,7 @@ impl App {
             self.clear_hunk_edge_hint();
             self.set_blame_hunk_hint();
             self.refresh_blame_toggle_hint();
+            moved = true;
         } else {
             match self.hunk_wrap {
                 HunkWrapMode::Hunk => {
@@ -1753,6 +1795,7 @@ impl App {
                     if total > 0 {
                         self.goto_hunk_index(total.saturating_sub(1));
                         self.clear_hunk_edge_hint();
+                        moved = true;
                     } else {
                         self.trigger_hunk_edge_hint(HunkEdge::First);
                     }
@@ -1760,6 +1803,7 @@ impl App {
                 HunkWrapMode::File => {
                     if self.wrap_to_file_hunk(false, true) {
                         self.clear_hunk_edge_hint();
+                        moved = true;
                     } else {
                         self.trigger_hunk_edge_hint(HunkEdge::First);
                     }
@@ -1769,6 +1813,7 @@ impl App {
                 }
             }
         }
+        crate::views::log_view_nav_event(self, "hunk_up", moved);
     }
 
     /// Get current hunk info (current hunk index, total hunks)

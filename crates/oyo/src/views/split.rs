@@ -226,6 +226,21 @@ pub fn render_split(frame: &mut Frame, app: &mut App, area: Rect) {
     let new_width = chunks[1]
         .width
         .saturating_sub(NEW_GUTTER_WIDTH + NEW_MARKER_WIDTH) as usize;
+    if super::view_debug_enabled() {
+        let extra = format!(
+            "split old_width={} new_width={} align_lines={}",
+            old_width, new_width, app.split_align_lines
+        );
+        super::maybe_log_view_debug(
+            app,
+            view_lines.as_ref(),
+            "split",
+            visible_height,
+            area.width as usize,
+            scroll_offset,
+            Some(extra),
+        );
+    }
     let hunk_overflow = if app.line_wrap {
         split_hunk_overflow_wrapped(
             app,

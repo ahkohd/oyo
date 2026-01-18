@@ -83,6 +83,17 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
         .set_show_hunk_extent_while_stepping(show_extent);
     let view_lines = app.current_view_with_frame(animation_frame);
     let scroll_offset = app.render_scroll_offset();
+    if super::view_debug_enabled() {
+        super::maybe_log_view_debug(
+            app,
+            view_lines.as_ref(),
+            "evolution",
+            visible_height,
+            visible_width,
+            scroll_offset,
+            None,
+        );
+    }
     let step_direction = app.multi_diff.current_step_direction();
     let mut display_len = 0usize;
     if !app.line_wrap {

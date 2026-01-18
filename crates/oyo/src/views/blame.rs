@@ -47,6 +47,18 @@ pub fn render_blame(frame: &mut Frame, app: &mut App, area: Rect) {
         .current_navigator()
         .set_show_hunk_extent_while_stepping(show_extent);
     let view_lines = app.current_view_with_frame(animation_frame);
+    let scroll_offset = app.render_scroll_offset();
+    if super::view_debug_enabled() {
+        super::maybe_log_view_debug(
+            app,
+            view_lines.as_ref(),
+            "blame",
+            visible_height,
+            wrap_width,
+            scroll_offset,
+            None,
+        );
+    }
 
     let now = OffsetDateTime::now_utc().unix_timestamp();
     let time_bucket = now / 60;

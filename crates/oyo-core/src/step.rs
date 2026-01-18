@@ -157,6 +157,8 @@ pub struct DiffNavigator {
     new_content: Arc<str>,
     /// Mapping from change ID to hunk index
     change_to_hunk: Vec<Option<usize>>,
+    /// Exact mapping from change ID to hunk index (no context padding)
+    change_id_to_hunk_exact: Vec<Option<usize>>,
     /// Mapping from change ID to change index in the diff
     change_to_index: Vec<Option<usize>>,
     /// Skip building full lookup maps for large diffs
@@ -165,6 +167,8 @@ pub struct DiffNavigator {
     hunk_step_ranges: Vec<Option<HunkStepRange>>,
     /// Cached change index range per hunk (inclusive), for O(1) scope checks
     hunk_change_ranges: Vec<Option<(usize, usize)>>,
+    /// Exact change index range per hunk (inclusive), no context padding
+    hunk_change_ranges_exact: Vec<Option<(usize, usize)>>,
     /// Cached display indices for evolution view (None for hidden deletions)
     evo_visible_index: Option<Vec<Option<usize>>>,
     /// Cached visible line count for evolution view
@@ -206,11 +210,16 @@ impl DiffNavigator {
             }
         }
 
+        let mut change_id_to_hunk_exact = vec![None; max_change_id.saturating_add(1)];
         let mut hunk_change_ranges = vec![None; diff.hunks.len()];
+        let mut hunk_change_ranges_exact = vec![None; diff.hunks.len()];
         for (hunk_idx, hunk) in diff.hunks.iter().enumerate() {
             let mut min_idx = usize::MAX;
             let mut max_idx = 0usize;
             for &change_id in &hunk.change_ids {
+                if let Some(slot) = change_id_to_hunk_exact.get_mut(change_id) {
+                    *slot = Some(hunk.id);
+                }
                 if let Some(Some(idx)) = change_to_index.get(change_id) {
                     min_idx = min_idx.min(*idx);
                     max_idx = max_idx.max(*idx);
@@ -219,6 +228,7 @@ impl DiffNavigator {
             if min_idx == usize::MAX {
                 continue;
             }
+            hunk_change_ranges_exact[hunk_idx] = Some((min_idx, max_idx));
             let start = if lazy_maps {
                 min_idx.saturating_sub(LARGE_CONTEXT_PAD)
             } else {
@@ -269,10 +279,12 @@ impl DiffNavigator {
             old_content,
             new_content,
             change_to_hunk,
+            change_id_to_hunk_exact,
             change_to_index,
             lazy_maps,
             hunk_step_ranges,
             hunk_change_ranges,
+            hunk_change_ranges_exact,
             evo_visible_index: None,
             evo_visible_len: None,
             evo_display_to_change: None,
@@ -1096,8 +1108,22 @@ impl DiffNavigator {
         self.change_to_hunk.get(idx).copied().flatten()
     }
 
+    fn hunk_index_for_change_exact(&self, change_id: usize) -> Option<usize> {
+        self.change_id_to_hunk_exact
+            .get(change_id)
+            .copied()
+            .flatten()
+    }
+
     fn hunk_change_index_range(&self, hunk_idx: usize) -> Option<(usize, usize)> {
         self.hunk_change_ranges
+            .get(hunk_idx)
+            .copied()
+            .flatten()
+    }
+
+    fn hunk_change_index_range_exact(&self, hunk_idx: usize) -> Option<(usize, usize)> {
+        self.hunk_change_ranges_exact
             .get(hunk_idx)
             .copied()
             .flatten()
@@ -1109,6 +1135,10 @@ impl DiffNavigator {
 
     pub fn hunk_index_for_change_id(&self, change_id: usize) -> Option<usize> {
         self.hunk_index_for_change(change_id)
+    }
+
+    pub fn hunk_index_for_change_id_exact(&self, change_id: usize) -> Option<usize> {
+        self.hunk_index_for_change_exact(change_id)
     }
 
     pub fn change_index_for(&self, change_id: usize) -> Option<usize> {
@@ -1166,20 +1196,31 @@ impl DiffNavigator {
         let is_in_hunk = self.is_change_in_animating_hunk(change_id);
         let is_active_change = self.state.active_change == Some(change_id);
         let is_active = is_active_change || is_in_hunk;
+        let has_changes = change.has_changes();
         let scope_hunk = if self.state.last_nav_was_hunk {
             self.state
                 .cursor_change
-                .and_then(|id| self.hunk_index_for_change(id))
+                .and_then(|id| self.hunk_index_for_change_exact(id))
                 .unwrap_or(self.state.current_hunk)
         } else {
             self.state.current_hunk
         };
         let in_scope = if self.state.last_nav_was_hunk {
-            let scope_range = self.hunk_change_index_range(scope_hunk);
+            let scope_range = if has_changes {
+                self.hunk_change_index_range_exact(scope_hunk)
+            } else {
+                self.hunk_change_index_range(scope_hunk)
+            };
             let idx = self.change_to_index.get(change_id).copied().flatten();
             match (scope_range, idx) {
                 (Some((start, end)), Some(idx)) => idx >= start && idx <= end,
-                _ => self.hunk_index_for_change(change_id) == Some(scope_hunk),
+                _ => {
+                    if has_changes {
+                        self.hunk_index_for_change_exact(change_id) == Some(scope_hunk)
+                    } else {
+                        self.hunk_index_for_change(change_id) == Some(scope_hunk)
+                    }
+                }
             }
         } else {
             self.hunk_index_for_change(change_id) == Some(scope_hunk)
@@ -1325,12 +1366,17 @@ impl DiffNavigator {
         let scope_hunk = if self.state.last_nav_was_hunk {
             self.state
                 .cursor_change
-                .and_then(|id| self.hunk_index_for_change(id))
+                .and_then(|id| self.hunk_index_for_change_exact(id))
                 .unwrap_or(self.state.current_hunk)
         } else {
             self.state.current_hunk
         };
-        let scope_range = if self.state.last_nav_was_hunk {
+        let scope_range_exact = if self.state.last_nav_was_hunk {
+            self.hunk_change_index_range_exact(scope_hunk)
+        } else {
+            None
+        };
+        let scope_range_padded = if self.state.last_nav_was_hunk {
             self.hunk_change_index_range(scope_hunk)
         } else {
             None
@@ -1338,6 +1384,8 @@ impl DiffNavigator {
 
         for change in changes {
             let is_applied = self.state.is_applied(change.id);
+            let has_changes = change.has_changes();
+            let use_exact = self.state.last_nav_was_hunk && has_changes;
 
             // Primary active: cursor destination (decoupled from animation target on backward)
             let is_primary_active = primary_change_id == Some(change.id);
@@ -1348,12 +1396,21 @@ impl DiffNavigator {
             // Active if: (1) the active_change, or (2) in animating hunk (lights up whole hunk during animation)
             let is_active = is_active_change || is_in_hunk;
             // Show extent marker if animating hunk OR (last nav was hunk AND change in current hunk)
+            let scope_range = if use_exact {
+                scope_range_exact
+            } else {
+                scope_range_padded
+            };
             let change_idx = scope_range
                 .and_then(|_| self.change_to_index.get(change.id).copied().flatten());
             let in_scope = if let (Some((start, end)), Some(idx)) = (scope_range, change_idx) {
                 idx >= start && idx <= end
             } else {
-                self.hunk_index_for_change(change.id) == Some(scope_hunk)
+                if use_exact {
+                    self.hunk_index_for_change_exact(change.id) == Some(scope_hunk)
+                } else {
+                    self.hunk_index_for_change(change.id) == Some(scope_hunk)
+                }
             };
             let show_hunk_extent = is_in_hunk
                 || (in_scope
@@ -1749,7 +1806,55 @@ pub enum LineKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::change::{Change, ChangeKind, ChangeSpan};
     use crate::diff::DiffEngine;
+    use crate::diff::{DiffResult, Hunk};
+    use std::sync::Arc;
+
+    fn build_manual_diff(
+        changes: Vec<Change>,
+        significant_changes: Vec<usize>,
+        hunks: Vec<Hunk>,
+    ) -> DiffResult {
+        let mut insertions = 0usize;
+        let mut deletions = 0usize;
+        for change in &changes {
+            for span in &change.spans {
+                match span.kind {
+                    ChangeKind::Insert => insertions += 1,
+                    ChangeKind::Delete => deletions += 1,
+                    ChangeKind::Replace => {
+                        insertions += 1;
+                        deletions += 1;
+                    }
+                    ChangeKind::Equal => {}
+                }
+            }
+        }
+        DiffResult {
+            changes,
+            significant_changes,
+            hunks,
+            insertions,
+            deletions,
+        }
+    }
+
+    fn make_equal_change(id: usize) -> Change {
+        let line = id + 1;
+        Change::single(
+            id,
+            ChangeSpan::equal(format!("line{}", id)).with_lines(Some(line), Some(line)),
+        )
+    }
+
+    fn make_insert_change(id: usize) -> Change {
+        let line = id + 1;
+        Change::single(
+            id,
+            ChangeSpan::insert(format!("ins{}", id)).with_lines(None, Some(line)),
+        )
+    }
 
     fn assert_applied_is_prefix(nav: &DiffNavigator) {
         let applied = &nav.state().applied_changes;
@@ -2175,6 +2280,97 @@ mod tests {
         assert!(range.is_some(), "expected cached range for hunk 0");
         let (start, end) = range.unwrap();
         assert!(start <= end, "range should be valid");
+    }
+
+    #[test]
+    fn test_no_step_scope_prefers_exact_mapping_for_changes() {
+        let changes = (0..8)
+            .map(|id| if id == 2 || id == 5 { make_insert_change(id) } else { make_equal_change(id) })
+            .collect::<Vec<_>>();
+        let hunks = vec![
+            Hunk {
+                id: 0,
+                change_ids: vec![2],
+                old_start: None,
+                new_start: Some(3),
+                insertions: 1,
+                deletions: 0,
+            },
+            Hunk {
+                id: 1,
+                change_ids: vec![5],
+                old_start: None,
+                new_start: Some(6),
+                insertions: 1,
+                deletions: 0,
+            },
+        ];
+        let diff = build_manual_diff(changes, vec![2, 5], hunks);
+        let mut nav = DiffNavigator::new(diff, Arc::from(""), Arc::from(""), true);
+        nav.goto_end();
+
+        assert_eq!(
+            nav.hunk_index_for_change_id(5),
+            Some(0),
+            "fixture should overlap padded range"
+        );
+        assert_eq!(
+            nav.hunk_index_for_change_id_exact(5),
+            Some(1),
+            "exact mapping should point to hunk 1"
+        );
+
+        nav.set_cursor_hunk(1, Some(5));
+        nav.set_hunk_scope(true);
+
+        let view = nav.current_view_with_frame(AnimationFrame::Idle);
+        let line_hunk_1 = view.iter().find(|l| l.change_id == 5).unwrap();
+        let line_hunk_0 = view.iter().find(|l| l.change_id == 2).unwrap();
+
+        assert!(
+            line_hunk_1.show_hunk_extent,
+            "change line in scope hunk should show extent"
+        );
+        assert!(
+            !line_hunk_0.show_hunk_extent,
+            "change line outside scope hunk should not show extent"
+        );
+    }
+
+    #[test]
+    fn test_no_step_scope_includes_context_lines() {
+        let changes = (0..10)
+            .map(|id| if id == 4 { make_insert_change(id) } else { make_equal_change(id) })
+            .collect::<Vec<_>>();
+        let hunks = vec![Hunk {
+            id: 0,
+            change_ids: vec![4],
+            old_start: None,
+            new_start: Some(5),
+            insertions: 1,
+            deletions: 0,
+        }];
+        let diff = build_manual_diff(changes, vec![4], hunks);
+        let mut nav = DiffNavigator::new(diff, Arc::from(""), Arc::from(""), true);
+        nav.goto_end();
+
+        nav.set_cursor_hunk(0, Some(4));
+        nav.set_hunk_scope(true);
+
+        let view = nav.current_view_with_frame(AnimationFrame::Idle);
+        let scope_range = nav
+            .hunk_change_index_range(0)
+            .expect("expected cached padded range");
+
+        for line in view.iter().filter(|l| !l.has_changes) {
+            let idx = nav.change_index_for(line.change_id).unwrap();
+            let in_range = idx >= scope_range.0 && idx <= scope_range.1;
+            assert_eq!(
+                line.show_hunk_extent, in_range,
+                "context line {} scope mismatch",
+                line.change_id
+            );
+        }
     }
 
     #[test]
