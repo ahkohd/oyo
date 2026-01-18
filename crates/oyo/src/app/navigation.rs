@@ -1725,6 +1725,7 @@ impl App {
         }
         self.multi_diff
             .ensure_full_navigator(self.multi_diff.selected_index);
+        self.cancel_view_build_defer();
         self.clear_peek();
         self.clear_blame_step_hint();
         self.clear_blame_hunk_hint();
@@ -1774,6 +1775,7 @@ impl App {
         }
         self.multi_diff
             .ensure_full_navigator(self.multi_diff.selected_index);
+        self.cancel_view_build_defer();
         self.clear_peek();
         self.clear_blame_step_hint();
         self.clear_blame_hunk_hint();
@@ -1896,6 +1898,7 @@ impl App {
         }
         self.multi_diff
             .ensure_full_navigator(self.multi_diff.selected_index);
+        self.cancel_view_build_defer();
         self.clear_peek();
         self.clear_blame_step_hint();
         self.clear_blame_hunk_hint();
@@ -1974,6 +1977,7 @@ impl App {
         }
         self.multi_diff
             .ensure_full_navigator(self.multi_diff.selected_index);
+        self.cancel_view_build_defer();
         self.clear_peek();
         self.clear_blame_step_hint();
         self.clear_blame_hunk_hint();
@@ -2251,6 +2255,7 @@ impl App {
         }
         self.multi_diff
             .ensure_full_navigator(self.multi_diff.selected_index);
+        self.cancel_view_build_defer();
         self.clear_peek();
         self.clear_blame_step_hint();
         self.clear_blame_hunk_hint();

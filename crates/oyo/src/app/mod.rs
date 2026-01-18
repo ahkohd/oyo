@@ -1069,6 +1069,11 @@ impl App {
         self.view_build_defer = true;
     }
 
+    fn cancel_view_build_defer(&mut self) {
+        self.view_build_defer = false;
+        self.view_build_pending = false;
+    }
+
     fn compute_view_window(&mut self) -> Option<ViewWindow> {
         if self.line_wrap {
             self.log_window_debug("window: skip line_wrap");

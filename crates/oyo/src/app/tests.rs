@@ -267,6 +267,32 @@ fn make_large_app(lines: usize, change_line: usize) -> App {
     app
 }
 
+fn make_large_step_app(lines: usize, change_lines: &[usize]) -> App {
+    let old_lines: Vec<String> = (0..lines).map(|i| format!("line{}", i)).collect();
+    let mut new_lines = old_lines.clone();
+    for &idx in change_lines {
+        if idx < new_lines.len() {
+            new_lines[idx] = format!("LINE{}", idx);
+        }
+    }
+    let old = old_lines.join("\n");
+    let new = new_lines.join("\n");
+
+    let mut multi_diff = MultiFileDiff::from_file_pair(
+        std::path::PathBuf::from("a.txt"),
+        std::path::PathBuf::from("a.txt"),
+        old.clone(),
+        new.clone(),
+    );
+    let diff = MultiFileDiff::compute_diff(&old, &new);
+    multi_diff.apply_diff_result(0, diff);
+    multi_diff.ensure_full_navigator(0);
+
+    let mut app = App::new(multi_diff, ViewMode::UnifiedPane, 0, false, None);
+    app.no_step_auto_jump_on_enter = false;
+    app
+}
+
 #[test]
 fn test_no_step_prev_hunk_from_bottom_advances() {
     let mut app = make_app_with_two_hunks();
@@ -484,6 +510,39 @@ fn test_no_step_hunk_scope_shows_extent_in_windowed_view() {
     assert!(state.cursor_change.is_some());
     assert!(app.view_windowed());
     assert!(view.iter().any(|line| line.show_hunk_extent));
+}
+
+#[test]
+fn test_step_hunk_nav_clears_view_build_defer_in_large_file() {
+    let _guard = DiffSettingsGuard::new(64);
+    let mut app = make_large_step_app(600, &[50, 450]);
+    app.last_viewport_height = 25;
+
+    let _ = app.current_view_with_frame(AnimationFrame::Idle);
+    app.next_hunk();
+    let _ = app.current_view_with_frame(AnimationFrame::Idle);
+    app.defer_view_build_for_jump();
+    assert!(app.view_build_defer);
+    let hunk_before = app.multi_diff.current_navigator().state().current_hunk;
+    app.next_hunk();
+    let hunk_after = app.multi_diff.current_navigator().state().current_hunk;
+    assert_ne!(hunk_before, hunk_after);
+    let _ = app.current_view_with_frame(AnimationFrame::Idle);
+    assert!(
+        !app.view_build_pending(),
+        "hunk nav should rebuild immediately without pending view"
+    );
+
+    app.defer_view_build_for_jump();
+    assert!(app.view_build_defer);
+    app.prev_hunk();
+    let hunk_back = app.multi_diff.current_navigator().state().current_hunk;
+    assert_ne!(hunk_after, hunk_back);
+    let _ = app.current_view_with_frame(AnimationFrame::Idle);
+    assert!(
+        !app.view_build_pending(),
+        "reverse hunk nav should rebuild immediately without pending view"
+    );
 }
 
 #[test]
