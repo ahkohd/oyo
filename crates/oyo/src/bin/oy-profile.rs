@@ -4,8 +4,17 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
-use clap::{Parser, ValueEnum};
+use clap::{ArgAction, Parser, ValueEnum};
 use serde_json::Value;
+
+const DEFAULT_IDLE_PATTERNS: &[&str] = &[
+    "crossterm::event::poll",
+    "clock_gettime",
+    "epoll_wait",
+    "kevent",
+    "nanosleep",
+    "std::thread::sleep",
+];
 
 #[derive(ValueEnum, Clone, Copy, Debug)]
 enum CountMode {
@@ -56,6 +65,14 @@ struct Args {
     #[arg(long)]
     verbose: bool,
 
+    /// Disable idle classification in reports
+    #[arg(long)]
+    no_idle: bool,
+
+    /// Mark leaf functions as idle when they contain this substring (case-insensitive)
+    #[arg(long, value_name = "PATTERN", action = ArgAction::Append)]
+    idle_pattern: Vec<String>,
+
     /// Only list threads and exit
     #[arg(long)]
     list_threads: bool,
@@ -86,6 +103,7 @@ struct MetricInfo {
 struct Sample {
     stack: Option<usize>,
     weight: f64,
+    is_idle: bool,
 }
 
 #[derive(Debug)]
@@ -97,6 +115,10 @@ struct ThreadStats {
     cpu_percent: Option<f64>,
     cpu_ms: Option<f64>,
     elapsed_ms: Option<f64>,
+}
+
+struct IdleClassifier {
+    patterns: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -113,6 +135,24 @@ struct FunctionInfo {
     label: String,
 }
 
+struct FunctionCache {
+    infos: Vec<FunctionInfo>,
+}
+
+#[derive(Debug)]
+struct IdleStats {
+    enabled: bool,
+    total_weight: f64,
+    idle_weight: f64,
+    active_weight: f64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SampleFilter {
+    All,
+    Active,
+}
+
 #[derive(Clone, Debug)]
 struct ThreadSummary {
     index: usize,
@@ -122,6 +162,36 @@ struct ThreadSummary {
     metric_value: f64,
     sample_count: usize,
     cpu_percent: Option<f64>,
+}
+
+impl IdleClassifier {
+    fn new(patterns: Vec<String>) -> Self {
+        Self {
+            patterns: patterns
+                .into_iter()
+                .map(|pattern| pattern.to_ascii_lowercase())
+                .collect(),
+        }
+    }
+
+    fn is_idle(&self, info: &FunctionInfo) -> bool {
+        let label = info.label.to_ascii_lowercase();
+        self.patterns.iter().any(|pattern| label.contains(pattern))
+    }
+}
+
+impl FunctionCache {
+    fn new(tables: &ThreadTables<'_>) -> Self {
+        let mut infos = Vec::with_capacity(tables.func_name.len());
+        for index in 0..tables.func_name.len() {
+            infos.push(func_info(tables, index));
+        }
+        Self { infos }
+    }
+
+    fn get(&self, index: usize) -> Option<&FunctionInfo> {
+        self.infos.get(index)
+    }
 }
 
 fn main() -> Result<()> {
@@ -144,6 +214,19 @@ fn main() -> Result<()> {
         .ok_or_else(|| anyhow!("profile missing threads array"))?;
 
     let units = sample_units(&profile);
+    let idle_classifier = if args.report && !args.no_idle {
+        let patterns = if args.idle_pattern.is_empty() {
+            DEFAULT_IDLE_PATTERNS
+                .iter()
+                .map(|pattern| pattern.to_string())
+                .collect()
+        } else {
+            args.idle_pattern.clone()
+        };
+        Some(IdleClassifier::new(patterns))
+    } else {
+        None
+    };
     let stats = collect_thread_stats(threads, &units);
     let global_metric = resolve_global_metric(args.metric, &stats);
     let thread_summary = if args.top_threads > 0 {
@@ -209,31 +292,51 @@ fn main() -> Result<()> {
     }
 
     let tables = ThreadTables::from_profile_thread(&profile, thread)?;
-    let samples = extract_samples(thread, &metric_info, &units)?;
-    let counts_inclusive = count_functions(&tables, &samples, CountMode::Inclusive);
-    let counts_leaf = count_functions(&tables, &samples, CountMode::Leaf);
-    let mut entries_inclusive = build_entries(&tables, counts_inclusive);
-    let mut entries_leaf = build_entries(&tables, counts_leaf);
-    sort_entries(&mut entries_inclusive);
-    sort_entries(&mut entries_leaf);
+    let function_cache = FunctionCache::new(&tables);
+    let mut samples = extract_samples(thread, &metric_info, &units)?;
+    let idle_stats =
+        classify_idle_samples(&mut samples, &tables, &function_cache, idle_classifier.as_ref());
+
+    let counts_inclusive_all = count_functions(&tables, &samples, CountMode::Inclusive, SampleFilter::All);
+    let counts_leaf_all = count_functions(&tables, &samples, CountMode::Leaf, SampleFilter::All);
+    let counts_inclusive_active =
+        count_functions(&tables, &samples, CountMode::Inclusive, SampleFilter::Active);
+    let counts_leaf_active =
+        count_functions(&tables, &samples, CountMode::Leaf, SampleFilter::Active);
+
+    let mut entries_inclusive_all = build_entries(&function_cache, counts_inclusive_all);
+    let mut entries_leaf_all = build_entries(&function_cache, counts_leaf_all);
+    let mut entries_inclusive_active = build_entries(&function_cache, counts_inclusive_active);
+    let mut entries_leaf_active = build_entries(&function_cache, counts_leaf_active);
+    sort_entries(&mut entries_inclusive_all);
+    sort_entries(&mut entries_leaf_all);
+    sort_entries(&mut entries_inclusive_active);
+    sort_entries(&mut entries_leaf_active);
 
     if args.report {
         print_report(
-            &entries_inclusive,
-            &entries_leaf,
-            &samples,
+            &entries_inclusive_active,
+            &entries_leaf_active,
             &metric_info,
             global_metric,
             thread_summary.as_deref(),
             &units,
+            &idle_stats,
             args.top,
         )?;
     }
 
     if !args.report || args.verbose {
-        let entries = match args.mode {
-            CountMode::Inclusive => &entries_inclusive,
-            CountMode::Leaf => &entries_leaf,
+        let entries = if args.report {
+            match args.mode {
+                CountMode::Inclusive => &entries_inclusive_active,
+                CountMode::Leaf => &entries_leaf_active,
+            }
+        } else {
+            match args.mode {
+                CountMode::Inclusive => &entries_inclusive_all,
+                CountMode::Leaf => &entries_leaf_all,
+            }
         };
 
         println!(
@@ -339,6 +442,70 @@ fn thread_time_range_ms(thread: &Value, start_key: &str, end_key: &str) -> Optio
     let end = thread.get(end_key).and_then(Value::as_f64)?;
     let delta = end - start;
     if delta.is_sign_positive() { Some(delta) } else { None }
+}
+
+fn classify_idle_samples(
+    samples: &mut [Sample],
+    tables: &ThreadTables<'_>,
+    cache: &FunctionCache,
+    classifier: Option<&IdleClassifier>,
+) -> IdleStats {
+    let total_weight: f64 = samples.iter().map(|sample| sample.weight).sum();
+    let Some(classifier) = classifier else {
+        return IdleStats {
+            enabled: false,
+            total_weight,
+            idle_weight: 0.0,
+            active_weight: total_weight,
+        };
+    };
+
+    let mut func_is_idle = vec![false; cache.infos.len()];
+    for (index, info) in cache.infos.iter().enumerate() {
+        func_is_idle[index] = classifier.is_idle(info);
+    }
+    let frame_to_func: Vec<Option<usize>> = tables
+        .frame_func
+        .iter()
+        .map(|value| value.as_u64().map(|value| value as usize))
+        .collect();
+
+    let mut idle_weight = 0.0;
+    for sample in samples.iter_mut() {
+        let Some(stack_index) = sample.stack else {
+            continue;
+        };
+        let mut is_idle = false;
+        walk_stack(tables, stack_index, |frame_index| {
+            if is_idle {
+                return;
+            }
+            let func_index = frame_to_func
+                .get(frame_index)
+                .and_then(|value| *value);
+            if let Some(func_index) = func_index {
+                if func_is_idle
+                    .get(func_index)
+                    .copied()
+                    .unwrap_or(false)
+                {
+                    is_idle = true;
+                }
+            }
+        });
+        if is_idle {
+            sample.is_idle = true;
+            idle_weight += sample.weight;
+        }
+    }
+
+    let active_weight = (total_weight - idle_weight).max(0.0);
+    IdleStats {
+        enabled: true,
+        total_weight,
+        idle_weight,
+        active_weight,
+    }
 }
 
 fn resolve_global_metric(request: Metric, stats: &[ThreadStats]) -> MetricKind {
@@ -540,16 +707,19 @@ fn select_thread<'a>(
 fn print_report(
     entries_inclusive: &[(FunctionInfo, f64)],
     entries_leaf: &[(FunctionInfo, f64)],
-    samples: &[Sample],
     metric_info: &MetricInfo,
     global_metric: MetricKind,
     thread_summary: Option<&[ThreadSummary]>,
     units: &SampleUnits,
+    idle_stats: &IdleStats,
     top: usize,
 ) -> Result<()> {
-    let total_samples: f64 = samples.iter().map(|sample| sample.weight).sum();
-    let total_inclusive: f64 = entries_inclusive.iter().map(|(_, count)| *count).sum();
-    let total_leaf: f64 = entries_leaf.iter().map(|(_, count)| *count).sum();
+    let total_samples = idle_stats.total_weight;
+    let active_total = if idle_stats.enabled {
+        idle_stats.active_weight
+    } else {
+        total_samples
+    };
 
     println!("report:");
     if let Some(summary) = thread_summary {
@@ -561,26 +731,36 @@ fn print_report(
         metric_info.label,
         format_metric_value(total_samples, metric_info.kind)
     );
-    println!(
-        "  total {} (inclusive): {}",
-        metric_info.label,
-        format_metric_value(total_inclusive, metric_info.kind)
-    );
-    println!(
-        "  total {} (leaf): {}",
-        metric_info.label,
-        format_metric_value(total_leaf, metric_info.kind)
-    );
+    if idle_stats.enabled {
+        let idle_percent = if total_samples > 0.0 {
+            idle_stats.idle_weight / total_samples * 100.0
+        } else {
+            0.0
+        };
+        let active_percent = if total_samples > 0.0 {
+            active_total / total_samples * 100.0
+        } else {
+            0.0
+        };
+        println!(
+            "  idle (leaf match): {} ({:.1}%), active: {} ({:.1}%)",
+            format_metric_value(idle_stats.idle_weight, metric_info.kind),
+            idle_percent,
+            format_metric_value(active_total, metric_info.kind),
+            active_percent
+        );
+        println!("  percent columns are of active samples");
+    }
 
     print_hotspots(
         "hot paths (inclusive)",
         entries_inclusive,
-        total_samples,
+        active_total,
         metric_info,
         top,
     );
-    print_hotspots("hot spots (leaf)", entries_leaf, total_leaf, metric_info, top);
-    print_module_summary(entries_leaf, total_leaf, metric_info, top);
+    print_hotspots("hot spots (leaf)", entries_leaf, active_total, metric_info, top);
+    print_module_summary(entries_leaf, active_total, metric_info, top);
     println!();
     Ok(())
 }
@@ -816,7 +996,11 @@ fn extract_samples(
     let samples = stacks
         .into_iter()
         .zip(weights)
-        .map(|(stack, weight)| Sample { stack, weight })
+        .map(|(stack, weight)| Sample {
+            stack,
+            weight,
+            is_idle: false,
+        })
         .collect();
     Ok(samples)
 }
@@ -1020,12 +1204,12 @@ fn module_key(info: &FunctionInfo) -> String {
 }
 
 fn build_entries(
-    tables: &ThreadTables<'_>,
+    cache: &FunctionCache,
     counts: HashMap<usize, f64>,
 ) -> Vec<(FunctionInfo, f64)> {
     counts
         .into_iter()
-        .map(|(func, count)| (func_info(tables, func), count))
+        .filter_map(|(func, count)| cache.get(func).cloned().map(|info| (info, count)))
         .collect()
 }
 
@@ -1041,6 +1225,7 @@ fn count_functions(
     tables: &ThreadTables<'_>,
     samples: &[Sample],
     mode: CountMode,
+    filter: SampleFilter,
 ) -> HashMap<usize, f64> {
     let frame_to_func: Vec<Option<usize>> = tables
         .frame_func
@@ -1051,6 +1236,9 @@ fn count_functions(
     let mut counts: HashMap<usize, f64> = HashMap::new();
 
     for sample in samples {
+        if filter == SampleFilter::Active && sample.is_idle {
+            continue;
+        }
         let Some(stack_index) = sample.stack else {
             continue;
         };
