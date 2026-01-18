@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use crate::app::{AnimationPhase, App, ViewMode};
+use crate::test_utils::TestApp;
 use crate::config::{
     DiffForegroundMode, DiffHighlightMode, EvoSyntaxMode, ModifiedStepMode, SyntaxMode,
 };
@@ -8,21 +9,23 @@ use crate::views::{render_blame, render_evolution, render_split, render_unified_
 use oyo_core::{AnimationFrame, MultiFileDiff};
 use ratatui::{backend::TestBackend, buffer::Buffer, Terminal};
 
-fn make_app(old: &str, new: &str, view_mode: ViewMode) -> App {
-    let diff = MultiFileDiff::from_file_pair(
-        PathBuf::from("old.txt"),
-        PathBuf::from("new.txt"),
-        old.to_string(),
-        new.to_string(),
-    );
-    let mut app = App::new(diff, view_mode, 200, false, None);
-    app.animation_enabled = false;
-    app.animation_phase = AnimationPhase::Idle;
-    app.syntax_mode = SyntaxMode::Off;
-    app.diff_bg = false;
-    app.diff_fg = DiffForegroundMode::Theme;
-    app.diff_highlight = DiffHighlightMode::Text;
-    app
+fn make_app(old: &str, new: &str, view_mode: ViewMode) -> TestApp {
+    TestApp::new_default(|| {
+        let diff = MultiFileDiff::from_file_pair(
+            PathBuf::from("old.txt"),
+            PathBuf::from("new.txt"),
+            old.to_string(),
+            new.to_string(),
+        );
+        let mut app = App::new(diff, view_mode, 200, false, None);
+        app.animation_enabled = false;
+        app.animation_phase = AnimationPhase::Idle;
+        app.syntax_mode = SyntaxMode::Off;
+        app.diff_bg = false;
+        app.diff_fg = DiffForegroundMode::Theme;
+        app.diff_highlight = DiffHighlightMode::Text;
+        app
+    })
 }
 
 fn render_buffer(app: &mut App, width: u16, height: u16) -> Buffer {
@@ -173,10 +176,15 @@ fn test_evolution_window_cache_scroll_offset() {
     app.needs_scroll_to_active = false;
     app.stepping = false;
     app.scroll_offset = 400;
+    let span = app
+        .last_viewport_height
+        .max(20)
+        .saturating_mul(4)
+        .max(200);
+    let scroll_offset = app.scroll_offset;
     let (_window_start, display_start) = {
         let nav = app.multi_diff.current_navigator();
-        let span = app.last_viewport_height.max(20).saturating_mul(4).max(200);
-        let window_start = app.scroll_offset.min(
+        let window_start = scroll_offset.min(
             nav.diff()
                 .changes
                 .len()

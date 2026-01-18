@@ -2,31 +2,11 @@ use super::utils::{
     allow_overscroll_state, evolution_display_metrics, max_scroll, split_display_metrics,
 };
 use super::*;
+use crate::test_utils::{DiffSettingsGuard, TestApp};
 use oyo_core::{LineKind, MultiFileDiff, StepDirection, ViewLine};
 use std::sync::{Mutex, MutexGuard};
 
-const DEFAULT_DIFF_MAX_BYTES: u64 = 16 * 1024 * 1024;
-static DIFF_SETTINGS_LOCK: Mutex<()> = Mutex::new(());
 static VIEW_DEBUG_ENV_LOCK: Mutex<()> = Mutex::new(());
-
-struct DiffSettingsGuard {
-    _lock: MutexGuard<'static, ()>,
-}
-
-impl DiffSettingsGuard {
-    fn new(diff_max_bytes: u64) -> Self {
-        let lock = DIFF_SETTINGS_LOCK.lock().unwrap();
-        MultiFileDiff::set_diff_max_bytes(diff_max_bytes);
-        Self { _lock: lock }
-    }
-}
-
-impl Drop for DiffSettingsGuard {
-    fn drop(&mut self) {
-        MultiFileDiff::set_diff_max_bytes(DEFAULT_DIFF_MAX_BYTES);
-        MultiFileDiff::set_diff_defer(true);
-    }
-}
 
 struct ViewDebugEnvGuard {
     _lock: MutexGuard<'static, ()>,
@@ -196,51 +176,57 @@ fn test_split_metrics_fallback_when_no_primary() {
     assert_eq!(idx, Some(1));
 }
 
-fn make_app_with_two_hunks() -> App {
-    let old_lines: Vec<String> = (1..=25).map(|i| format!("line{}", i)).collect();
-    let mut new_lines = old_lines.clone();
-    new_lines[1] = "line2-new".to_string();
-    new_lines[19] = "line20-new".to_string();
-    let old = old_lines.join("\n");
-    let new = new_lines.join("\n");
+fn make_app_with_two_hunks() -> TestApp {
+    TestApp::new_default(|| {
+        let old_lines: Vec<String> = (1..=25).map(|i| format!("line{}", i)).collect();
+        let mut new_lines = old_lines.clone();
+        new_lines[1] = "line2-new".to_string();
+        new_lines[19] = "line20-new".to_string();
+        let old = old_lines.join("\n");
+        let new = new_lines.join("\n");
 
-    let multi_diff = MultiFileDiff::from_file_pair(
-        std::path::PathBuf::from("a.txt"),
-        std::path::PathBuf::from("a.txt"),
-        old,
-        new,
-    );
-    let mut app = App::new(multi_diff, ViewMode::UnifiedPane, 0, false, None);
-    app.stepping = false;
-    app.enter_no_step_mode();
-    app
+        let multi_diff = MultiFileDiff::from_file_pair(
+            std::path::PathBuf::from("a.txt"),
+            std::path::PathBuf::from("a.txt"),
+            old,
+            new,
+        );
+        let mut app = App::new(multi_diff, ViewMode::UnifiedPane, 0, false, None);
+        app.stepping = false;
+        app.enter_no_step_mode();
+        app
+    })
 }
 
-fn make_app_with_unified_hunk() -> App {
-    let old = "one\ntwo\nthree".to_string();
-    let new = "one\nTWO\nthree".to_string();
-    let multi_diff = MultiFileDiff::from_file_pair(
-        std::path::PathBuf::from("a.txt"),
-        std::path::PathBuf::from("a.txt"),
-        old,
-        new,
-    );
-    let mut app = App::new(multi_diff, ViewMode::UnifiedPane, 0, false, None);
-    app.stepping = false;
-    app.enter_no_step_mode();
-    app
+fn make_app_with_unified_hunk() -> TestApp {
+    TestApp::new_default(|| {
+        let old = "one\ntwo\nthree".to_string();
+        let new = "one\nTWO\nthree".to_string();
+        let multi_diff = MultiFileDiff::from_file_pair(
+            std::path::PathBuf::from("a.txt"),
+            std::path::PathBuf::from("a.txt"),
+            old,
+            new,
+        );
+        let mut app = App::new(multi_diff, ViewMode::UnifiedPane, 0, false, None);
+        app.stepping = false;
+        app.enter_no_step_mode();
+        app
+    })
 }
 
-fn make_app_with_unified_hunk_two_changes() -> App {
-    let old = "one\ntwo\nthree\nfour".to_string();
-    let new = "ONE\nTWO\nthree\nfour".to_string();
-    let multi_diff = MultiFileDiff::from_file_pair(
-        std::path::PathBuf::from("a.txt"),
-        std::path::PathBuf::from("a.txt"),
-        old,
-        new,
-    );
-    App::new(multi_diff, ViewMode::UnifiedPane, 0, false, None)
+fn make_app_with_unified_hunk_two_changes() -> TestApp {
+    TestApp::new_default(|| {
+        let old = "one\ntwo\nthree\nfour".to_string();
+        let new = "ONE\nTWO\nthree\nfour".to_string();
+        let multi_diff = MultiFileDiff::from_file_pair(
+            std::path::PathBuf::from("a.txt"),
+            std::path::PathBuf::from("a.txt"),
+            old,
+            new,
+        );
+        App::new(multi_diff, ViewMode::UnifiedPane, 0, false, None)
+    })
 }
 
 fn make_large_app(lines: usize, change_line: usize) -> App {
@@ -409,6 +395,7 @@ fn test_hunk_step_info_counts_applied_changes() {
 
 #[test]
 fn test_no_step_snapshot_restores_cursor_or_jumps() {
+    let _guard = DiffSettingsGuard::default();
     let old_lines: Vec<String> = (1..=25).map(|i| format!("line{}", i)).collect();
     let mut new_lines = old_lines.clone();
     new_lines[1] = "line2-new".to_string();
@@ -444,6 +431,7 @@ fn test_no_step_snapshot_restores_cursor_or_jumps() {
 
 #[test]
 fn test_no_step_cursor_stable_through_file_cycles() {
+    let _guard = DiffSettingsGuard::default();
     let old_lines: Vec<String> = (1..=25).map(|i| format!("line{}", i)).collect();
     let mut new_lines = old_lines.clone();
     new_lines[1] = "line2-new".to_string();
@@ -547,6 +535,7 @@ fn test_step_hunk_nav_clears_view_build_defer_in_large_file() {
 
 #[test]
 fn test_view_nav_logging_emits_entry() {
+    let _guard = DiffSettingsGuard::default();
     let path = std::env::temp_dir().join(format!(
         "oyo_view_nav_test_{}.log",
         std::process::id()

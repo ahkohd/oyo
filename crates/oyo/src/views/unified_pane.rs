@@ -1322,14 +1322,6 @@ fn render_unified_pane_cached(frame: &mut Frame, app: &mut App, area: Rect) {
             None,
         );
     }
-    app.log_window_debug(format!(
-        "render: view_len={} scroll_offset={} raw_scroll={} window_start={} window_total={:?}",
-        view_lines.len(),
-        scroll_offset,
-        app.scroll_offset,
-        app.view_window_start(),
-        app.render_total_lines(view_lines.len())
-    ));
     if !app.line_wrap {
         let extra_total = app
             .blame_extra_rows

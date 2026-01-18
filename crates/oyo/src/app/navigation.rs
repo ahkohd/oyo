@@ -2562,6 +2562,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::DiffSettingsGuard;
     use crate::ViewMode;
     use oyo_core::MultiFileDiff;
 
@@ -2579,6 +2580,7 @@ mod tests {
 
     #[test]
     fn test_conflict_navigation_steps_between_markers() {
+        let _guard = DiffSettingsGuard::default();
         let mut app = make_app_with_conflict_markers();
         let steps = app.collect_conflict_steps();
         assert!(

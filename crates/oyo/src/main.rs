@@ -9,6 +9,8 @@ mod syntax;
 mod time_format;
 mod ui;
 mod views;
+#[cfg(test)]
+mod test_utils;
 
 use crate::dashboard::{Dashboard, DashboardConfig, DashboardSelection};
 use crate::syntax::{list_syntax_themes, SyntaxEngine};

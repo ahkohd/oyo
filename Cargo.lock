@@ -774,6 +774,7 @@ dependencies = [
  "clap",
  "crossterm",
  "dirs",
+ "flate2",
  "oyo-core",
  "ratatui",
  "regex",
