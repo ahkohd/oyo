@@ -1533,6 +1533,68 @@ mod tests {
 
         assert!(cache.spans(650).is_some());
     }
+
+    #[test]
+    fn syntax_cache_warmup_prefers_pending_store() {
+        let engine = SyntaxEngine::new("aura", false);
+        let mut old_content = String::new();
+        let mut new_content = String::new();
+        for idx in 0..800 {
+            old_content.push_str(&format!("old {idx}\n"));
+            new_content.push_str(&format!("new {idx}\n"));
+        }
+        let mut cache = SyntaxCache::new(&engine, &old_content, &new_content, "sample.rs", true);
+        cache.set_warmup_targets(None, Some(crate::app::WarmupRange { start: 600, end: 650 }));
+
+        match (&cache.old, &cache.new) {
+            (SyntaxStore::Lazy(old), SyntaxStore::Lazy(new)) => {
+                assert!(old.warm_progress.is_none());
+                assert!(new.warm_progress.is_some());
+            }
+            _ => panic!("expected lazy caches"),
+        }
+
+        let processed = cache.warm_checkpoints(50);
+        assert!(processed > 0);
+
+        match (&cache.old, &cache.new) {
+            (SyntaxStore::Lazy(old), SyntaxStore::Lazy(new)) => {
+                assert!(
+                    old.warm_progress.is_none(),
+                    "old store should not start warming when only new is pending"
+                );
+                assert!(new.warm_progress.is_some());
+            }
+            _ => panic!("expected lazy caches"),
+        }
+    }
+
+    #[test]
+    fn syntax_cache_epoch_bumps_when_warmup_completes() {
+        let engine = SyntaxEngine::new("aura", false);
+        let mut content = String::new();
+        for idx in 0..800 {
+            content.push_str(&format!("line {idx}\n"));
+        }
+        let mut cache = SyntaxCache::new(&engine, &content, &content, "sample.rs", true);
+        cache.set_warmup_targets(None, Some(crate::app::WarmupRange { start: 600, end: 650 }));
+
+        assert!(cache.warm_pending());
+        let epoch_before = cache.epoch();
+
+        for _ in 0..20 {
+            cache.warm_checkpoints(500);
+            if !cache.warm_pending() {
+                break;
+            }
+        }
+
+        assert!(!cache.warm_pending());
+        assert!(
+            cache.epoch() > epoch_before,
+            "epoch should advance when warmup completes"
+        );
+    }
 }
 
 fn to_tui(color: Color) -> TuiColor {
