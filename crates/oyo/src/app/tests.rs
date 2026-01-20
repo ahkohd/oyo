@@ -485,6 +485,45 @@ fn test_windowed_view_tracks_scroll_offset_in_no_step_large_file() {
 }
 
 #[test]
+fn test_step_jump_waits_for_view_rebuild_before_scroll() {
+    let _guard = DiffSettingsGuard::new(64);
+    let change_lines: Vec<usize> = (0..600).collect();
+    let mut app = make_large_step_app(600, &change_lines);
+    app.view_mode = ViewMode::Split;
+    app.split_align_lines = true;
+    app.last_viewport_height = 25;
+
+    let _ = app.current_view_with_frame(AnimationFrame::Idle);
+    app.defer_view_build_for_jump();
+    app.goto_last_step();
+    assert!(app.needs_scroll_to_active);
+
+    app.ensure_active_visible_if_needed(app.last_viewport_height);
+    assert!(
+        app.needs_scroll_to_active,
+        "deferred view should keep active scroll pending"
+    );
+
+    app.ensure_active_visible_if_needed(app.last_viewport_height);
+    assert!(!app.needs_scroll_to_active);
+    let state = app.multi_diff.current_navigator().state().clone();
+    let window_start = app.view_window_start();
+    let pending = app.view_build_pending();
+    let scroll_offset = app.scroll_offset;
+    assert!(
+        scroll_offset > 0,
+        "scroll_offset={} window_start={} pending={} active_change={:?} current_step={} step_dir={:?}",
+        scroll_offset,
+        window_start,
+        pending,
+        state.active_change,
+        state.current_step,
+        state.step_direction
+    );
+    assert!(window_start > 0);
+}
+
+#[test]
 fn test_no_step_end_scroll_does_not_shift_window() {
     let _guard = DiffSettingsGuard::new(64);
     let mut app = make_large_app(600, 320);

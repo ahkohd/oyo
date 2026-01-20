@@ -1349,18 +1349,20 @@ impl App {
         if self.auto_center && self.snap_frame.is_some() {
             return;
         }
-        self.needs_scroll_to_active = false;
+        let frame = self.animation_frame();
+        let view = self.current_view_with_frame(frame);
+        if self.view_build_pending {
+            return;
+        }
 
         let step_direction = self.multi_diff.current_step_direction();
         let auto_center = self.auto_center;
         // If auto_center is enabled, always center on active change
         if auto_center {
             self.center_on_active(viewport_height);
+            self.needs_scroll_to_active = false;
             return;
         }
-
-        let frame = self.animation_frame();
-        let view = self.current_view_with_frame(frame);
 
         let scroll_offset = self.render_scroll_offset();
         let view_start = self.view_window_start;
@@ -1393,6 +1395,7 @@ impl App {
             // No active line (step 0); snap to top so "first step" is visible.
             self.scroll_offset = 0;
         }
+        self.needs_scroll_to_active = false;
     }
 
     pub fn ensure_active_visible_if_needed_wrapped(
