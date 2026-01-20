@@ -544,6 +544,46 @@ fn test_no_step_end_scroll_does_not_shift_window() {
 }
 
 #[test]
+fn test_no_step_goto_end_preserves_hunk_scope() {
+    let _guard = DiffSettingsGuard::new(64);
+    let mut app = make_large_app(600, 599);
+    app.view_mode = ViewMode::Split;
+    app.split_align_lines = true;
+    app.last_viewport_height = 25;
+
+    app.goto_last_hunk_scroll();
+    let view = app.current_view_with_frame(AnimationFrame::Idle);
+    let state = app.multi_diff.current_navigator().state();
+    assert!(state.last_nav_was_hunk);
+    assert!(view.iter().any(|line| line.show_hunk_extent));
+
+    app.goto_end();
+    let view = app.current_view_with_frame(AnimationFrame::Idle);
+    let state = app.multi_diff.current_navigator().state();
+    assert!(state.last_nav_was_hunk);
+    assert!(view.iter().any(|line| line.show_hunk_extent));
+}
+
+#[test]
+fn test_no_step_goto_end_updates_hunk_scope_after_scroll() {
+    let _guard = DiffSettingsGuard::new(64);
+    let mut app = make_large_step_app(600, &[10, 590]);
+    app.stepping = false;
+    app.no_step_auto_jump_on_enter = false;
+    app.enter_no_step_mode();
+    app.view_mode = ViewMode::Split;
+    app.split_align_lines = true;
+    app.last_viewport_height = 25;
+
+    app.goto_hunk_index_scroll(0);
+    app.goto_end();
+    let view = app.current_view_with_frame(AnimationFrame::Idle);
+    let state = app.multi_diff.current_navigator().state();
+    assert!(state.last_nav_was_hunk);
+    assert!(view.iter().any(|line| line.show_hunk_extent));
+}
+
+#[test]
 fn test_no_step_hunk_scope_shows_extent_in_windowed_view() {
     let _guard = DiffSettingsGuard::new(64);
     let mut app = make_large_app(600, 320);

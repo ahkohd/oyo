@@ -1508,6 +1508,11 @@ impl App {
 
     pub(super) fn set_cursor_for_current_scroll(&mut self) {
         let view = self.current_view_with_frame(AnimationFrame::Idle);
+        let target_offset = if self.view_windowed() {
+            self.render_scroll_offset()
+        } else {
+            self.scroll_offset
+        };
         let mut display_idx = 0usize;
         let mut cursor_line = None;
 
@@ -1521,7 +1526,7 @@ impl App {
             if !visible {
                 continue;
             }
-            if display_idx >= self.scroll_offset {
+            if display_idx >= target_offset {
                 cursor_line = Some(line);
                 break;
             }
@@ -2129,8 +2134,17 @@ impl App {
             self.scroll_offset = 0;
             self.centered_once = false;
             self.needs_scroll_to_active = false;
-            self.multi_diff.current_navigator().clear_cursor_change();
-            self.multi_diff.current_navigator().set_hunk_scope(false);
+            let preserve_scope = self
+                .multi_diff
+                .current_navigator()
+                .state()
+                .last_nav_was_hunk;
+            if !preserve_scope {
+                self.multi_diff.current_navigator().clear_cursor_change();
+                self.multi_diff.current_navigator().set_hunk_scope(false);
+            } else {
+                self.set_cursor_for_current_scroll();
+            }
             return;
         }
         self.multi_diff.current_navigator().goto_start();
@@ -2157,8 +2171,17 @@ impl App {
             self.scroll_offset = usize::MAX;
             self.centered_once = false;
             self.needs_scroll_to_active = false;
-            self.multi_diff.current_navigator().clear_cursor_change();
-            self.multi_diff.current_navigator().set_hunk_scope(false);
+            let preserve_scope = self
+                .multi_diff
+                .current_navigator()
+                .state()
+                .last_nav_was_hunk;
+            if !preserve_scope {
+                self.multi_diff.current_navigator().clear_cursor_change();
+                self.multi_diff.current_navigator().set_hunk_scope(false);
+            } else {
+                self.set_cursor_for_current_scroll();
+            }
             return;
         }
         self.multi_diff.current_navigator().goto_end();
