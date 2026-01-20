@@ -485,6 +485,26 @@ fn test_windowed_view_tracks_scroll_offset_in_no_step_large_file() {
 }
 
 #[test]
+fn test_no_step_end_scroll_does_not_shift_window() {
+    let _guard = DiffSettingsGuard::new(64);
+    let mut app = make_large_app(600, 320);
+    app.last_viewport_height = 72;
+    let total_len = app.multi_diff.current_navigator().diff().changes.len();
+    let max = max_scroll(total_len, app.last_viewport_height, app.allow_overscroll());
+    app.scroll_offset = max;
+
+    let _ = app.current_view_with_frame(AnimationFrame::Idle);
+    let start = app.view_window_start();
+
+    app.scroll_down();
+    let _ = app.current_view_with_frame(AnimationFrame::Idle);
+
+    assert_eq!(app.scroll_offset, max);
+    assert_eq!(app.view_window_start(), start);
+    assert_eq!(app.render_scroll_offset(), app.scroll_offset - start);
+}
+
+#[test]
 fn test_no_step_hunk_scope_shows_extent_in_windowed_view() {
     let _guard = DiffSettingsGuard::new(64);
     let mut app = make_large_app(600, 320);

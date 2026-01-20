@@ -1103,10 +1103,16 @@ impl App {
             return None;
         }
 
+        let allow_overscroll = self.allow_overscroll();
         let nav = self.multi_diff.current_navigator();
         let total_len = nav.diff().changes.len();
         if total_len == 0 {
             return None;
+        }
+        let viewport_height = self.last_viewport_height.max(1);
+        let max_scroll = max_scroll(total_len, viewport_height, allow_overscroll);
+        if self.scroll_offset > max_scroll {
+            self.scroll_offset = max_scroll;
         }
 
         let span = self.last_viewport_height.max(20).saturating_mul(4).max(200);
