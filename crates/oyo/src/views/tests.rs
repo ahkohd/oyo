@@ -45,6 +45,18 @@ fn render_buffer(app: &mut App, width: u16, height: u16) -> Buffer {
     terminal.backend().buffer().clone()
 }
 
+fn render_unified_buffer(app: &mut App, width: u16, height: u16) -> Buffer {
+    let backend = TestBackend::new(width, height);
+    let mut terminal = Terminal::new(backend).expect("terminal");
+    terminal
+        .draw(|frame| {
+            let area = frame.area();
+            render_unified_pane(frame, app, area);
+        })
+        .expect("draw");
+    terminal.backend().buffer().clone()
+}
+
 fn buffer_text(buf: &Buffer) -> Vec<String> {
     let mut lines = Vec::new();
     for y in 0..buf.area.height {
@@ -274,6 +286,97 @@ fn test_unified_wrap_end_scroll_no_bounce() {
         "scroll offset should clamp at end"
     );
     assert_eq!(first, second, "render should not bounce at end");
+}
+
+#[test]
+fn test_blame_end_scroll_no_bounce() {
+    let long = "LONGINSERT_LONGINSERT_LONGINSERT_LONGINSERT";
+    let mut new = String::new();
+    for idx in 0..40 {
+        new.push_str(&format!("{long} {idx}\n"));
+    }
+    let mut app = make_app("", &new, ViewMode::Blame);
+    app.blame_enabled = true;
+    app.line_wrap = false;
+    app.auto_center = false;
+    app.needs_scroll_to_active = false;
+    app.no_step_auto_jump_on_enter = false;
+    app.stepping = false;
+    app.enter_no_step_mode();
+    app.last_viewport_height = 4;
+    app.scroll_offset = usize::MAX;
+
+    let first = buffer_text(&render_buffer(&mut app, 30, 4));
+    let max_scroll = app.scroll_offset;
+    assert!(max_scroll > 0, "expected content to be scrollable");
+
+    app.scroll_down();
+    let second = buffer_text(&render_buffer(&mut app, 30, 4));
+
+    assert_eq!(
+        app.scroll_offset, max_scroll,
+        "scroll offset should clamp at end"
+    );
+    assert_eq!(first, second, "render should not bounce at end");
+}
+
+#[test]
+fn test_blame_large_file_end_scroll_no_empty_state() {
+    let long = "LONGINSERT_LONGINSERT_LONGINSERT_LONGINSERT";
+    let mut new = String::new();
+    for idx in 0..200 {
+        new.push_str(&format!("{long} {idx}\n"));
+    }
+    let mut app = TestApp::new_with_guard(32, || {
+        let diff = MultiFileDiff::from_file_pair(
+            PathBuf::from("old.txt"),
+            PathBuf::from("new.txt"),
+            String::new(),
+            new,
+        );
+        let mut app = App::new(diff, ViewMode::Blame, 200, false, None);
+        app.animation_enabled = false;
+        app.animation_phase = AnimationPhase::Idle;
+        app.syntax_mode = SyntaxMode::Off;
+        app.diff_bg = false;
+        app.diff_fg = DiffForegroundMode::Theme;
+        app.diff_highlight = DiffHighlightMode::Text;
+        app
+    });
+    app.blame_enabled = true;
+    app.line_wrap = false;
+    app.auto_center = false;
+    app.needs_scroll_to_active = false;
+    app.no_step_auto_jump_on_enter = false;
+    app.stepping = false;
+    app.enter_no_step_mode();
+    app.last_viewport_height = 4;
+    app.scroll_offset = usize::MAX;
+
+    let view = app.current_view_with_frame(AnimationFrame::Idle);
+    let mut extra_rows = vec![0; view.len()];
+    if let Some(last) = extra_rows.last_mut() {
+        *last = 2;
+    }
+    app.blame_extra_rows = Some(extra_rows);
+
+    let first_buf = render_unified_buffer(&mut app, 30, 4);
+    let first_text = buffer_text(&first_buf).join("\n");
+    assert!(
+        !first_text.contains("No content at this step"),
+        "expected content at end of blame view"
+    );
+    let max_scroll = app.scroll_offset;
+
+    app.scroll_down();
+    let second_buf = render_unified_buffer(&mut app, 30, 4);
+    let second_text = buffer_text(&second_buf).join("\n");
+
+    assert_eq!(
+        app.scroll_offset, max_scroll,
+        "scroll offset should clamp at end"
+    );
+    assert_eq!(first_text, second_text, "render should not bounce at end");
 }
 
 #[test]

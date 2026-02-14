@@ -335,11 +335,6 @@ fn build_unified_render_model(
         None
     };
 
-    let extra_total = blame_extra_rows
-        .as_ref()
-        .map(|rows| rows.iter().copied().sum::<usize>())
-        .unwrap_or(0);
-
     let mut gutter_lines: Vec<Line> = Vec::new();
     let mut content_lines: Vec<Line> = Vec::new();
     let mut max_line_width: usize = 0;
@@ -358,7 +353,6 @@ fn build_unified_render_model(
         0
     } else {
         app.render_total_lines(view_lines.len())
-            .saturating_add(extra_total)
     };
     let mut primary_display_idx: Option<usize> = None;
     let mut active_display_idx: Option<usize> = None;
@@ -488,6 +482,11 @@ fn build_unified_render_model(
         if !app.line_wrap && gutter_lines.len() >= visible_height {
             break;
         }
+
+        let extra_rows = blame_extra_rows
+            .as_ref()
+            .and_then(|rows| rows.get(idx).copied())
+            .unwrap_or(0);
 
         let line_hunk = view_line.hunk_index;
         let is_first_in_hunk = line_hunk.is_some() && prev_visible_hunk != line_hunk;
@@ -1090,10 +1089,6 @@ fn build_unified_render_model(
                 }
             }
         }
-        let extra_rows = blame_extra_rows
-            .as_ref()
-            .and_then(|rows| rows.get(idx).copied())
-            .unwrap_or(0);
         if extra_rows > 0 {
             if app.line_wrap {
                 display_len += extra_rows;
@@ -1102,6 +1097,9 @@ fn build_unified_render_model(
                 super::push_wrapped_bg_line(bg_lines, wrap_width, extra_rows, None);
             }
             for _ in 0..extra_rows {
+                if !app.line_wrap && gutter_lines.len() >= visible_height {
+                    break;
+                }
                 content_lines.push(Line::from(Span::raw("")));
                 gutter_lines.push(Line::from(Span::raw(" ")));
             }
@@ -1355,14 +1353,7 @@ fn render_unified_pane_cached(frame: &mut Frame, app: &mut App, area: Rect) {
         crate::syntax::syntax_debug_reset();
     }
     if !app.line_wrap {
-        let extra_total = app
-            .blame_extra_rows
-            .as_ref()
-            .map(|rows| rows.iter().copied().sum::<usize>())
-            .unwrap_or(0);
-        let total_lines = app
-            .render_total_lines(view_lines.len())
-            .saturating_add(extra_total);
+        let total_lines = app.render_total_lines(view_lines.len());
         app.clamp_scroll(total_lines, visible_height, app.allow_overscroll());
     }
 
@@ -1566,14 +1557,7 @@ fn render_unified_pane_uncached(frame: &mut Frame, app: &mut App, area: Rect) {
         crate::syntax::syntax_debug_reset();
     }
     if !app.line_wrap {
-        let extra_total = app
-            .blame_extra_rows
-            .as_ref()
-            .map(|rows| rows.iter().copied().sum::<usize>())
-            .unwrap_or(0);
-        let total_lines = app
-            .render_total_lines(view_lines.len())
-            .saturating_add(extra_total);
+        let total_lines = app.render_total_lines(view_lines.len());
         app.clamp_scroll(total_lines, visible_height, app.allow_overscroll());
     }
     let mut scroll_offset = app.render_scroll_offset();
