@@ -361,10 +361,7 @@ fn main() -> Result<()> {
             }
         };
 
-        println!(
-            "{:>4} {:>12} function",
-            "rank", metric_info.column_label
-        );
+        println!("{:>4} {:>12} function", "rank", metric_info.column_label);
         for (rank, (info, count)) in entries.iter().take(args.top).enumerate() {
             let formatted = format_metric_value(*count, metric_info.kind);
             println!("{:>4} {:>12} {}", rank + 1, formatted, info.label);

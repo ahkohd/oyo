@@ -1503,7 +1503,7 @@ impl App {
             .find_map(|(idx, bound)| bound.map(|b| (idx, b)))
     }
 
-    pub(super) fn set_cursor_for_current_scroll(&mut self) {
+    pub(super) fn set_cursor_for_current_scroll(&mut self) -> bool {
         let view = self.current_view_with_frame(AnimationFrame::Idle);
         let target_offset = if self.view_windowed() {
             self.render_scroll_offset()
@@ -1535,13 +1535,16 @@ impl App {
                 self.multi_diff
                     .current_navigator()
                     .set_cursor_hunk(hidx, Some(line.change_id));
+                return true;
             } else {
                 self.multi_diff
                     .current_navigator()
                     .set_cursor_change(Some(line.change_id));
+                return false;
             }
         } else {
             self.multi_diff.current_navigator().clear_cursor_change();
+            false
         }
     }
 
@@ -2139,8 +2142,9 @@ impl App {
             if !preserve_scope {
                 self.multi_diff.current_navigator().clear_cursor_change();
                 self.multi_diff.current_navigator().set_hunk_scope(false);
-            } else {
-                self.set_cursor_for_current_scroll();
+            } else if !self.set_cursor_for_current_scroll() {
+                self.multi_diff.current_navigator().clear_cursor_change();
+                self.multi_diff.current_navigator().set_hunk_scope(false);
             }
             return;
         }
@@ -2176,8 +2180,9 @@ impl App {
             if !preserve_scope {
                 self.multi_diff.current_navigator().clear_cursor_change();
                 self.multi_diff.current_navigator().set_hunk_scope(false);
-            } else {
-                self.set_cursor_for_current_scroll();
+            } else if !self.set_cursor_for_current_scroll() {
+                self.multi_diff.current_navigator().clear_cursor_change();
+                self.multi_diff.current_navigator().set_hunk_scope(false);
             }
             return;
         }

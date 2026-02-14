@@ -46,10 +46,14 @@ type UnifiedHunkCacheKey = (usize, ViewMode, FoldContextMode, bool, usize, usize
 type SplitHunkCacheKey = (usize, FoldContextMode, bool, bool, usize, usize, usize);
 type UnifiedHunkStartsCache = Option<(UnifiedHunkCacheKey, Vec<Option<HunkStart>>)>;
 type UnifiedHunkBoundsCache = Option<(UnifiedHunkCacheKey, Vec<Option<HunkBounds>>)>;
-type SplitHunkStartsCache =
-    Option<(SplitHunkCacheKey, (Vec<Option<HunkStart>>, Vec<Option<HunkStart>>))>;
-type SplitHunkBoundsCache =
-    Option<(SplitHunkCacheKey, (Vec<Option<HunkBounds>>, Vec<Option<HunkBounds>>))>;
+type SplitHunkStartsCache = Option<(
+    SplitHunkCacheKey,
+    (Vec<Option<HunkStart>>, Vec<Option<HunkStart>>),
+)>;
+type SplitHunkBoundsCache = Option<(
+    SplitHunkCacheKey,
+    (Vec<Option<HunkBounds>>, Vec<Option<HunkBounds>>),
+)>;
 
 /// The main application state
 pub struct App {
