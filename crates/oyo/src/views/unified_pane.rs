@@ -6,8 +6,7 @@ use super::{
     truncate_text, wrap_count_for_spans, wrap_count_for_text, TAB_WIDTH,
 };
 use crate::app::{
-    is_conflict_marker, is_fold_line, AnimationPhase, App, UnifiedRenderKey,
-    UnifiedRenderModel,
+    is_conflict_marker, is_fold_line, AnimationPhase, App, UnifiedRenderKey, UnifiedRenderModel,
 };
 use crate::color;
 use crate::config::{DiffForegroundMode, DiffHighlightMode, ModifiedStepMode};
@@ -346,7 +345,10 @@ fn build_unified_render_model(
     let mut max_line_width: usize = 0;
     let wrap_width = visible_width;
     let syntax_window = if app.line_wrap {
-        Some(super::syntax_highlight_window(scroll_offset, visible_height))
+        Some(super::syntax_highlight_window(
+            scroll_offset,
+            visible_height,
+        ))
     } else {
         None
     };
@@ -1077,11 +1079,14 @@ fn build_unified_render_model(
                 if let Some(bg) = line_bg_gutter {
                     let pad = " ".repeat(GUTTER_WIDTH as usize - 1);
                     gutter_lines.push(Line::from(vec![
-                    Span::styled(wrap_marker.to_string(), wrap_style),
+                        Span::styled(wrap_marker.to_string(), wrap_style),
                         Span::styled(pad, Style::default().bg(bg)),
                     ]));
                 } else {
-                gutter_lines.push(Line::from(Span::styled(wrap_marker.to_string(), wrap_style)));
+                    gutter_lines.push(Line::from(Span::styled(
+                        wrap_marker.to_string(),
+                        wrap_style,
+                    )));
                 }
             }
         }
@@ -1356,11 +1361,19 @@ fn render_unified_pane_cached(frame: &mut Frame, app: &mut App, area: Rect) {
             .as_ref()
             .map(|rows| rows.iter().copied().sum::<usize>())
             .unwrap_or(0);
-        let total_lines = app.render_total_lines(view_lines.len()).saturating_add(extra_total);
+        let total_lines = app
+            .render_total_lines(view_lines.len())
+            .saturating_add(extra_total);
         app.clamp_scroll(total_lines, visible_height, app.allow_overscroll());
     }
 
-    let key = unified_render_key(app, animation_frame, visible_height, visible_width, scroll_offset);
+    let key = unified_render_key(
+        app,
+        animation_frame,
+        visible_height,
+        visible_width,
+        scroll_offset,
+    );
     let rebuild = app
         .unified_render_cache
         .as_ref()
@@ -1483,8 +1496,7 @@ fn render_unified_model(
             let total_lines = model.display_len;
             let visible_lines = content_area.height as usize;
             if total_lines > visible_lines {
-                let mut scrollbar_state =
-                    ScrollbarState::new(total_lines).position(scroll_offset);
+                let mut scrollbar_state = ScrollbarState::new(total_lines).position(scroll_offset);
                 frame.render_stateful_widget(
                     scrollbar,
                     area.inner(ratatui::layout::Margin {
@@ -1539,7 +1551,9 @@ fn render_unified_pane_uncached(frame: &mut Frame, app: &mut App, area: Rect) {
             .as_ref()
             .map(|rows| rows.iter().copied().sum::<usize>())
             .unwrap_or(0);
-        let total_lines = app.render_total_lines(view_lines.len()).saturating_add(extra_total);
+        let total_lines = app
+            .render_total_lines(view_lines.len())
+            .saturating_add(extra_total);
         app.clamp_scroll(total_lines, visible_height, app.allow_overscroll());
     }
     let blame_extra_rows = if matches!(app.view_mode, crate::app::ViewMode::Blame) {
@@ -1547,7 +1561,13 @@ fn render_unified_pane_uncached(frame: &mut Frame, app: &mut App, area: Rect) {
     } else {
         None
     };
-    let key = unified_render_key(app, animation_frame, visible_height, visible_width, scroll_offset);
+    let key = unified_render_key(
+        app,
+        animation_frame,
+        visible_height,
+        visible_width,
+        scroll_offset,
+    );
     let model = build_unified_render_model(
         app,
         key,

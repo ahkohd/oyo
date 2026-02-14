@@ -119,11 +119,7 @@ impl Sink for ChangeRangeSink {
     }
 }
 
-fn diff_ranges<I, T>(
-    algorithm: Algorithm,
-    before: I,
-    after: I,
-) -> Vec<(Range<usize>, Range<usize>)>
+fn diff_ranges<I, T>(algorithm: Algorithm, before: I, after: I) -> Vec<(Range<usize>, Range<usize>)>
 where
     I: TokenSource<Token = T>,
     T: Eq + Hash,
@@ -264,8 +260,7 @@ impl DiffEngine {
                     }
                 }
             }
-            let significant_set: FxHashSet<usize> =
-                significant_changes.iter().copied().collect();
+            let significant_set: FxHashSet<usize> = significant_changes.iter().copied().collect();
             let mut filtered_changes = Vec::new();
             let mut filtered_significant = Vec::new();
             for (idx, change) in changes.into_iter().enumerate() {
@@ -547,18 +542,26 @@ impl DiffEngine {
         for (before, after) in ranges {
             while old_idx < before.start {
                 let token = old_refs.get(old_idx).copied().unwrap_or("");
-                spans.push(ChangeSpan::equal(token.to_string()).with_lines(Some(old_line), Some(new_line)));
+                spans.push(
+                    ChangeSpan::equal(token.to_string()).with_lines(Some(old_line), Some(new_line)),
+                );
                 old_idx += 1;
             }
 
             for idx in before.start..before.end {
                 let token = old_refs.get(idx).copied().unwrap_or("");
-                spans.push(ChangeSpan::delete(token.to_string()).with_lines(Some(old_line), Some(new_line)));
+                spans.push(
+                    ChangeSpan::delete(token.to_string())
+                        .with_lines(Some(old_line), Some(new_line)),
+                );
             }
 
             for idx in after.start..after.end {
                 let token = new_refs.get(idx).copied().unwrap_or("");
-                spans.push(ChangeSpan::insert(token.to_string()).with_lines(Some(old_line), Some(new_line)));
+                spans.push(
+                    ChangeSpan::insert(token.to_string())
+                        .with_lines(Some(old_line), Some(new_line)),
+                );
             }
 
             old_idx = before.end;
@@ -566,7 +569,9 @@ impl DiffEngine {
 
         while old_idx < old_refs.len() {
             let token = old_refs.get(old_idx).copied().unwrap_or("");
-            spans.push(ChangeSpan::equal(token.to_string()).with_lines(Some(old_line), Some(new_line)));
+            spans.push(
+                ChangeSpan::equal(token.to_string()).with_lines(Some(old_line), Some(new_line)),
+            );
             old_idx += 1;
         }
 

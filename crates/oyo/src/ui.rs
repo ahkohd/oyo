@@ -430,7 +430,8 @@ fn draw_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
     let diff_pending = matches!(
         app.multi_diff.current_file_diff_status(),
         DiffStatus::Deferred | DiffStatus::Computing
-    ) || app.view_build_pending() || app.syntax_warmup_pending();
+    ) || app.view_build_pending()
+        || app.syntax_warmup_pending();
     let stats_known = insertions > 0 || deletions > 0;
     let mut right_spans = Vec::new();
     if let Some(ref hunk) = hunk_text {
@@ -531,7 +532,8 @@ fn draw_top_bar(frame: &mut Frame, app: &mut App, area: Rect) {
     let diff_pending = matches!(
         app.multi_diff.current_file_diff_status(),
         DiffStatus::Deferred | DiffStatus::Computing
-    ) || app.view_build_pending() || app.syntax_warmup_pending();
+    ) || app.view_build_pending()
+        || app.syntax_warmup_pending();
     let stats_known = insertions > 0 || deletions > 0;
     let mut right_spans = if matches!(app.view_mode, ViewMode::Blame) {
         blame_age_legend_spans(app)

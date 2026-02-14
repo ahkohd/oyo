@@ -268,7 +268,10 @@ impl DiffNavigator {
                 }
             }
             if count > 0 && min != usize::MAX {
-                hunk_step_ranges[hunk_idx] = Some(HunkStepRange { start: min, len: count });
+                hunk_step_ranges[hunk_idx] = Some(HunkStepRange {
+                    start: min,
+                    len: count,
+                });
             }
         }
 
@@ -403,7 +406,11 @@ impl DiffNavigator {
                 (Some(prev), Some(next)) => {
                     let prev_dist = idx.saturating_sub(prev);
                     let next_dist = next.saturating_sub(idx);
-                    nearest[idx] = if next_dist < prev_dist { Some(next) } else { Some(prev) };
+                    nearest[idx] = if next_dist < prev_dist {
+                        Some(next)
+                    } else {
+                        Some(prev)
+                    };
                 }
                 (Some(prev), None) => nearest[idx] = Some(prev),
                 (None, Some(next)) => nearest[idx] = Some(next),
@@ -728,20 +735,13 @@ impl DiffNavigator {
 
         for &change_id in &hunk.change_ids {
             if Some(change_id) == keep {
-                keep_index = change_to_step_index
-                    .get(change_id)
-                    .copied()
-                    .flatten();
+                keep_index = change_to_step_index.get(change_id).copied().flatten();
                 continue;
             }
             if !state.is_applied(change_id) {
                 continue;
             }
-            if let Some(step_idx) = change_to_step_index
-                .get(change_id)
-                .copied()
-                .flatten()
-            {
+            if let Some(step_idx) = change_to_step_index.get(change_id).copied().flatten() {
                 min_index = Some(min_index.map_or(step_idx, |min| min.min(step_idx)));
             }
         }
@@ -782,8 +782,10 @@ impl DiffNavigator {
         if self.lazy_maps {
             if target_step > 0 {
                 let end = target_step.min(self.diff.significant_changes.len());
-                self.state.applied_changes =
-                    self.diff.significant_changes[..end].iter().copied().collect();
+                self.state.applied_changes = self.diff.significant_changes[..end]
+                    .iter()
+                    .copied()
+                    .collect();
                 self.state.rebuild_applied_set();
                 self.state.current_step = end;
                 self.state.active_change = self.state.applied_changes.last().copied();
@@ -928,10 +930,7 @@ impl DiffNavigator {
         // On hunk 0, only proceed if there are applied changes to unapply
         if self.state.current_hunk == 0 {
             let hunk = &self.diff.hunks[0];
-            let has_applied = hunk
-                .change_ids
-                .iter()
-                .any(|id| self.state.is_applied(*id));
+            let has_applied = hunk.change_ids.iter().any(|id| self.state.is_applied(*id));
             if !has_applied {
                 // No movement, restore preview mode
                 self.state.hunk_preview_mode = was_in_preview;
@@ -1087,10 +1086,7 @@ impl DiffNavigator {
         }
 
         let hunk = &self.diff.hunks[self.state.current_hunk];
-        let has_applied = hunk
-            .change_ids
-            .iter()
-            .any(|id| self.state.is_applied(*id));
+        let has_applied = hunk.change_ids.iter().any(|id| self.state.is_applied(*id));
         if !has_applied {
             return false;
         }
@@ -1157,7 +1153,10 @@ impl DiffNavigator {
     fn is_change_in_animating_hunk(&self, change_id: usize) -> bool {
         self.state
             .animating_hunk
-            .and_then(|hunk_idx| self.hunk_index_for_change(change_id).map(|id| id == hunk_idx))
+            .and_then(|hunk_idx| {
+                self.hunk_index_for_change(change_id)
+                    .map(|id| id == hunk_idx)
+            })
             .unwrap_or(false)
     }
 
@@ -1174,10 +1173,7 @@ impl DiffNavigator {
     }
 
     fn hunk_change_index_range(&self, hunk_idx: usize) -> Option<(usize, usize)> {
-        self.hunk_change_ranges
-            .get(hunk_idx)
-            .copied()
-            .flatten()
+        self.hunk_change_ranges.get(hunk_idx).copied().flatten()
     }
 
     fn hunk_change_index_range_exact(&self, hunk_idx: usize) -> Option<(usize, usize)> {
@@ -1285,8 +1281,7 @@ impl DiffNavigator {
         };
         let show_hunk_extent = is_in_hunk
             || (in_scope
-                && (self.state.last_nav_was_hunk
-                    || self.state.show_hunk_extent_while_stepping));
+                && (self.state.last_nav_was_hunk || self.state.show_hunk_extent_while_stepping));
 
         let primary_change_id = if self.state.cursor_change.is_some()
             && self.state.active_change.is_none()
@@ -1459,8 +1454,8 @@ impl DiffNavigator {
             } else {
                 scope_range_padded
             };
-            let change_idx = scope_range
-                .and_then(|_| self.change_to_index.get(change.id).copied().flatten());
+            let change_idx =
+                scope_range.and_then(|_| self.change_to_index.get(change.id).copied().flatten());
             let in_scope = if let (Some((start, end)), Some(idx)) = (scope_range, change_idx) {
                 idx >= start && idx <= end
             } else {
@@ -2343,7 +2338,13 @@ mod tests {
     #[test]
     fn test_no_step_scope_prefers_exact_mapping_for_changes() {
         let changes = (0..8)
-            .map(|id| if id == 2 || id == 5 { make_insert_change(id) } else { make_equal_change(id) })
+            .map(|id| {
+                if id == 2 || id == 5 {
+                    make_insert_change(id)
+                } else {
+                    make_equal_change(id)
+                }
+            })
             .collect::<Vec<_>>();
         let hunks = vec![
             Hunk {
@@ -2398,7 +2399,13 @@ mod tests {
     #[test]
     fn test_no_step_scope_includes_context_lines() {
         let changes = (0..10)
-            .map(|id| if id == 4 { make_insert_change(id) } else { make_equal_change(id) })
+            .map(|id| {
+                if id == 4 {
+                    make_insert_change(id)
+                } else {
+                    make_equal_change(id)
+                }
+            })
             .collect::<Vec<_>>();
         let hunks = vec![Hunk {
             id: 0,

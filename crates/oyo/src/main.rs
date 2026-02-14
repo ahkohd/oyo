@@ -6,11 +6,11 @@ mod color;
 mod config;
 mod dashboard;
 mod syntax;
+#[cfg(test)]
+mod test_utils;
 mod time_format;
 mod ui;
 mod views;
-#[cfg(test)]
-mod test_utils;
 
 use crate::dashboard::{Dashboard, DashboardConfig, DashboardSelection};
 use crate::syntax::{list_syntax_themes, SyntaxEngine};
@@ -20,8 +20,8 @@ use app::{App, ViewMode};
 use clap::{Parser, Subcommand};
 use crossterm::{
     event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
-    KeyModifiers, MouseButton, MouseEventKind,
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+        KeyModifiers, MouseButton, MouseEventKind,
     },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -1525,9 +1525,7 @@ fn coalesce_key_repeats(
     pending_event: &mut Option<Event>,
 ) -> std::io::Result<usize> {
     let mut count = 1usize;
-    let same_key = |next: &KeyEvent| {
-        next.code == first.code && next.modifiers == first.modifiers
-    };
+    let same_key = |next: &KeyEvent| next.code == first.code && next.modifiers == first.modifiers;
     while event::poll(Duration::from_millis(0))? {
         let next = event::read()?;
         match next {

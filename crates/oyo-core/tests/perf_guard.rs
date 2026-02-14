@@ -47,7 +47,12 @@ fn make_text(hunks: usize, changes_per_hunk: usize, context_lines: usize) -> (St
 }
 
 fn measure_is_applied(inputs: &Inputs) -> Duration {
-    let mut nav = DiffNavigator::new(inputs.diff.clone(), inputs.old.clone(), inputs.new.clone(), false);
+    let mut nav = DiffNavigator::new(
+        inputs.diff.clone(),
+        inputs.old.clone(),
+        inputs.new.clone(),
+        false,
+    );
     nav.goto_end();
     let sample_ids: Vec<usize> = inputs
         .diff
@@ -67,7 +72,12 @@ fn measure_is_applied(inputs: &Inputs) -> Duration {
 }
 
 fn measure_hunk_index_for_change_id(inputs: &Inputs) -> Duration {
-    let nav = DiffNavigator::new(inputs.diff.clone(), inputs.old.clone(), inputs.new.clone(), false);
+    let nav = DiffNavigator::new(
+        inputs.diff.clone(),
+        inputs.old.clone(),
+        inputs.new.clone(),
+        false,
+    );
     let sample_ids: Vec<usize> = inputs
         .diff
         .changes

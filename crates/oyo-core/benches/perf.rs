@@ -45,8 +45,12 @@ fn bench_prev_hunk(c: &mut Criterion) {
     c.bench_function("prev_hunk/100x20", |b| {
         b.iter_batched(
             || {
-                let mut nav =
-                    DiffNavigator::new(inputs.diff.clone(), inputs.old.clone(), inputs.new.clone(), false);
+                let mut nav = DiffNavigator::new(
+                    inputs.diff.clone(),
+                    inputs.old.clone(),
+                    inputs.new.clone(),
+                    false,
+                );
                 nav.goto_end();
                 nav
             },
@@ -62,7 +66,14 @@ fn bench_next_hunk(c: &mut Criterion) {
     let inputs = build_inputs(100, 20, 3);
     c.bench_function("next_hunk/100x20", |b| {
         b.iter_batched(
-            || DiffNavigator::new(inputs.diff.clone(), inputs.old.clone(), inputs.new.clone(), false),
+            || {
+                DiffNavigator::new(
+                    inputs.diff.clone(),
+                    inputs.old.clone(),
+                    inputs.new.clone(),
+                    false,
+                )
+            },
             |mut nav| {
                 black_box(nav.next_hunk());
             },
@@ -76,8 +87,12 @@ fn bench_view_for_changes(c: &mut Criterion) {
     c.bench_function("view_for_changes/100x20", |b| {
         b.iter_batched(
             || {
-                let mut nav =
-                    DiffNavigator::new(inputs.diff.clone(), inputs.old.clone(), inputs.new.clone(), false);
+                let mut nav = DiffNavigator::new(
+                    inputs.diff.clone(),
+                    inputs.old.clone(),
+                    inputs.new.clone(),
+                    false,
+                );
                 let mid = nav.state().total_steps / 2;
                 nav.goto(mid);
                 nav
@@ -98,8 +113,12 @@ fn bench_view_for_changes_large_hunk(c: &mut Criterion) {
     group.bench_function("1x5000", |b| {
         b.iter_batched(
             || {
-                let mut nav =
-                    DiffNavigator::new(inputs.diff.clone(), inputs.old.clone(), inputs.new.clone(), false);
+                let mut nav = DiffNavigator::new(
+                    inputs.diff.clone(),
+                    inputs.old.clone(),
+                    inputs.new.clone(),
+                    false,
+                );
                 let mid = nav.state().total_steps / 2;
                 nav.goto(mid);
                 nav
@@ -121,7 +140,14 @@ fn bench_hunk_index_for_change_id(c: &mut Criterion) {
         &change_ids,
         |b, ids| {
             b.iter_batched(
-                || DiffNavigator::new(inputs.diff.clone(), inputs.old.clone(), inputs.new.clone(), false),
+                || {
+                    DiffNavigator::new(
+                        inputs.diff.clone(),
+                        inputs.old.clone(),
+                        inputs.new.clone(),
+                        false,
+                    )
+                },
                 |nav| {
                     for id in ids.iter().take(1000) {
                         black_box(nav.hunk_index_for_change_id(*id));
@@ -139,8 +165,12 @@ fn bench_is_applied(c: &mut Criterion) {
     c.bench_function("is_applied/200x10", |b| {
         b.iter_batched(
             || {
-                let mut nav =
-                    DiffNavigator::new(inputs.diff.clone(), inputs.old.clone(), inputs.new.clone(), false);
+                let mut nav = DiffNavigator::new(
+                    inputs.diff.clone(),
+                    inputs.old.clone(),
+                    inputs.new.clone(),
+                    false,
+                );
                 nav.goto_end();
                 nav
             },

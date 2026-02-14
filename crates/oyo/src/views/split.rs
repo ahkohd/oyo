@@ -351,7 +351,10 @@ fn render_old_pane(
     let visible_height = area.height as usize;
     let visible_width = area.width.saturating_sub(GUTTER_WIDTH + 1) as usize; // +1 for border
     let syntax_window = if app.line_wrap {
-        Some(super::syntax_highlight_window(scroll_offset, visible_height))
+        Some(super::syntax_highlight_window(
+            scroll_offset,
+            visible_height,
+        ))
     } else {
         None
     };
@@ -1163,7 +1166,10 @@ fn render_new_pane(
     let view_lines = app.current_view_with_frame(animation_frame);
     let visible_height = area.height as usize;
     let syntax_window = if app.line_wrap {
-        Some(super::syntax_highlight_window(scroll_offset, visible_height))
+        Some(super::syntax_highlight_window(
+            scroll_offset,
+            visible_height,
+        ))
     } else {
         None
     };

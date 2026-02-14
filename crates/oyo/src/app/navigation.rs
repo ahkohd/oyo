@@ -1020,8 +1020,7 @@ impl App {
                 return starts.clone();
             }
         }
-        let starts = if self.multi_diff.current_file_is_large() && !self.fold_context.is_enabled()
-        {
+        let starts = if self.multi_diff.current_file_is_large() && !self.fold_context.is_enabled() {
             self.compute_hunk_starts_split_fast()
         } else {
             let view = self.current_view_with_frame(AnimationFrame::Idle);
@@ -1072,62 +1071,61 @@ impl App {
                 return bounds.clone();
             }
         }
-        let bounds =
-            if self.multi_diff.current_file_is_large() && !self.fold_context.is_enabled() {
-                self.compute_hunk_bounds_split_fast()
-            } else {
-                let view = self.current_view_with_frame(AnimationFrame::Idle);
-                let (_, total_hunks) = self.hunk_info();
+        let bounds = if self.multi_diff.current_file_is_large() && !self.fold_context.is_enabled() {
+            self.compute_hunk_bounds_split_fast()
+        } else {
+            let view = self.current_view_with_frame(AnimationFrame::Idle);
+            let (_, total_hunks) = self.hunk_info();
 
-                let mut old_bounds: Vec<Option<HunkBounds>> = vec![None; total_hunks];
-                let mut new_bounds: Vec<Option<HunkBounds>> = vec![None; total_hunks];
-                let mut old_idx = 0usize;
-                let mut new_idx = 0usize;
+            let mut old_bounds: Vec<Option<HunkBounds>> = vec![None; total_hunks];
+            let mut new_bounds: Vec<Option<HunkBounds>> = vec![None; total_hunks];
+            let mut old_idx = 0usize;
+            let mut new_idx = 0usize;
 
-                for line in view.iter() {
-                    let fold_line = is_fold_line(line);
-                    if line.old_line.is_some() || fold_line {
-                        if let Some(hidx) = line.hunk_index {
-                            if hidx < total_hunks {
-                                let start = HunkStart {
-                                    idx: old_idx,
-                                    change_id: Some(line.change_id),
-                                };
-                                if let Some(existing) = old_bounds[hidx] {
-                                    old_bounds[hidx] = Some(HunkBounds {
-                                        start: existing.start,
-                                        end: start,
-                                    });
-                                } else {
-                                    old_bounds[hidx] = Some(HunkBounds { start, end: start });
-                                }
+            for line in view.iter() {
+                let fold_line = is_fold_line(line);
+                if line.old_line.is_some() || fold_line {
+                    if let Some(hidx) = line.hunk_index {
+                        if hidx < total_hunks {
+                            let start = HunkStart {
+                                idx: old_idx,
+                                change_id: Some(line.change_id),
+                            };
+                            if let Some(existing) = old_bounds[hidx] {
+                                old_bounds[hidx] = Some(HunkBounds {
+                                    start: existing.start,
+                                    end: start,
+                                });
+                            } else {
+                                old_bounds[hidx] = Some(HunkBounds { start, end: start });
                             }
                         }
-                        old_idx += 1;
                     }
-                    if line.new_line.is_some() || fold_line {
-                        if let Some(hidx) = line.hunk_index {
-                            if hidx < total_hunks {
-                                let start = HunkStart {
-                                    idx: new_idx,
-                                    change_id: Some(line.change_id),
-                                };
-                                if let Some(existing) = new_bounds[hidx] {
-                                    new_bounds[hidx] = Some(HunkBounds {
-                                        start: existing.start,
-                                        end: start,
-                                    });
-                                } else {
-                                    new_bounds[hidx] = Some(HunkBounds { start, end: start });
-                                }
-                            }
-                        }
-                        new_idx += 1;
-                    }
+                    old_idx += 1;
                 }
+                if line.new_line.is_some() || fold_line {
+                    if let Some(hidx) = line.hunk_index {
+                        if hidx < total_hunks {
+                            let start = HunkStart {
+                                idx: new_idx,
+                                change_id: Some(line.change_id),
+                            };
+                            if let Some(existing) = new_bounds[hidx] {
+                                new_bounds[hidx] = Some(HunkBounds {
+                                    start: existing.start,
+                                    end: start,
+                                });
+                            } else {
+                                new_bounds[hidx] = Some(HunkBounds { start, end: start });
+                            }
+                        }
+                    }
+                    new_idx += 1;
+                }
+            }
 
-                (old_bounds, new_bounds)
-            };
+            (old_bounds, new_bounds)
+        };
         self.hunk_bounds_split_cache = Some((key, bounds.clone()));
         bounds
     }

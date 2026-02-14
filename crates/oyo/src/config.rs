@@ -1154,7 +1154,11 @@ impl From<SyntaxConfigDef> for SyntaxConfig {
                 mode,
                 ..Self::default()
             },
-            SyntaxConfigDef::Detailed { mode, theme, warmup } => Self {
+            SyntaxConfigDef::Detailed {
+                mode,
+                theme,
+                warmup,
+            } => Self {
                 mode,
                 theme: theme.unwrap_or_default(),
                 warmup: warmup.unwrap_or_default(),

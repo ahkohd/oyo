@@ -476,11 +476,7 @@ fn test_windowed_view_tracks_scroll_offset_in_no_step_large_file() {
     assert!(start <= app.scroll_offset);
     assert_eq!(app.render_scroll_offset(), app.scroll_offset - start);
 
-    let span = app
-        .last_viewport_height
-        .max(20)
-        .saturating_mul(4)
-        .max(200);
+    let span = app.last_viewport_height.max(20).saturating_mul(4).max(200);
     assert!(view.len() <= span.saturating_add(1));
 }
 
@@ -635,10 +631,7 @@ fn test_step_hunk_nav_clears_view_build_defer_in_large_file() {
 #[test]
 fn test_view_nav_logging_emits_entry() {
     let _guard = DiffSettingsGuard::default();
-    let path = std::env::temp_dir().join(format!(
-        "oyo_view_nav_test_{}.log",
-        std::process::id()
-    ));
+    let path = std::env::temp_dir().join(format!("oyo_view_nav_test_{}.log", std::process::id()));
     let _guard = ViewDebugEnvGuard::new(&path);
     let _ = std::fs::remove_file(&path);
 

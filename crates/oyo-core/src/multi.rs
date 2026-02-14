@@ -5,8 +5,8 @@ use crate::diff::{DiffEngine, DiffResult};
 use crate::git::{ChangedFile, FileStatus};
 use crate::step::{DiffNavigator, StepDirection};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 use thiserror::Error;
 
 #[derive(Error, Debug)]

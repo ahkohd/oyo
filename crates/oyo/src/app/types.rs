@@ -6,8 +6,8 @@ use crate::config::{
 use crate::syntax::SyntaxSide;
 use oyo_core::diff::DiffResult;
 use oyo_core::{multi::BlameSource, AnimationFrame, StepDirection};
-use ratatui::text::Line;
 use ratatui::style::Color;
+use ratatui::text::Line;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;

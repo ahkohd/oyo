@@ -173,7 +173,10 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
     let mut max_line_width: usize = 0;
     let wrap_width = visible_width;
     let syntax_window = if app.line_wrap {
-        Some(super::syntax_highlight_window(scroll_offset, visible_height))
+        Some(super::syntax_highlight_window(
+            scroll_offset,
+            visible_height,
+        ))
     } else {
         None
     };

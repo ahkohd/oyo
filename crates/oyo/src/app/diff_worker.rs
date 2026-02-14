@@ -36,7 +36,10 @@ impl App {
         if !self.diff_defer {
             return;
         }
-        if !matches!(self.multi_diff.diff_status(idx), oyo_core::multi::DiffStatus::Deferred) {
+        if !matches!(
+            self.multi_diff.diff_status(idx),
+            oyo_core::multi::DiffStatus::Deferred
+        ) {
             return;
         }
         if self.diff_inflight == Some(idx) || self.diff_queue.contains(&idx) {
@@ -97,7 +100,8 @@ impl App {
                     }
                     if resp.file_index == self.multi_diff.selected_index {
                         self.reset_current_max_line_width();
-                        if !self.files_visited[resp.file_index] || !self.no_step_visited[resp.file_index]
+                        if !self.files_visited[resp.file_index]
+                            || !self.no_step_visited[resp.file_index]
                         {
                             self.finish_file_enter();
                         }
@@ -123,7 +127,10 @@ impl App {
             return;
         }
         for idx in 0..self.multi_diff.file_count() {
-            if matches!(self.multi_diff.diff_status(idx), oyo_core::multi::DiffStatus::Deferred) {
+            if matches!(
+                self.multi_diff.diff_status(idx),
+                oyo_core::multi::DiffStatus::Deferred
+            ) {
                 self.queue_diff_for_file(idx);
                 break;
             }

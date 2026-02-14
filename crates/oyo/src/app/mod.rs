@@ -1018,7 +1018,12 @@ impl App {
         )
     }
 
-    fn view_cache_key(&mut self, frame: AnimationFrame, windowed: bool, window_start: usize) -> ViewCacheKey {
+    fn view_cache_key(
+        &mut self,
+        frame: AnimationFrame,
+        windowed: bool,
+        window_start: usize,
+    ) -> ViewCacheKey {
         let idx = self.multi_diff.selected_index;
         let state = self.multi_diff.current_navigator().state();
         ViewCacheKey {
@@ -1044,8 +1049,7 @@ impl App {
     }
 
     pub(crate) fn render_scroll_offset(&self) -> usize {
-        self.scroll_offset
-            .saturating_sub(self.view_window_start)
+        self.scroll_offset.saturating_sub(self.view_window_start)
     }
 
     pub(crate) fn peek_state(&self) -> Option<PeekState> {
@@ -1129,8 +1133,8 @@ impl App {
             let mut end = (idx + span).min(total_len.saturating_sub(1));
             let scroll = self.scroll_offset.min(total_len.saturating_sub(1));
             if !self.needs_scroll_to_active {
-                let inside_window = scroll >= start.saturating_add(margin)
-                    && scroll <= end.saturating_sub(margin);
+                let inside_window =
+                    scroll >= start.saturating_add(margin) && scroll <= end.saturating_sub(margin);
                 if !inside_window {
                     start = scroll.saturating_sub(margin);
                     end = (start + span).min(total_len.saturating_sub(1));
@@ -1231,8 +1235,8 @@ impl App {
                             window_start_override = Some(start_display);
                             window_total_override = Some(nav.evolution_visible_len());
                             nav.current_view_for_change_range(frame, start, end)
-                        } else if let Some(anchor) = nav
-                            .evolution_nearest_visible_change_id_dynamic(change_id, radius)
+                        } else if let Some(anchor) =
+                            nav.evolution_nearest_visible_change_id_dynamic(change_id, radius)
                         {
                             nav.current_view_for_change_window(frame, anchor, radius)
                         } else {
@@ -1278,17 +1282,12 @@ impl App {
                     .or(state.applied_changes.last().copied())
                     .or_else(|| nav.diff().significant_changes.first().copied());
                 if let Some(change_id) = change_id {
-                    let radius = self
-                        .last_viewport_height
-                        .max(20)
-                        .saturating_mul(4)
-                        .max(200);
+                    let radius = self.last_viewport_height.max(20).saturating_mul(4).max(200);
                     if let Some(anchor) =
                         nav.evolution_nearest_visible_change_id_dynamic(change_id, radius)
                     {
                         if let Some(display_idx) = nav.evolution_display_index_for_change(anchor) {
-                            window_start_override =
-                                Some(display_idx.saturating_sub(radius));
+                            window_start_override = Some(display_idx.saturating_sub(radius));
                             window_total_override = Some(nav.evolution_visible_len());
                         }
                         view = nav.current_view_for_change_window(frame, anchor, radius);

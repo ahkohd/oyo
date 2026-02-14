@@ -1,10 +1,10 @@
 use std::path::PathBuf;
 
 use crate::app::{AnimationPhase, App, ViewMode};
-use crate::test_utils::TestApp;
 use crate::config::{
     DiffForegroundMode, DiffHighlightMode, EvoSyntaxMode, ModifiedStepMode, SyntaxMode,
 };
+use crate::test_utils::TestApp;
 use crate::views::{render_blame, render_evolution, render_split, render_unified_pane};
 use oyo_core::{AnimationFrame, MultiFileDiff};
 use ratatui::{backend::TestBackend, buffer::Buffer, Terminal};
@@ -163,9 +163,7 @@ fn test_evolution_deleted_active_fallback_marker() {
 
 #[test]
 fn test_evolution_window_cache_scroll_offset() {
-    let old = (0..600)
-        .map(|i| format!("line {i}\n"))
-        .collect::<String>();
+    let old = (0..600).map(|i| format!("line {i}\n")).collect::<String>();
     let new = (0..600)
         .filter(|i| *i >= 50)
         .map(|i| format!("line {i} new\n"))
@@ -176,21 +174,11 @@ fn test_evolution_window_cache_scroll_offset() {
     app.needs_scroll_to_active = false;
     app.stepping = false;
     app.scroll_offset = 400;
-    let span = app
-        .last_viewport_height
-        .max(20)
-        .saturating_mul(4)
-        .max(200);
+    let span = app.last_viewport_height.max(20).saturating_mul(4).max(200);
     let scroll_offset = app.scroll_offset;
     let (_window_start, display_start) = {
         let nav = app.multi_diff.current_navigator();
-        let window_start = scroll_offset.min(
-            nav.diff()
-                .changes
-                .len()
-                .saturating_sub(1)
-                .max(span),
-        );
+        let window_start = scroll_offset.min(nav.diff().changes.len().saturating_sub(1).max(span));
         let display_start = nav
             .evolution_display_index_for_change_index(window_start)
             .unwrap_or(0);

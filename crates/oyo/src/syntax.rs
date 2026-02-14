@@ -763,7 +763,11 @@ impl SyntaxCache {
         }
     }
 
-    pub fn rendered_spans(&mut self, side: SyntaxSide, line_index: usize) -> Option<Vec<Span<'static>>> {
+    pub fn rendered_spans(
+        &mut self,
+        side: SyntaxSide,
+        line_index: usize,
+    ) -> Option<Vec<Span<'static>>> {
         syntax_debug_request();
         match side {
             SyntaxSide::Old => rendered_spans_for_store(&mut self.old, line_index),
@@ -788,8 +792,10 @@ impl SyntaxCache {
                     remaining.saturating_sub(warm_checkpoints_for_store(&mut self.old, remaining));
             }
         } else {
-            remaining = remaining.saturating_sub(warm_checkpoints_for_store(&mut self.new, remaining));
-            remaining = remaining.saturating_sub(warm_checkpoints_for_store(&mut self.old, remaining));
+            remaining =
+                remaining.saturating_sub(warm_checkpoints_for_store(&mut self.new, remaining));
+            remaining =
+                remaining.saturating_sub(warm_checkpoints_for_store(&mut self.old, remaining));
         }
         if new_pending_before && !warm_pending_for_store(&self.new) {
             self.bump_epoch();
@@ -859,10 +865,7 @@ fn warm_pending_for_store(store: &SyntaxStore) -> bool {
     }
 }
 
-fn set_warmup_target_for_store(
-    store: &mut SyntaxStore,
-    range: Option<crate::app::WarmupRange>,
-) {
+fn set_warmup_target_for_store(store: &mut SyntaxStore, range: Option<crate::app::WarmupRange>) {
     match store {
         SyntaxStore::Full(_) => {}
         SyntaxStore::Lazy(cache) => match range {
@@ -1013,7 +1016,10 @@ impl LazySyntaxCache {
         }
 
         while progress.next_chunk <= target_chunk {
-            let Some(state) = self.checkpoints.get(progress.next_chunk).and_then(|c| c.clone())
+            let Some(state) = self
+                .checkpoints
+                .get(progress.next_chunk)
+                .and_then(|c| c.clone())
             else {
                 break;
             };
@@ -1263,9 +1269,7 @@ fn syntax_debug_highlight_lines(count: usize) {
         return;
     }
     let counters = syntax_debug_counters();
-    counters
-        .highlight_lines
-        .fetch_add(count, Ordering::Relaxed);
+    counters.highlight_lines.fetch_add(count, Ordering::Relaxed);
 }
 
 fn syntax_debug_cached_lines(count: usize) {
@@ -1544,7 +1548,13 @@ mod tests {
             new_content.push_str(&format!("new {idx}\n"));
         }
         let mut cache = SyntaxCache::new(&engine, &old_content, &new_content, "sample.rs", true);
-        cache.set_warmup_targets(None, Some(crate::app::WarmupRange { start: 600, end: 650 }));
+        cache.set_warmup_targets(
+            None,
+            Some(crate::app::WarmupRange {
+                start: 600,
+                end: 650,
+            }),
+        );
 
         match (&cache.old, &cache.new) {
             (SyntaxStore::Lazy(old), SyntaxStore::Lazy(new)) => {
@@ -1577,7 +1587,13 @@ mod tests {
             content.push_str(&format!("line {idx}\n"));
         }
         let mut cache = SyntaxCache::new(&engine, &content, &content, "sample.rs", true);
-        cache.set_warmup_targets(None, Some(crate::app::WarmupRange { start: 600, end: 650 }));
+        cache.set_warmup_targets(
+            None,
+            Some(crate::app::WarmupRange {
+                start: 600,
+                end: 650,
+            }),
+        );
 
         assert!(cache.warm_pending());
         let epoch_before = cache.epoch();

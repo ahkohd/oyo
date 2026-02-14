@@ -214,7 +214,10 @@ fn main() -> Result<()> {
         let version = meta.get("version").and_then(Value::as_u64).unwrap_or(0);
         let interval = meta.get("interval").and_then(Value::as_f64).unwrap_or(0.0);
         println!("profile: {}", args.input.display());
-        println!("meta: product={} version={} interval={}ms", product, version, interval);
+        println!(
+            "meta: product={} version={} interval={}ms",
+            product, version, interval
+        );
     } else {
         println!("profile: {}", args.input.display());
     }
@@ -263,19 +266,18 @@ fn main() -> Result<()> {
     }
 
     let selector = args.thread.as_deref().map(parse_thread_selector);
-    let (thread_index, thread) =
-        select_thread(threads, selector, args.metric, &stats)?;
+    let (thread_index, thread) = select_thread(threads, selector, args.metric, &stats)?;
     let thread_name = thread
         .get("name")
         .and_then(Value::as_str)
         .unwrap_or("<unnamed>");
-    let sample_count = thread
-        .get("samples")
-        .map(sample_count)
-        .unwrap_or(0);
+    let sample_count = thread.get("samples").map(sample_count).unwrap_or(0);
 
     let metric_info = resolve_metric_info(args.metric, thread, &units);
-    println!("thread[{}]: {} (samples={})", thread_index, thread_name, sample_count);
+    println!(
+        "thread[{}]: {} (samples={})",
+        thread_index, thread_name, sample_count
+    );
     println!(
         "metric: {}{}",
         metric_info.label,
@@ -305,13 +307,22 @@ fn main() -> Result<()> {
     let tables = ThreadTables::from_profile_thread(&profile, thread)?;
     let function_cache = FunctionCache::new(&tables);
     let mut samples = extract_samples(thread, &metric_info, &units)?;
-    let idle_stats =
-        classify_idle_samples(&mut samples, &tables, &function_cache, idle_classifier.as_ref());
+    let idle_stats = classify_idle_samples(
+        &mut samples,
+        &tables,
+        &function_cache,
+        idle_classifier.as_ref(),
+    );
 
-    let counts_inclusive_all = count_functions(&tables, &samples, CountMode::Inclusive, SampleFilter::All);
+    let counts_inclusive_all =
+        count_functions(&tables, &samples, CountMode::Inclusive, SampleFilter::All);
     let counts_leaf_all = count_functions(&tables, &samples, CountMode::Leaf, SampleFilter::All);
-    let counts_inclusive_active =
-        count_functions(&tables, &samples, CountMode::Inclusive, SampleFilter::Active);
+    let counts_inclusive_active = count_functions(
+        &tables,
+        &samples,
+        CountMode::Inclusive,
+        SampleFilter::Active,
+    );
     let counts_leaf_active =
         count_functions(&tables, &samples, CountMode::Leaf, SampleFilter::Active);
 
@@ -396,15 +407,18 @@ fn parse_thread_selector(value: &str) -> ThreadSelector {
 }
 
 fn collect_thread_stats(threads: &[Value], units: &SampleUnits) -> Vec<ThreadStats> {
-    threads.iter().map(|thread| thread_stats(thread, units)).collect()
+    threads
+        .iter()
+        .map(|thread| thread_stats(thread, units))
+        .collect()
 }
 
 fn thread_stats(thread: &Value, units: &SampleUnits) -> ThreadStats {
     let samples = thread.get("samples");
     let sample_count = samples.map(sample_count).unwrap_or(0);
-    let weight_sum = samples.and_then(extract_weight_values).map(|values| {
-        values.into_iter().fold(0.0, |acc, value| acc + value)
-    });
+    let weight_sum = samples
+        .and_then(extract_weight_values)
+        .map(|values| values.into_iter().fold(0.0, |acc, value| acc + value));
     let time_values = samples.and_then(|samples| extract_time_values(samples, units));
     let time_sum = time_values
         .as_ref()
@@ -418,13 +432,13 @@ fn thread_stats(thread: &Value, units: &SampleUnits) -> ThreadStats {
             }
         })
     });
-    let cpu_ms = samples
-        .and_then(extract_cpu_values)
-        .and_then(|values| units.cpu_scale_ms.map(|scale| values.into_iter().sum::<f64>() * scale));
+    let cpu_ms = samples.and_then(extract_cpu_values).and_then(|values| {
+        units
+            .cpu_scale_ms
+            .map(|scale| values.into_iter().sum::<f64>() * scale)
+    });
     let cpu_percent = match (cpu_ms, elapsed_ms) {
-        (Some(cpu_ms), Some(elapsed_ms)) if elapsed_ms > 0.0 => {
-            Some(cpu_ms / elapsed_ms * 100.0)
-        }
+        (Some(cpu_ms), Some(elapsed_ms)) if elapsed_ms > 0.0 => Some(cpu_ms / elapsed_ms * 100.0),
         _ => None,
     };
     let weight_type = samples
@@ -452,7 +466,11 @@ fn thread_time_range_ms(thread: &Value, start_key: &str, end_key: &str) -> Optio
     let start = thread.get(start_key).and_then(Value::as_f64)?;
     let end = thread.get(end_key).and_then(Value::as_f64)?;
     let delta = end - start;
-    if delta.is_sign_positive() { Some(delta) } else { None }
+    if delta.is_sign_positive() {
+        Some(delta)
+    } else {
+        None
+    }
 }
 
 fn classify_idle_samples(
@@ -491,15 +509,9 @@ fn classify_idle_samples(
             if is_idle {
                 return;
             }
-            let func_index = frame_to_func
-                .get(frame_index)
-                .and_then(|value| *value);
+            let func_index = frame_to_func.get(frame_index).and_then(|value| *value);
             if let Some(func_index) = func_index {
-                if func_is_idle
-                    .get(func_index)
-                    .copied()
-                    .unwrap_or(false)
-                {
+                if func_is_idle.get(func_index).copied().unwrap_or(false) {
                     is_idle = true;
                 }
             }
@@ -641,9 +653,7 @@ fn metric_value(stats: &ThreadStats, metric: MetricKind) -> f64 {
 }
 
 fn sample_units(profile: &Value) -> SampleUnits {
-    let units = profile
-        .get("meta")
-        .and_then(|meta| meta.get("sampleUnits"));
+    let units = profile.get("meta").and_then(|meta| meta.get("sampleUnits"));
     let time_label = units
         .and_then(|units| units.get("time"))
         .and_then(Value::as_str)
@@ -699,10 +709,7 @@ fn select_thread<'a>(
         Some(ThreadSelector::Name(name)) => {
             let needle = name.to_ascii_lowercase();
             let found = threads.iter().enumerate().find(|(_, thread)| {
-                let thread_name = thread
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .unwrap_or("");
+                let thread_name = thread.get("name").and_then(Value::as_str).unwrap_or("");
                 let process_name = thread
                     .get("processName")
                     .and_then(Value::as_str)
@@ -772,7 +779,13 @@ fn print_report(
         metric_info,
         top,
     );
-    print_hotspots("hot spots (leaf)", entries_leaf, active_total, metric_info, top);
+    print_hotspots(
+        "hot spots (leaf)",
+        entries_leaf,
+        active_total,
+        metric_info,
+        top,
+    );
     print_module_summary(entries_leaf, active_total, metric_info, top);
     println!();
     Ok(())
@@ -866,7 +879,11 @@ fn print_hotspots(
         "rank", metric_info.column_label, "%", "function"
     );
     for (rank, (info, count)) in entries.iter().take(top).enumerate() {
-        let percent = if total > 0.0 { count / total * 100.0 } else { 0.0 };
+        let percent = if total > 0.0 {
+            count / total * 100.0
+        } else {
+            0.0
+        };
         let formatted = format_metric_value(*count, metric_info.kind);
         println!(
             "  {:>4} {:>12} {:>6.1}% {}",
@@ -911,7 +928,11 @@ fn print_module_summary(
         "rank", metric_info.column_label, "%", "module"
     );
     for (rank, (module, value)) in modules.into_iter().take(top).enumerate() {
-        let percent = if total > 0.0 { value / total * 100.0 } else { 0.0 };
+        let percent = if total > 0.0 {
+            value / total * 100.0
+        } else {
+            0.0
+        };
         let formatted = format_metric_value(value, metric_info.kind);
         let top_fn = module_top
             .get(&module)
@@ -939,10 +960,7 @@ fn print_threads(threads: &[Value], stats: &[ThreadStats], units: &SampleUnits) 
             .get("processType")
             .and_then(Value::as_str)
             .unwrap_or("-");
-        let pid = thread
-            .get("pid")
-            .and_then(Value::as_str)
-            .unwrap_or("-");
+        let pid = thread.get("pid").and_then(Value::as_str).unwrap_or("-");
         let stat = &stats[index];
         let mut metrics = vec![format!("samples={}", stat.sample_count)];
         if let Some(weight_sum) = stat.weight_sum {
@@ -951,7 +969,11 @@ fn print_threads(threads: &[Value], stats: &[ThreadStats], units: &SampleUnits) 
                 .as_deref()
                 .map(|ty| format!("weight({})", ty))
                 .unwrap_or_else(|| "weight".to_string());
-            metrics.push(format!("{}={}", weight_label, format_metric_value(weight_sum, MetricKind::Weight)));
+            metrics.push(format!(
+                "{}={}",
+                weight_label,
+                format_metric_value(weight_sum, MetricKind::Weight)
+            ));
         }
         if let Some(time_sum) = stat.time_sum {
             metrics.push(format!(
@@ -1034,7 +1056,8 @@ fn extract_sample_stacks(thread: &Value) -> Result<Vec<Option<usize>>> {
     let stack_index = schema
         .get("stack")
         .and_then(Value::as_u64)
-        .ok_or_else(|| anyhow!("samples schema missing stack column"))? as usize;
+        .ok_or_else(|| anyhow!("samples schema missing stack column"))?
+        as usize;
     let data = samples
         .get("data")
         .and_then(Value::as_array)
@@ -1216,10 +1239,7 @@ fn module_key(info: &FunctionInfo) -> String {
     info.name.clone()
 }
 
-fn build_entries(
-    cache: &FunctionCache,
-    counts: HashMap<usize, f64>,
-) -> Vec<(FunctionInfo, f64)> {
+fn build_entries(cache: &FunctionCache, counts: HashMap<usize, f64>) -> Vec<(FunctionInfo, f64)> {
     counts
         .into_iter()
         .filter_map(|(func, count)| cache.get(func).cloned().map(|info| (info, count)))
@@ -1301,10 +1321,7 @@ fn walk_stack(tables: &ThreadTables<'_>, start: usize, mut f: impl FnMut(usize))
         };
         f(frame_index);
 
-        current = tables
-            .stack_prefix
-            .get(stack_index)
-            .and_then(to_opt_index);
+        current = tables.stack_prefix.get(stack_index).and_then(to_opt_index);
         depth += 1;
         if depth > 8192 {
             break;

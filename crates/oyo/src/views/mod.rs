@@ -711,21 +711,22 @@ fn view_debug_max_lines() -> usize {
 
 fn view_debug_filters() -> Option<&'static Vec<String>> {
     static FILTERS: OnceLock<Option<Vec<String>>> = OnceLock::new();
-    FILTERS.get_or_init(|| {
-        let raw = std::env::var("OYO_DEBUG_VIEW_FILTER").ok()?;
-        let filters: Vec<String> = raw
-            .split(',')
-            .map(|part| part.trim())
-            .filter(|part| !part.is_empty())
-            .map(|part| part.to_ascii_lowercase())
-            .collect();
-        if filters.is_empty() {
-            None
-        } else {
-            Some(filters)
-        }
-    })
-    .as_ref()
+    FILTERS
+        .get_or_init(|| {
+            let raw = std::env::var("OYO_DEBUG_VIEW_FILTER").ok()?;
+            let filters: Vec<String> = raw
+                .split(',')
+                .map(|part| part.trim())
+                .filter(|part| !part.is_empty())
+                .map(|part| part.to_ascii_lowercase())
+                .collect();
+            if filters.is_empty() {
+                None
+            } else {
+                Some(filters)
+            }
+        })
+        .as_ref()
 }
 
 fn view_debug_file_allowed(file_name: &str) -> bool {
@@ -938,35 +939,42 @@ pub(crate) fn maybe_log_view_debug(
         return;
     }
 
-    let (current_hunk, total_hunks, last_nav_was_hunk, cursor_change, show_extent_step, scope_hunk, scope_from_cursor) =
-        {
-            let nav = app.multi_diff.current_navigator();
-            let state = nav.state();
-            let total_hunks = nav.hunks().len();
-            let mut scope_hunk = if total_hunks > 0 {
-                Some(state.current_hunk)
-            } else {
-                None
-            };
-            let mut scope_from_cursor = false;
-            if state.last_nav_was_hunk {
-                if let Some(cursor) = state.cursor_change {
-                    if let Some(hunk) = nav.hunk_index_for_change_id_exact(cursor) {
-                        scope_hunk = Some(hunk);
-                        scope_from_cursor = true;
-                    }
+    let (
+        current_hunk,
+        total_hunks,
+        last_nav_was_hunk,
+        cursor_change,
+        show_extent_step,
+        scope_hunk,
+        scope_from_cursor,
+    ) = {
+        let nav = app.multi_diff.current_navigator();
+        let state = nav.state();
+        let total_hunks = nav.hunks().len();
+        let mut scope_hunk = if total_hunks > 0 {
+            Some(state.current_hunk)
+        } else {
+            None
+        };
+        let mut scope_from_cursor = false;
+        if state.last_nav_was_hunk {
+            if let Some(cursor) = state.cursor_change {
+                if let Some(hunk) = nav.hunk_index_for_change_id_exact(cursor) {
+                    scope_hunk = Some(hunk);
+                    scope_from_cursor = true;
                 }
             }
-            (
-                state.current_hunk,
-                total_hunks,
-                state.last_nav_was_hunk,
-                state.cursor_change,
-                state.show_hunk_extent_while_stepping,
-                scope_hunk,
-                scope_from_cursor,
-            )
-        };
+        }
+        (
+            state.current_hunk,
+            total_hunks,
+            state.last_nav_was_hunk,
+            state.cursor_change,
+            state.show_hunk_extent_while_stepping,
+            scope_hunk,
+            scope_from_cursor,
+        )
+    };
 
     let key = DebugViewKey {
         file_index,
@@ -995,10 +1003,7 @@ pub(crate) fn maybe_log_view_debug(
     let _ = writeln!(
         out,
         "OYO_VIEW_DEBUG ts_ms={} pane={} file_index={} file=\"{}\"",
-        ts,
-        pane,
-        file_index,
-        file_name
+        ts, pane, file_index, file_name
     );
     let _ = writeln!(
         out,
@@ -1046,9 +1051,7 @@ pub(crate) fn maybe_log_view_debug(
     let _ = writeln!(
         out,
         "visible_render_range={}..{} context={}",
-        visible_start,
-        visible_end,
-        context
+        visible_start, visible_end, context
     );
 
     let max_lines = view_debug_max_lines();
