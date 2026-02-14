@@ -255,8 +255,8 @@ impl DiffEngine {
                 if let Some(&idx) = id_to_idx.get(&change_id) {
                     let start = idx.saturating_sub(self.context_lines);
                     let end = (idx + self.context_lines).min(changes.len().saturating_sub(1));
-                    for i in start..=end {
-                        include[i] = true;
+                    for slot in include.iter_mut().take(end + 1).skip(start) {
+                        *slot = true;
                     }
                 }
             }

@@ -337,7 +337,7 @@ impl DiffNavigator {
                 ChangeKind::Equal => {}
             }
         }
-        !(has_old && !has_new)
+        !has_old || has_new
     }
 
     fn change_visible_in_evolution_state(&self, change: &Change) -> bool {
@@ -782,10 +782,7 @@ impl DiffNavigator {
         if self.lazy_maps {
             if target_step > 0 {
                 let end = target_step.min(self.diff.significant_changes.len());
-                self.state.applied_changes = self.diff.significant_changes[..end]
-                    .iter()
-                    .copied()
-                    .collect();
+                self.state.applied_changes = self.diff.significant_changes[..end].to_vec();
                 self.state.rebuild_applied_set();
                 self.state.current_step = end;
                 self.state.active_change = self.state.applied_changes.last().copied();
@@ -1458,12 +1455,10 @@ impl DiffNavigator {
                 scope_range.and_then(|_| self.change_to_index.get(change.id).copied().flatten());
             let in_scope = if let (Some((start, end)), Some(idx)) = (scope_range, change_idx) {
                 idx >= start && idx <= end
+            } else if use_exact {
+                self.hunk_index_for_change_exact(change.id) == Some(scope_hunk)
             } else {
-                if use_exact {
-                    self.hunk_index_for_change_exact(change.id) == Some(scope_hunk)
-                } else {
-                    self.hunk_index_for_change(change.id) == Some(scope_hunk)
-                }
+                self.hunk_index_for_change(change.id) == Some(scope_hunk)
             };
             let show_hunk_extent = is_in_hunk
                 || (in_scope

@@ -42,6 +42,15 @@ use types::{
 use utils::{allow_overscroll_state, max_scroll};
 pub(crate) use utils::{display_metrics, is_conflict_marker, is_fold_line};
 
+type UnifiedHunkCacheKey = (usize, ViewMode, FoldContextMode, bool, usize, usize, usize);
+type SplitHunkCacheKey = (usize, FoldContextMode, bool, bool, usize, usize, usize);
+type UnifiedHunkStartsCache = Option<(UnifiedHunkCacheKey, Vec<Option<HunkStart>>)>;
+type UnifiedHunkBoundsCache = Option<(UnifiedHunkCacheKey, Vec<Option<HunkBounds>>)>;
+type SplitHunkStartsCache =
+    Option<(SplitHunkCacheKey, (Vec<Option<HunkStart>>, Vec<Option<HunkStart>>))>;
+type SplitHunkBoundsCache =
+    Option<(SplitHunkCacheKey, (Vec<Option<HunkBounds>>, Vec<Option<HunkBounds>>))>;
+
 /// The main application state
 pub struct App {
     /// Multi-file diff manager
@@ -221,25 +230,13 @@ pub struct App {
     /// Cached blame time ranges (min/max) per file/source
     blame_time_ranges: FxHashMap<BlamePrefetchKey, (i64, i64)>,
     /// Cached unified hunk starts for no-step mode
-    hunk_starts_unified_cache: Option<(
-        (usize, ViewMode, FoldContextMode, bool, usize, usize, usize),
-        Vec<Option<HunkStart>>,
-    )>,
+    hunk_starts_unified_cache: UnifiedHunkStartsCache,
     /// Cached unified hunk bounds for no-step mode
-    hunk_bounds_unified_cache: Option<(
-        (usize, ViewMode, FoldContextMode, bool, usize, usize, usize),
-        Vec<Option<HunkBounds>>,
-    )>,
+    hunk_bounds_unified_cache: UnifiedHunkBoundsCache,
     /// Cached split hunk starts for no-step mode
-    hunk_starts_split_cache: Option<(
-        (usize, FoldContextMode, bool, bool, usize, usize, usize),
-        (Vec<Option<HunkStart>>, Vec<Option<HunkStart>>),
-    )>,
+    hunk_starts_split_cache: SplitHunkStartsCache,
     /// Cached split hunk bounds for no-step mode
-    hunk_bounds_split_cache: Option<(
-        (usize, FoldContextMode, bool, bool, usize, usize, usize),
-        (Vec<Option<HunkBounds>>, Vec<Option<HunkBounds>>),
-    )>,
+    hunk_bounds_split_cache: SplitHunkBoundsCache,
     /// Cached blame prefetch windows
     blame_prefetch: FxHashMap<BlamePrefetchKey, BlamePrefetchRange>,
     /// Cached blame render layout (for scroll performance)

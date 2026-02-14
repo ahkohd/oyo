@@ -48,7 +48,7 @@ pub struct SyntaxCache {
 #[derive(Clone, Debug)]
 enum SyntaxStore {
     Full(FullSyntaxCache),
-    Lazy(LazySyntaxCache),
+    Lazy(Box<LazySyntaxCache>),
 }
 
 #[derive(Clone, Debug)]
@@ -742,8 +742,8 @@ impl SyntaxCache {
             let old = LazySyntaxCache::new(engine, old, file_name);
             let new = LazySyntaxCache::new(engine, new, file_name);
             Self {
-                old: SyntaxStore::Lazy(old),
-                new: SyntaxStore::Lazy(new),
+                old: SyntaxStore::Lazy(Box::new(old)),
+                new: SyntaxStore::Lazy(Box::new(new)),
                 epoch: 0,
             }
         } else {
@@ -996,7 +996,7 @@ impl LazySyntaxCache {
         }
         let mut progress = self.warm_progress.take();
         if progress.is_none() {
-            let Some(state) = self.checkpoints.get(0).and_then(|c| c.clone()) else {
+            let Some(state) = self.checkpoints.first().and_then(|c| c.clone()) else {
                 return 0;
             };
             progress = Some(WarmProgress {

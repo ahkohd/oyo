@@ -336,16 +336,16 @@ fn main() -> Result<()> {
     sort_entries(&mut entries_leaf_active);
 
     if args.report {
-        print_report(
-            &entries_inclusive_active,
-            &entries_leaf_active,
-            &metric_info,
+        print_report(ReportArgs {
+            entries_inclusive: &entries_inclusive_active,
+            entries_leaf: &entries_leaf_active,
+            metric_info: &metric_info,
             global_metric,
-            thread_summary.as_deref(),
-            &units,
-            &idle_stats,
-            args.top,
-        )?;
+            thread_summary: thread_summary.as_deref(),
+            units: &units,
+            idle_stats: &idle_stats,
+            top: args.top,
+        })?;
     }
 
     if !args.report || args.verbose {
@@ -362,8 +362,8 @@ fn main() -> Result<()> {
         };
 
         println!(
-            "{:>4} {:>12} {}",
-            "rank", metric_info.column_label, "function"
+            "{:>4} {:>12} function",
+            "rank", metric_info.column_label
         );
         for (rank, (info, count)) in entries.iter().take(args.top).enumerate() {
             let formatted = format_metric_value(*count, metric_info.kind);
@@ -722,16 +722,29 @@ fn select_thread<'a>(
     }
 }
 
-fn print_report(
-    entries_inclusive: &[(FunctionInfo, f64)],
-    entries_leaf: &[(FunctionInfo, f64)],
-    metric_info: &MetricInfo,
+struct ReportArgs<'a> {
+    entries_inclusive: &'a [(FunctionInfo, f64)],
+    entries_leaf: &'a [(FunctionInfo, f64)],
+    metric_info: &'a MetricInfo,
     global_metric: MetricKind,
-    thread_summary: Option<&[ThreadSummary]>,
-    units: &SampleUnits,
-    idle_stats: &IdleStats,
+    thread_summary: Option<&'a [ThreadSummary]>,
+    units: &'a SampleUnits,
+    idle_stats: &'a IdleStats,
     top: usize,
-) -> Result<()> {
+}
+
+fn print_report(args: ReportArgs<'_>) -> Result<()> {
+    let ReportArgs {
+        entries_inclusive,
+        entries_leaf,
+        metric_info,
+        global_metric,
+        thread_summary,
+        units,
+        idle_stats,
+        top,
+    } = args;
+
     let total_samples = idle_stats.total_weight;
     let active_total = if idle_stats.enabled {
         idle_stats.active_weight
@@ -875,8 +888,8 @@ fn print_hotspots(
 ) {
     println!("  {}:", label);
     println!(
-        "  {:>4} {:>12} {:>7} {}",
-        "rank", metric_info.column_label, "%", "function"
+        "  {:>4} {:>12} {:>7} function",
+        "rank", metric_info.column_label, "%"
     );
     for (rank, (info, count)) in entries.iter().take(top).enumerate() {
         let percent = if total > 0.0 {
@@ -924,8 +937,8 @@ fn print_module_summary(
 
     println!("  top modules (leaf):");
     println!(
-        "  {:>4} {:>12} {:>7} {}",
-        "rank", metric_info.column_label, "%", "module"
+        "  {:>4} {:>12} {:>7} module",
+        "rank", metric_info.column_label, "%"
     );
     for (rank, (module, value)) in modules.into_iter().take(top).enumerate() {
         let percent = if total > 0.0 {
@@ -1246,7 +1259,7 @@ fn build_entries(cache: &FunctionCache, counts: HashMap<usize, f64>) -> Vec<(Fun
         .collect()
 }
 
-fn sort_entries(entries: &mut Vec<(FunctionInfo, f64)>) {
+fn sort_entries(entries: &mut [(FunctionInfo, f64)]) {
     entries.sort_by(|a, b| {
         b.1.partial_cmp(&a.1)
             .unwrap_or(std::cmp::Ordering::Equal)

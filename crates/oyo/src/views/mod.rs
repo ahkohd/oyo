@@ -73,7 +73,7 @@ pub(crate) fn syntax_highlight_window(
     scroll_offset: usize,
     visible_height: usize,
 ) -> (usize, usize) {
-    let pad = (visible_height / 3).max(8).min(32);
+    let pad = (visible_height / 3).clamp(8, 32);
     let start = scroll_offset.saturating_sub(pad);
     let end = scroll_offset.saturating_add(visible_height + pad);
     (start, end)
@@ -656,9 +656,7 @@ struct DebugViewKey {
 fn view_debug_path() -> Option<&'static PathBuf> {
     static VIEW_DEBUG_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
     VIEW_DEBUG_PATH.get_or_init(|| {
-        if std::env::var_os("OYO_DEBUG_VIEW").is_none() {
-            return None;
-        }
+        std::env::var_os("OYO_DEBUG_VIEW")?;
         let path = std::env::var_os("OYO_DEBUG_VIEW_FILE")
             .map(PathBuf::from)
             .unwrap_or_else(|| std::env::temp_dir().join("oyo_view_debug.log"));
@@ -676,9 +674,7 @@ fn view_debug_nav_enabled() -> bool {
 }
 
 fn view_debug_nav_path() -> Option<PathBuf> {
-    if std::env::var_os("OYO_DEBUG_VIEW").is_none() {
-        return None;
-    }
+    std::env::var_os("OYO_DEBUG_VIEW")?;
     let path = std::env::var_os("OYO_DEBUG_VIEW_FILE")
         .map(PathBuf::from)
         .unwrap_or_else(|| std::env::temp_dir().join("oyo_view_debug.log"));
@@ -1080,7 +1076,7 @@ pub(crate) fn maybe_log_view_debug(
                     }
                     let global_start = window_start.saturating_add(start);
                     let global_end = window_start.saturating_add(end);
-                    let scope = scope_hunk.map_or(false, |h| line.hunk_index == Some(h));
+                    let scope = scope_hunk.is_some_and(|h| line.hunk_index == Some(h));
                     let _ = writeln!(
                         out,
                         "L raw={} disp={} gdisp={} h={} scope={} show={} kind={:?} changes={} old={} new={} act={} prim={} id={} wrap={} txt=\"{}\"",
@@ -1130,7 +1126,7 @@ pub(crate) fn maybe_log_view_debug(
                     }
                     let global_start = window_start.saturating_add(start);
                     let global_end = window_start.saturating_add(end);
-                    let scope = scope_hunk.map_or(false, |h| line.hunk_index == Some(h));
+                    let scope = scope_hunk.is_some_and(|h| line.hunk_index == Some(h));
                     let _ = writeln!(
                         out,
                         "L raw={} disp={} gdisp={} h={} scope={} show={} kind={:?} changes={} old={} new={} act={} prim={} id={} wrap={} txt=\"{}\"",
@@ -1197,7 +1193,7 @@ pub(crate) fn maybe_log_view_debug(
                         .replace('\r', "\\r");
                     let global_old = old_idx_start.map(|idx| window_start.saturating_add(idx));
                     let global_new = new_idx_start.map(|idx| window_start.saturating_add(idx));
-                    let scope = scope_hunk.map_or(false, |h| line.hunk_index == Some(h));
+                    let scope = scope_hunk.is_some_and(|h| line.hunk_index == Some(h));
                     let _ = writeln!(
                         out,
                         "L raw={} old={} new={} gold={} gnew={} h={} scope={} show={} kind={:?} changes={} old_line={} new_line={} act={} prim={} id={} txt=\"{}\"",

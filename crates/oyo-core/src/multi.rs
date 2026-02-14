@@ -171,9 +171,8 @@ impl MultiFileDiff {
     fn diff_strings(old: &str, new: &str) -> crate::diff::DiffResult {
         let max_len = old.len().max(new.len()) as u64;
         let word_level = max_len <= Self::MAX_WORD_LEVEL_BYTES;
-        let context_lines = if max_len > Self::full_context_max_bytes() {
-            3
-        } else if max_len > Self::diff_max_bytes() {
+        let context_limit = Self::full_context_max_bytes().min(Self::diff_max_bytes());
+        let context_lines = if max_len > context_limit {
             3
         } else {
             usize::MAX
@@ -195,14 +194,10 @@ impl MultiFileDiff {
 
     fn context_only_diff(text: &str) -> DiffResult {
         let mut changes = Vec::new();
-        let mut change_id = 0usize;
-        let mut line_num = 1usize;
-
-        for line in text.split('\n') {
+        for (change_id, line) in text.split('\n').enumerate() {
+            let line_num = change_id + 1;
             let span = ChangeSpan::equal(line).with_lines(Some(line_num), Some(line_num));
             changes.push(Change::single(change_id, span));
-            change_id += 1;
-            line_num += 1;
         }
 
         DiffResult {

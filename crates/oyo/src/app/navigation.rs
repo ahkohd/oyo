@@ -1144,7 +1144,7 @@ impl App {
                 ChangeKind::Equal => {}
             }
         }
-        !(has_old && !has_new)
+        !has_old || has_new
     }
 
     fn compute_hunk_starts_unified_fast(&mut self) -> Vec<Option<HunkStart>> {
@@ -1405,7 +1405,7 @@ impl App {
                 }
             })
             .map(|(idx, _)| idx)
-            .last();
+            .next_back();
 
         let mut target_idx = match current_hunk_idx {
             Some(curr) => curr + 1,
@@ -1469,8 +1469,7 @@ impl App {
             .iter()
             .enumerate()
             .filter_map(|(idx, start)| start.map(|s| (idx, s)))
-            .filter(|&(_, start)| start.idx < self.scroll_offset)
-            .last()
+            .rfind(|&(_, start)| start.idx < self.scroll_offset)
     }
 
     fn prev_hunk_from_index(
