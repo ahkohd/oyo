@@ -1535,12 +1535,12 @@ impl App {
                 self.multi_diff
                     .current_navigator()
                     .set_cursor_hunk(hidx, Some(line.change_id));
-                return true;
+                true
             } else {
                 self.multi_diff
                     .current_navigator()
                     .set_cursor_change(Some(line.change_id));
-                return false;
+                false
             }
         } else {
             self.multi_diff.current_navigator().clear_cursor_change();
@@ -2139,10 +2139,8 @@ impl App {
                 .current_navigator()
                 .state()
                 .last_nav_was_hunk;
-            if !preserve_scope {
-                self.multi_diff.current_navigator().clear_cursor_change();
-                self.multi_diff.current_navigator().set_hunk_scope(false);
-            } else if !self.set_cursor_for_current_scroll() {
+            let keep_scope = preserve_scope && self.set_cursor_for_current_scroll();
+            if !keep_scope {
                 self.multi_diff.current_navigator().clear_cursor_change();
                 self.multi_diff.current_navigator().set_hunk_scope(false);
             }
@@ -2177,10 +2175,8 @@ impl App {
                 .current_navigator()
                 .state()
                 .last_nav_was_hunk;
-            if !preserve_scope {
-                self.multi_diff.current_navigator().clear_cursor_change();
-                self.multi_diff.current_navigator().set_hunk_scope(false);
-            } else if !self.set_cursor_for_current_scroll() {
+            let keep_scope = preserve_scope && self.set_cursor_for_current_scroll();
+            if !keep_scope {
                 self.multi_diff.current_navigator().clear_cursor_change();
                 self.multi_diff.current_navigator().set_hunk_scope(false);
             }

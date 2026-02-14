@@ -467,44 +467,6 @@ fn build_diff_from_input_mode(
     Ok(Some((multi_diff, git_branch)))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::parse_range;
-
-    #[test]
-    fn parse_range_accepts_double_dot() {
-        let (from, to) = parse_range("HEAD~1..HEAD").unwrap();
-        assert_eq!(from, "HEAD~1");
-        assert_eq!(to, "HEAD");
-    }
-
-    #[test]
-    fn parse_range_accepts_triple_dot() {
-        let (from, to) = parse_range("main...feature").unwrap();
-        assert_eq!(from, "main");
-        assert_eq!(to, "feature");
-    }
-
-    #[test]
-    fn parse_range_rejects_empty_bounds() {
-        assert!(parse_range("..HEAD").is_err());
-        assert!(parse_range("HEAD..").is_err());
-        assert!(parse_range("...HEAD").is_err());
-        assert!(parse_range("HEAD...").is_err());
-    }
-
-    #[test]
-    fn parse_range_rejects_extra_separators() {
-        assert!(parse_range("A..B..C").is_err());
-        assert!(parse_range("A...B..C").is_err());
-    }
-
-    #[test]
-    fn parse_range_rejects_missing_separator() {
-        assert!(parse_range("HEAD").is_err());
-    }
-}
-
 fn main() -> Result<()> {
     let args = Args::parse();
     let view_limit = match args.command {
@@ -1705,4 +1667,42 @@ fn run_commit_picker<B: Backend>(
     };
 
     Ok(Some(input_mode))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_range;
+
+    #[test]
+    fn parse_range_accepts_double_dot() {
+        let (from, to) = parse_range("HEAD~1..HEAD").unwrap();
+        assert_eq!(from, "HEAD~1");
+        assert_eq!(to, "HEAD");
+    }
+
+    #[test]
+    fn parse_range_accepts_triple_dot() {
+        let (from, to) = parse_range("main...feature").unwrap();
+        assert_eq!(from, "main");
+        assert_eq!(to, "feature");
+    }
+
+    #[test]
+    fn parse_range_rejects_empty_bounds() {
+        assert!(parse_range("..HEAD").is_err());
+        assert!(parse_range("HEAD..").is_err());
+        assert!(parse_range("...HEAD").is_err());
+        assert!(parse_range("HEAD...").is_err());
+    }
+
+    #[test]
+    fn parse_range_rejects_extra_separators() {
+        assert!(parse_range("A..B..C").is_err());
+        assert!(parse_range("A...B..C").is_err());
+    }
+
+    #[test]
+    fn parse_range_rejects_missing_separator() {
+        assert!(parse_range("HEAD").is_err());
+    }
 }

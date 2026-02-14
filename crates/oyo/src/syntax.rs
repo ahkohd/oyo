@@ -1410,6 +1410,10 @@ fn to_syntect(color: TuiColor) -> Color {
     }
 }
 
+fn to_tui(color: Color) -> TuiColor {
+    TuiColor::Rgb(color.r, color.g, color.b)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1611,8 +1615,4 @@ mod tests {
             "epoch should advance when warmup completes"
         );
     }
-}
-
-fn to_tui(color: Color) -> TuiColor {
-    TuiColor::Rgb(color.r, color.g, color.b)
 }

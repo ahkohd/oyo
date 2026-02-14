@@ -2145,7 +2145,7 @@ mod tests {
         assert_eq!(primary_lines.len(), 1, "exactly one primary line");
 
         // Fading hunk should have is_active lines
-        assert!(active_lines.len() >= 1, "fading line should be active");
+        assert!(!active_lines.is_empty(), "fading line should be active");
 
         // Primary is on destination (hunk 0 = LINE2), not fading line (hunk 1 = LINE7)
         let primary = primary_lines[0];
