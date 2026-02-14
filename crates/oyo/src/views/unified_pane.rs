@@ -1350,7 +1350,6 @@ fn render_unified_pane_cached(frame: &mut Frame, app: &mut App, area: Rect) {
         .current_navigator()
         .set_show_hunk_extent_while_stepping(show_extent);
     let view_lines = app.current_view_with_frame(animation_frame);
-    let scroll_offset = app.render_scroll_offset();
     let debug_enabled = super::view_debug_enabled();
     if debug_enabled {
         crate::syntax::syntax_debug_reset();
@@ -1366,6 +1365,8 @@ fn render_unified_pane_cached(frame: &mut Frame, app: &mut App, area: Rect) {
             .saturating_add(extra_total);
         app.clamp_scroll(total_lines, visible_height, app.allow_overscroll());
     }
+
+    let mut scroll_offset = app.render_scroll_offset();
 
     let key = unified_render_key(
         app,
@@ -1392,22 +1393,42 @@ fn render_unified_pane_cached(frame: &mut Frame, app: &mut App, area: Rect) {
         app.unified_render_cache = Some(model);
     }
 
-    let model = match app.unified_render_cache.take() {
+    let mut model = match app.unified_render_cache.take() {
         Some(model) => model,
         None => return,
     };
-    let display_len = model.display_len;
-    let primary_display_idx = model.primary_display_idx;
-    let active_display_idx = model.active_display_idx;
-    let max_line_width = model.max_line_width;
     if app.line_wrap {
         app.ensure_active_visible_if_needed_wrapped(
             visible_height,
-            display_len,
-            primary_display_idx.or(active_display_idx),
+            model.display_len,
+            model.primary_display_idx.or(model.active_display_idx),
         );
-        app.clamp_scroll(display_len, visible_height, app.allow_overscroll());
+        let scroll_before = app.scroll_offset;
+        app.clamp_scroll(model.display_len, visible_height, app.allow_overscroll());
+        if app.scroll_offset != scroll_before {
+            let new_scroll_offset = app.render_scroll_offset();
+            if new_scroll_offset != scroll_offset {
+                scroll_offset = new_scroll_offset;
+                let key = unified_render_key(
+                    app,
+                    animation_frame,
+                    visible_height,
+                    visible_width,
+                    scroll_offset,
+                );
+                model = build_unified_render_model(
+                    app,
+                    key,
+                    &view_lines,
+                    visible_height,
+                    visible_width,
+                    scroll_offset,
+                    None,
+                );
+            }
+        }
     }
+    let max_line_width = model.max_line_width;
 
     app.clamp_horizontal_scroll(max_line_width, visible_width);
     app.set_current_max_line_width(max_line_width);
@@ -1540,7 +1561,6 @@ fn render_unified_pane_uncached(frame: &mut Frame, app: &mut App, area: Rect) {
         .current_navigator()
         .set_show_hunk_extent_while_stepping(show_extent);
     let view_lines = app.current_view_with_frame(animation_frame);
-    let scroll_offset = app.render_scroll_offset();
     let debug_enabled = super::view_debug_enabled();
     if debug_enabled {
         crate::syntax::syntax_debug_reset();
@@ -1556,6 +1576,7 @@ fn render_unified_pane_uncached(frame: &mut Frame, app: &mut App, area: Rect) {
             .saturating_add(extra_total);
         app.clamp_scroll(total_lines, visible_height, app.allow_overscroll());
     }
+    let mut scroll_offset = app.render_scroll_offset();
     let blame_extra_rows = if matches!(app.view_mode, crate::app::ViewMode::Blame) {
         app.blame_extra_rows.clone()
     } else {
@@ -1568,7 +1589,7 @@ fn render_unified_pane_uncached(frame: &mut Frame, app: &mut App, area: Rect) {
         visible_width,
         scroll_offset,
     );
-    let model = build_unified_render_model(
+    let mut model = build_unified_render_model(
         app,
         key,
         &view_lines,
@@ -1583,7 +1604,30 @@ fn render_unified_pane_uncached(frame: &mut Frame, app: &mut App, area: Rect) {
             model.display_len,
             model.primary_display_idx.or(model.active_display_idx),
         );
+        let scroll_before = app.scroll_offset;
         app.clamp_scroll(model.display_len, visible_height, app.allow_overscroll());
+        if app.scroll_offset != scroll_before {
+            let new_scroll_offset = app.render_scroll_offset();
+            if new_scroll_offset != scroll_offset {
+                scroll_offset = new_scroll_offset;
+                let key = unified_render_key(
+                    app,
+                    animation_frame,
+                    visible_height,
+                    visible_width,
+                    scroll_offset,
+                );
+                model = build_unified_render_model(
+                    app,
+                    key,
+                    &view_lines,
+                    visible_height,
+                    visible_width,
+                    scroll_offset,
+                    blame_extra_rows.as_deref(),
+                );
+            }
+        }
     }
     app.clamp_horizontal_scroll(model.max_line_width, visible_width);
     app.set_current_max_line_width(model.max_line_width);

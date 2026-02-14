@@ -246,6 +246,37 @@ fn test_unified_wrap_hunk_hint_overflow_places_above() {
 }
 
 #[test]
+fn test_unified_wrap_end_scroll_no_bounce() {
+    let long = "LONGINSERT_LONGINSERT_LONGINSERT_LONGINSERT";
+    let mut new = String::new();
+    for idx in 0..40 {
+        new.push_str(&format!("{long} {idx}\n"));
+    }
+    let mut app = make_app("", &new, ViewMode::UnifiedPane);
+    app.line_wrap = true;
+    app.auto_center = false;
+    app.needs_scroll_to_active = false;
+    app.no_step_auto_jump_on_enter = false;
+    app.stepping = false;
+    app.enter_no_step_mode();
+    app.last_viewport_height = 4;
+    app.scroll_offset = usize::MAX;
+
+    let first = buffer_text(&render_buffer(&mut app, 20, 4));
+    let max_scroll = app.scroll_offset;
+    assert!(max_scroll > 0, "expected content to be scrollable");
+
+    app.scroll_down();
+    let second = buffer_text(&render_buffer(&mut app, 20, 4));
+
+    assert_eq!(
+        app.scroll_offset, max_scroll,
+        "scroll offset should clamp at end"
+    );
+    assert_eq!(first, second, "render should not bounce at end");
+}
+
+#[test]
 fn test_split_wrap_hunk_hint_overflow_places_above() {
     let long = "LONGINSERT".repeat(12);
     let old = "";

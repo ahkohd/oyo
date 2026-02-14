@@ -210,7 +210,7 @@ pub fn render_split(frame: &mut Frame, app: &mut App, area: Rect) {
         .current_navigator()
         .set_show_hunk_extent_while_stepping(show_extent);
     let view_lines = app.current_view_with_frame(AnimationFrame::Idle);
-    let scroll_offset = app.render_scroll_offset();
+    let mut scroll_offset = app.render_scroll_offset();
     let step_direction = app.multi_diff.current_step_direction();
     let preview_hunk = app.multi_diff.current_navigator().state().current_hunk;
     let debug_enabled = super::view_debug_enabled();
@@ -239,19 +239,6 @@ pub fn render_split(frame: &mut Frame, app: &mut App, area: Rect) {
     } else {
         None
     };
-    let hunk_overflow = if app.line_wrap {
-        split_hunk_overflow_wrapped(
-            app,
-            &view_lines,
-            preview_hunk,
-            scroll_offset,
-            visible_height,
-            old_width,
-            new_width,
-        )
-    } else {
-        app.hunk_hint_overflow(preview_hunk, visible_height)
-    };
 
     if app.line_wrap {
         let (display_len, active_idx) = split_wrap_display_metrics(
@@ -265,7 +252,11 @@ pub fn render_split(frame: &mut Frame, app: &mut App, area: Rect) {
         );
         app.ensure_active_visible_if_needed_wrapped(visible_height, display_len, active_idx);
         let total_len = app.render_total_lines(display_len);
+        let scroll_before = app.scroll_offset;
         app.clamp_scroll(total_len, visible_height, app.allow_overscroll());
+        if app.scroll_offset != scroll_before {
+            scroll_offset = app.render_scroll_offset();
+        }
     } else {
         let (display_len, _) = crate::app::display_metrics(
             &view_lines,
@@ -276,8 +267,25 @@ pub fn render_split(frame: &mut Frame, app: &mut App, area: Rect) {
             app.split_align_lines,
         );
         let total_len = app.render_total_lines(display_len);
+        let scroll_before = app.scroll_offset;
         app.clamp_scroll(total_len, visible_height, app.allow_overscroll());
+        if app.scroll_offset != scroll_before {
+            scroll_offset = app.render_scroll_offset();
+        }
     }
+    let hunk_overflow = if app.line_wrap {
+        split_hunk_overflow_wrapped(
+            app,
+            &view_lines,
+            preview_hunk,
+            scroll_offset,
+            visible_height,
+            old_width,
+            new_width,
+        )
+    } else {
+        app.hunk_hint_overflow(preview_hunk, visible_height)
+    };
     if !app.line_wrap {
         app.clamp_horizontal_scroll_cached(old_width.min(new_width));
     }

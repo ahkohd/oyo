@@ -82,13 +82,14 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
         .current_navigator()
         .set_show_hunk_extent_while_stepping(show_extent);
     let view_lines = app.current_view_with_frame(animation_frame);
-    let scroll_offset = app.render_scroll_offset();
+    let mut scroll_offset = app.render_scroll_offset();
     let debug_enabled = super::view_debug_enabled();
     if debug_enabled {
         crate::syntax::syntax_debug_reset();
     }
     let step_direction = app.multi_diff.current_step_direction();
     let mut display_len = 0usize;
+    let mut clamped_scroll = false;
     if !app.line_wrap {
         let (len, _) = crate::app::display_metrics(
             &view_lines,
@@ -99,8 +100,13 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
             app.split_align_lines,
         );
         let total_len = app.render_total_lines(len);
+        let scroll_before = app.scroll_offset;
         app.clamp_scroll(total_len, visible_height, app.allow_overscroll());
+        clamped_scroll = app.scroll_offset != scroll_before;
         display_len = total_len;
+    }
+    if clamped_scroll {
+        scroll_offset = app.render_scroll_offset();
     }
     let debug_target = app.syntax_scope_target(&view_lines);
     let pending_insert_only = if app.stepping {
@@ -817,7 +823,11 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
             primary_display_idx.or(active_display_idx),
         );
         let total_len = app.render_total_lines(display_len);
+        let scroll_before = app.scroll_offset;
         app.clamp_scroll(total_len, visible_height, app.allow_overscroll());
+        if app.scroll_offset != scroll_before {
+            scroll_offset = app.render_scroll_offset();
+        }
     }
 
     // Clamp horizontal scroll
