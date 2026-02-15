@@ -652,3 +652,45 @@ fn test_view_nav_logging_emits_entry() {
     assert!(log.contains("action=step_down"), "missing step_down action");
     assert!(log.contains("moved=true"), "expected moved=true for step");
 }
+
+#[test]
+fn test_diff_worker_upgrades_deferred_diff_and_updates_counts() {
+    let _guard = DiffSettingsGuard::new(32);
+    let old = "line1\nline2\nline3\nline4\nline5\nline6\n";
+    let new = "line1\nLINE2\nline3\nline4\nline5\nline6\n";
+    let diff = MultiFileDiff::from_file_pair(
+        std::path::PathBuf::from("a.txt"),
+        std::path::PathBuf::from("a.txt"),
+        old.to_string(),
+        new.to_string(),
+    );
+    assert_eq!(diff.diff_status(0), DiffStatus::Deferred);
+
+    let expected = MultiFileDiff::compute_diff(old, new);
+
+    let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+    app.stepping = false;
+    app.no_step_auto_jump_on_enter = false;
+    app.enter_no_step_mode();
+
+    let _ = app.multi_diff.current_navigator();
+    assert!(app.multi_diff.current_navigator_is_placeholder());
+
+    app.queue_current_file_diff();
+
+    let mut ready = false;
+    for _ in 0..200 {
+        app.poll_diff_responses();
+        if matches!(app.multi_diff.current_file_diff_status(), DiffStatus::Ready) {
+            ready = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+
+    assert!(ready, "diff worker did not finish");
+    assert!(!app.multi_diff.current_navigator_is_placeholder());
+    let file = &app.multi_diff.files[0];
+    assert_eq!(file.insertions, expected.insertions);
+    assert_eq!(file.deletions, expected.deletions);
+}
