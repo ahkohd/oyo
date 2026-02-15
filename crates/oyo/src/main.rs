@@ -45,6 +45,7 @@ struct Args {
     command: Option<Command>,
 
     /// Files or directories to compare: old_file new_file
+    /// Single file compares against HEAD (like git diff)
     /// Also works as a git external diff tool (git config diff.external oy)
     #[arg(num_args = 0..)]
     paths: Vec<PathBuf>,
@@ -148,6 +149,8 @@ enum InputMode {
         old_path: PathBuf,
         new_path: PathBuf,
     },
+    /// Single file compared against HEAD
+    GitFile { path: PathBuf },
     /// No args - try git uncommitted changes in current directory
     GitUncommitted,
     /// Staged changes (index vs HEAD)
@@ -181,6 +184,10 @@ fn detect_input_mode(paths: &[PathBuf]) -> InputMode {
         InputMode::TwoPaths {
             old_path: paths[0].clone(),
             new_path: paths[1].clone(),
+        }
+    } else if paths.len() == 1 {
+        InputMode::GitFile {
+            path: paths[0].clone(),
         }
     } else if paths.is_empty() {
         // No args - try git uncommitted changes
@@ -349,6 +356,58 @@ fn build_diff_from_input_mode(
             };
             (diff, None)
         }
+        InputMode::GitFile { path } => {
+            let cwd = std::env::current_dir().unwrap_or_default();
+            if !oyo_core::git::is_git_repo(&cwd) {
+                anyhow::bail!(
+                    "Not in a git repository.\n\
+                     \n\
+                     Usage: oy <file>\n\
+                     \n\
+                     Or use: oy <old_file> <new_file>"
+                );
+            }
+
+            let repo_root =
+                oyo_core::git::get_repo_root(&cwd).context("Failed to get git repository root")?;
+            let abs_path = if path.is_absolute() {
+                path.clone()
+            } else {
+                cwd.join(path)
+            };
+            if abs_path.exists() && abs_path.is_dir() {
+                anyhow::bail!("Expected a file path: {}", path.display());
+            }
+
+            let rel_path = abs_path.strip_prefix(&repo_root).with_context(|| {
+                format!("Path is outside the git repository: {}", path.display())
+            })?;
+
+            let head_exists =
+                oyo_core::git::get_file_at_commit_size(&repo_root, "HEAD", rel_path).is_some();
+            let work_exists = abs_path.exists();
+            if !head_exists && !work_exists {
+                anyhow::bail!("File not found in HEAD or working tree: {}", path.display());
+            }
+
+            let old_bytes = if head_exists {
+                oyo_core::git::get_head_content_bytes(&repo_root, rel_path)
+                    .context("Failed to read file from HEAD")?
+            } else {
+                Vec::new()
+            };
+            let new_bytes = if work_exists {
+                std::fs::read(&abs_path)
+                    .context(format!("Failed to read: {}", abs_path.display()))?
+            } else {
+                Vec::new()
+            };
+
+            let diff =
+                MultiFileDiff::from_file_pair_bytes(rel_path.to_path_buf(), old_bytes, new_bytes);
+            let branch = oyo_core::git::get_current_branch(&repo_root).ok();
+            (diff, branch)
+        }
         InputMode::GitUncommitted => {
             let cwd = std::env::current_dir().unwrap_or_default();
             if !oyo_core::git::is_git_repo(&cwd) {
@@ -458,6 +517,7 @@ fn build_diff_from_input_mode(
         InputMode::None => {
             anyhow::bail!(
                 "Usage: oy <old_file> <new_file>\n\
+                 Usage: oy <file>\n\
                  \n\
                  Or run from a git repository to diff uncommitted changes."
             );
@@ -1671,7 +1731,8 @@ fn run_commit_picker<B: Backend>(
 
 #[cfg(test)]
 mod tests {
-    use super::parse_range;
+    use super::{detect_input_mode, parse_range, InputMode};
+    use std::path::PathBuf;
 
     #[test]
     fn parse_range_accepts_double_dot() {
@@ -1704,5 +1765,14 @@ mod tests {
     #[test]
     fn parse_range_rejects_missing_separator() {
         assert!(parse_range("HEAD").is_err());
+    }
+
+    #[test]
+    fn detect_input_mode_single_path() {
+        let paths = vec![PathBuf::from("main.rs")];
+        match detect_input_mode(&paths) {
+            InputMode::GitFile { path } => assert_eq!(path, PathBuf::from("main.rs")),
+            _ => panic!("unexpected input mode"),
+        }
     }
 }

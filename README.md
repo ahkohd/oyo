@@ -100,6 +100,14 @@ oy
 oy old.rs new.rs
 ```
 
+### Compare a file against HEAD
+
+```bash
+oy path/to/file.rs
+```
+
+Runs a working-tree vs `HEAD` diff for that file (like `git diff path/to/file.rs`).
+
 ### Commit picker
 
 ```bash
