@@ -81,6 +81,24 @@ name = "MyTheme"
 If you provide `MyTheme-light.json` and `MyTheme-dark.json`, `oyo` will pick the
 variant based on `ui.theme.mode` (and fall back to the other if one is missing).
 
+#### ANSI color names
+
+Theme tokens accept ANSI color names, which use your terminal’s palette:
+
+```json
+{
+  "theme": {
+    "diffAdded": { "dark": "green" },
+    "diffRemoved": { "dark": "red" }
+  }
+}
+```
+
+Supported names:
+`black`, `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `gray`,
+`dark_gray`, `light_red`, `light_green`, `light_yellow`, `light_blue`,
+`light_magenta`, `light_cyan`, `white`, and `default`/`reset`/`transparent`.
+
 ## Syntax Themes
 
 Syntax highlighting is tmTheme-based. You can select a built-in syntax theme or provide
