@@ -310,14 +310,14 @@ impl App {
     /// Refresh current file from disk
     pub fn refresh_current_file(&mut self) {
         self.multi_diff.refresh_current_file();
+        // The navigator is rebuilt at step 0 after refresh; jump to the end
+        // so all changes remain visible, and preserve scroll position.
+        self.multi_diff.current_navigator().goto_end();
         let idx = self.multi_diff.selected_index;
         if idx < self.syntax_caches.len() {
             self.syntax_caches[idx] = None;
         }
-        self.scroll_offset = 0;
-        self.horizontal_scroll = 0;
-        self.centered_once = false;
-        self.needs_scroll_to_active = true;
+        self.ensure_syntax_cache();
     }
 
     /// Refresh all files from git (re-scan for uncommitted changes)

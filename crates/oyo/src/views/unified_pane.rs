@@ -957,7 +957,6 @@ fn build_unified_render_model(
                 app.diff_highlight,
                 DiffHighlightMode::Text | DiffHighlightMode::Word
             )
-            && used_syntax
         {
             if let Some(bg) = diff_line_bg(view_line.kind, &app.theme) {
                 content_spans = apply_spans_bg(content_spans, bg);
