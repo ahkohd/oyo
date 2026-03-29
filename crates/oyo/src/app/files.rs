@@ -1,3 +1,5 @@
+use std::time::{Duration, Instant};
+
 use super::{AnimationPhase, App, ViewMode};
 
 impl App {
@@ -318,6 +320,36 @@ impl App {
             self.syntax_caches[idx] = None;
         }
         self.ensure_syntax_cache();
+        self.files_changed_on_disk = false;
+        self.last_refresh_time = std::time::SystemTime::now();
+    }
+
+    /// Check if files on disk have changed since they were loaded.
+    /// Called from tick() every ~1 second.
+    pub fn maybe_check_file_changes(&mut self) {
+        if self.files_changed_on_disk {
+            return;
+        }
+        let now = Instant::now();
+        if now.duration_since(self.last_fs_check) < Duration::from_secs(1) {
+            return;
+        }
+        self.last_fs_check = now;
+
+        if let Some(repo_root) = self.multi_diff.repo_root() {
+            let repo_root = repo_root.to_path_buf();
+            for file in &self.multi_diff.files {
+                let full_path = repo_root.join(&file.path);
+                if let Ok(meta) = std::fs::metadata(&full_path) {
+                    if let Ok(mtime) = meta.modified() {
+                        if mtime > self.last_refresh_time {
+                            self.files_changed_on_disk = true;
+                            return;
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Refresh all files from git (re-scan for uncommitted changes)
@@ -342,6 +374,8 @@ impl App {
             self.centered_once = false;
             self.handle_file_enter();
         }
+        self.files_changed_on_disk = false;
+        self.last_refresh_time = std::time::SystemTime::now();
     }
 
     /// Get the total number of lines in the current view

@@ -472,6 +472,13 @@ fn draw_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
             Style::default().fg(app.theme.error),
         ));
     }
+    if app.files_changed_on_disk {
+        right_spans.push(Span::raw(" "));
+        right_spans.push(Span::styled(
+            "changed",
+            Style::default().fg(app.theme.warning),
+        ));
+    }
     right_spans.push(Span::raw("  "));
     right_spans.push(Span::styled(
         format!("file {}", file_text),

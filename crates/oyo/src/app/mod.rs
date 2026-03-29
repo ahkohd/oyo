@@ -137,6 +137,12 @@ pub struct App {
     pub pending_count: Option<usize>,
     /// Pending "g" prefix for vim-style commands (e.g., gg)
     pub pending_g_prefix: bool,
+    /// True when files on disk have changed since last refresh
+    pub files_changed_on_disk: bool,
+    /// Last time we checked file mtimes
+    last_fs_check: Instant,
+    /// When files were last loaded/refreshed (as SystemTime for mtime comparison)
+    last_refresh_time: std::time::SystemTime,
     /// Defer heavy view rebuild by one frame (for large-file jumps)
     view_build_defer: bool,
     /// True while a deferred view rebuild is pending
@@ -546,6 +552,9 @@ impl App {
             blame_prefetch_at: None,
             blame_worker_tx: None,
             blame_worker_rx: None,
+            files_changed_on_disk: false,
+            last_fs_check: Instant::now(),
+            last_refresh_time: std::time::SystemTime::now(),
             diff_defer: true,
             diff_idle_ms: 250,
             diff_last_input: Instant::now(),
@@ -1544,6 +1553,7 @@ impl App {
 
         self.poll_diff_responses();
         self.maybe_queue_idle_diff();
+        self.maybe_check_file_changes();
 
         if let Some(frame) = self.snap_frame {
             let started_at = self.snap_frame_started_at.get_or_insert(now);
