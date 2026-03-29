@@ -217,7 +217,7 @@ impl App {
         Some((display_idx, label))
     }
 
-    fn ensure_syntax_cache(&mut self) -> Option<&mut SyntaxCache> {
+    pub(crate) fn ensure_syntax_cache(&mut self) -> Option<&mut SyntaxCache> {
         if !self.syntax_enabled() {
             return None;
         }
