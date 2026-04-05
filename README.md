@@ -67,7 +67,7 @@ oyo does **not** replace classic diffs, it adds a new way to review them.
 
 ## Installation
 
-### Homebrew (macOS)
+### Homebrew (macOS/Linux)
 
 ```bash
 brew install ahkohd/oyo/oy

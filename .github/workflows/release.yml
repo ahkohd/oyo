@@ -108,6 +108,8 @@ jobs:
             os: macos-14
           - target: x86_64-apple-darwin
             os: macos-15
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -168,16 +170,18 @@ jobs:
       - name: Compute SHA256
         id: sha
         run: |
-          echo "aarch64=$(shasum -a 256 artifacts/oy-aarch64-apple-darwin.tar.gz | cut -d' ' -f1)" >> $GITHUB_OUTPUT
-          echo "x86_64=$(shasum -a 256 artifacts/oy-x86_64-apple-darwin.tar.gz | cut -d' ' -f1)" >> $GITHUB_OUTPUT
+          echo "macos_arm64=$(shasum -a 256 artifacts/oy-aarch64-apple-darwin.tar.gz | cut -d' ' -f1)" >> $GITHUB_OUTPUT
+          echo "macos_x86_64=$(shasum -a 256 artifacts/oy-x86_64-apple-darwin.tar.gz | cut -d' ' -f1)" >> $GITHUB_OUTPUT
+          echo "linux_x86_64=$(shasum -a 256 artifacts/oy-x86_64-unknown-linux-gnu.tar.gz | cut -d' ' -f1)" >> $GITHUB_OUTPUT
 
       - name: Update formula
         env:
           GH_TOKEN: ${{ secrets.HOMEBREW_OYO_TAP_TOKEN }}
         run: |
           VERSION="${{ needs.release.outputs.version }}"
-          SHA_ARM64="${{ steps.sha.outputs.aarch64 }}"
-          SHA_X86="${{ steps.sha.outputs.x86_64 }}"
+          SHA_MACOS_ARM64="${{ steps.sha.outputs.macos_arm64 }}"
+          SHA_MACOS_X86_64="${{ steps.sha.outputs.macos_x86_64 }}"
+          SHA_LINUX_X86_64="${{ steps.sha.outputs.linux_x86_64 }}"
 
           git clone https://x-access-token:${GH_TOKEN}@github.com/ahkohd/homebrew-oyo.git
           cd homebrew-oyo
@@ -193,11 +197,18 @@ jobs:
             on_macos do
               on_arm do
                 url "https://github.com/ahkohd/oyo/releases/download/vVERSION_PLACEHOLDER/oy-aarch64-apple-darwin.tar.gz"
-                sha256 "SHA_ARM64_PLACEHOLDER"
+                sha256 "SHA_MACOS_ARM64_PLACEHOLDER"
               end
               on_intel do
                 url "https://github.com/ahkohd/oyo/releases/download/vVERSION_PLACEHOLDER/oy-x86_64-apple-darwin.tar.gz"
-                sha256 "SHA_X86_PLACEHOLDER"
+                sha256 "SHA_MACOS_X86_64_PLACEHOLDER"
+              end
+            end
+
+            on_linux do
+              on_intel do
+                url "https://github.com/ahkohd/oyo/releases/download/vVERSION_PLACEHOLDER/oy-x86_64-unknown-linux-gnu.tar.gz"
+                sha256 "SHA_LINUX_X86_64_PLACEHOLDER"
               end
             end
 
@@ -212,8 +223,9 @@ jobs:
           FORMULA
 
           sed -i "s/VERSION_PLACEHOLDER/${VERSION}/g" Formula/oy.rb
-          sed -i "s/SHA_ARM64_PLACEHOLDER/${SHA_ARM64}/g" Formula/oy.rb
-          sed -i "s/SHA_X86_PLACEHOLDER/${SHA_X86}/g" Formula/oy.rb
+          sed -i "s/SHA_MACOS_ARM64_PLACEHOLDER/${SHA_MACOS_ARM64}/g" Formula/oy.rb
+          sed -i "s/SHA_MACOS_X86_64_PLACEHOLDER/${SHA_MACOS_X86_64}/g" Formula/oy.rb
+          sed -i "s/SHA_LINUX_X86_64_PLACEHOLDER/${SHA_LINUX_X86_64}/g" Formula/oy.rb
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"

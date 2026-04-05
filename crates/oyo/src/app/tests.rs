@@ -635,6 +635,98 @@ fn test_step_hunk_nav_clears_view_build_defer_in_large_file() {
 }
 
 #[test]
+fn test_refresh_current_file_keeps_no_step_state() {
+    let _guard = DiffSettingsGuard::default();
+    let old = "line1\nline2\nline3\n".to_string();
+    let new = "line1\nLINE2\nline3\n".to_string();
+
+    let path = std::env::temp_dir().join(format!(
+        "oyo_refresh_state_test_{}_{}.txt",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos()
+    ));
+    std::fs::write(&path, &new).expect("write test file");
+
+    let diff = MultiFileDiff::from_file_pair(path.clone(), path.clone(), old, new);
+    let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+    app.stepping = false;
+    app.no_step_auto_jump_on_enter = false;
+    app.enter_no_step_mode();
+    app.scroll_offset = 1;
+    app.horizontal_scroll = 4;
+
+    app.refresh_current_file();
+
+    let state = app.multi_diff.current_navigator().state().clone();
+    assert_eq!(state.step_direction, StepDirection::None);
+    assert!(state.active_change.is_none());
+    assert_eq!(app.scroll_offset, 1);
+    assert_eq!(app.horizontal_scroll, 4);
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn test_refresh_current_file_preserves_no_step_hunk_scope() {
+    let _guard = DiffSettingsGuard::default();
+    let old_lines: Vec<String> = (1..=25).map(|i| format!("line{}", i)).collect();
+    let mut new_lines = old_lines.clone();
+    new_lines[1] = "line2-new".to_string();
+    new_lines[19] = "line20-new".to_string();
+    let old = old_lines.join("\n");
+    let new = new_lines.join("\n");
+
+    let path = std::env::temp_dir().join(format!(
+        "oyo_refresh_hunk_test_{}_{}.txt",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos()
+    ));
+    std::fs::write(&path, &new).expect("write test file");
+
+    let diff = MultiFileDiff::from_file_pair(path.clone(), path.clone(), old, new);
+    let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+    app.stepping = false;
+    app.no_step_auto_jump_on_enter = false;
+    app.enter_no_step_mode();
+    app.goto_last_hunk_scroll();
+
+    let before = app.multi_diff.current_navigator().state().clone();
+    assert!(before.last_nav_was_hunk);
+    assert!(before.cursor_change.is_some());
+
+    app.refresh_current_file();
+
+    let (after, cursor_in_hunk) = {
+        let nav = app.multi_diff.current_navigator();
+        let state = nav.state().clone();
+        let in_hunk = state
+            .cursor_change
+            .map(|id| {
+                nav.diff()
+                    .hunks
+                    .get(state.current_hunk)
+                    .map(|hunk| hunk.change_ids.contains(&id))
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false);
+        (state, in_hunk)
+    };
+
+    assert!(after.last_nav_was_hunk);
+    assert_eq!(after.current_hunk, before.current_hunk);
+    assert!(after.cursor_change.is_some());
+    assert!(cursor_in_hunk, "cursor should remain within selected hunk");
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
 fn test_view_nav_logging_emits_entry() {
     let _guard = DiffSettingsGuard::default();
     let path = std::env::temp_dir().join(format!("oyo_view_nav_test_{}.log", std::process::id()));
