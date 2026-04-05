@@ -149,6 +149,9 @@ Applies to unified/split only (ignored in evolution):
 
 ```toml
 [ui]
+auto_center = true      # keep active change centered while stepping
+overscroll = false      # allow EOF overscroll when centering (opt-in)
+
 [ui.diff]
 bg = false            # true | false
 fg = "theme"          # theme | syntax

@@ -52,13 +52,19 @@ impl Drop for ViewDebugEnvGuard {
 
 #[test]
 fn test_allow_overscroll_state() {
-    assert!(!allow_overscroll_state(false, false, false));
-    assert!(allow_overscroll_state(false, false, true));
-    assert!(!allow_overscroll_state(false, true, false));
-    assert!(!allow_overscroll_state(true, false, false));
-    assert!(allow_overscroll_state(true, true, false));
-    assert!(allow_overscroll_state(true, true, true));
-    assert!(allow_overscroll_state(true, false, true));
+    // Feature disabled: overscroll is never allowed.
+    assert!(!allow_overscroll_state(false, false, false, false));
+    assert!(!allow_overscroll_state(false, true, true, false));
+    assert!(!allow_overscroll_state(false, false, false, true));
+
+    // Feature enabled: preserve existing auto-center/manual-center behavior.
+    assert!(!allow_overscroll_state(true, false, false, false));
+    assert!(allow_overscroll_state(true, false, false, true));
+    assert!(!allow_overscroll_state(true, false, true, false));
+    assert!(!allow_overscroll_state(true, true, false, false));
+    assert!(allow_overscroll_state(true, true, true, false));
+    assert!(allow_overscroll_state(true, true, true, true));
+    assert!(allow_overscroll_state(true, true, false, true));
 }
 
 #[test]

@@ -8,6 +8,7 @@
 //! zen = false
 //! topbar = true
 //! auto_center = true
+//! overscroll = false
 //! view_mode = "unified"
 //! line_wrap = false
 //! scrollbar = false
@@ -668,6 +669,8 @@ pub struct UiConfig {
     pub topbar: bool,
     /// Auto-center on active change after stepping (like vim's zz)
     pub auto_center: bool,
+    /// Allow overscroll near EOF when centering
+    pub overscroll: bool,
     /// Default view mode: "unified", "split", or "evolution"
     pub view_mode: Option<String>,
     /// Enable line wrapping (default: false, uses horizontal scroll instead)
@@ -714,6 +717,7 @@ impl Default for UiConfig {
             zen: false,
             topbar: true,
             auto_center: true,
+            overscroll: false,
             view_mode: None,
             line_wrap: false,
             fold_context: FoldContextMode::Off,

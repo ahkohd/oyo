@@ -254,6 +254,7 @@ Create a config file at `~/.config/oyo/config.toml`:
 ```toml
 [ui]
 auto_center = true          # Auto-center on active change (default: true)
+overscroll = false         # EOF overscroll when centering (opt-in)
 topbar = true               # Show top bar in diff view (default: true)
 view_mode = "unified"       # Default: "unified", "split", "evolution", or "blame"
 line_wrap = false           # Wrap long lines (default: false, uses horizontal scroll)
@@ -334,6 +335,7 @@ Example config:
 [ui]
 zen = false
 auto_center = true
+overscroll = false
 view_mode = "unified"
 gutter_signs = false
 topbar = true

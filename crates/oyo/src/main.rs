@@ -243,6 +243,7 @@ fn apply_config_to_app(app: &mut App, config: &config::Config, args: &Args, ligh
     app.file_panel_width = config.files.panel_width;
     app.file_count_mode = config.files.counts;
     app.auto_center = config.ui.auto_center;
+    app.overscroll = config.ui.overscroll;
     app.topbar = config.ui.topbar;
     app.line_wrap = config.ui.line_wrap;
     app.set_fold_context_mode(config.ui.fold_context);

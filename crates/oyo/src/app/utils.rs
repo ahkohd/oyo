@@ -8,11 +8,12 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 
 pub(crate) fn allow_overscroll_state(
+    overscroll_enabled: bool,
     auto_center: bool,
     needs_scroll_to_active: bool,
     centered_once: bool,
 ) -> bool {
-    (auto_center && needs_scroll_to_active) || centered_once
+    overscroll_enabled && ((auto_center && needs_scroll_to_active) || centered_once)
 }
 
 pub(crate) fn max_scroll(

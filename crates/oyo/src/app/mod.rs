@@ -129,6 +129,8 @@ pub struct App {
     pub git_branch: Option<String>,
     /// Auto-center on active change after stepping (like vim's zz)
     pub auto_center: bool,
+    /// Allow overscroll near EOF when centering
+    pub overscroll: bool,
     /// Show top bar in diff view
     pub topbar: bool,
     /// Animation duration in milliseconds (how long fade effects take)
@@ -483,6 +485,7 @@ impl App {
             help_max_scroll: 0,
             git_branch,
             auto_center: true,
+            overscroll: false,
             topbar: true,
             animation_duration: 150,
             pending_count: None,
@@ -706,6 +709,7 @@ impl App {
     /// Whether overscroll is allowed (centering is about to happen or manual zz was used)
     pub fn allow_overscroll(&self) -> bool {
         allow_overscroll_state(
+            self.overscroll,
             self.auto_center,
             self.needs_scroll_to_active,
             self.centered_once,
