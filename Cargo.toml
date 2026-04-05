@@ -37,6 +37,6 @@ flate2 = "1.0"
 toml = "0.8"
 dirs = "5.0"
 regex = "1.10"
-unicode-width = "0.1"
+unicode-width = "0.2"
 unicode-segmentation = "1.11"
 time = { version = "0.3", features = ["std", "formatting", "parsing"] }
