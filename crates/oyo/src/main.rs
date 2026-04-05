@@ -868,7 +868,7 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<AppE
                             app.end_file_panel_resize();
                         }
                         MouseEventKind::ScrollUp => {
-                            if app.file_list_focused {
+                            if app.mouse_over_file_panel(me.column, me.row) {
                                 app.prev_file();
                             } else if app.stepping && app.current_file_diff_ready() {
                                 app.prev_step();
@@ -877,7 +877,7 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<AppE
                             }
                         }
                         MouseEventKind::ScrollDown => {
-                            if app.file_list_focused {
+                            if app.mouse_over_file_panel(me.column, me.row) {
                                 app.next_file();
                             } else if app.stepping && app.current_file_diff_ready() {
                                 app.next_step();

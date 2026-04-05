@@ -1,5 +1,12 @@
 use super::{App, DIFF_VIEW_MIN_WIDTH, FILE_PANEL_MIN_WIDTH};
 
+fn point_in_rect(rect: (u16, u16, u16, u16), column: u16, row: u16) -> bool {
+    let (x, y, width, height) = rect;
+    let end_x = x.saturating_add(width);
+    let end_y = y.saturating_add(height);
+    column >= x && column < end_x && row >= y && row < end_y
+}
+
 impl App {
     pub fn handle_file_list_click(&mut self, column: u16, row: u16) -> bool {
         if let Some((x, y, width, height)) = self.file_filter_area {
@@ -49,6 +56,12 @@ impl App {
 
         self.file_list_focused = true;
         true
+    }
+
+    pub fn mouse_over_file_panel(&self, column: u16, row: u16) -> bool {
+        self.file_panel_rect
+            .map(|rect| point_in_rect(rect, column, row))
+            .unwrap_or(false)
     }
 
     pub fn toggle_file_panel(&mut self) {
