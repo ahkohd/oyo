@@ -309,6 +309,29 @@ impl App {
 
     /// Refresh current file from disk
     pub fn refresh_current_file(&mut self) {
+        // Preserve no-step hunk scope/cursor context when possible.
+        let preserve_no_step_hunk = if !self.stepping {
+            let nav = self.multi_diff.current_navigator();
+            let state = nav.state();
+            if state.last_nav_was_hunk {
+                let cursor_rank = nav
+                    .diff()
+                    .hunks
+                    .get(state.current_hunk)
+                    .and_then(|hunk| {
+                        state
+                            .cursor_change
+                            .and_then(|cursor| hunk.change_ids.iter().position(|id| *id == cursor))
+                    })
+                    .unwrap_or(0);
+                Some((state.current_hunk, cursor_rank))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         self.multi_diff.refresh_current_file();
 
         // The navigator is rebuilt at step 0 after refresh; jump to the end
@@ -323,8 +346,35 @@ impl App {
         }
 
         if !self.stepping {
-            self.set_cursor_for_current_scroll();
-            self.multi_diff.current_navigator().set_hunk_scope(false);
+            let restored_hunk_scope = if let Some((prev_hunk, prev_cursor_rank)) =
+                preserve_no_step_hunk
+            {
+                let nav = self.multi_diff.current_navigator();
+                let total_hunks = nav.state().total_hunks;
+                if total_hunks > 0 {
+                    let hunk_idx = prev_hunk.min(total_hunks.saturating_sub(1));
+                    let cursor_change = nav.diff().hunks.get(hunk_idx).and_then(|hunk| {
+                        if hunk.change_ids.is_empty() {
+                            None
+                        } else {
+                            let idx = prev_cursor_rank.min(hunk.change_ids.len().saturating_sub(1));
+                            hunk.change_ids.get(idx).copied()
+                        }
+                    });
+                    nav.set_cursor_hunk(hunk_idx, cursor_change);
+                    nav.set_hunk_scope(true);
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+
+            if !restored_hunk_scope {
+                self.set_cursor_for_current_scroll();
+                self.multi_diff.current_navigator().set_hunk_scope(false);
+            }
         }
 
         let idx = self.multi_diff.selected_index;
