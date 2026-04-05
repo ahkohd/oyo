@@ -19,7 +19,7 @@ anyhow = "1.0"
 
 # Diff engine
 imara-diff = "0.1"
-rustc-hash = "1.1"
+rustc-hash = "2.0"
 
 # TUI
 ratatui = "0.29"
