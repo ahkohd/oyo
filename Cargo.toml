@@ -18,7 +18,7 @@ thiserror = "2.0"
 anyhow = "1.0"
 
 # Diff engine
-imara-diff = "0.1"
+imara-diff = "0.2"
 rustc-hash = "1.1"
 
 # TUI
