@@ -22,7 +22,7 @@ imara-diff = "0.1"
 rustc-hash = "1.1"
 
 # TUI
-ratatui = "0.29"
+ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
 crossterm = "0.29"
 tui-textarea = "0.7"
 
