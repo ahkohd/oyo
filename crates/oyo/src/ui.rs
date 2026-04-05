@@ -472,6 +472,13 @@ fn draw_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
             Style::default().fg(app.theme.error),
         ));
     }
+    if app.files_changed_on_disk {
+        right_spans.push(Span::raw(" "));
+        right_spans.push(Span::styled(
+            "changed",
+            Style::default().fg(app.theme.warning),
+        ));
+    }
     right_spans.push(Span::raw("  "));
     right_spans.push(Span::styled(
         format!("file {}", file_text),
@@ -581,6 +588,8 @@ fn draw_top_bar(frame: &mut Frame, app: &mut App, area: Rect) {
     };
     let right_width = spans_width(&right_spans);
     let left_max = available_width.saturating_sub(right_width + 2);
+    let file_changed = app.file_changed_on_disk(app.multi_diff.selected_index);
+    let changed_marker_len = if file_changed { 2 } else { 0 };
 
     let (name_text, status_style) = if let Some(file) = file {
         let file_name = file
@@ -588,7 +597,8 @@ fn draw_top_bar(frame: &mut Frame, app: &mut App, area: Rect) {
             .rsplit('/')
             .next()
             .unwrap_or(&file.display_name);
-        let name = truncate_filename_keep_ext(file_name, left_max.saturating_sub(3));
+        let name =
+            truncate_filename_keep_ext(file_name, left_max.saturating_sub(3 + changed_marker_len));
         let status_style = match file.status {
             FileStatus::Added | FileStatus::Untracked => Style::default().fg(app.theme.success),
             FileStatus::Deleted => Style::default().fg(app.theme.error),
@@ -606,6 +616,15 @@ fn draw_top_bar(frame: &mut Frame, app: &mut App, area: Rect) {
         Span::raw(" "),
         Span::styled(name_text, Style::default().fg(app.theme.text)),
     ];
+    if file_changed {
+        left_spans.push(Span::raw(" "));
+        left_spans.push(Span::styled(
+            "*",
+            Style::default()
+                .fg(app.theme.warning)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
     left_spans = clamp_spans_to_width(&left_spans, left_max);
     left_spans = pad_spans_left(left_spans, left_max);
 
@@ -966,13 +985,19 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
             0
         };
 
+        let file_changed = app.file_changed_on_disk(file_idx);
+        let changed_marker_len = if file_changed { 2 } else { 0 };
+
         // Truncate filename to fit (preserve extension)
         let file_name = file
             .display_name
             .rsplit('/')
             .next()
             .unwrap_or(&file.display_name);
-        let max_name_len = list_area.width.saturating_sub(8 + signs_len as u16).max(1) as usize;
+        let max_name_len = list_area
+            .width
+            .saturating_sub(8 + signs_len as u16 + changed_marker_len as u16)
+            .max(1) as usize;
         let name = truncate_filename_keep_ext(file_name, max_name_len);
 
         let mut icon_style = status_style;
@@ -1024,6 +1049,17 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
                 line_spans.push(Span::raw(" "));
                 line_spans.push(Span::styled(delete_text, delete_style));
             }
+        }
+
+        if file_changed {
+            let mut changed_style = Style::default()
+                .fg(app.theme.warning)
+                .add_modifier(Modifier::BOLD);
+            if let Some(bg) = selected_bg {
+                changed_style = changed_style.bg(bg);
+            }
+            line_spans.push(Span::raw(" "));
+            line_spans.push(Span::styled("*", changed_style));
         }
 
         let line = Line::from(line_spans);
@@ -1353,7 +1389,7 @@ fn draw_help_popover(frame: &mut Frame, app: &mut App) {
     push_help_line(&mut lines, "Tab", "Cycle view mode");
     push_help_line(&mut lines, "Shift-Tab", "Cycle view mode (reverse)");
     push_help_line(&mut lines, "Z", "Zen mode");
-    push_help_line(&mut lines, "R", "Refresh from disk");
+    push_help_line(&mut lines, "R", "Refresh all files");
 
     if app.is_multi_file() {
         lines.push(Line::from(""));
@@ -1363,7 +1399,6 @@ fn draw_help_popover(frame: &mut Frame, app: &mut App) {
         push_help_line(&mut lines, "Enter", "Focus file list");
         push_help_line(&mut lines, "j / k / ↑↓", "Move selection (focused)");
         push_help_line(&mut lines, "/", "Filter files (when focused)");
-        push_help_line(&mut lines, "R", "Refresh all (when focused)");
     }
 
     lines.push(Line::from(""));

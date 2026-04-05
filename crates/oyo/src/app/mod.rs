@@ -16,7 +16,7 @@ use regex::Regex;
 use rustc_hash::FxHashMap;
 use std::collections::VecDeque;
 use std::sync::mpsc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 mod blame;
 mod diff_worker;
@@ -139,6 +139,14 @@ pub struct App {
     pub pending_count: Option<usize>,
     /// Pending "g" prefix for vim-style commands (e.g., gg)
     pub pending_g_prefix: bool,
+    /// True when at least one tracked file changed on disk since refresh
+    pub files_changed_on_disk: bool,
+    /// Last time we checked file mtimes
+    last_fs_check: Instant,
+    /// Baseline disk stamp captured at load/refresh for each file
+    file_disk_baseline: Vec<FileDiskStamp>,
+    /// Per-file changed-on-disk flags (same indexing as multi_diff.files)
+    file_disk_changed: Vec<bool>,
     /// Defer heavy view rebuild by one frame (for large-file jumps)
     view_build_defer: bool,
     /// True while a deferred view rebuild is pending
@@ -439,6 +447,13 @@ pub(crate) struct SyntaxWarmupTarget {
     new: Option<WarmupRange>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct FileDiskStamp {
+    pub(crate) modified: Option<SystemTime>,
+    pub(crate) len: u64,
+    pub(crate) exists: bool,
+}
+
 impl App {
     pub fn new(
         multi_diff: MultiFileDiff,
@@ -448,7 +463,7 @@ impl App {
         git_branch: Option<String>,
     ) -> Self {
         let file_count = multi_diff.file_count();
-        Self {
+        let mut app = Self {
             multi_diff,
             view_mode,
             animation_speed,
@@ -490,6 +505,10 @@ impl App {
             animation_duration: 150,
             pending_count: None,
             pending_g_prefix: false,
+            files_changed_on_disk: false,
+            last_fs_check: Instant::now(),
+            file_disk_baseline: vec![FileDiskStamp::default(); file_count],
+            file_disk_changed: vec![false; file_count],
             view_build_defer: false,
             view_build_pending: false,
             horizontal_scroll: 0,
@@ -615,7 +634,9 @@ impl App {
             unified_render_cache: None,
             view_window_start: 0,
             view_window_total_len: None,
-        }
+        };
+        app.rebuild_file_disk_baseline();
+        app
     }
 
     /// Add a digit to the pending count (vim-style command counts)
@@ -1548,6 +1569,7 @@ impl App {
 
         self.poll_diff_responses();
         self.maybe_queue_idle_diff();
+        self.maybe_check_file_changes();
 
         if let Some(frame) = self.snap_frame {
             let started_at = self.snap_frame_started_at.get_or_insert(now);

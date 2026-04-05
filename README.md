@@ -234,7 +234,7 @@ command = ["oy", "$left", "$right"]
 | `s` | Toggle stepping (no-step mode) |
 | `S` | Toggle strikethrough |
 | `r` | Replay last step (count supported) |
-| `R` | Refresh file (or all files when file list focused) |
+| `R` | Refresh all files |
 | `Ctrl+f` | Toggle file panel |
 | `Enter` | Focus file list |
 | `]` | Next file (supports count) |

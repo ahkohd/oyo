@@ -1467,11 +1467,10 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<AppE
                         }
                         KeyCode::Char('R') => {
                             app.reset_count();
-                            if app.file_list_focused {
-                                // Refresh all files from git
+                            // Refresh the full file set so added/removed files are reflected.
+                            if app.multi_diff.is_git_mode() {
                                 app.refresh_all_files();
                             } else {
-                                // Refresh current file from disk
                                 app.refresh_current_file();
                             }
                         }

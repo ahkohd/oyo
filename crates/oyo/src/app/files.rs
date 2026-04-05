@@ -1,4 +1,5 @@
-use super::{AnimationPhase, App, ViewMode};
+use super::{AnimationPhase, App, FileDiskStamp, ViewMode};
+use std::time::{Duration, Instant};
 
 impl App {
     // File navigation methods
@@ -307,6 +308,80 @@ impl App {
             .unwrap_or_default()
     }
 
+    fn disk_stamp_for_index(&self, idx: usize) -> FileDiskStamp {
+        let Some(file) = self.multi_diff.files.get(idx) else {
+            return FileDiskStamp::default();
+        };
+
+        let full_path = if let Some(repo_root) = self.multi_diff.repo_root() {
+            repo_root.join(&file.path)
+        } else {
+            file.path.clone()
+        };
+
+        match std::fs::metadata(&full_path) {
+            Ok(meta) => FileDiskStamp {
+                modified: meta.modified().ok(),
+                len: meta.len(),
+                exists: true,
+            },
+            Err(_) => FileDiskStamp::default(),
+        }
+    }
+
+    pub(crate) fn rebuild_file_disk_baseline(&mut self) {
+        let file_count = self.multi_diff.file_count();
+        self.file_disk_baseline = (0..file_count)
+            .map(|idx| self.disk_stamp_for_index(idx))
+            .collect();
+        self.file_disk_changed = vec![false; file_count];
+    }
+
+    fn refresh_file_disk_baseline_for(&mut self, idx: usize) {
+        if self.file_disk_baseline.len() != self.multi_diff.file_count() {
+            self.rebuild_file_disk_baseline();
+            return;
+        }
+        let stamp = self.disk_stamp_for_index(idx);
+        if let Some(slot) = self.file_disk_baseline.get_mut(idx) {
+            *slot = stamp;
+        }
+    }
+
+    fn recompute_file_change_state(&mut self) {
+        let file_count = self.multi_diff.file_count();
+        if self.file_disk_baseline.len() != file_count {
+            self.rebuild_file_disk_baseline();
+        }
+        if self.file_disk_changed.len() != file_count {
+            self.file_disk_changed = vec![false; file_count];
+        }
+
+        let mut any_changed = false;
+        for idx in 0..file_count {
+            let changed = self.disk_stamp_for_index(idx) != self.file_disk_baseline[idx];
+            if let Some(slot) = self.file_disk_changed.get_mut(idx) {
+                *slot = changed;
+            }
+            any_changed |= changed;
+        }
+        self.files_changed_on_disk = any_changed;
+    }
+
+    pub(crate) fn file_changed_on_disk(&self, idx: usize) -> bool {
+        self.file_disk_changed.get(idx).copied().unwrap_or(false)
+    }
+
+    /// Check if tracked files changed on disk since the last refresh baseline.
+    pub fn maybe_check_file_changes(&mut self) {
+        let now = Instant::now();
+        if now.duration_since(self.last_fs_check) < Duration::from_secs(1) {
+            return;
+        }
+        self.last_fs_check = now;
+        self.recompute_file_change_state();
+    }
+
     /// Refresh current file from disk
     pub fn refresh_current_file(&mut self) {
         // Preserve no-step hunk scope/cursor context when possible.
@@ -382,6 +457,9 @@ impl App {
             self.syntax_caches[idx] = None;
         }
         self.ensure_syntax_cache();
+
+        self.refresh_file_disk_baseline_for(idx);
+        self.recompute_file_change_state();
     }
 
     /// Refresh all files from git (re-scan for uncommitted changes)
@@ -405,6 +483,9 @@ impl App {
             self.needs_scroll_to_active = true;
             self.centered_once = false;
             self.handle_file_enter();
+
+            self.rebuild_file_disk_baseline();
+            self.files_changed_on_disk = false;
         }
     }
 

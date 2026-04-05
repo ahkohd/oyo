@@ -5,6 +5,7 @@ use super::*;
 use crate::test_utils::{DiffSettingsGuard, TestApp};
 use oyo_core::{LineKind, MultiFileDiff, StepDirection, ViewLine};
 use std::sync::{Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 static VIEW_DEBUG_ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -724,6 +725,101 @@ fn test_refresh_current_file_preserves_no_step_hunk_scope() {
     assert!(cursor_in_hunk, "cursor should remain within selected hunk");
 
     let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn test_files_changed_indicator_detects_disk_modification_and_clears_on_refresh() {
+    let _guard = DiffSettingsGuard::default();
+    let initial = "line1\n";
+    let path = std::env::temp_dir().join(format!(
+        "oyo_changed_indicator_test_{}_{}.txt",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos()
+    ));
+    std::fs::write(&path, initial).expect("write test file");
+
+    let diff = MultiFileDiff::from_file_pair(
+        path.clone(),
+        path.clone(),
+        "old\n".to_string(),
+        initial.to_string(),
+    );
+    let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+
+    app.last_fs_check = Instant::now() - Duration::from_secs(2);
+    app.maybe_check_file_changes();
+    assert!(!app.files_changed_on_disk);
+    assert!(!app.file_changed_on_disk(0));
+
+    std::fs::write(&path, "line1 changed on disk\n").expect("update test file");
+    app.last_fs_check = Instant::now() - Duration::from_secs(2);
+    app.maybe_check_file_changes();
+    assert!(app.files_changed_on_disk);
+    assert!(app.file_changed_on_disk(0));
+
+    app.refresh_current_file();
+    assert!(!app.files_changed_on_disk);
+    assert!(!app.file_changed_on_disk(0));
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn test_refresh_current_file_keeps_changed_indicator_if_other_file_is_modified() {
+    let _guard = DiffSettingsGuard::default();
+    let now_nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let path_a = std::env::temp_dir().join(format!(
+        "oyo_changed_a_{}_{}.txt",
+        std::process::id(),
+        now_nanos
+    ));
+    let path_b = std::env::temp_dir().join(format!(
+        "oyo_changed_b_{}_{}.txt",
+        std::process::id(),
+        now_nanos
+    ));
+
+    std::fs::write(&path_a, "A\n").expect("write file a");
+    std::fs::write(&path_b, "B\n").expect("write file b");
+
+    let diff = MultiFileDiff::from_file_pairs(vec![
+        (path_a.clone(), "old A\n".to_string(), "A\n".to_string()),
+        (path_b.clone(), "old B\n".to_string(), "B\n".to_string()),
+    ]);
+    let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+
+    std::fs::write(&path_a, "A changed on disk\n").expect("update file a");
+    std::fs::write(&path_b, "B changed on disk\n").expect("update file b");
+
+    app.last_fs_check = Instant::now() - Duration::from_secs(2);
+    app.maybe_check_file_changes();
+    assert!(app.files_changed_on_disk);
+    assert!(app.file_changed_on_disk(0));
+    assert!(app.file_changed_on_disk(1));
+
+    app.multi_diff.select_file(0);
+    app.refresh_current_file();
+    assert!(
+        app.files_changed_on_disk,
+        "indicator should stay on while another file remains changed"
+    );
+    assert!(!app.file_changed_on_disk(0));
+    assert!(app.file_changed_on_disk(1));
+
+    app.multi_diff.select_file(1);
+    app.refresh_current_file();
+    assert!(!app.files_changed_on_disk);
+    assert!(!app.file_changed_on_disk(0));
+    assert!(!app.file_changed_on_disk(1));
+
+    let _ = std::fs::remove_file(path_a);
+    let _ = std::fs::remove_file(path_b);
 }
 
 #[test]
