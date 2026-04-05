@@ -22,7 +22,7 @@ imara-diff = "0.1"
 rustc-hash = "1.1"
 
 # TUI
-ratatui = "0.29"
+ratatui = "0.30"
 crossterm = "0.28"
 tui-textarea = "0.7"
 
