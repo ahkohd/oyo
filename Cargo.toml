@@ -18,11 +18,11 @@ thiserror = "2.0"
 anyhow = "1.0"
 
 # Diff engine
-imara-diff = "0.1"
-rustc-hash = "2.0"
+imara-diff = "0.2"
+rustc-hash = "1.1"
 
 # TUI
-ratatui = "0.29"
+ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
 crossterm = "0.29"
 tui-textarea = "0.7"
 

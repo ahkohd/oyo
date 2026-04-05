@@ -15,7 +15,7 @@ mod views;
 use crate::dashboard::{Dashboard, DashboardConfig, DashboardSelection};
 use crate::syntax::{list_syntax_themes, SyntaxEngine};
 use crate::time_format::TimeFormatter;
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use app::{App, ViewMode};
 use clap::{Parser, Subcommand};
 use crossterm::{
@@ -792,7 +792,9 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<AppE
     let mut pending_event: Option<Event> = None;
 
     loop {
-        terminal.draw(|f| ui::draw(f, app))?;
+        terminal
+            .draw(|f| ui::draw(f, app))
+            .map_err(|e| anyhow!("{e}"))?;
 
         // Clear active change after render (one-frame extent marker display when animation disabled)
         if app.clear_active_on_next_render {
@@ -1573,12 +1575,15 @@ fn run_dashboard<B: Backend>(
     let tick_rate = Duration::from_millis(16);
 
     loop {
-        terminal.draw(|f| dashboard.draw(f))?;
+        terminal
+            .draw(|f| dashboard.draw(f))
+            .map_err(|e| anyhow!("{e}"))?;
 
         if event::poll(tick_rate)? {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
-                    let list_height = dashboard.list_height(terminal.size()?.height);
+                    let list_height =
+                        dashboard.list_height(terminal.size().map_err(|e| anyhow!("{e}"))?.height);
                     if dashboard.filter_active() {
                         match key.code {
                             KeyCode::Esc => {
@@ -1658,7 +1663,8 @@ fn run_dashboard<B: Backend>(
                     }
                 }
                 Event::Mouse(mouse) => {
-                    let list_height = dashboard.list_height(terminal.size()?.height);
+                    let list_height =
+                        dashboard.list_height(terminal.size().map_err(|e| anyhow!("{e}"))?.height);
                     match mouse.kind {
                         MouseEventKind::ScrollUp => {
                             dashboard.move_selection(-3, list_height);

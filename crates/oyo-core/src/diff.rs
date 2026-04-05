@@ -1,8 +1,7 @@
 //! Diff computation engine
 
 use crate::change::{Change, ChangeKind, ChangeSpan};
-use imara_diff::intern::{InternedInput, TokenSource};
-use imara_diff::{Algorithm, Sink};
+use imara_diff::{Algorithm, Diff, InternedInput, TokenSource};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::hash::Hash;
 use std::ops::Range;
@@ -99,33 +98,21 @@ pub struct DiffEngine {
     word_level: bool,
 }
 
-#[derive(Default)]
-struct ChangeRangeSink {
-    ranges: Vec<(Range<usize>, Range<usize>)>,
-}
-
-impl Sink for ChangeRangeSink {
-    type Out = Vec<(Range<usize>, Range<usize>)>;
-
-    fn process_change(&mut self, before: Range<u32>, after: Range<u32>) {
-        self.ranges.push((
-            before.start as usize..before.end as usize,
-            after.start as usize..after.end as usize,
-        ));
-    }
-
-    fn finish(self) -> Self::Out {
-        self.ranges
-    }
-}
-
 fn diff_ranges<I, T>(algorithm: Algorithm, before: I, after: I) -> Vec<(Range<usize>, Range<usize>)>
 where
     I: TokenSource<Token = T>,
     T: Eq + Hash,
 {
     let input = InternedInput::new(before, after);
-    imara_diff::diff(algorithm, &input, ChangeRangeSink::default())
+    let diff = Diff::compute(algorithm, &input);
+    diff.hunks()
+        .map(|hunk| {
+            (
+                hunk.before.start as usize..hunk.before.end as usize,
+                hunk.after.start as usize..hunk.after.end as usize,
+            )
+        })
+        .collect()
 }
 
 impl Default for DiffEngine {
