@@ -1,0 +1,24 @@
+{
+  "name": "@ahkohd/oyo-darwin-x64",
+  "version": "0.1.28",
+  "description": "Prebuilt binary for @ahkohd/oyo (darwin x64)",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ahkohd/oyo.git"
+  },
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "bin/oy",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  }
+}

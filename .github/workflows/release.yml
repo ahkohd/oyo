@@ -36,6 +36,12 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+
       - name: Calculate new version
         id: version
         run: |
@@ -56,6 +62,12 @@ jobs:
           sed -i 's/^version = ".*"/version = "${{ steps.version.outputs.new }}"/' Cargo.toml
           cargo update --workspace
 
+      - name: Update npm package versions
+        run: node scripts/sync-npm-version.cjs "${{ steps.version.outputs.new }}"
+
+      - name: npm package dry run
+        run: npm pack --dry-run
+
       - name: Configure git
         run: |
           git config user.name "github-actions[bot]"
@@ -64,7 +76,8 @@ jobs:
       - name: Commit and tag
         if: ${{ !inputs.dry_run }}
         run: |
-          git add Cargo.toml Cargo.lock
+          git add Cargo.toml Cargo.lock package.json
+          git add npm/darwin-arm64/package.json npm/darwin-x64/package.json npm/linux-x64-gnu/package.json
           git commit -m "chore: release v${{ steps.version.outputs.new }}"
           git tag "v${{ steps.version.outputs.new }}"
           git push origin main
@@ -94,8 +107,14 @@ jobs:
           echo "- New version: ${{ steps.version.outputs.new }}" >> $GITHUB_STEP_SUMMARY
           echo "- Would commit, tag, and push v${{ steps.version.outputs.new }}" >> $GITHUB_STEP_SUMMARY
           echo "- Would publish oyo-core and oyo to crates.io" >> $GITHUB_STEP_SUMMARY
+          echo "- Would publish npm packages:" >> $GITHUB_STEP_SUMMARY
+          echo "  - @ahkohd/oyo-darwin-arm64@${{ steps.version.outputs.new }}" >> $GITHUB_STEP_SUMMARY
+          echo "  - @ahkohd/oyo-darwin-x64@${{ steps.version.outputs.new }}" >> $GITHUB_STEP_SUMMARY
+          echo "  - @ahkohd/oyo-linux-x64-gnu@${{ steps.version.outputs.new }}" >> $GITHUB_STEP_SUMMARY
+          echo "  - @ahkohd/oyo@${{ steps.version.outputs.new }}" >> $GITHUB_STEP_SUMMARY
           cargo publish -p oyo-core --dry-run --allow-dirty
           cargo publish -p oyo --dry-run --allow-dirty
+          npm publish --dry-run --access public
 
   build:
     name: Build (${{ matrix.target }})
@@ -133,6 +152,81 @@ jobs:
         with:
           name: oy-${{ matrix.target }}
           path: oy-${{ matrix.target }}.tar.gz
+
+  publish-npm:
+    name: Publish npm packages
+    needs: [release, build]
+    if: ${{ !inputs.dry_run }}
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: v${{ needs.release.outputs.version }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Stage npm packages
+        run: |
+          STAGE_DIR="${RUNNER_TEMP}/oyo-npm"
+          rm -rf "${STAGE_DIR}"
+          mkdir -p "${STAGE_DIR}"
+
+          mkdir -p "${STAGE_DIR}/main"
+          cp -R package.json README.md bin lib "${STAGE_DIR}/main"
+
+          mkdir -p "${STAGE_DIR}/darwin-arm64"
+          cp -R npm/darwin-arm64/. "${STAGE_DIR}/darwin-arm64"
+          rm -f "${STAGE_DIR}/darwin-arm64/bin/.gitkeep"
+          tar -xzf artifacts/oy-aarch64-apple-darwin.tar.gz -C "${STAGE_DIR}/darwin-arm64/bin"
+          chmod +x "${STAGE_DIR}/darwin-arm64/bin/oy"
+
+          mkdir -p "${STAGE_DIR}/darwin-x64"
+          cp -R npm/darwin-x64/. "${STAGE_DIR}/darwin-x64"
+          rm -f "${STAGE_DIR}/darwin-x64/bin/.gitkeep"
+          tar -xzf artifacts/oy-x86_64-apple-darwin.tar.gz -C "${STAGE_DIR}/darwin-x64/bin"
+          chmod +x "${STAGE_DIR}/darwin-x64/bin/oy"
+
+          mkdir -p "${STAGE_DIR}/linux-x64-gnu"
+          cp -R npm/linux-x64-gnu/. "${STAGE_DIR}/linux-x64-gnu"
+          rm -f "${STAGE_DIR}/linux-x64-gnu/bin/.gitkeep"
+          tar -xzf artifacts/oy-x86_64-unknown-linux-gnu.tar.gz -C "${STAGE_DIR}/linux-x64-gnu/bin"
+          chmod +x "${STAGE_DIR}/linux-x64-gnu/bin/oy"
+
+          echo "STAGE_DIR=${STAGE_DIR}" >> "$GITHUB_ENV"
+
+      - name: Verify npm auth
+        run: npm whoami
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish platform packages
+        run: |
+          npm publish "${STAGE_DIR}/darwin-arm64" --provenance --access public
+          npm publish "${STAGE_DIR}/darwin-x64" --provenance --access public
+          npm publish "${STAGE_DIR}/linux-x64-gnu" --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Wait for npm index
+        run: sleep 15
+
+      - name: Publish main package
+        run: npm publish "${STAGE_DIR}/main" --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   publish:
     name: Publish Release

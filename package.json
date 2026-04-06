@@ -1,0 +1,39 @@
+{
+  "name": "@ahkohd/oyo",
+  "version": "0.1.28",
+  "description": "A step-through diff viewer for the terminal.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ahkohd/oyo.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ahkohd/oyo/issues"
+  },
+  "homepage": "https://github.com/ahkohd/oyo#readme",
+  "type": "commonjs",
+  "bin": {
+    "oy": "bin/oy.js"
+  },
+  "files": [
+    "bin/*.js",
+    "lib/*.js",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "optionalDependencies": {
+    "@ahkohd/oyo-darwin-arm64": "0.1.28",
+    "@ahkohd/oyo-darwin-x64": "0.1.28",
+    "@ahkohd/oyo-linux-x64-gnu": "0.1.28"
+  },
+  "scripts": {
+    "pack:dry": "npm pack --dry-run",
+    "version:sync": "node scripts/sync-npm-version.cjs"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  }
+}

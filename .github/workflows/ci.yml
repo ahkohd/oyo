@@ -20,6 +20,11 @@ jobs:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
 
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+
       - name: Format
         run: cargo fmt --all -- --check
 
@@ -31,3 +36,6 @@ jobs:
 
       - name: Test
         run: cargo test --workspace
+
+      - name: npm pack dry run
+        run: npm pack --dry-run
