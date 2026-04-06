@@ -297,6 +297,25 @@ fn preserve_ref_trailing_space(text: &str) -> bool {
     token.chars().all(valid_char)
 }
 
+fn merge_changed_and_repo_paths(changed_paths: &[String], repo_paths: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seen = BTreeSet::new();
+
+    for path in changed_paths {
+        if seen.insert(path.clone()) {
+            out.push(path.clone());
+        }
+    }
+
+    for path in repo_paths {
+        if seen.insert(path.clone()) {
+            out.push(path.clone());
+        }
+    }
+
+    out
+}
+
 fn nearest_hunk_line_index(visible: &[(usize, ViewLine)], focus_pos: usize) -> Option<usize> {
     if visible.is_empty() {
         return None;
@@ -1097,14 +1116,14 @@ impl App {
     }
 
     fn review_changed_file_paths(&self) -> Vec<String> {
-        let mut paths: Vec<String> = self
-            .multi_diff
-            .files
-            .iter()
-            .map(|f| f.display_name.clone())
-            .collect();
-        paths.sort();
-        paths.dedup();
+        let mut paths: Vec<String> = Vec::new();
+        let mut seen = BTreeSet::new();
+        for file in &self.multi_diff.files {
+            let path = file.display_name.clone();
+            if seen.insert(path.clone()) {
+                paths.push(path);
+            }
+        }
         paths
     }
 
@@ -1155,18 +1174,10 @@ impl App {
                 if repo_paths.is_empty() {
                     changed_paths.clone()
                 } else {
-                    repo_paths
+                    merge_changed_and_repo_paths(&changed_paths, &repo_paths)
                 }
             }
         };
-
-        let mut seen = BTreeSet::new();
-        paths.retain(|path| seen.insert(path.clone()));
-        for path in changed_paths {
-            if seen.insert(path.clone()) {
-                paths.push(path);
-            }
-        }
 
         let current_file = self.current_file_path();
         if !current_file.is_empty() {
@@ -1288,16 +1299,87 @@ impl App {
     }
 
     fn review_mention_candidates(&mut self, query: &str) -> Vec<ReviewMentionItem> {
+        const MAX_ITEMS: usize = 40;
+        const MAX_REF_ITEMS: usize = 16;
+
         let query_lc = query.to_ascii_lowercase();
         let matches_query = |text: &str| {
             query_lc.is_empty() || text.to_ascii_lowercase().contains(query_lc.as_str())
         };
 
         let current_file = self.current_file_path();
-        let file_paths = self.review_mention_file_paths();
-        let file_paths = self.filter_review_file_paths(&file_paths, query, 80);
-
         let mut items: Vec<ReviewMentionItem> = Vec::new();
+
+        // Empty query ordering: changed files -> line refs -> repo files.
+        if query.is_empty() {
+            let changed_paths = self.review_changed_file_paths();
+            for path in &changed_paths {
+                if items.len() >= MAX_ITEMS {
+                    break;
+                }
+                items.push(ReviewMentionItem {
+                    label: format!("file  {path}"),
+                    insert_text: format!("@{path}"),
+                });
+            }
+
+            if items.len() < MAX_ITEMS && !current_file.is_empty() {
+                let mut seen: BTreeSet<String> = BTreeSet::new();
+                let mut ref_count = 0usize;
+                for (_, line) in self.review_visible_lines_with_idx() {
+                    if line.hunk_index.is_none() {
+                        continue;
+                    }
+
+                    if let Some(line_no) = line.new_line {
+                        let mention = format!("@{}:new:{}", current_file, line_no);
+                        if ref_count < MAX_REF_ITEMS && seen.insert(mention.clone()) {
+                            items.push(ReviewMentionItem {
+                                label: format!("line  {}:new:{}", current_file, line_no),
+                                insert_text: mention,
+                            });
+                            ref_count += 1;
+                        }
+                    }
+                    if let Some(line_no) = line.old_line {
+                        let mention = format!("@{}:old:{}", current_file, line_no);
+                        if ref_count < MAX_REF_ITEMS && seen.insert(mention.clone()) {
+                            items.push(ReviewMentionItem {
+                                label: format!("line  {}:old:{}", current_file, line_no),
+                                insert_text: mention,
+                            });
+                            ref_count += 1;
+                        }
+                    }
+
+                    if ref_count >= MAX_REF_ITEMS || items.len() >= MAX_ITEMS {
+                        break;
+                    }
+                }
+            }
+
+            if items.len() < MAX_ITEMS && self.review_mention_file_scope == MentionFileScope::Repo {
+                let changed_set: BTreeSet<String> = changed_paths.into_iter().collect();
+                for path in self.review_repo_file_paths() {
+                    if changed_set.contains(&path) {
+                        continue;
+                    }
+                    if items.len() >= MAX_ITEMS {
+                        break;
+                    }
+                    items.push(ReviewMentionItem {
+                        label: format!("file  {path}"),
+                        insert_text: format!("@{path}"),
+                    });
+                }
+            }
+
+            return items;
+        }
+
+        // Non-empty query: filter/rank file mentions first (fzf in auto/fzf mode), then line refs.
+        let file_paths = self.review_mention_file_paths();
+        let file_paths = self.filter_review_file_paths(&file_paths, query, MAX_ITEMS);
         for path in file_paths {
             let insert_text = format!("@{path}");
             items.push(ReviewMentionItem {
@@ -1306,34 +1388,52 @@ impl App {
             });
         }
 
-        if !current_file.is_empty() {
-            let mut seen: BTreeSet<String> = BTreeSet::new();
-            for (_, line) in self.review_visible_lines_with_idx() {
-                if line.hunk_index.is_none() {
-                    continue;
+        if items.len() >= MAX_ITEMS || current_file.is_empty() {
+            return items;
+        }
+
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        let mut ref_count = 0usize;
+        for (_, line) in self.review_visible_lines_with_idx() {
+            if line.hunk_index.is_none() {
+                continue;
+            }
+
+            if let Some(line_no) = line.new_line {
+                let mention = format!("@{}:new:{}", current_file, line_no);
+                if ref_count < MAX_REF_ITEMS
+                    && seen.insert(mention.clone())
+                    && matches_query(&mention)
+                {
+                    items.push(ReviewMentionItem {
+                        label: format!("line  {}:new:{}", current_file, line_no),
+                        insert_text: mention,
+                    });
+                    ref_count += 1;
                 }
-                if let Some(line_no) = line.new_line {
-                    let mention = format!("@{}:new:{}", current_file, line_no);
-                    if seen.insert(mention.clone()) && matches_query(&mention) {
-                        items.push(ReviewMentionItem {
-                            label: format!("line  {}:new:{}", current_file, line_no),
-                            insert_text: mention,
-                        });
-                    }
+            }
+            if let Some(line_no) = line.old_line {
+                let mention = format!("@{}:old:{}", current_file, line_no);
+                if ref_count < MAX_REF_ITEMS
+                    && seen.insert(mention.clone())
+                    && matches_query(&mention)
+                {
+                    items.push(ReviewMentionItem {
+                        label: format!("line  {}:old:{}", current_file, line_no),
+                        insert_text: mention,
+                    });
+                    ref_count += 1;
                 }
-                if let Some(line_no) = line.old_line {
-                    let mention = format!("@{}:old:{}", current_file, line_no);
-                    if seen.insert(mention.clone()) && matches_query(&mention) {
-                        items.push(ReviewMentionItem {
-                            label: format!("line  {}:old:{}", current_file, line_no),
-                            insert_text: mention,
-                        });
-                    }
-                }
+            }
+
+            if ref_count >= MAX_REF_ITEMS || items.len() >= MAX_ITEMS {
+                break;
             }
         }
 
-        items.truncate(40);
+        if items.len() > MAX_ITEMS {
+            items.truncate(MAX_ITEMS);
+        }
         items
     }
 
