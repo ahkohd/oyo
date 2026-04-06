@@ -1525,6 +1525,16 @@ fn draw_review_editor_overlay(frame: &mut Frame, app: &mut App) {
     frame.render_widget(anchor_line, chunks[0]);
 
     let text_area = chunks[1];
+    let padded_text_area = text_area.inner(ratatui::layout::Margin {
+        horizontal: 1,
+        vertical: 0,
+    });
+    let text_area = if padded_text_area.width == 0 {
+        text_area
+    } else {
+        padded_text_area
+    };
+
     let visible_lines = text_area.height.max(1) as usize;
     let wrap_width = text_area.width.max(1) as usize;
 
