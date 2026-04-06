@@ -1,9 +1,12 @@
 use super::{AnimationFrame, App, ViewMode};
+use crate::config::{MentionFileScope, MentionFinder};
 use oyo_core::{LineKind, ViewLine};
 use serde::{Deserialize, Serialize};
-use std::collections::hash_map::DefaultHasher;
+use std::collections::{hash_map::DefaultHasher, BTreeSet};
 use std::fs;
 use std::hash::{Hash, Hasher};
+use std::io::Write;
+use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -547,6 +550,7 @@ impl App {
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
         self.review_repo_root = Some(repo_root.to_string_lossy().to_string());
+        self.invalidate_review_repo_file_cache();
 
         let diff_fingerprint = self.compute_review_diff_fingerprint();
         self.review_diff_fingerprint = diff_fingerprint.clone();
@@ -954,6 +958,219 @@ impl App {
         });
     }
 
+    pub(crate) fn invalidate_review_repo_file_cache(&mut self) {
+        self.review_repo_file_cache = None;
+    }
+
+    fn review_mention_fzf_available(&mut self) -> bool {
+        if let Some(available) = self.review_mention_fzf_available {
+            return available;
+        }
+
+        let available = Command::new("fzf")
+            .arg("--version")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+
+        self.review_mention_fzf_available = Some(available);
+        available
+    }
+
+    fn review_changed_file_paths(&self) -> Vec<String> {
+        let mut paths: Vec<String> = self
+            .multi_diff
+            .files
+            .iter()
+            .map(|f| f.display_name.clone())
+            .collect();
+        paths.sort();
+        paths.dedup();
+        paths
+    }
+
+    fn load_review_repo_file_paths(&self) -> Option<Vec<String>> {
+        let repo_root = self.multi_diff.repo_root()?;
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(repo_root)
+            .args([
+                "ls-files",
+                "-z",
+                "--cached",
+                "--others",
+                "--exclude-standard",
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+
+        let mut paths: Vec<String> = output
+            .stdout
+            .split(|b| *b == 0)
+            .filter(|raw| !raw.is_empty())
+            .map(|raw| String::from_utf8_lossy(raw).into_owned())
+            .collect();
+        paths.sort();
+        paths.dedup();
+        Some(paths)
+    }
+
+    fn review_repo_file_paths(&mut self) -> Vec<String> {
+        if self.review_repo_file_cache.is_none() {
+            self.review_repo_file_cache = self.load_review_repo_file_paths();
+        }
+        self.review_repo_file_cache.clone().unwrap_or_default()
+    }
+
+    fn review_mention_file_paths(&mut self) -> Vec<String> {
+        let changed_paths = self.review_changed_file_paths();
+        let mut paths = match self.review_mention_file_scope {
+            MentionFileScope::Changed => changed_paths.clone(),
+            MentionFileScope::Repo => {
+                let repo_paths = self.review_repo_file_paths();
+                if repo_paths.is_empty() {
+                    changed_paths.clone()
+                } else {
+                    repo_paths
+                }
+            }
+        };
+
+        let mut seen = BTreeSet::new();
+        paths.retain(|path| seen.insert(path.clone()));
+        for path in changed_paths {
+            if seen.insert(path.clone()) {
+                paths.push(path);
+            }
+        }
+
+        let current_file = self.current_file_path();
+        if !current_file.is_empty() {
+            if let Some(pos) = paths.iter().position(|p| p == &current_file) {
+                let current = paths.remove(pos);
+                paths.insert(0, current);
+            }
+        }
+
+        paths
+    }
+
+    fn filter_review_file_paths_builtin(
+        paths: &[String],
+        query: &str,
+        limit: usize,
+    ) -> Vec<String> {
+        if paths.is_empty() || limit == 0 {
+            return Vec::new();
+        }
+
+        let query_lc = query.to_ascii_lowercase();
+        if query_lc.is_empty() {
+            return paths.iter().take(limit).cloned().collect();
+        }
+
+        let mut scored: Vec<(usize, usize, usize)> = Vec::new();
+        for (idx, path) in paths.iter().enumerate() {
+            let path_lc = path.to_ascii_lowercase();
+            let Some(pos) = path_lc.find(&query_lc) else {
+                continue;
+            };
+            let filename = path_lc.rsplit(['/', '\\']).next().unwrap_or(&path_lc);
+            let tier = if filename.starts_with(&query_lc) {
+                0
+            } else if pos == 0 {
+                1
+            } else {
+                2
+            };
+            scored.push((tier, pos, idx));
+        }
+
+        scored.sort_unstable();
+        scored
+            .into_iter()
+            .take(limit)
+            .map(|(_, _, idx)| paths[idx].clone())
+            .collect()
+    }
+
+    fn filter_review_file_paths_with_fzf(
+        &self,
+        paths: &[String],
+        query: &str,
+        limit: usize,
+    ) -> Option<Vec<String>> {
+        if query.is_empty() || paths.is_empty() || limit == 0 {
+            return None;
+        }
+
+        let mut child = Command::new("fzf")
+            .arg("--filter")
+            .arg(query)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .ok()?;
+
+        {
+            let mut stdin = child.stdin.take()?;
+            for path in paths {
+                if writeln!(stdin, "{path}").is_err() {
+                    return None;
+                }
+            }
+        }
+
+        let output = child.wait_with_output().ok()?;
+        // fzf exits with status 1 when no match is found.
+        if !output.status.success() && output.status.code() != Some(1) {
+            return None;
+        }
+
+        let mut out: Vec<String> = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(ToString::to_string)
+            .collect();
+        if out.len() > limit {
+            out.truncate(limit);
+        }
+        Some(out)
+    }
+
+    fn filter_review_file_paths(
+        &mut self,
+        paths: &[String],
+        query: &str,
+        limit: usize,
+    ) -> Vec<String> {
+        let builtin = || Self::filter_review_file_paths_builtin(paths, query, limit);
+
+        match self.review_mention_finder {
+            MentionFinder::Builtin => builtin(),
+            MentionFinder::Fzf => self
+                .filter_review_file_paths_with_fzf(paths, query, limit)
+                .unwrap_or_else(builtin),
+            MentionFinder::Auto => {
+                if query.is_empty() || !self.review_mention_fzf_available() {
+                    builtin()
+                } else {
+                    self.filter_review_file_paths_with_fzf(paths, query, limit)
+                        .unwrap_or_else(builtin)
+                }
+            }
+        }
+    }
+
     fn review_mention_candidates(&mut self, query: &str) -> Vec<ReviewMentionItem> {
         let query_lc = query.to_ascii_lowercase();
         let matches_query = |text: &str| {
@@ -961,34 +1178,20 @@ impl App {
         };
 
         let current_file = self.current_file_path();
-        let mut file_paths: Vec<String> = self
-            .multi_diff
-            .files
-            .iter()
-            .map(|f| f.display_name.clone())
-            .collect();
-        file_paths.sort();
-        file_paths.dedup();
-        if !current_file.is_empty() {
-            if let Some(pos) = file_paths.iter().position(|p| p == &current_file) {
-                let current = file_paths.remove(pos);
-                file_paths.insert(0, current);
-            }
-        }
+        let file_paths = self.review_mention_file_paths();
+        let file_paths = self.filter_review_file_paths(&file_paths, query, 80);
 
         let mut items: Vec<ReviewMentionItem> = Vec::new();
         for path in file_paths {
             let insert_text = format!("@{path}");
-            if matches_query(&insert_text) {
-                items.push(ReviewMentionItem {
-                    label: format!("file  {path}"),
-                    insert_text,
-                });
-            }
+            items.push(ReviewMentionItem {
+                label: format!("file  {path}"),
+                insert_text,
+            });
         }
 
         if !current_file.is_empty() {
-            let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+            let mut seen: BTreeSet<String> = BTreeSet::new();
             for (_, line) in self.review_visible_lines_with_idx() {
                 if line.hunk_index.is_none() {
                     continue;

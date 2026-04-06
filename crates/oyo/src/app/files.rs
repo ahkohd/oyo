@@ -486,6 +486,7 @@ impl App {
 
             self.rebuild_file_disk_baseline();
             self.files_changed_on_disk = false;
+            self.invalidate_review_repo_file_cache();
         }
     }
 

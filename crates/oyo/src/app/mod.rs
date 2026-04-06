@@ -3,8 +3,8 @@
 use crate::blame::BlameInfo;
 use crate::config::{
     BlameMode, DiffExtentMarkerMode, DiffExtentMarkerScope, DiffForegroundMode, DiffHighlightMode,
-    FileCountMode, FoldContextMode, HunkWrapMode, ModifiedStepMode, ResolvedTheme, StepWrapMode,
-    SyntaxMode,
+    FileCountMode, FoldContextMode, HunkWrapMode, MentionFileScope, MentionFinder,
+    ModifiedStepMode, ResolvedTheme, StepWrapMode, SyntaxMode,
 };
 use crate::syntax::{SyntaxCache, SyntaxEngine};
 use crate::time_format::TimeFormatter;
@@ -388,6 +388,14 @@ pub struct App {
     review_preview_boxes: Vec<review::ReviewPreviewBox>,
     /// Active inline mention picker state for comment editor
     review_mention_picker: Option<review::ReviewMentionPickerState>,
+    /// File source scope for @ mention candidates.
+    pub review_mention_file_scope: MentionFileScope,
+    /// Finder backend for @ mention file candidates.
+    pub review_mention_finder: MentionFinder,
+    /// Cached fzf availability probe result.
+    review_mention_fzf_available: Option<bool>,
+    /// Cached git-aware repository file list for @ mention candidates.
+    review_repo_file_cache: Option<Vec<String>>,
     /// Monotonic revision for review state changes (cache invalidation)
     review_revision: u64,
     /// Last matched display index for search navigation
@@ -658,6 +666,10 @@ impl App {
             review_submission_output: None,
             review_preview_boxes: Vec::new(),
             review_mention_picker: None,
+            review_mention_file_scope: MentionFileScope::default(),
+            review_mention_finder: MentionFinder::default(),
+            review_mention_fzf_available: None,
+            review_repo_file_cache: None,
             review_revision: 0,
             search_last_target: None,
             needs_scroll_to_search: false,

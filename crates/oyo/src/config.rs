@@ -46,6 +46,10 @@
 //! panel_visible = true
 //! panel_width = 30
 //! counts = "active"
+//!
+//! [comments.mentions]
+//! file_scope = "repo" # changed | repo
+//! finder = "auto"     # auto | builtin | fzf
 //! ```
 
 use crate::color::{self, AnimationGradient};
@@ -1267,6 +1271,45 @@ pub enum FileCountMode {
     Off,
 }
 
+/// Inline mention file source scope.
+#[derive(Debug, Deserialize, Clone, Copy, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MentionFileScope {
+    Changed,
+    #[default]
+    Repo,
+}
+
+/// Inline mention finder backend.
+#[derive(Debug, Deserialize, Clone, Copy, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MentionFinder {
+    /// Use fzf when available, otherwise fall back to builtin matching.
+    #[default]
+    Auto,
+    /// Builtin case-insensitive matching.
+    Builtin,
+    /// Force fzf backend (falls back to builtin if command fails).
+    Fzf,
+}
+
+/// Inline mention configuration.
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
+pub struct MentionConfig {
+    /// Which files to include in @ mention file candidates.
+    pub file_scope: MentionFileScope,
+    /// Which backend to use for ranking/filtering mention file candidates.
+    pub finder: MentionFinder,
+}
+
+/// Comments configuration.
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
+pub struct CommentsConfig {
+    pub mentions: MentionConfig,
+}
+
 /// Root configuration
 #[derive(Debug, Deserialize, Default)]
 #[serde(default)]
@@ -1276,6 +1319,7 @@ pub struct Config {
     pub files: FilesConfig,
     pub navigation: NavigationConfig,
     pub no_step: NoStepConfig,
+    pub comments: CommentsConfig,
 }
 
 impl Config {

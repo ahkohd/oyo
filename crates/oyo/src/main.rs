@@ -275,6 +275,8 @@ fn apply_config_to_app(app: &mut App, config: &config::Config, args: &Args, ligh
     app.auto_step_on_enter = config.playback.auto_step_on_enter;
     app.auto_step_blank_files = config.playback.auto_step_blank_files;
     app.no_step_auto_jump_on_enter = config.no_step.auto_jump_on_enter;
+    app.review_mention_file_scope = config.comments.mentions.file_scope;
+    app.review_mention_finder = config.comments.mentions.finder;
     app.hunk_wrap = config.navigation.wrap.hunk;
     app.step_wrap = config.navigation.wrap.step;
     app.primary_marker = config.ui.primary_marker.clone();

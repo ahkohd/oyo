@@ -51,6 +51,7 @@ oyo does **not** replace classic diffs, it adds a new way to review them.
   - **Evolution**: Watch the file evolve, deletions simply disappear
   - **Blame**: Per-line git blame gutter (opt-in)
 - **Inline review comments**: Add/update/remove line and hunk comments across views; printed to stdout on quit
+- **`@` mention picker**: Mention changed or repo files (gitignore-aware), with optional `fzf` ranking
 - **Word-level diffing**: See exactly which words changed within a line
 - **Multi-file support**: Navigate between changed files with preserved positions
 - **Search**: Regex search with to jump between matches
@@ -331,6 +332,10 @@ counts = "active"           # Per-file +/- counts: active, focused, all, off
 
 [no_step]
 auto_jump_on_enter = true   # Jump to first hunk when entering a file in no-step mode
+
+[comments.mentions]
+file_scope = "repo"         # "changed" | "repo" (git-aware via ls-files)
+finder = "auto"             # "auto" | "builtin" | "fzf"
 ```
 
 Example config:
@@ -375,6 +380,10 @@ speed = 200
 animation = true
 animation_duration = 150
 autoplay = false
+
+[comments.mentions]
+file_scope = "repo"
+finder = "auto"
 ```
 
 Config is loaded from (in priority order):
