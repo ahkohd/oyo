@@ -84,6 +84,8 @@ pub(crate) struct ReviewEditorRender {
     pub(crate) cursor_row: usize,
     pub(crate) cursor_col: usize,
     pub(crate) display_idx_hint: Option<usize>,
+    pub(crate) anchor_display_span: Option<(usize, usize)>,
+    pub(crate) anchor_is_hunk: bool,
     pub(crate) prefer_right: bool,
 }
 
@@ -386,8 +388,79 @@ impl App {
         }
     }
 
-    pub fn review_editor_render(&self) -> Option<ReviewEditorRender> {
-        let editor = self.review_editor.as_ref()?;
+    fn review_anchor_display_span(&mut self, anchor: &ReviewAnchor) -> Option<(usize, usize)> {
+        let visible = self.review_visible_lines_with_idx();
+        if visible.is_empty() {
+            return anchor.display_idx_hint.map(|idx| (idx, idx));
+        }
+
+        let span = match anchor.kind {
+            ReviewTargetKind::Line => {
+                let side = anchor.side.unwrap_or(ReviewSide::New);
+                let target_line = match side {
+                    ReviewSide::Old => anchor.old_range.map(|r| r.start),
+                    ReviewSide::New => anchor.new_range.map(|r| r.start),
+                };
+                let Some(target_line) = target_line else {
+                    return anchor.display_idx_hint.map(|idx| (idx, idx));
+                };
+
+                visible
+                    .iter()
+                    .find_map(|(idx, line)| {
+                        let line_no = match side {
+                            ReviewSide::Old => line.old_line,
+                            ReviewSide::New => line.new_line,
+                        };
+                        (line_no == Some(target_line)).then_some(*idx)
+                    })
+                    .map(|idx| (idx, idx))
+            }
+            ReviewTargetKind::Hunk => {
+                let mut start: Option<usize> = None;
+                let mut end: Option<usize> = None;
+
+                let in_range = |line: &ViewLine| {
+                    let old_match = match (anchor.old_range, line.old_line) {
+                        (Some(range), Some(line_no)) => {
+                            line_no >= range.start && line_no <= range.end
+                        }
+                        _ => false,
+                    };
+                    let new_match = match (anchor.new_range, line.new_line) {
+                        (Some(range), Some(line_no)) => {
+                            line_no >= range.start && line_no <= range.end
+                        }
+                        _ => false,
+                    };
+                    old_match || new_match
+                };
+
+                for (idx, line) in &visible {
+                    let matches = if let Some(hunk_id) = anchor.hunk_id {
+                        line.hunk_index == Some(hunk_id) || in_range(line)
+                    } else {
+                        in_range(line)
+                    };
+
+                    if matches {
+                        start = Some(start.map_or(*idx, |v| v.min(*idx)));
+                        end = Some(end.map_or(*idx, |v| v.max(*idx)));
+                    }
+                }
+
+                match (start, end) {
+                    (Some(start), Some(end)) => Some((start, end)),
+                    _ => None,
+                }
+            }
+        };
+
+        span.or_else(|| anchor.display_idx_hint.map(|idx| (idx, idx)))
+    }
+
+    pub fn review_editor_render(&mut self) -> Option<ReviewEditorRender> {
+        let editor = self.review_editor.as_ref()?.clone();
         let (cursor_row, cursor_col) = cursor_row_col(&editor.text, editor.cursor);
         let mut lines: Vec<String> = if editor.text.is_empty() {
             vec![String::new()]
@@ -418,6 +491,8 @@ impl App {
             ),
         };
 
+        let anchor_display_span = self.review_anchor_display_span(&editor.anchor);
+
         let prefer_right = match editor.anchor.kind {
             ReviewTargetKind::Line => !matches!(editor.anchor.side, Some(ReviewSide::Old)),
             ReviewTargetKind::Hunk => !matches!(
@@ -433,6 +508,8 @@ impl App {
             cursor_row,
             cursor_col,
             display_idx_hint: editor.anchor.display_idx_hint,
+            anchor_display_span,
+            anchor_is_hunk: matches!(editor.anchor.kind, ReviewTargetKind::Hunk),
             prefer_right,
         })
     }

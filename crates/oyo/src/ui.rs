@@ -560,10 +560,16 @@ fn draw_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
             Style::default().fg(app.theme.warning),
         ));
     }
-    if app.review_comment_count() > 0 || app.review_editor_active() {
+    let comment_count = app.review_comment_count();
+    if comment_count > 0 || app.review_editor_active() {
         right_spans.push(Span::raw(" "));
+        let comments_label = if comment_count == 0 {
+            "no comment".to_string()
+        } else {
+            format!("comments {}", comment_count)
+        };
         right_spans.push(Span::styled(
-            format!("comments {}", app.review_comment_count()),
+            comments_label,
             Style::default().fg(app.theme.primary),
         ));
     }
@@ -1383,11 +1389,32 @@ fn draw_review_editor_overlay(frame: &mut Frame, app: &mut App) {
         diff_area
     };
 
-    let anchor_row = editor
-        .display_idx_hint
-        .map(|idx| idx.saturating_sub(app.render_scroll_offset()) as u16)
+    let render_scroll = app.render_scroll_offset() as isize;
+    let max_row = editor_area.height.saturating_sub(1) as isize;
+    let anchor_span_rows = editor.anchor_display_span.and_then(|(start_idx, end_idx)| {
+        let start_rel = start_idx as isize - render_scroll;
+        let end_rel = end_idx as isize - render_scroll;
+        if end_rel < 0 || start_rel > max_row {
+            None
+        } else {
+            Some((
+                start_rel.clamp(0, max_row) as u16,
+                end_rel.clamp(0, max_row) as u16,
+            ))
+        }
+    });
+
+    let anchor_row = anchor_span_rows
+        .map(|(start, _)| start)
+        .or_else(|| {
+            editor.display_idx_hint.map(|idx| {
+                idx.saturating_sub(app.render_scroll_offset())
+                    .min(editor_area.height.saturating_sub(1) as usize) as u16
+            })
+        })
         .unwrap_or(0)
         .min(editor_area.height.saturating_sub(1));
+    let forbidden_rows = anchor_span_rows.unwrap_or((anchor_row, anchor_row));
 
     let max_popup_width = editor_area.width.saturating_sub(2);
     let popup_width = if max_popup_width < 24 {
@@ -1395,16 +1422,69 @@ fn draw_review_editor_overlay(frame: &mut Frame, app: &mut App) {
     } else {
         max_popup_width.min(72)
     };
-    let mut popup_height = (editor.lines.len() as u16).saturating_add(5).clamp(6, 12);
-    popup_height = popup_height.min(editor_area.height.saturating_sub(1).max(4));
+    let desired_popup_height = (editor.lines.len() as u16).saturating_add(5).clamp(6, 12);
+    let min_popup_height = 4u16;
+    let mut popup_height =
+        desired_popup_height.min(editor_area.height.saturating_sub(1).max(min_popup_height));
 
     let popup_x = editor_area.x.saturating_add(1);
-    let preferred_y = editor_area.y.saturating_add(anchor_row);
-    let max_y = editor_area
-        .y
-        .saturating_add(editor_area.height)
-        .saturating_sub(popup_height);
-    let popup_y = preferred_y.min(max_y).max(editor_area.y);
+    let area_top = editor_area.y;
+    let area_bottom = editor_area.y.saturating_add(editor_area.height);
+    let forbidden_top_y = editor_area.y.saturating_add(forbidden_rows.0);
+    let forbidden_bottom_y = editor_area.y.saturating_add(forbidden_rows.1);
+
+    // Prefer placing below the anchored line/hunk so the referenced lines remain visible.
+    // Keep a one-row gap when possible to avoid touching the referenced line(s).
+    // Fall back to above, and for hunk anchors use the hunk middle when space is tight.
+    let placement_gap = 1u16;
+
+    let below_y_gap = forbidden_bottom_y
+        .saturating_add(1)
+        .saturating_add(placement_gap);
+    let below_space_gap = area_bottom.saturating_sub(below_y_gap);
+
+    let below_y_tight = forbidden_bottom_y.saturating_add(1);
+    let below_space_tight = area_bottom.saturating_sub(below_y_tight);
+
+    let above_space = forbidden_top_y.saturating_sub(area_top);
+    let above_space_gap = above_space.saturating_sub(placement_gap);
+
+    let popup_y = if below_space_gap >= min_popup_height {
+        popup_height = popup_height.min(below_space_gap);
+        below_y_gap
+    } else if below_space_tight >= min_popup_height {
+        popup_height = popup_height.min(below_space_tight);
+        below_y_tight
+    } else if above_space_gap >= min_popup_height {
+        popup_height = popup_height.min(above_space_gap);
+        forbidden_top_y
+            .saturating_sub(placement_gap)
+            .saturating_sub(popup_height)
+    } else if above_space >= min_popup_height {
+        popup_height = popup_height.min(above_space);
+        forbidden_top_y.saturating_sub(popup_height)
+    } else if editor.anchor_is_hunk {
+        popup_height = popup_height.min(editor_area.height.max(1));
+        let center_y =
+            forbidden_top_y.saturating_add(forbidden_bottom_y.saturating_sub(forbidden_top_y) / 2);
+        let max_y = area_bottom.saturating_sub(popup_height);
+        center_y
+            .saturating_sub(popup_height / 2)
+            .max(area_top)
+            .min(max_y)
+    } else {
+        popup_height = popup_height.min(editor_area.height.max(1));
+        let max_y = area_bottom.saturating_sub(popup_height);
+        let mut y = below_y_tight.min(max_y).max(area_top);
+        let overlaps_forbidden = y <= forbidden_bottom_y
+            && y.saturating_add(popup_height).saturating_sub(1) >= forbidden_top_y;
+        if overlaps_forbidden && above_space > 0 {
+            popup_height = popup_height.min(above_space);
+            y = forbidden_top_y.saturating_sub(popup_height);
+        }
+        y
+    };
+
     let popup_area = Rect::new(popup_x, popup_y, popup_width, popup_height);
 
     frame.render_widget(Clear, popup_area);
