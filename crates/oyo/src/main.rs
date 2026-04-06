@@ -616,6 +616,7 @@ fn main() -> Result<()> {
         };
 
         let mut exit_message: Option<String> = None;
+        let mut review_output: Option<String> = None;
         loop {
             let empty_message = match &input_mode {
                 InputMode::GitUncommitted => Some("No uncommitted changes found.".to_string()),
@@ -649,8 +650,12 @@ fn main() -> Result<()> {
 
             let mut app = App::new(multi_diff, view_mode, speed, autoplay, git_branch);
             apply_config_to_app(&mut app, &config, &args, light_mode);
+            app.enable_review_mode();
 
             let exit = run_app(&mut terminal, &mut app)?;
+            if review_output.is_none() {
+                review_output = app.take_review_submission_output();
+            }
             match exit {
                 AppExit::Quit => break,
                 AppExit::OpenDashboard => {
@@ -670,6 +675,11 @@ fn main() -> Result<()> {
             DisableMouseCapture
         )?;
         terminal.show_cursor()?;
+        if let Some(output) = review_output {
+            if !output.trim().is_empty() {
+                println!("{output}");
+            }
+        }
         if let Some(message) = exit_message {
             println!("{message}");
         }
@@ -719,6 +729,7 @@ fn main() -> Result<()> {
     let dashboard_limit = view_limit.unwrap_or(200);
 
     let mut exit_message: Option<String> = None;
+    let mut review_output: Option<String> = None;
     let mut pending_diff = Some(prefetched);
     loop {
         let empty_message = match &input_mode {
@@ -757,8 +768,12 @@ fn main() -> Result<()> {
 
         let mut app = App::new(multi_diff, view_mode, speed, autoplay, git_branch);
         apply_config_to_app(&mut app, &config, &args, light_mode);
+        app.enable_review_mode();
 
         let exit = run_app(&mut terminal, &mut app)?;
+        if review_output.is_none() {
+            review_output = app.take_review_submission_output();
+        }
         match exit {
             AppExit::Quit => break,
             AppExit::OpenDashboard => {
@@ -780,6 +795,11 @@ fn main() -> Result<()> {
         DisableMouseCapture
     )?;
     terminal.show_cursor()?;
+    if let Some(output) = review_output {
+        if !output.trim().is_empty() {
+            println!("{output}");
+        }
+    }
     if let Some(message) = exit_message {
         println!("{message}");
     }
@@ -853,6 +873,9 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<AppE
                             if app.start_file_panel_resize(me.column, me.row) {
                                 continue;
                             }
+                            if app.handle_review_preview_click(me.column, me.row) {
+                                continue;
+                            }
                             if app.handle_file_list_click(me.column, me.row) {
                                 continue;
                             }
@@ -906,6 +929,69 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<AppE
                         }
                         continue;
                     }
+
+                    if app.review_editor_active() {
+                        match key.code {
+                            KeyCode::Esc => {
+                                if !app.review_cancel_mention_picker() {
+                                    app.review_cancel_editor();
+                                }
+                            }
+                            KeyCode::Enter if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                app.review_save_editor();
+                            }
+                            KeyCode::Enter => {
+                                if !app.review_accept_mention() {
+                                    app.review_insert_newline();
+                                }
+                            }
+                            KeyCode::Tab => {
+                                let _ = app.review_accept_mention();
+                            }
+                            KeyCode::Backspace => app.review_backspace(),
+                            KeyCode::Delete => app.review_delete(),
+                            KeyCode::Left => app.review_move_left(),
+                            KeyCode::Right => app.review_move_right(),
+                            KeyCode::Up => {
+                                if app.review_mention_picker_active() {
+                                    app.review_mention_move_selection(-1);
+                                } else {
+                                    app.review_move_up();
+                                }
+                            }
+                            KeyCode::Down => {
+                                if app.review_mention_picker_active() {
+                                    app.review_mention_move_selection(1);
+                                } else {
+                                    app.review_move_down();
+                                }
+                            }
+                            KeyCode::Home => app.review_move_home(),
+                            KeyCode::End => app.review_move_end(),
+                            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                app.review_clear_editor_text();
+                            }
+                            KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                if app.review_mention_picker_active() {
+                                    app.review_mention_move_selection(1);
+                                }
+                            }
+                            KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                if app.review_mention_picker_active() {
+                                    app.review_mention_move_selection(-1);
+                                }
+                            }
+                            KeyCode::Char(c)
+                                if !key.modifiers.contains(KeyModifiers::CONTROL)
+                                    && !key.modifiers.contains(KeyModifiers::ALT) =>
+                            {
+                                app.review_insert_char(c);
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
+
                     let is_ctrl_p = key.modifiers.contains(KeyModifiers::CONTROL)
                         && matches!(key.code, KeyCode::Char('p') | KeyCode::Char('P'));
                     let is_ctrl_shift_p = key.modifiers.contains(KeyModifiers::CONTROL)
@@ -1158,7 +1244,8 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<AppE
                             } else if app.show_path_popup {
                                 app.show_path_popup = false;
                             } else {
-                                return Ok(AppExit::Quit);
+                                app.submit_review_and_quit();
+                                continue;
                             }
                         }
                         // Step navigation (supports count)
@@ -1516,6 +1603,26 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<AppE
                         KeyCode::Char('C') => {
                             app.reset_count();
                             app.prev_conflict();
+                        }
+                        KeyCode::Char('m') => {
+                            app.reset_count();
+                            app.start_line_comment();
+                        }
+                        KeyCode::Char('M') => {
+                            app.reset_count();
+                            app.start_hunk_comment();
+                        }
+                        KeyCode::Char('x') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            app.reset_count();
+                            app.clear_all_review_comments();
+                        }
+                        KeyCode::Char('x') => {
+                            app.reset_count();
+                            app.remove_line_comment_at_cursor();
+                        }
+                        KeyCode::Char('X') => {
+                            app.reset_count();
+                            app.remove_hunk_comment_at_cursor();
                         }
                         KeyCode::Char('?') => {
                             app.reset_count();

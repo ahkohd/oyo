@@ -334,6 +334,31 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let query = app.search_query().trim().to_ascii_lowercase();
     let has_query = !query.is_empty();
+    let mut review_preview_rows: Vec<(usize, usize, String)> = Vec::new();
+    let mut review_preview_before_idx: std::collections::HashMap<usize, Vec<(String, String)>> =
+        std::collections::HashMap::new();
+    let mut review_preview_after_idx: std::collections::HashMap<usize, Vec<(String, String)>> =
+        std::collections::HashMap::new();
+    if app.review_mode()
+        && !app.review_editor_active()
+        && app.view_mode == crate::app::ViewMode::Evolution
+    {
+        for overlay in app.review_comment_overlays_for_current_file() {
+            let text = app.review_preview_hint_text(&overlay);
+            if overlay.is_hunk {
+                review_preview_before_idx
+                    .entry(overlay.display_idx)
+                    .or_default()
+                    .push((overlay.anchor_key, text));
+            } else {
+                review_preview_after_idx
+                    .entry(overlay.display_idx)
+                    .or_default()
+                    .push((overlay.anchor_key, text));
+            }
+        }
+    }
+
     for (raw_idx, view_line) in view_lines.iter().enumerate() {
         // Skip lines that are deleted or pending delete (they disappear in evolution view)
         if !is_visible(view_line) {
@@ -409,6 +434,53 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
                     }
                 }
                 virtual_inserted = true;
+            }
+        }
+
+        if let Some(previews) = review_preview_before_idx.get(&display_idx) {
+            for (anchor_key, preview_text) in previews {
+                let virtual_style = Style::default()
+                    .fg(app.theme.text_muted)
+                    .add_modifier(Modifier::ITALIC);
+                let mut virtual_spans = vec![Span::styled(preview_text.clone(), virtual_style)];
+                virtual_spans = expand_tabs_in_spans(&virtual_spans, TAB_WIDTH);
+
+                let virtual_width = spans_width(&virtual_spans);
+                max_line_width = max_line_width.max(virtual_width);
+
+                let virtual_wrap = if app.line_wrap {
+                    wrap_count_for_spans(&virtual_spans, wrap_width)
+                } else {
+                    1
+                };
+                let row_idx = if app.line_wrap {
+                    display_len
+                } else {
+                    content_lines.len()
+                };
+                if app.line_wrap {
+                    display_len += virtual_wrap;
+                }
+
+                let mut display_virtual = virtual_spans;
+                if !app.line_wrap {
+                    display_virtual =
+                        slice_spans(&display_virtual, app.horizontal_scroll, visible_width);
+                }
+                content_lines.push(Line::from(display_virtual));
+                gutter_lines.push(Line::from(vec![
+                    Span::raw(" "),
+                    Span::raw("    "),
+                    Span::raw(" "),
+                    Span::raw(" "),
+                    Span::raw(" "),
+                ]));
+                if app.line_wrap && virtual_wrap > 1 {
+                    for _ in 1..virtual_wrap {
+                        gutter_lines.push(Line::from(Span::raw(" ")));
+                    }
+                }
+                review_preview_rows.push((row_idx, virtual_wrap, anchor_key.clone()));
             }
         }
 
@@ -626,6 +698,54 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
                 gutter_lines.push(Line::from(Span::raw(" ")));
             }
         }
+
+        if let Some(previews) = review_preview_after_idx.get(&display_idx) {
+            for (anchor_key, preview_text) in previews {
+                let virtual_style = Style::default()
+                    .fg(app.theme.text_muted)
+                    .add_modifier(Modifier::ITALIC);
+                let mut virtual_spans = vec![Span::styled(preview_text.clone(), virtual_style)];
+                virtual_spans = expand_tabs_in_spans(&virtual_spans, TAB_WIDTH);
+
+                let virtual_width = spans_width(&virtual_spans);
+                max_line_width = max_line_width.max(virtual_width);
+
+                let virtual_wrap = if app.line_wrap {
+                    wrap_count_for_spans(&virtual_spans, wrap_width)
+                } else {
+                    1
+                };
+                let row_idx = if app.line_wrap {
+                    display_len
+                } else {
+                    content_lines.len()
+                };
+                if app.line_wrap {
+                    display_len += virtual_wrap;
+                }
+
+                let mut display_virtual = virtual_spans;
+                if !app.line_wrap {
+                    display_virtual =
+                        slice_spans(&display_virtual, app.horizontal_scroll, visible_width);
+                }
+                content_lines.push(Line::from(display_virtual));
+                gutter_lines.push(Line::from(vec![
+                    Span::raw(" "),
+                    Span::raw("    "),
+                    Span::raw(" "),
+                    Span::raw(" "),
+                    Span::raw(" "),
+                ]));
+                if app.line_wrap && virtual_wrap > 1 {
+                    for _ in 1..virtual_wrap {
+                        gutter_lines.push(Line::from(Span::raw(" ")));
+                    }
+                }
+                review_preview_rows.push((row_idx, virtual_wrap, anchor_key.clone()));
+            }
+        }
+
         if let Some(text) = virtual_text.as_ref() {
             if !virtual_inserted
                 && prefer_cursor
@@ -888,6 +1008,35 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
             content_paragraph = content_paragraph.style(style);
         }
         frame.render_widget(content_paragraph, content_area);
+
+        if app.review_mode()
+            && !app.review_editor_active()
+            && app.view_mode == crate::app::ViewMode::Evolution
+        {
+            let viewport_start = if app.line_wrap { scroll_offset } else { 0 };
+            let viewport_end = viewport_start.saturating_add(content_area.height as usize);
+            for (row_idx, row_span, anchor_key) in &review_preview_rows {
+                let start = *row_idx;
+                let end = start.saturating_add((*row_span).max(1));
+                let visible_start = start.max(viewport_start);
+                let visible_end = end.min(viewport_end);
+                if visible_start >= visible_end {
+                    continue;
+                }
+                let local_row = visible_start.saturating_sub(viewport_start);
+                let height = (visible_end.saturating_sub(visible_start)) as u16;
+                if height == 0 {
+                    continue;
+                }
+                app.add_review_preview_box(
+                    content_area.x,
+                    content_area.y.saturating_add(local_row as u16),
+                    content_area.width,
+                    height,
+                    anchor_key.clone(),
+                );
+            }
+        }
 
         // Render scrollbar (if enabled)
         if app.scrollbar_visible {

@@ -208,6 +208,9 @@ pub(crate) struct UnifiedRenderKey {
     pub(crate) step_edge_hint: bool,
     pub(crate) hunk_edge_hint: bool,
     pub(crate) blame_hunk_hint: Option<String>,
+    pub(crate) review_mode: bool,
+    pub(crate) review_editor_active: bool,
+    pub(crate) review_revision: u64,
 }
 
 pub(crate) struct UnifiedRenderModel {
@@ -219,6 +222,8 @@ pub(crate) struct UnifiedRenderModel {
     pub(crate) max_line_width: usize,
     pub(crate) primary_display_idx: Option<usize>,
     pub(crate) active_display_idx: Option<usize>,
+    /// Preview rows for review comments: (row_idx, row_span, anchor_key)
+    pub(crate) review_preview_rows: Vec<(usize, usize, String)>,
 }
 
 #[derive(Clone, Debug)]

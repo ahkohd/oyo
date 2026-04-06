@@ -314,6 +314,9 @@ fn unified_render_key(
         step_edge_hint: app.step_edge_hint_active(),
         hunk_edge_hint: app.hunk_edge_hint_active(),
         blame_hunk_hint: app.blame_hunk_hint_text().map(|text| text.to_string()),
+        review_mode: app.review_mode(),
+        review_editor_active: app.review_editor_active(),
+        review_revision: app.review_revision(),
     }
 }
 
@@ -356,6 +359,34 @@ fn build_unified_render_model(
     };
     let mut primary_display_idx: Option<usize> = None;
     let mut active_display_idx: Option<usize> = None;
+    let mut review_preview_rows: Vec<(usize, usize, String)> = Vec::new();
+
+    let mut review_preview_before_idx: std::collections::HashMap<usize, Vec<(String, String)>> =
+        std::collections::HashMap::new();
+    let mut review_preview_after_idx: std::collections::HashMap<usize, Vec<(String, String)>> =
+        std::collections::HashMap::new();
+    if app.review_mode()
+        && !app.review_editor_active()
+        && matches!(
+            app.view_mode,
+            crate::app::ViewMode::UnifiedPane | crate::app::ViewMode::Blame
+        )
+    {
+        for overlay in app.review_comment_overlays_for_current_file() {
+            let text = app.review_preview_hint_text(&overlay);
+            if overlay.is_hunk {
+                review_preview_before_idx
+                    .entry(overlay.display_idx)
+                    .or_default()
+                    .push((overlay.anchor_key, text));
+            } else {
+                review_preview_after_idx
+                    .entry(overlay.display_idx)
+                    .or_default()
+                    .push((overlay.anchor_key, text));
+            }
+        }
+    }
 
     let query = app.search_query().trim().to_ascii_lowercase();
     let has_query = !query.is_empty();
@@ -491,6 +522,7 @@ fn build_unified_render_model(
         let line_hunk = view_line.hunk_index;
         let is_first_in_hunk = line_hunk.is_some() && prev_visible_hunk != line_hunk;
         let is_last_in_hunk = line_hunk.is_some() && next_visible_hunk[idx] != line_hunk;
+
         if let Some(text) = virtual_text.as_ref() {
             if !virtual_inserted
                 && !prefer_cursor
@@ -538,6 +570,56 @@ fn build_unified_render_model(
                     }
                 }
                 virtual_inserted = true;
+            }
+        }
+
+        if let Some(previews) = review_preview_before_idx.get(&idx) {
+            for (anchor_key, preview_text) in previews {
+                let virtual_style = Style::default()
+                    .fg(app.theme.text_muted)
+                    .add_modifier(Modifier::ITALIC);
+                let mut virtual_spans = vec![Span::styled(preview_text.clone(), virtual_style)];
+                virtual_spans = expand_tabs_in_spans(&virtual_spans, TAB_WIDTH);
+
+                let virtual_width = spans_width(&virtual_spans);
+                max_line_width = max_line_width.max(virtual_width);
+
+                let virtual_wrap = if app.line_wrap {
+                    wrap_count_for_spans(&virtual_spans, wrap_width)
+                } else {
+                    1
+                };
+                let row_idx = if app.line_wrap {
+                    display_len
+                } else {
+                    content_lines.len()
+                };
+                if app.line_wrap {
+                    display_len += virtual_wrap;
+                }
+
+                let mut display_virtual = virtual_spans;
+                if !app.line_wrap {
+                    display_virtual =
+                        slice_spans(&display_virtual, app.horizontal_scroll, visible_width);
+                }
+                if let Some(bg_lines) = bg_lines.as_mut() {
+                    super::push_wrapped_bg_line(bg_lines, wrap_width, virtual_wrap, None);
+                }
+                content_lines.push(Line::from(display_virtual));
+                gutter_lines.push(Line::from(vec![
+                    Span::raw(" "),
+                    Span::raw("    "),
+                    Span::raw(" "),
+                    Span::raw(" "),
+                    Span::raw(" "),
+                ]));
+                if app.line_wrap && virtual_wrap > 1 {
+                    for _ in 1..virtual_wrap {
+                        gutter_lines.push(Line::from(Span::raw(" ")));
+                    }
+                }
+                review_preview_rows.push((row_idx, virtual_wrap, anchor_key.clone()));
             }
         }
 
@@ -1104,6 +1186,57 @@ fn build_unified_render_model(
                 gutter_lines.push(Line::from(Span::raw(" ")));
             }
         }
+
+        if let Some(previews) = review_preview_after_idx.get(&idx) {
+            for (anchor_key, preview_text) in previews {
+                let virtual_style = Style::default()
+                    .fg(app.theme.text_muted)
+                    .add_modifier(Modifier::ITALIC);
+                let mut virtual_spans = vec![Span::styled(preview_text.clone(), virtual_style)];
+                virtual_spans = expand_tabs_in_spans(&virtual_spans, TAB_WIDTH);
+
+                let virtual_width = spans_width(&virtual_spans);
+                max_line_width = max_line_width.max(virtual_width);
+
+                let virtual_wrap = if app.line_wrap {
+                    wrap_count_for_spans(&virtual_spans, wrap_width)
+                } else {
+                    1
+                };
+                let row_idx = if app.line_wrap {
+                    display_len
+                } else {
+                    content_lines.len()
+                };
+                if app.line_wrap {
+                    display_len += virtual_wrap;
+                }
+
+                let mut display_virtual = virtual_spans;
+                if !app.line_wrap {
+                    display_virtual =
+                        slice_spans(&display_virtual, app.horizontal_scroll, visible_width);
+                }
+                if let Some(bg_lines) = bg_lines.as_mut() {
+                    super::push_wrapped_bg_line(bg_lines, wrap_width, virtual_wrap, None);
+                }
+                content_lines.push(Line::from(display_virtual));
+                gutter_lines.push(Line::from(vec![
+                    Span::raw(" "),
+                    Span::raw("    "),
+                    Span::raw(" "),
+                    Span::raw(" "),
+                    Span::raw(" "),
+                ]));
+                if app.line_wrap && virtual_wrap > 1 {
+                    for _ in 1..virtual_wrap {
+                        gutter_lines.push(Line::from(Span::raw(" ")));
+                    }
+                }
+                review_preview_rows.push((row_idx, virtual_wrap, anchor_key.clone()));
+            }
+        }
+
         if let Some(text) = virtual_text.as_ref() {
             if !virtual_inserted
                 && prefer_cursor
@@ -1324,6 +1457,7 @@ fn build_unified_render_model(
         max_line_width,
         primary_display_idx,
         active_display_idx,
+        review_preview_rows,
     }
 }
 
@@ -1500,6 +1634,38 @@ fn render_unified_model(
             }
         }
         frame.render_widget(content_paragraph, content_area);
+
+        if app.review_mode()
+            && !app.review_editor_active()
+            && matches!(
+                app.view_mode,
+                crate::app::ViewMode::UnifiedPane | crate::app::ViewMode::Blame
+            )
+        {
+            let viewport_start = if app.line_wrap { scroll_offset } else { 0 };
+            let viewport_end = viewport_start.saturating_add(content_area.height as usize);
+            for (row_idx, row_span, anchor_key) in &model.review_preview_rows {
+                let start = *row_idx;
+                let end = start.saturating_add((*row_span).max(1));
+                let visible_start = start.max(viewport_start);
+                let visible_end = end.min(viewport_end);
+                if visible_start >= visible_end {
+                    continue;
+                }
+                let local_row = visible_start.saturating_sub(viewport_start);
+                let height = (visible_end.saturating_sub(visible_start)) as u16;
+                if height == 0 {
+                    continue;
+                }
+                app.add_review_preview_box(
+                    content_area.x,
+                    content_area.y.saturating_add(local_row as u16),
+                    content_area.width,
+                    height,
+                    anchor_key.clone(),
+                );
+            }
+        }
 
         if app.scrollbar_visible {
             let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)

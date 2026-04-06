@@ -1,7 +1,8 @@
-use criterion::{black_box, BatchSize, BenchmarkId, Criterion};
 use criterion::{criterion_group, criterion_main};
+use criterion::{BatchSize, BenchmarkId, Criterion};
 use oyo_core::diff::DiffEngine;
 use oyo_core::step::{AnimationFrame, DiffNavigator};
+use std::hint::black_box;
 use std::sync::Arc;
 use std::time::Duration;
 

@@ -14,7 +14,7 @@ use ratatui::{
     },
     Frame,
 };
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 fn truncate_filename_keep_ext(name: &str, max_width: usize) -> String {
     if max_width == 0 {
@@ -91,6 +91,71 @@ fn truncate_to_width(text: &str, max_width: usize) -> String {
         width += ch_width;
     }
     out
+}
+
+fn wrap_editor_line(line: &str, max_width: usize) -> Vec<String> {
+    if max_width == 0 {
+        return vec![String::new()];
+    }
+    if line.is_empty() {
+        return vec![String::new()];
+    }
+
+    let mut out: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut width = 0usize;
+
+    for ch in line.chars() {
+        let ch_width = ch.width().unwrap_or(1).max(1);
+        if width + ch_width > max_width && !current.is_empty() {
+            out.push(current);
+            current = String::new();
+            width = 0;
+        }
+
+        current.push(ch);
+        width += ch_width;
+
+        if width >= max_width {
+            out.push(current);
+            current = String::new();
+            width = 0;
+        }
+    }
+
+    if !current.is_empty() {
+        out.push(current);
+    }
+    if out.is_empty() {
+        out.push(String::new());
+    }
+    out
+}
+
+fn editor_cursor_visual(line: &str, cursor_col: usize, max_width: usize) -> (usize, usize) {
+    if max_width == 0 || line.is_empty() {
+        return (0, 0);
+    }
+
+    let mut row = 0usize;
+    let mut col = 0usize;
+    for (idx, ch) in line.chars().enumerate() {
+        if idx >= cursor_col {
+            break;
+        }
+        let ch_width = ch.width().unwrap_or(1).max(1);
+        if col + ch_width > max_width && col > 0 {
+            row += 1;
+            col = 0;
+        }
+        col += ch_width;
+        if col == max_width {
+            row += 1;
+            col = 0;
+        }
+    }
+
+    (row, col)
 }
 
 fn format_ratio(current: usize, total: usize) -> String {
@@ -242,6 +307,8 @@ fn truncate_text(text: &str, max_width: usize) -> String {
 
 /// Main drawing function
 pub fn draw(frame: &mut Frame, app: &mut App) {
+    app.clear_review_preview_boxes();
+
     if app.zen_mode {
         // Zen mode: just the content with minimal progress indicator
         draw_content(frame, app, frame.area(), false);
@@ -288,6 +355,20 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     if app.file_search_active() {
         draw_file_search_popover(frame, app);
+    }
+
+    if app.review_mode() {
+        if app.review_editor_active() {
+            app.clear_review_preview_boxes();
+            draw_review_editor_overlay(frame, app);
+        } else if !matches!(
+            app.view_mode,
+            ViewMode::UnifiedPane | ViewMode::Split | ViewMode::Evolution | ViewMode::Blame
+        ) {
+            draw_review_comment_overlays(frame, app);
+        }
+    } else {
+        app.clear_review_preview_boxes();
     }
 }
 
@@ -477,6 +558,13 @@ fn draw_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
         right_spans.push(Span::styled(
             "changed",
             Style::default().fg(app.theme.warning),
+        ));
+    }
+    if app.review_comment_count() > 0 || app.review_editor_active() {
+        right_spans.push(Span::raw(" "));
+        right_spans.push(Span::styled(
+            format!("comments {}", app.review_comment_count()),
+            Style::default().fg(app.theme.primary),
         ));
     }
     right_spans.push(Span::raw("  "));
@@ -708,9 +796,17 @@ fn draw_content(frame: &mut Frame, app: &mut App, area: Rect, show_topbar: bool)
                 .split(chunks[1]);
             draw_top_bar(frame, app, diff_chunks[0]);
             app.last_viewport_height = diff_chunks[1].height as usize;
+            app.diff_view_area = Some((
+                diff_chunks[1].x,
+                diff_chunks[1].y,
+                diff_chunks[1].width,
+                diff_chunks[1].height,
+            ));
             draw_diff_view(frame, app, diff_chunks[1]);
         } else {
             app.last_viewport_height = chunks[1].height as usize;
+            app.diff_view_area =
+                Some((chunks[1].x, chunks[1].y, chunks[1].width, chunks[1].height));
             draw_diff_view(frame, app, chunks[1]);
         }
     } else {
@@ -726,9 +822,16 @@ fn draw_content(frame: &mut Frame, app: &mut App, area: Rect, show_topbar: bool)
                 .split(area);
             draw_top_bar(frame, app, diff_chunks[0]);
             app.last_viewport_height = diff_chunks[1].height as usize;
+            app.diff_view_area = Some((
+                diff_chunks[1].x,
+                diff_chunks[1].y,
+                diff_chunks[1].width,
+                diff_chunks[1].height,
+            ));
             draw_diff_view(frame, app, diff_chunks[1]);
         } else {
             app.last_viewport_height = area.height as usize;
+            app.diff_view_area = Some((area.x, area.y, area.width, area.height));
             draw_diff_view(frame, app, area);
         }
     }
@@ -1150,6 +1253,381 @@ fn draw_diff_view(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
+fn draw_review_comment_overlays(frame: &mut Frame, app: &mut App) {
+    app.clear_review_preview_boxes();
+
+    let Some((x, y, width, height)) = app.diff_view_area else {
+        return;
+    };
+    if width < 20 || height < 4 {
+        return;
+    }
+
+    let diff_area = Rect::new(x, y, width, height);
+    let overlays = app.review_comment_overlays_for_current_file();
+    if overlays.is_empty() {
+        return;
+    }
+
+    let scroll_offset = app.render_scroll_offset();
+    let diff_bottom = diff_area.y.saturating_add(diff_area.height);
+
+    if matches!(app.view_mode, ViewMode::UnifiedPane | ViewMode::Split) {
+        return;
+    }
+
+    // Other modes: keep compact card previews.
+    let max_popup_width = diff_area.width.saturating_sub(8);
+    if max_popup_width < 16 {
+        return;
+    }
+    let popup_width = if max_popup_width < 24 {
+        max_popup_width
+    } else {
+        max_popup_width.min(40)
+    };
+
+    let mut next_free_y = diff_area.y;
+    for overlay in overlays.into_iter().take(16) {
+        if overlay.display_idx < scroll_offset {
+            continue;
+        }
+        let row = overlay.display_idx.saturating_sub(scroll_offset) as u16;
+        if row >= diff_area.height {
+            continue;
+        }
+
+        let anchor_y = diff_area.y.saturating_add(row);
+        let preferred_y = anchor_y.saturating_add(1);
+        // Height 3 => 1 inner row (excerpt only)
+        let popup_height = 3u16;
+        let mut popup_y = preferred_y.max(next_free_y);
+
+        // Keep collapsed preview below its anchor line when possible.
+        if popup_y.saturating_add(popup_height) > diff_bottom {
+            let fallback = diff_bottom.saturating_sub(popup_height);
+            if fallback <= anchor_y {
+                // No room below this anchor; skip instead of covering the anchor line.
+                continue;
+            }
+            popup_y = fallback.max(next_free_y);
+            if popup_y.saturating_add(popup_height) > diff_bottom || popup_y <= anchor_y {
+                continue;
+            }
+        }
+
+        let popup_x = diff_area.x.saturating_add(
+            diff_area
+                .width
+                .saturating_sub(popup_width)
+                .saturating_sub(1),
+        );
+        let popup_area = Rect::new(popup_x, popup_y, popup_width, popup_height);
+
+        frame.render_widget(Clear, popup_area);
+
+        let mut block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(ratatui::widgets::BorderType::Rounded)
+            .border_style(Style::default().fg(app.theme.border_subtle));
+        if let Some(bg) = app.theme.background_panel.or(app.theme.background) {
+            block = block.style(Style::default().bg(bg));
+        }
+        let inner = block.inner(popup_area);
+        frame.render_widget(block, popup_area);
+
+        let preview_text = app.review_preview_hint_text(&overlay);
+        let preview = truncate_text(&preview_text, inner.width as usize);
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                preview,
+                Style::default().fg(app.theme.text),
+            ))),
+            inner,
+        );
+        app.add_review_preview_box(
+            popup_area.x,
+            popup_area.y,
+            popup_area.width,
+            popup_area.height,
+            overlay.anchor_key,
+        );
+
+        next_free_y = popup_y.saturating_add(popup_height);
+    }
+}
+
+fn draw_review_editor_overlay(frame: &mut Frame, app: &mut App) {
+    let Some(editor) = app.review_editor_render() else {
+        return;
+    };
+    let Some((x, y, width, height)) = app.diff_view_area else {
+        return;
+    };
+    if width < 20 || height < 4 {
+        return;
+    }
+
+    let diff_area = Rect::new(x, y, width, height);
+    let editor_area = if app.view_mode == ViewMode::Split {
+        let panes = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(diff_area);
+        if editor.prefer_right {
+            panes[1]
+        } else {
+            panes[0]
+        }
+    } else {
+        diff_area
+    };
+
+    let anchor_row = editor
+        .display_idx_hint
+        .map(|idx| idx.saturating_sub(app.render_scroll_offset()) as u16)
+        .unwrap_or(0)
+        .min(editor_area.height.saturating_sub(1));
+
+    let max_popup_width = editor_area.width.saturating_sub(2);
+    let popup_width = if max_popup_width < 24 {
+        max_popup_width
+    } else {
+        max_popup_width.min(72)
+    };
+    let mut popup_height = (editor.lines.len() as u16).saturating_add(5).clamp(6, 12);
+    popup_height = popup_height.min(editor_area.height.saturating_sub(1).max(4));
+
+    let popup_x = editor_area.x.saturating_add(1);
+    let preferred_y = editor_area.y.saturating_add(anchor_row);
+    let max_y = editor_area
+        .y
+        .saturating_add(editor_area.height)
+        .saturating_sub(popup_height);
+    let popup_y = preferred_y.min(max_y).max(editor_area.y);
+    let popup_area = Rect::new(popup_x, popup_y, popup_width, popup_height);
+
+    frame.render_widget(Clear, popup_area);
+
+    let mut block = Block::default()
+        .title(Span::styled(
+            editor.title,
+            Style::default()
+                .fg(app.theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .title_bottom(Span::styled(
+            " Ctrl+Enter save • Esc cancel • @ mention ",
+            Style::default().fg(app.theme.text_muted),
+        ))
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(Style::default().fg(app.theme.border_active));
+    if let Some(bg) = app.theme.background_panel.or(app.theme.background) {
+        block = block.style(Style::default().bg(bg));
+    }
+
+    let inner = block.inner(popup_area);
+    frame.render_widget(block, popup_area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(1)])
+        .split(inner);
+
+    let anchor_line = Paragraph::new(Line::from(vec![
+        Span::styled(" ", Style::default().fg(app.theme.text_muted)),
+        Span::styled(
+            editor.anchor_label,
+            Style::default().fg(app.theme.text_muted),
+        ),
+    ]));
+    frame.render_widget(anchor_line, chunks[0]);
+
+    let text_area = chunks[1];
+    let visible_lines = text_area.height.max(1) as usize;
+    let wrap_width = text_area.width.max(1) as usize;
+
+    let mut visual_lines: Vec<String> = Vec::new();
+    let mut cursor_visual_row = 0usize;
+    let mut cursor_visual_col = 0usize;
+
+    for (logical_row, line) in editor.lines.iter().enumerate() {
+        let wrapped = wrap_editor_line(line, wrap_width);
+        if logical_row < editor.cursor_row {
+            cursor_visual_row = cursor_visual_row.saturating_add(wrapped.len());
+        } else if logical_row == editor.cursor_row {
+            let (row_in_line, col_in_line) =
+                editor_cursor_visual(line, editor.cursor_col, wrap_width);
+            cursor_visual_row = cursor_visual_row.saturating_add(row_in_line);
+            cursor_visual_col = col_in_line;
+        }
+        visual_lines.extend(wrapped);
+    }
+
+    if visual_lines.is_empty() {
+        visual_lines.push(String::new());
+    }
+
+    let max_start = visual_lines.len().saturating_sub(visible_lines);
+    let start_row = cursor_visual_row
+        .saturating_add(1)
+        .saturating_sub(visible_lines)
+        .min(max_start);
+    let end_row = (start_row + visible_lines).min(visual_lines.len());
+
+    let text_lines: Vec<Line> = visual_lines[start_row..end_row]
+        .iter()
+        .map(|line| {
+            Line::from(Span::styled(
+                if line.is_empty() {
+                    " ".to_string()
+                } else {
+                    line.clone()
+                },
+                Style::default().fg(app.theme.text),
+            ))
+        })
+        .collect();
+
+    frame.render_widget(Paragraph::new(text_lines), text_area);
+
+    let cursor_screen_row = cursor_visual_row.saturating_sub(start_row);
+    let cursor_x = text_area.x.saturating_add(cursor_visual_col as u16).min(
+        text_area
+            .x
+            .saturating_add(text_area.width.saturating_sub(1)),
+    );
+    let cursor_y = text_area.y.saturating_add(cursor_screen_row as u16).min(
+        text_area
+            .y
+            .saturating_add(text_area.height.saturating_sub(1)),
+    );
+
+    if let Some(mentions) = app.review_mention_render() {
+        let max_items = mentions.items.len().min(5);
+        if max_items > 0 && diff_area.width > 14 && diff_area.height > 4 {
+            let start_idx = mentions
+                .scroll_start
+                .min(mentions.items.len().saturating_sub(max_items));
+            let end_idx = (start_idx + max_items).min(mentions.items.len());
+
+            let max_text_width = mentions.items[start_idx..end_idx]
+                .iter()
+                .map(|item| text_width(item))
+                .max()
+                .unwrap_or(0)
+                .min(diff_area.width.saturating_sub(10) as usize);
+            let popup_width = (max_text_width as u16)
+                .saturating_add(4)
+                .max(12)
+                .min(diff_area.width.saturating_sub(2).max(1));
+            let popup_height = (max_items as u16)
+                .saturating_add(2)
+                .min(diff_area.height.saturating_sub(2).max(3));
+
+            let min_x = diff_area.x.saturating_add(1);
+            let max_x = diff_area
+                .x
+                .saturating_add(diff_area.width)
+                .saturating_sub(popup_width)
+                .saturating_sub(1);
+            let min_y = diff_area.y.saturating_add(1);
+            let max_y = diff_area
+                .y
+                .saturating_add(diff_area.height)
+                .saturating_sub(popup_height)
+                .saturating_sub(1);
+
+            let mention_area = if min_x > max_x || min_y > max_y {
+                Rect::new(min_x, min_y, popup_width, popup_height)
+            } else {
+                // Keep placement close to cursor; only collision-bound against diff view bounds.
+                let clamp_u16 = |value: u16, lo: u16, hi: u16| value.max(lo).min(hi);
+                let right_x = cursor_x.saturating_add(1);
+                let left_x = cursor_x.saturating_sub(popup_width.saturating_add(1));
+                let centered_x = cursor_x.saturating_sub(popup_width / 2);
+                let below_y = cursor_y;
+                let above_y = cursor_y.saturating_sub(popup_height);
+
+                let candidates = [
+                    (right_x, below_y),
+                    (right_x, above_y),
+                    (left_x, below_y),
+                    (left_x, above_y),
+                    (centered_x, below_y),
+                    (centered_x, above_y),
+                    (right_x, cursor_y),
+                    (left_x, cursor_y),
+                    (centered_x, cursor_y),
+                    (min_x, below_y),
+                    (max_x, below_y),
+                    (min_x, above_y),
+                    (max_x, above_y),
+                    (min_x, min_y),
+                ];
+
+                let mut fallback = Rect::new(
+                    clamp_u16(right_x, min_x, max_x),
+                    clamp_u16(below_y, min_y, max_y),
+                    popup_width,
+                    popup_height,
+                );
+
+                for (cx, cy) in candidates {
+                    let x = clamp_u16(cx, min_x, max_x);
+                    let y = clamp_u16(cy, min_y, max_y);
+                    let rect = Rect::new(x, y, popup_width, popup_height);
+                    let contains_cursor = cursor_x >= rect.x
+                        && cursor_x < rect.x.saturating_add(rect.width)
+                        && cursor_y >= rect.y
+                        && cursor_y < rect.y.saturating_add(rect.height);
+                    if !contains_cursor {
+                        fallback = rect;
+                        break;
+                    }
+                }
+
+                fallback
+            };
+            frame.render_widget(Clear, mention_area);
+
+            let mut mention_block = Block::default()
+                .title(Span::styled(
+                    format!(" @{} ", mentions.query),
+                    Style::default().fg(app.theme.text_muted),
+                ))
+                .borders(Borders::ALL)
+                .border_type(ratatui::widgets::BorderType::Rounded)
+                .border_style(Style::default().fg(app.theme.border_subtle));
+            if let Some(bg) = app.theme.background_panel.or(app.theme.background) {
+                mention_block = mention_block.style(Style::default().bg(bg));
+            }
+            let inner = mention_block.inner(mention_area);
+            frame.render_widget(mention_block, mention_area);
+
+            let mut mention_lines: Vec<Line> = Vec::new();
+            for (local_idx, item) in mentions.items[start_idx..end_idx].iter().enumerate() {
+                let idx = start_idx + local_idx;
+                let text = truncate_text(item, inner.width.saturating_sub(2) as usize);
+                let style = if idx == mentions.selected {
+                    Style::default().fg(app.theme.accent)
+                } else {
+                    Style::default().fg(app.theme.text)
+                };
+                mention_lines.push(Line::from(vec![
+                    Span::raw(" "),
+                    Span::styled(text, style),
+                    Span::raw(" "),
+                ]));
+            }
+            frame.render_widget(Paragraph::new(mention_lines), inner);
+        }
+    }
+
+    frame.set_cursor_position((cursor_x, cursor_y));
+}
+
 fn draw_zen_progress(frame: &mut Frame, app: &mut App) {
     let state = app.state();
     let label = format!(" {}/{} ", state.current_step + 1, state.total_steps);
@@ -1184,6 +1662,10 @@ fn draw_help_popover(frame: &mut Frame, app: &mut App) {
         "y / Y",
         "/",
         "n / N",
+        "c / C",
+        "m / M",
+        "x / X",
+        "Ctrl+x",
         ":<line>",
         ":h<num>",
         ":s<num>",
@@ -1352,6 +1834,9 @@ fn draw_help_popover(frame: &mut Frame, app: &mut App) {
     push_help_line(&mut lines, "/", "Search (diff pane)");
     push_help_line(&mut lines, "n / N", "Next/prev match");
     push_help_line(&mut lines, "c / C", "Next/prev conflict");
+    push_help_line(&mut lines, "m / M", "Add/update line/hunk comment");
+    push_help_line(&mut lines, "x / X", "Remove line/hunk comment");
+    push_help_line(&mut lines, "Ctrl+x", "Clear all comments");
     push_help_line(&mut lines, ":<line>", "Go to line");
     push_help_line(&mut lines, ":h<num>", "Go to hunk");
     push_help_line(&mut lines, ":s<num>", "Go to step");
@@ -1406,9 +1891,10 @@ fn draw_help_popover(frame: &mut Frame, app: &mut App) {
         Span::styled(format!("  {:<12}", "?"), key_style),
         Span::styled("Close help", dim_style),
     ]));
+    let quit_label = "Quit (prints comments if any)";
     lines.push(Line::from(vec![
         Span::styled(format!("  {:<12}", "q / Esc"), key_style),
-        Span::styled("Quit", label_style),
+        Span::styled(quit_label, label_style),
     ]));
 
     let base_height = if app.is_multi_file() { 31 } else { 26 };

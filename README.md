@@ -50,6 +50,7 @@ oyo does **not** replace classic diffs, it adds a new way to review them.
   - **Split**: See old and new versions with synchronized stepping
   - **Evolution**: Watch the file evolve, deletions simply disappear
   - **Blame**: Per-line git blame gutter (opt-in)
+- **Inline review comments**: Add/update/remove line and hunk comments across views; printed to stdout on quit
 - **Word-level diffing**: See exactly which words changed within a line
 - **Multi-file support**: Navigate between changed files with preserved positions
 - **Search**: Regex search with to jump between matches
@@ -231,6 +232,9 @@ command = ["oy", "$left", "$right"]
 | `t` | Toggle syntax highlight |
 | `E` | Toggle evo syntax (context/full) |
 | `c` / `C` | Next/prev conflict |
+| `m` / `M` | Add/update line/hunk comment |
+| `x` / `X` | Remove line/hunk comment |
+| `Ctrl+x` | Clear all comments |
 | `s` | Toggle stepping (no-step mode) |
 | `S` | Toggle strikethrough |
 | `r` | Replay last step (count supported) |
@@ -242,7 +246,7 @@ command = ["oy", "$left", "$right"]
 | `+` / `=` | Increase speed |
 | `-` | Decrease speed |
 | `?` | Toggle help |
-| `q` / `Esc` | Quit (or close help) |
+| `q` / `Esc` | Quit (prints comments if any; closes help/path popups) |
 
 Clipboard support uses system tools: `pbcopy` (macOS), `wl-copy` / `xclip` / `xsel` (Linux), `clip` (Windows).
 Search is case-insensitive regex; invalid patterns fall back to literal matching.
