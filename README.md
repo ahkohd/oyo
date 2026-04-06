@@ -83,7 +83,7 @@ paru -S oyo
 ### Cargo
 
 ```bash
-cargo install oyo
+cargo install oyo --locked --force
 ```
 
 ## Usage
