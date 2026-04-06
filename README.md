@@ -28,7 +28,7 @@ Enable with:
 - Set `stepping = false` in config
 
 ### 2. Step-through review (default)
-Apply changes incrementally and watch the file transform from old → new.
+Apply changes incrementally and watch the file transform from old to new.
 
 - Step change-by-change
 - See precise evolution of the code

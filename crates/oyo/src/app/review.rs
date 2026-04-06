@@ -1,6 +1,6 @@
 use super::{AnimationFrame, App, ViewMode};
 use crate::config::{MentionFileScope, MentionFinder};
-use oyo_core::{LineKind, ViewLine};
+use oyo_core::{ChangeKind, LineKind, ViewLine};
 use serde::{Deserialize, Serialize};
 use std::collections::{hash_map::DefaultHasher, BTreeSet};
 use std::fs;
@@ -263,6 +263,10 @@ fn mention_query_at_cursor(text: &str, cursor: usize) -> Option<(usize, String)>
     Some((at, token.to_string()))
 }
 
+fn is_numeric_query(query: &str) -> bool {
+    !query.is_empty() && query.chars().all(|ch| ch.is_ascii_digit())
+}
+
 fn preserve_ref_trailing_space(text: &str) -> bool {
     let without_spaces = text.trim_end_matches(' ');
     if without_spaces.len() == text.len() {
@@ -314,6 +318,39 @@ fn merge_changed_and_repo_paths(changed_paths: &[String], repo_paths: &[String])
     }
 
     out
+}
+
+fn push_numeric_line_mention_item(
+    items: &mut Vec<ReviewMentionItem>,
+    current_file: &str,
+    query: &str,
+    side: Option<ReviewSide>,
+    line_no: usize,
+    limit: usize,
+) {
+    if items.len() >= limit {
+        return;
+    }
+    let line_text = line_no.to_string();
+    if !line_text.starts_with(query) {
+        return;
+    }
+
+    let (label, insert_text) = match side {
+        Some(side) => {
+            let side_label = side.as_str();
+            (
+                format!("line  {}:{}:{}", current_file, side_label, line_no),
+                format!("@{}:{}:{}", current_file, side_label, line_no),
+            )
+        }
+        None => (
+            format!("line  {}:{}", current_file, line_no),
+            format!("@{}:{}", current_file, line_no),
+        ),
+    };
+
+    items.push(ReviewMentionItem { label, insert_text });
 }
 
 fn nearest_hunk_line_index(visible: &[(usize, ViewLine)], focus_pos: usize) -> Option<usize> {
@@ -1190,6 +1227,142 @@ impl App {
         paths
     }
 
+    fn review_current_file_line_counts(&self) -> (usize, usize) {
+        let Some((old, new)) = self
+            .multi_diff
+            .file_contents(self.multi_diff.selected_index)
+        else {
+            return (0, 0);
+        };
+
+        let old_total = if old.is_empty() {
+            0
+        } else {
+            old.lines().count()
+        };
+        let new_total = if new.is_empty() {
+            0
+        } else {
+            new.lines().count()
+        };
+        (old_total, new_total)
+    }
+
+    fn review_changed_line_numbers(&mut self) -> (BTreeSet<usize>, BTreeSet<usize>) {
+        let diff = self.multi_diff.current_navigator().diff();
+        let mut old_changed = BTreeSet::new();
+        let mut new_changed = BTreeSet::new();
+
+        for change in &diff.changes {
+            for span in &change.spans {
+                if span.kind == ChangeKind::Equal {
+                    continue;
+                }
+                if let Some(line_no) = span.old_line {
+                    old_changed.insert(line_no);
+                }
+                if let Some(line_no) = span.new_line {
+                    new_changed.insert(line_no);
+                }
+            }
+        }
+
+        (old_changed, new_changed)
+    }
+
+    fn review_numeric_line_mention_candidates(
+        &mut self,
+        current_file: &str,
+        query: &str,
+        limit: usize,
+    ) -> Vec<ReviewMentionItem> {
+        if current_file.is_empty() || limit == 0 {
+            return Vec::new();
+        }
+
+        let (old_total, new_total) = self.review_current_file_line_counts();
+        if old_total == 0 && new_total == 0 {
+            return Vec::new();
+        }
+
+        let (old_changed, new_changed) = self.review_changed_line_numbers();
+        let mut items: Vec<ReviewMentionItem> = Vec::new();
+
+        for line_no in 1..=new_total {
+            if new_changed.contains(&line_no) {
+                push_numeric_line_mention_item(
+                    &mut items,
+                    current_file,
+                    query,
+                    Some(ReviewSide::New),
+                    line_no,
+                    limit,
+                );
+            }
+        }
+        for line_no in 1..=old_total {
+            if old_changed.contains(&line_no) {
+                push_numeric_line_mention_item(
+                    &mut items,
+                    current_file,
+                    query,
+                    Some(ReviewSide::Old),
+                    line_no,
+                    limit,
+                );
+            }
+        }
+
+        if items.len() >= limit {
+            return items;
+        }
+
+        let common = old_total.min(new_total);
+        for line_no in 1..=common {
+            if !old_changed.contains(&line_no) && !new_changed.contains(&line_no) {
+                push_numeric_line_mention_item(
+                    &mut items,
+                    current_file,
+                    query,
+                    None,
+                    line_no,
+                    limit,
+                );
+            }
+        }
+
+        if items.len() >= limit {
+            return items;
+        }
+
+        for line_no in (common + 1)..=new_total {
+            if !new_changed.contains(&line_no) {
+                push_numeric_line_mention_item(
+                    &mut items,
+                    current_file,
+                    query,
+                    Some(ReviewSide::New),
+                    line_no,
+                    limit,
+                );
+            }
+        }
+        for line_no in (common + 1)..=old_total {
+            if !old_changed.contains(&line_no) {
+                push_numeric_line_mention_item(
+                    &mut items,
+                    current_file,
+                    query,
+                    Some(ReviewSide::Old),
+                    line_no,
+                    limit,
+                );
+            }
+        }
+
+        items
+    }
+
     fn filter_review_file_paths_builtin(
         paths: &[String],
         query: &str,
@@ -1377,7 +1550,12 @@ impl App {
             return items;
         }
 
-        // Non-empty query: filter/rank file mentions first (fzf in auto/fzf mode), then line refs.
+        // Numeric query (`@123`): show only line refs, with changed lines first.
+        if is_numeric_query(query) {
+            return self.review_numeric_line_mention_candidates(&current_file, query, MAX_ITEMS);
+        }
+
+        // Non-empty non-numeric query: file mentions first (fzf in auto/fzf mode), then line refs.
         let file_paths = self.review_mention_file_paths();
         let file_paths = self.filter_review_file_paths(&file_paths, query, MAX_ITEMS);
         for path in file_paths {
