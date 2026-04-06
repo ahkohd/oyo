@@ -263,6 +263,40 @@ fn mention_query_at_cursor(text: &str, cursor: usize) -> Option<(usize, String)>
     Some((at, token.to_string()))
 }
 
+fn preserve_ref_trailing_space(text: &str) -> bool {
+    let without_spaces = text.trim_end_matches(' ');
+    if without_spaces.len() == text.len() {
+        return false;
+    }
+
+    if without_spaces
+        .chars()
+        .next_back()
+        .is_some_and(|ch| ch.is_ascii_digit())
+    {
+        return true;
+    }
+
+    let token_start = without_spaces
+        .char_indices()
+        .rev()
+        .find_map(|(idx, ch)| ch.is_whitespace().then_some(idx + ch.len_utf8()))
+        .unwrap_or(0);
+    let tail = &without_spaces[token_start..];
+    if !tail.starts_with('@') {
+        return false;
+    }
+
+    let token = &tail[1..];
+    if token.is_empty() {
+        return false;
+    }
+
+    let valid_char =
+        |ch: char| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/' | ':');
+    token.chars().all(valid_char)
+}
+
 fn nearest_hunk_line_index(visible: &[(usize, ViewLine)], focus_pos: usize) -> Option<usize> {
     if visible.is_empty() {
         return None;
@@ -903,7 +937,12 @@ impl App {
             return;
         };
 
-        let body = editor.text.trim_end().to_string();
+        let preserve_space = preserve_ref_trailing_space(&editor.text);
+        let mut body = editor.text.trim_end().to_string();
+        if preserve_space {
+            body.push(' ');
+        }
+
         let existing_idx = self
             .review_comments
             .iter()
@@ -1621,5 +1660,31 @@ impl App {
         }
 
         lines.join("\n")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::preserve_ref_trailing_space;
+
+    #[test]
+    fn preserve_space_for_trailing_line_reference() {
+        assert!(preserve_ref_trailing_space("see @foo/new.rs:new:1234 "));
+        assert!(preserve_ref_trailing_space("1234 "));
+    }
+
+    #[test]
+    fn preserve_space_for_trailing_file_reference() {
+        assert!(preserve_ref_trailing_space("see @foo/new.rs "));
+        assert!(preserve_ref_trailing_space("@foo/new.rs "));
+        assert!(preserve_ref_trailing_space("see\n@foo/new.rs:old:abc "));
+    }
+
+    #[test]
+    fn do_not_preserve_unrelated_trailing_space() {
+        assert!(!preserve_ref_trailing_space("plain text "));
+        assert!(!preserve_ref_trailing_space("@ "));
+        assert!(!preserve_ref_trailing_space("no trailing space"));
+        assert!(!preserve_ref_trailing_space("ends with tab\t"));
     }
 }
