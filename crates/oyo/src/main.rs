@@ -89,6 +89,14 @@ struct Args {
     /// Diff a git range (e.g. HEAD~1..HEAD)
     #[arg(long, value_name = "RANGE", conflicts_with = "staged")]
     range: Option<String>,
+
+    /// Write review comments to this file on quit
+    #[arg(long, value_name = "FILE", global = true)]
+    review_output_file: Option<PathBuf>,
+
+    /// Do not print review comments to stdout (requires --review-output-file)
+    #[arg(long, requires = "review_output_file", global = true)]
+    no_print_review: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -304,6 +312,35 @@ fn apply_config_to_app(app: &mut App, config: &config::Config, args: &Args, ligh
         app.enter_no_step_mode();
     }
     app.handle_file_enter();
+}
+
+fn emit_review_output(
+    review_output: Option<String>,
+    review_output_file: Option<&PathBuf>,
+    print_review: bool,
+) -> Result<()> {
+    let output = review_output.unwrap_or_default();
+
+    if let Some(path) = review_output_file {
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent).with_context(|| {
+                    format!(
+                        "Failed to create review output directory: {}",
+                        parent.display()
+                    )
+                })?;
+            }
+        }
+        std::fs::write(path, &output)
+            .with_context(|| format!("Failed to write review output file: {}", path.display()))?;
+    }
+
+    if print_review && !output.trim().is_empty() {
+        println!("{output}");
+    }
+
+    Ok(())
 }
 
 fn build_diff_from_input_mode(
@@ -677,11 +714,11 @@ fn main() -> Result<()> {
             DisableMouseCapture
         )?;
         terminal.show_cursor()?;
-        if let Some(output) = review_output {
-            if !output.trim().is_empty() {
-                println!("{output}");
-            }
-        }
+        emit_review_output(
+            review_output,
+            args.review_output_file.as_ref(),
+            !args.no_print_review,
+        )?;
         if let Some(message) = exit_message {
             println!("{message}");
         }
@@ -797,11 +834,11 @@ fn main() -> Result<()> {
         DisableMouseCapture
     )?;
     terminal.show_cursor()?;
-    if let Some(output) = review_output {
-        if !output.trim().is_empty() {
-            println!("{output}");
-        }
-    }
+    emit_review_output(
+        review_output,
+        args.review_output_file.as_ref(),
+        !args.no_print_review,
+    )?;
     if let Some(message) = exit_message {
         println!("{message}");
     }

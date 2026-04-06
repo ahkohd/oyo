@@ -148,6 +148,19 @@ oy --range main...feature
 oy --staged
 ```
 
+### Review output
+
+```bash
+# default: prints review comments to stdout on quit
+oy --no-step
+
+# also write review comments to a file
+oy --no-step --review-output-file /tmp/oy-review.txt
+
+# file-only output (for tool integrations)
+oy --no-step --review-output-file /tmp/oy-review.txt --no-print-review
+```
+
 ---
 
 ## Git Integration

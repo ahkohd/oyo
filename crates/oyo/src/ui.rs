@@ -563,10 +563,10 @@ fn draw_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
     let comment_count = app.review_comment_count();
     if comment_count > 0 || app.review_editor_active() {
         right_spans.push(Span::raw(" "));
-        let comments_label = if comment_count == 0 {
-            "no comment".to_string()
-        } else {
-            format!("comments {}", comment_count)
+        let comments_label = match comment_count {
+            0 => "no comment".to_string(),
+            1 => "1 comment".to_string(),
+            n => format!("{n} comments"),
         };
         right_spans.push(Span::styled(
             comments_label,
