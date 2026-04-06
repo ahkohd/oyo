@@ -26,6 +26,7 @@
   "optionalDependencies": {
     "@ahkohd/oyo-darwin-arm64": "0.1.28",
     "@ahkohd/oyo-darwin-x64": "0.1.28",
+    "@ahkohd/oyo-linux-arm64-gnu": "0.1.28",
     "@ahkohd/oyo-linux-x64-gnu": "0.1.28"
   },
   "scripts": {

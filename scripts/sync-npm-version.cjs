@@ -9,12 +9,14 @@ const ROOT_PACKAGE = path.join(ROOT, "package.json");
 const PLATFORM_PACKAGES = [
   path.join(ROOT, "npm", "darwin-arm64", "package.json"),
   path.join(ROOT, "npm", "darwin-x64", "package.json"),
+  path.join(ROOT, "npm", "linux-arm64-gnu", "package.json"),
   path.join(ROOT, "npm", "linux-x64-gnu", "package.json"),
 ];
 
 const PLATFORM_DEPENDENCIES = [
   "@ahkohd/oyo-darwin-arm64",
   "@ahkohd/oyo-darwin-x64",
+  "@ahkohd/oyo-linux-arm64-gnu",
   "@ahkohd/oyo-linux-x64-gnu",
 ];
 

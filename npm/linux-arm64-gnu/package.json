@@ -1,0 +1,27 @@
+{
+  "name": "@ahkohd/oyo-linux-arm64-gnu",
+  "version": "0.1.28",
+  "description": "Prebuilt binary for @ahkohd/oyo (linux arm64 glibc)",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ahkohd/oyo.git"
+  },
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "libc": [
+    "glibc"
+  ],
+  "files": [
+    "bin/oy",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  }
+}
