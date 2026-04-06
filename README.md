@@ -171,6 +171,12 @@ oy --no-step --review-output-file /tmp/oy-review.txt
 
 # file-only output (for tool integrations)
 oy --no-step --review-output-file /tmp/oy-review.txt --no-print-review
+
+# ephemeral review session (disable autosave/restore)
+oy --no-step --no-review-persist
+
+# start a fresh persisted review session (clear saved state for this diff)
+oy --no-step --clear-review-session
 ```
 
 ---

@@ -97,6 +97,14 @@ struct Args {
     /// Do not print review comments to stdout (requires --review-output-file)
     #[arg(long, requires = "review_output_file", global = true)]
     no_print_review: bool,
+
+    /// Disable loading/saving persisted review session comments
+    #[arg(long, global = true)]
+    no_review_persist: bool,
+
+    /// Clear saved review session state for the current diff on startup
+    #[arg(long, global = true)]
+    clear_review_session: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -689,6 +697,8 @@ fn main() -> Result<()> {
 
             let mut app = App::new(multi_diff, view_mode, speed, autoplay, git_branch);
             apply_config_to_app(&mut app, &config, &args, light_mode);
+            app.set_review_persist_enabled(!args.no_review_persist);
+            app.set_review_clear_session_on_start(args.clear_review_session);
             app.enable_review_mode();
 
             let exit = run_app(&mut terminal, &mut app)?;
@@ -807,6 +817,8 @@ fn main() -> Result<()> {
 
         let mut app = App::new(multi_diff, view_mode, speed, autoplay, git_branch);
         apply_config_to_app(&mut app, &config, &args, light_mode);
+        app.set_review_persist_enabled(!args.no_review_persist);
+        app.set_review_clear_session_on_start(args.clear_review_session);
         app.enable_review_mode();
 
         let exit = run_app(&mut terminal, &mut app)?;

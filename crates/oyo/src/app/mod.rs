@@ -374,6 +374,10 @@ pub struct App {
     review_editor: Option<review::ReviewEditorState>,
     /// Autosave path for current review session
     review_session_path: Option<PathBuf>,
+    /// Whether review comments/session state should be loaded/saved across runs.
+    review_persist_enabled: bool,
+    /// If true, start review with a clean session (ignores/removes any saved state).
+    review_clear_session_on_start: bool,
     /// Diff fingerprint used for resume/autosave matching
     review_diff_fingerprint: String,
     /// Repository root key used in review session metadata
@@ -659,6 +663,8 @@ impl App {
             review_comments: Vec::new(),
             review_editor: None,
             review_session_path: None,
+            review_persist_enabled: true,
+            review_clear_session_on_start: false,
             review_diff_fingerprint: String::new(),
             review_repo_root: None,
             review_session_created_at: 0,

@@ -381,6 +381,17 @@ impl App {
         self.review_mode
     }
 
+    pub fn set_review_persist_enabled(&mut self, enabled: bool) {
+        self.review_persist_enabled = enabled;
+        if !enabled {
+            self.review_session_path = None;
+        }
+    }
+
+    pub fn set_review_clear_session_on_start(&mut self, enabled: bool) {
+        self.review_clear_session_on_start = enabled;
+    }
+
     pub fn review_revision(&self) -> u64 {
         self.review_revision
     }
@@ -722,6 +733,18 @@ impl App {
         let diff_fingerprint = self.compute_review_diff_fingerprint();
         self.review_diff_fingerprint = diff_fingerprint.clone();
 
+        self.review_session_created_at = now_ts();
+
+        if !self.review_persist_enabled {
+            self.review_session_path = None;
+            self.review_comments.clear();
+            self.review_editor = None;
+            self.review_mention_picker = None;
+            self.review_next_comment_id = 1;
+            self.touch_review_state();
+            return;
+        }
+
         let repo_key = hash_hex(&repo_root.to_string_lossy());
         let base = std::env::temp_dir()
             .join("oyo")
@@ -729,7 +752,17 @@ impl App {
             .join(repo_key);
         let path = base.join(format!("{}.json", diff_fingerprint));
         self.review_session_path = Some(path.clone());
-        self.review_session_created_at = now_ts();
+
+        if self.review_clear_session_on_start {
+            let _ = fs::remove_file(&path);
+            self.review_comments.clear();
+            self.review_editor = None;
+            self.review_mention_picker = None;
+            self.review_next_comment_id = 1;
+            self.touch_review_state();
+            self.persist_review_session();
+            return;
+        }
 
         if let Ok(data) = fs::read_to_string(&path) {
             if let Ok(session) = serde_json::from_str::<ReviewSession>(&data) {
@@ -1802,7 +1835,7 @@ impl App {
     }
 
     fn persist_review_session(&mut self) {
-        if !self.review_mode {
+        if !self.review_mode || !self.review_persist_enabled {
             return;
         }
         let Some(path) = self.review_session_path.as_ref() else {

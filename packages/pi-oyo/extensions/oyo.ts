@@ -31,13 +31,13 @@ function stripManagedReviewFlags(args: string[]): string[] {
   return out;
 }
 
-function runOyAndReadReview(cwd: string, args?: string): { comments: string; error?: Error } {
+function runOyAndReadReview(cwd: string, args: string[] = []): { comments: string; error?: Error } {
   const outputFile = join(
     tmpdir(),
     `oy-review-${Date.now()}-${randomBytes(6).toString("hex")}.txt`,
   );
 
-  const userArgs = stripManagedReviewFlags(parseArgs(args));
+  const userArgs = stripManagedReviewFlags(args);
   const oyArgs = [
     ...userArgs,
     "--review-output-file",
@@ -72,13 +72,45 @@ function delay(ms: number): Promise<void> {
   });
 }
 
+function buildReviewOyArgs(args?: string): string[] {
+  const inputArgs = parseArgs(args);
+
+  let tempSession = false;
+  let clearSession = false;
+  let i = 0;
+  while (i < inputArgs.length) {
+    const token = inputArgs[i]!;
+    if (token === "temp") {
+      tempSession = true;
+      i += 1;
+      continue;
+    }
+    if (token === "new") {
+      clearSession = true;
+      i += 1;
+      continue;
+    }
+    break;
+  }
+
+  const oyArgs = inputArgs.slice(i);
+  if (tempSession && !oyArgs.includes("--no-review-persist")) {
+    oyArgs.push("--no-review-persist");
+  }
+  if (clearSession && !oyArgs.includes("--clear-review-session")) {
+    oyArgs.push("--clear-review-session");
+  }
+
+  return oyArgs;
+}
+
 export default function oyoExtension(pi: ExtensionAPI): void {
   const cwd = process.cwd();
 
   pi.registerCommand("diff", {
     description: "Diff changes",
     handler: async (args, ctx) => {
-      const { error } = runOyAndReadReview(cwd, args);
+      const { error } = runOyAndReadReview(cwd, parseArgs(args));
 
       if (error) {
         ctx.ui.notify(`Failed to run oy: ${error.message}`, "error");
@@ -89,7 +121,8 @@ export default function oyoExtension(pi: ExtensionAPI): void {
   pi.registerCommand("review", {
     description: "Review changes",
     handler: async (args, ctx) => {
-      const { comments, error } = runOyAndReadReview(cwd, args);
+      const oyArgs = buildReviewOyArgs(args);
+      const { comments, error } = runOyAndReadReview(cwd, oyArgs);
 
       if (error) {
         ctx.ui.notify(`Failed to run oy: ${error.message}`, "error");
