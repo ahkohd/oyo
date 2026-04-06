@@ -68,13 +68,13 @@ oyo does **not** replace classic diffs, it adds a new way to review them.
 
 ## Installation
 
-### npm (macOS, Linux x64/arm64 glibc)
+### npm (macOS, Linux)
 
 ```bash
 npm i -g @ahkohd/oyo
 ```
 
-### Homebrew (macOS/Linux)
+### Homebrew (macOS, Linux)
 
 ```bash
 brew install ahkohd/oyo/oy
