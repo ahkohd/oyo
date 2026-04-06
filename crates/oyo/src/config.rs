@@ -1097,7 +1097,7 @@ pub enum SyntaxMode {
 
 /// Syntax highlighting configuration
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(from = "SyntaxConfigDef")]
+#[serde(default)]
 pub struct SyntaxConfig {
     pub mode: SyntaxMode,
     pub theme: String,
@@ -1139,38 +1139,6 @@ impl Default for SyntaxWarmupConfig {
             pending_lines: syntax_warmup_pending_lines_default(),
             idle_lines: syntax_warmup_idle_lines_default(),
             debounce_ms: syntax_warmup_debounce_ms_default(),
-        }
-    }
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum SyntaxConfigDef {
-    Mode(SyntaxMode),
-    Detailed {
-        #[serde(default)]
-        mode: SyntaxMode,
-        theme: Option<String>,
-        warmup: Option<SyntaxWarmupConfig>,
-    },
-}
-
-impl From<SyntaxConfigDef> for SyntaxConfig {
-    fn from(def: SyntaxConfigDef) -> Self {
-        match def {
-            SyntaxConfigDef::Mode(mode) => Self {
-                mode,
-                ..Self::default()
-            },
-            SyntaxConfigDef::Detailed {
-                mode,
-                theme,
-                warmup,
-            } => Self {
-                mode,
-                theme: theme.unwrap_or_default(),
-                warmup: warmup.unwrap_or_default(),
-            },
         }
     }
 }

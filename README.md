@@ -307,19 +307,6 @@ hunk = "none"               # "none" | "hunk" | "file"
 # align_fill = "╱"          # Fill character for aligned blanks (empty = no marker)
 # [ui.evo]
 # syntax = "context"         # "context" (non-diff only) or "full" (diff + context)
-# Syntax highlighting:
-# - legacy: syntax = "on"    # "on" or "off"
-# - table:
-#   [ui.syntax]
-#   mode = "on"              # "on" or "off"
-#   theme = "tokyonight"     # builtin name or "custom.tmTheme" (from ~/.config/oyo/themes)
-#                             # default: ui.theme.name, fallback to "ansi"
-#   [ui.syntax.warmup]
-#   active_lines = 100       # lines per tick while navigating
-#   pending_lines = 300      # lines per tick while catching up to a pending checkpoint
-#   idle_lines = 1000        # lines per tick while idle
-#   debounce_ms = 80         # wait before warming a new viewport target
-syntax = "on"
 # [ui.unified]
 # modified_step_mode = "mixed" # "mixed" or "modified" (unified pane only)
 # theme = { name = "tokyonight" } # Built-ins listed below
@@ -328,6 +315,16 @@ primary_marker_right = "◀"  # Right pane marker (optional, defaults to ◀)
 extent_marker = "▌"         # Left pane extent marker (Left Half Block)
 extent_marker_right = "▐"   # Right pane extent marker (optional, defaults to ▐)
 zen = false                 # Start in zen mode (minimal UI)
+
+[ui.syntax]
+mode = "on"                # "on" or "off"
+# theme = "tokyonight"     # builtin name or "custom.tmTheme" (from ~/.config/oyo/themes)
+#                           # default: ui.theme.name, fallback to "ansi"
+# [ui.syntax.warmup]
+# active_lines = 100       # lines per tick while navigating
+# pending_lines = 300      # lines per tick while catching up to a pending checkpoint
+# idle_lines = 1000        # lines per tick while idle
+# debounce_ms = 80         # wait before warming a new viewport target
 
 [playback]
 speed = 200                 # Autoplay interval in milliseconds
