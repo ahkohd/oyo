@@ -74,6 +74,12 @@ oyo does **not** replace classic diffs, it adds a new way to review them.
 npm i -g @ahkohd/oyo
 ```
 
+### Pi package (`/diff`, `/review` commands)
+
+```bash
+pi install npm:@ahkohd/pi-oyo
+```
+
 ### Homebrew (macOS, Linux)
 
 ```bash

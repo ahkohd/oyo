@@ -66,7 +66,9 @@ jobs:
         run: node scripts/sync-npm-version.cjs "${{ steps.version.outputs.new }}"
 
       - name: npm package dry run
-        run: npm pack --dry-run
+        run: |
+          npm pack --dry-run
+          npm pack --dry-run ./packages/pi-oyo
 
       - name: Configure git
         run: |
@@ -78,6 +80,7 @@ jobs:
         run: |
           git add Cargo.toml Cargo.lock package.json
           git add npm/darwin-arm64/package.json npm/darwin-x64/package.json npm/linux-arm64-gnu/package.json npm/linux-x64-gnu/package.json
+          git add packages/pi-oyo/package.json
           git commit -m "chore: release v${{ steps.version.outputs.new }}"
           git tag "v${{ steps.version.outputs.new }}"
           git push origin main
@@ -113,9 +116,11 @@ jobs:
           echo "  - @ahkohd/oyo-linux-arm64-gnu@${{ steps.version.outputs.new }}" >> $GITHUB_STEP_SUMMARY
           echo "  - @ahkohd/oyo-linux-x64-gnu@${{ steps.version.outputs.new }}" >> $GITHUB_STEP_SUMMARY
           echo "  - @ahkohd/oyo@${{ steps.version.outputs.new }}" >> $GITHUB_STEP_SUMMARY
+          echo "  - @ahkohd/pi-oyo@${{ steps.version.outputs.new }}" >> $GITHUB_STEP_SUMMARY
           cargo publish -p oyo-core --dry-run --allow-dirty
           cargo publish -p oyo --dry-run --allow-dirty
           npm publish --dry-run --access public
+          npm publish ./packages/pi-oyo --dry-run --access public
 
   build:
     name: Build (${{ matrix.target }})
@@ -248,6 +253,11 @@ jobs:
 
       - name: Publish main package
         run: npm publish "${STAGE_DIR}/main" --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish pi package
+        run: npm publish ./packages/pi-oyo --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 

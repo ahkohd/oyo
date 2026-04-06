@@ -1,0 +1,41 @@
+{
+  "name": "@ahkohd/pi-oyo",
+  "version": "0.1.29",
+  "private": false,
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "type": "module",
+  "description": "Pi package providing oyo diff/review commands",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ahkohd/oyo.git",
+    "directory": "packages/pi-oyo"
+  },
+  "homepage": "https://github.com/ahkohd/oyo/tree/main/packages/pi-oyo",
+  "bugs": {
+    "url": "https://github.com/ahkohd/oyo/issues"
+  },
+  "keywords": [
+    "pi-package",
+    "oyo",
+    "pi-extension",
+    "diff",
+    "review"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions"
+    ]
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*"
+  },
+  "files": [
+    "extensions",
+    "README.md",
+    "package.json"
+  ]
+}

@@ -13,6 +13,8 @@ const PLATFORM_PACKAGES = [
   path.join(ROOT, "npm", "linux-x64-gnu", "package.json"),
 ];
 
+const PI_PACKAGES = [path.join(ROOT, "packages", "pi-oyo", "package.json")];
+
 const PLATFORM_DEPENDENCIES = [
   "@ahkohd/oyo-darwin-arm64",
   "@ahkohd/oyo-darwin-x64",
@@ -50,7 +52,7 @@ function main() {
   }
   writeJson(ROOT_PACKAGE, root);
 
-  for (const packagePath of PLATFORM_PACKAGES) {
+  for (const packagePath of [...PLATFORM_PACKAGES, ...PI_PACKAGES]) {
     const pkg = readJson(packagePath);
     pkg.version = version;
     writeJson(packagePath, pkg);

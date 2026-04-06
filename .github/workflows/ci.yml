@@ -38,4 +38,6 @@ jobs:
         run: cargo test --workspace
 
       - name: npm pack dry run
-        run: npm pack --dry-run
+        run: |
+          npm pack --dry-run
+          npm pack --dry-run ./packages/pi-oyo
