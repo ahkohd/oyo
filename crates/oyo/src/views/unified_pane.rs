@@ -984,18 +984,18 @@ fn build_unified_render_model(
                 );
                 if !app.stepping && is_modified_line && app.diff_bg {
                     match view_span.kind {
-                        ViewSpanKind::Deleted | ViewSpanKind::PendingDelete => {
-                            if style.bg.is_none() {
-                                if let Some(bg) = app.theme.diff_removed_bg {
-                                    style = style.bg(bg);
-                                }
+                        ViewSpanKind::Deleted | ViewSpanKind::PendingDelete
+                            if style.bg.is_none() =>
+                        {
+                            if let Some(bg) = app.theme.diff_removed_bg {
+                                style = style.bg(bg);
                             }
                         }
-                        ViewSpanKind::Inserted | ViewSpanKind::PendingInsert => {
-                            if style.bg.is_none() {
-                                if let Some(bg) = app.theme.diff_added_bg {
-                                    style = style.bg(bg);
-                                }
+                        ViewSpanKind::Inserted | ViewSpanKind::PendingInsert
+                            if style.bg.is_none() =>
+                        {
+                            if let Some(bg) = app.theme.diff_added_bg {
+                                style = style.bg(bg);
                             }
                         }
                         _ => {}

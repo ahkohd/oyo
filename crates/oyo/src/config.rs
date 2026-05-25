@@ -50,6 +50,11 @@
 //! [comments.mentions]
 //! file_scope = "repo" # changed | repo
 //! finder = "auto"     # auto | builtin | fzf
+//!
+//! [editor]
+//! # command = "nvim"
+//! # args = ["+{line}", "{file}"]
+//! open_at_line = true
 //! ```
 
 use crate::color::{self, AnimationGradient};
@@ -1228,6 +1233,28 @@ impl Default for NoStepConfig {
     }
 }
 
+/// External editor configuration.
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct EditorConfig {
+    /// Command used by the open-in-editor key. Defaults to VISUAL, then EDITOR, then vi.
+    pub command: Option<String>,
+    /// Argument templates passed after the command. Supports {file} and {line}.
+    pub args: Option<Vec<String>>,
+    /// Used only when args is omitted. Passes +<line> before the file path.
+    pub open_at_line: bool,
+}
+
+impl Default for EditorConfig {
+    fn default() -> Self {
+        Self {
+            command: None,
+            args: None,
+            open_at_line: true,
+        }
+    }
+}
+
 /// File list counts display behavior
 #[derive(Debug, Deserialize, Clone, Copy, Default)]
 #[serde(rename_all = "snake_case")]
@@ -1288,6 +1315,7 @@ pub struct Config {
     pub navigation: NavigationConfig,
     pub no_step: NoStepConfig,
     pub comments: CommentsConfig,
+    pub editor: EditorConfig,
 }
 
 impl Config {

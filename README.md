@@ -252,6 +252,7 @@ command = ["oy", "$left", "$right"]
 | `Ctrl+u` | Half page up |
 | `Ctrl+d` | Half page down |
 | `Ctrl+g` | Show full file path |
+| `o` / `Ctrl+e` | Open current file in editor |
 | `gy` / `gY` | Copy patch for line/hunk |
 | `Ctrl+p` | Command palette |
 | `Ctrl+Shift+p` | Quick file search |
@@ -359,6 +360,11 @@ counts = "active"           # Per-file +/- counts: active, focused, all, off
 
 [no_step]
 auto_jump_on_enter = true   # Jump to first hunk when entering a file in no-step mode
+
+[editor]
+# command = "nvim"           # Defaults to $VISUAL, then $EDITOR, then vi
+# args = ["+{line}", "{file}"] # Templates. VS Code: ["--goto", "{file}:{line}"]
+open_at_line = true          # Used when args is omitted
 
 [comments.mentions]
 file_scope = "repo"         # "changed" | "repo" (git-aware via ls-files)

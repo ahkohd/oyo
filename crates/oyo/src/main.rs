@@ -26,15 +26,18 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use oyo_core::MultiFileDiff;
+use oyo_core::{LineKind, MultiFileDiff, ViewLine};
 use ratatui::prelude::*;
 use std::fs::OpenOptions;
 use std::io::{self, IsTerminal};
-#[cfg(unix)]
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command as ProcessCommand;
 use std::time::Duration;
 
 const INDEX_REF: &str = "INDEX";
+
+type TuiBackend = CrosstermBackend<Box<dyn io::Write>>;
+type TuiTerminal = Terminal<TuiBackend>;
 
 #[derive(Parser, Debug)]
 #[command(name = "oy")]
@@ -235,7 +238,7 @@ fn parse_range(range: &str) -> Result<(String, String)> {
     anyhow::bail!("Range must be in the form A..B or A...B");
 }
 
-fn setup_terminal() -> Result<Terminal<CrosstermBackend<Box<dyn io::Write>>>> {
+fn setup_terminal() -> Result<TuiTerminal> {
     enable_raw_mode()?;
     let mut stdout: Box<dyn io::Write> = if io::stdout().is_terminal() {
         Box::new(io::stdout())
@@ -249,6 +252,242 @@ fn setup_terminal() -> Result<Terminal<CrosstermBackend<Box<dyn io::Write>>>> {
     let backend = CrosstermBackend::new(stdout);
     let terminal = Terminal::new(backend)?;
     Ok(terminal)
+}
+
+struct EditorTarget {
+    path: PathBuf,
+    line: Option<usize>,
+    cwd: Option<PathBuf>,
+}
+
+fn resolve_editor_command(config: &config::EditorConfig) -> String {
+    fn non_empty(value: Option<String>) -> Option<String> {
+        value
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    }
+
+    non_empty(config.command.clone())
+        .or_else(|| non_empty(std::env::var("VISUAL").ok()))
+        .or_else(|| non_empty(std::env::var("EDITOR").ok()))
+        .unwrap_or_else(|| "vi".to_string())
+}
+
+fn current_editor_target(app: &mut App, needs_line: bool) -> Option<EditorTarget> {
+    let (file_path, cwd) = {
+        let file = app.multi_diff.current_file()?;
+        (
+            file.path.clone(),
+            app.multi_diff.repo_root().map(Path::to_path_buf),
+        )
+    };
+    let path = cwd
+        .as_ref()
+        .map(|root| root.join(&file_path))
+        .unwrap_or(file_path);
+    let line = if needs_line {
+        current_editor_line(app)
+    } else {
+        None
+    };
+
+    Some(EditorTarget { path, line, cwd })
+}
+
+fn editor_needs_line(config: &config::EditorConfig) -> bool {
+    if config.open_at_line {
+        return true;
+    }
+    config
+        .args
+        .as_ref()
+        .map(|args| args.iter().any(|arg| arg.contains("{line}")))
+        .unwrap_or(false)
+}
+
+fn render_editor_template(template: &str, line: Option<usize>, path: &Path) -> String {
+    let file = path.to_string_lossy();
+    let line = line.unwrap_or(1).to_string();
+    template.replace("{file}", &file).replace("{line}", &line)
+}
+
+fn render_editor_args(
+    config: &config::EditorConfig,
+    line: Option<usize>,
+    path: &Path,
+) -> Vec<String> {
+    if let Some(args) = &config.args {
+        return args
+            .iter()
+            .map(|arg| render_editor_template(arg, line, path))
+            .collect();
+    }
+
+    let mut args = Vec::new();
+    if config.open_at_line {
+        if let Some(line) = line {
+            args.push(format!("+{}", line));
+        }
+    }
+    args.push(path.to_string_lossy().into_owned());
+    args
+}
+
+fn current_editor_line(app: &mut App) -> Option<usize> {
+    let frame = app.animation_frame();
+    let view = app.current_view_with_frame(frame);
+    if app.stepping {
+        return primary_editor_line(&view)
+            .or_else(|| active_editor_line(&view))
+            .or_else(|| visible_editor_line(app, &view));
+    }
+
+    let hunk_cursor = {
+        let state = app.multi_diff.current_navigator().state();
+        state.last_nav_was_hunk && state.cursor_change.is_some()
+    };
+    if hunk_cursor {
+        primary_editor_line(&view).or_else(|| visible_editor_line(app, &view))
+    } else {
+        visible_editor_line(app, &view).or_else(|| primary_editor_line(&view))
+    }
+}
+
+fn primary_editor_line(view: &[ViewLine]) -> Option<usize> {
+    view.iter()
+        .find(|line| line.is_primary_active)
+        .and_then(editor_line_number)
+}
+
+fn active_editor_line(view: &[ViewLine]) -> Option<usize> {
+    view.iter()
+        .find(|line| line.is_active)
+        .and_then(editor_line_number)
+}
+
+fn editor_line_number(line: &ViewLine) -> Option<usize> {
+    line.new_line.or(line.old_line).filter(|line| *line > 0)
+}
+
+fn visible_editor_line(app: &App, view: &[ViewLine]) -> Option<usize> {
+    let target = app.render_scroll_offset();
+    match app.view_mode {
+        ViewMode::Split => visible_split_editor_line(app, view, target),
+        ViewMode::Evolution => view
+            .iter()
+            .filter(|line| !matches!(line.kind, LineKind::Deleted | LineKind::PendingDelete))
+            .enumerate()
+            .skip_while(|(idx, _)| *idx < target)
+            .find_map(|(_, line)| editor_line_number(line)),
+        _ => view.iter().skip(target).find_map(editor_line_number),
+    }
+}
+
+fn visible_split_editor_line(app: &App, view: &[ViewLine], target: usize) -> Option<usize> {
+    let mut old_idx = 0usize;
+    let mut new_idx = 0usize;
+    let mut old_match = None;
+    let mut new_match = None;
+
+    for line in view {
+        let fold_line = crate::app::is_fold_line(line);
+        let old_present = line.old_line.is_some() || fold_line;
+        let new_present = (line.new_line.is_some()
+            && !matches!(line.kind, LineKind::Deleted | LineKind::PendingDelete))
+            || fold_line;
+
+        if old_present || (app.split_align_lines && new_present) {
+            if old_idx >= target && old_match.is_none() {
+                old_match = editor_line_number(line);
+            }
+            old_idx += 1;
+        }
+        if new_present || (app.split_align_lines && old_present) {
+            if new_idx >= target && new_match.is_none() {
+                new_match = editor_line_number(line);
+            }
+            new_idx += 1;
+        }
+        if new_match.is_some() {
+            break;
+        }
+    }
+
+    new_match.or(old_match)
+}
+
+fn suspend_terminal_for_child(terminal: &mut TuiTerminal) -> Result<()> {
+    disable_raw_mode()?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    )?;
+    terminal.show_cursor()?;
+    Ok(())
+}
+
+fn resume_terminal_after_child(terminal: &mut TuiTerminal) -> Result<()> {
+    enable_raw_mode()?;
+    execute!(
+        terminal.backend_mut(),
+        EnterAlternateScreen,
+        EnableMouseCapture
+    )?;
+    terminal.clear()?;
+    Ok(())
+}
+
+fn run_editor_command(
+    command: &str,
+    args: &[String],
+    cwd: Option<&Path>,
+) -> std::io::Result<std::process::ExitStatus> {
+    #[cfg(windows)]
+    let mut child = {
+        let mut parts = command.split_whitespace();
+        let exe = parts.next().unwrap_or(command);
+        let mut cmd = ProcessCommand::new(exe);
+        cmd.args(parts);
+        cmd
+    };
+
+    #[cfg(not(windows))]
+    let mut child = {
+        let mut cmd = ProcessCommand::new("sh");
+        cmd.arg("-c")
+            .arg(format!("exec {} \"$@\"", command))
+            .arg("oy-editor");
+        cmd
+    };
+
+    child.args(args);
+    if let Some(cwd) = cwd {
+        child.current_dir(cwd);
+    }
+    child.status()
+}
+
+fn open_current_file_in_editor(
+    terminal: &mut TuiTerminal,
+    app: &mut App,
+    config: &config::EditorConfig,
+) -> Result<()> {
+    let Some(target) = current_editor_target(app, editor_needs_line(config)) else {
+        return Ok(());
+    };
+    let command = resolve_editor_command(config);
+    let args = render_editor_args(config, target.line, &target.path);
+
+    suspend_terminal_for_child(terminal)?;
+    let editor_result = run_editor_command(&command, &args, target.cwd.as_deref());
+    let resume_result = resume_terminal_after_child(terminal);
+    resume_result?;
+
+    if editor_result.is_ok() {
+        app.refresh_current_file();
+    }
+    Ok(())
 }
 
 fn apply_config_to_app(app: &mut App, config: &config::Config, args: &Args, light_mode: bool) {
@@ -701,7 +940,7 @@ fn main() -> Result<()> {
             app.set_review_clear_session_on_start(args.clear_review_session);
             app.enable_review_mode();
 
-            let exit = run_app(&mut terminal, &mut app)?;
+            let exit = run_app(&mut terminal, &mut app, &config.editor)?;
             if review_output.is_none() {
                 review_output = app.take_review_submission_output();
             }
@@ -821,7 +1060,7 @@ fn main() -> Result<()> {
         app.set_review_clear_session_on_start(args.clear_review_session);
         app.enable_review_mode();
 
-        let exit = run_app(&mut terminal, &mut app)?;
+        let exit = run_app(&mut terminal, &mut app, &config.editor)?;
         if review_output.is_none() {
             review_output = app.take_review_submission_output();
         }
@@ -858,7 +1097,11 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<AppExit> {
+fn run_app(
+    terminal: &mut TuiTerminal,
+    app: &mut App,
+    editor_config: &config::EditorConfig,
+) -> Result<AppExit> {
     let tick_rate = Duration::from_millis(16);
     let mut pending_event: Option<Event> = None;
 
@@ -983,18 +1226,14 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<AppE
 
                     if app.review_editor_active() {
                         match key.code {
-                            KeyCode::Esc => {
-                                if !app.review_cancel_mention_picker() {
-                                    app.review_cancel_editor();
-                                }
+                            KeyCode::Esc if !app.review_cancel_mention_picker() => {
+                                app.review_cancel_editor();
                             }
                             KeyCode::Enter if key.modifiers.contains(KeyModifiers::CONTROL) => {
                                 app.review_save_editor();
                             }
-                            KeyCode::Enter => {
-                                if !app.review_accept_mention() {
-                                    app.review_insert_newline();
-                                }
+                            KeyCode::Enter if !app.review_accept_mention() => {
+                                app.review_insert_newline();
                             }
                             KeyCode::Tab => {
                                 let _ = app.review_accept_mention();
@@ -1022,15 +1261,17 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<AppE
                             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                                 app.review_clear_editor_text();
                             }
-                            KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                                if app.review_mention_picker_active() {
-                                    app.review_mention_move_selection(1);
-                                }
+                            KeyCode::Char('n')
+                                if key.modifiers.contains(KeyModifiers::CONTROL)
+                                    && app.review_mention_picker_active() =>
+                            {
+                                app.review_mention_move_selection(1);
                             }
-                            KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                                if app.review_mention_picker_active() {
-                                    app.review_mention_move_selection(-1);
-                                }
+                            KeyCode::Char('p')
+                                if key.modifiers.contains(KeyModifiers::CONTROL)
+                                    && app.review_mention_picker_active() =>
+                            {
+                                app.review_mention_move_selection(-1);
                             }
                             KeyCode::Char(c)
                                 if !key.modifiers.contains(KeyModifiers::CONTROL)
@@ -1375,6 +1616,10 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<AppE
                                 app.goto_hunk_start_scroll();
                             }
                         }
+                        KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            app.reset_count();
+                            open_current_file_in_editor(terminal, app, editor_config)?;
+                        }
                         KeyCode::Char('e') => {
                             app.reset_count();
                             app.defer_view_build_for_jump();
@@ -1410,6 +1655,13 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<AppE
                             app.reset_count();
                             // Toggle file path popup
                             app.toggle_path_popup();
+                        }
+                        KeyCode::Char('o')
+                            if !key.modifiers.contains(KeyModifiers::CONTROL)
+                                && !key.modifiers.contains(KeyModifiers::ALT) =>
+                        {
+                            app.reset_count();
+                            open_current_file_in_editor(terminal, app, editor_config)?;
                         }
                         KeyCode::Home => {
                             app.reset_count();
@@ -1895,8 +2147,8 @@ fn run_commit_picker<B: Backend>(
 
 #[cfg(test)]
 mod tests {
-    use super::{detect_input_mode, parse_range, InputMode};
-    use std::path::PathBuf;
+    use super::{config, detect_input_mode, parse_range, render_editor_args, InputMode};
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn parse_range_accepts_double_dot() {
@@ -1938,5 +2190,23 @@ mod tests {
             InputMode::GitFile { path } => assert_eq!(path, PathBuf::from("main.rs")),
             _ => panic!("unexpected input mode"),
         }
+    }
+
+    #[test]
+    fn editor_default_args_open_at_line() {
+        let config = config::EditorConfig::default();
+        let args = render_editor_args(&config, Some(42), Path::new("src/main.rs"));
+        assert_eq!(args, vec!["+42", "src/main.rs"]);
+    }
+
+    #[test]
+    fn editor_template_args_replace_file_and_line() {
+        let config = config::EditorConfig {
+            command: Some("code".to_string()),
+            args: Some(vec!["--goto".to_string(), "{file}:{line}".to_string()]),
+            open_at_line: true,
+        };
+        let args = render_editor_args(&config, Some(42), Path::new("src/main.rs"));
+        assert_eq!(args, vec!["--goto", "src/main.rs:42"]);
     }
 }

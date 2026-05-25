@@ -1766,6 +1766,7 @@ fn draw_help_popover(frame: &mut Frame, app: &mut App) {
         "0 / $",
         "^U / ^D",
         "^G",
+        "o / Ctrl+e",
         "z",
         "w",
         "t",
@@ -1937,6 +1938,7 @@ fn draw_help_popover(frame: &mut Frame, app: &mut App) {
     push_help_line(&mut lines, "0 / $", "Scroll to line start/end");
     push_help_line(&mut lines, "^U / ^D", "Scroll half-page");
     push_help_line(&mut lines, "^G", "Show full file path");
+    push_help_line(&mut lines, "o / Ctrl+e", "Open file in editor");
     push_help_line(&mut lines, "z", "Center on active");
     push_help_line(&mut lines, "w", "Toggle line wrap");
     push_help_line(&mut lines, "f", "Toggle context folding");
