@@ -358,6 +358,10 @@ panel_visible = true        # Show file panel in multi-file mode
 panel_width = 30            # File panel width (columns)
 counts = "active"           # Per-file +/- counts: active, focused, all, off
 
+[files.scan]
+git_ignore = "auto"         # "auto" | true | false (auto trusts VCS temp dirs)
+ignore_globs = [".git/**", ".jj/**", ".hg/**", ".svn/**"]
+
 [no_step]
 auto_jump_on_enter = true   # Jump to first hunk when entering a file in no-step mode
 

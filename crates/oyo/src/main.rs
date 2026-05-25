@@ -26,7 +26,7 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use oyo_core::{LineKind, MultiFileDiff, ViewLine};
+use oyo_core::{DirectoryScanOptions, LineKind, MultiFileDiff, ViewLine};
 use ratatui::prelude::*;
 use std::fs::OpenOptions;
 use std::io::{self, IsTerminal};
@@ -104,6 +104,18 @@ struct Args {
     /// Disable loading/saving persisted review session comments
     #[arg(long, global = true)]
     no_review_persist: bool,
+
+    /// Respect git ignore files during directory scans
+    #[arg(long, global = true, conflicts_with = "no_git_ignore")]
+    git_ignore: bool,
+
+    /// Do not respect git ignore files during directory scans
+    #[arg(long, global = true, conflicts_with = "git_ignore")]
+    no_git_ignore: bool,
+
+    /// Glob patterns to exclude during directory scans (pipe-separated, repeatable)
+    #[arg(long, value_name = "GLOBS", global = true)]
+    ignore_glob: Vec<String>,
 
     /// Clear saved review session state for the current diff on startup
     #[arg(long, global = true)]
@@ -236,6 +248,76 @@ fn parse_range(range: &str) -> Result<(String, String)> {
         return Ok((from.to_string(), to.to_string()));
     }
     anyhow::bail!("Range must be in the form A..B or A...B");
+}
+
+fn split_ignore_globs(values: &[String]) -> Vec<String> {
+    values
+        .iter()
+        .flat_map(|value| value.split('|'))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn looks_like_jj_external_diff_dirs(old_path: &Path, new_path: &Path) -> bool {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let old_abs = if old_path.is_absolute() {
+        old_path.to_path_buf()
+    } else {
+        cwd.join(old_path)
+    };
+    let new_abs = if new_path.is_absolute() {
+        new_path.to_path_buf()
+    } else {
+        cwd.join(new_path)
+    };
+
+    if old_abs.file_name().and_then(|name| name.to_str()) != Some("left") {
+        return false;
+    }
+    if new_abs.file_name().and_then(|name| name.to_str()) != Some("right") {
+        return false;
+    }
+    let Some(old_parent) = old_abs.parent() else {
+        return false;
+    };
+    if new_abs.parent() != Some(old_parent) {
+        return false;
+    }
+
+    old_parent
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.starts_with("jj-diff-"))
+        .unwrap_or(false)
+}
+
+fn directory_scan_options(
+    config: &config::Config,
+    args: &Args,
+    old_path: &Path,
+    new_path: &Path,
+) -> DirectoryScanOptions {
+    let vcs_external_diff = looks_like_jj_external_diff_dirs(old_path, new_path);
+    let mut git_ignore = match config.files.scan.git_ignore {
+        config::GitIgnoreMode::Auto => !vcs_external_diff,
+        config::GitIgnoreMode::On => true,
+        config::GitIgnoreMode::Off => false,
+    };
+    if args.git_ignore {
+        git_ignore = true;
+    }
+    if args.no_git_ignore {
+        git_ignore = false;
+    }
+
+    let mut ignore_globs = config.files.scan.ignore_globs.clone();
+    ignore_globs.extend(split_ignore_globs(&args.ignore_glob));
+    DirectoryScanOptions {
+        git_ignore,
+        ignore_globs,
+    }
 }
 
 fn setup_terminal() -> Result<TuiTerminal> {
@@ -592,6 +674,8 @@ fn emit_review_output(
 
 fn build_diff_from_input_mode(
     input_mode: &InputMode,
+    config: &config::Config,
+    args: &Args,
 ) -> Result<Option<(MultiFileDiff, Option<String>)>> {
     let (multi_diff, git_branch) = match input_mode {
         InputMode::GitExternal {
@@ -623,7 +707,8 @@ fn build_diff_from_input_mode(
         }
         InputMode::TwoPaths { old_path, new_path } => {
             let diff = if old_path.is_dir() && new_path.is_dir() {
-                MultiFileDiff::from_directories(old_path, new_path)
+                let scan_options = directory_scan_options(config, args, old_path, new_path);
+                MultiFileDiff::from_directories_with_options(old_path, new_path, &scan_options)
                     .context("Failed to create diff from directories")?
             } else {
                 let old_bytes = if old_path.to_string_lossy() == "/dev/null" {
@@ -912,13 +997,14 @@ fn main() -> Result<()> {
                 }
                 _ => Some("No changes found.".to_string()),
             };
-            let (multi_diff, git_branch) = match build_diff_from_input_mode(&input_mode)? {
-                Some(result) => result,
-                None => {
-                    exit_message = empty_message;
-                    break;
-                }
-            };
+            let (multi_diff, git_branch) =
+                match build_diff_from_input_mode(&input_mode, &config, &args)? {
+                    Some(result) => result,
+                    None => {
+                        exit_message = empty_message;
+                        break;
+                    }
+                };
 
             if multi_diff.file_count() == 0 {
                 exit_message = Some("No changes found.".to_string());
@@ -999,7 +1085,7 @@ fn main() -> Result<()> {
         InputMode::GitRange { from, to } => Some(format!("No changes in range {}..{}.", from, to)),
         _ => Some("No changes found.".to_string()),
     };
-    let prefetched = match build_diff_from_input_mode(&input_mode)? {
+    let prefetched = match build_diff_from_input_mode(&input_mode, &config, &args)? {
         Some(result) => result,
         None => {
             if let Some(message) = empty_message {
@@ -1031,7 +1117,7 @@ fn main() -> Result<()> {
         let (multi_diff, git_branch) = if let Some(result) = pending_diff.take() {
             result
         } else {
-            match build_diff_from_input_mode(&input_mode)? {
+            match build_diff_from_input_mode(&input_mode, &config, &args)? {
                 Some(result) => result,
                 None => {
                     exit_message = empty_message;

@@ -47,6 +47,10 @@
 //! panel_width = 30
 //! counts = "active"
 //!
+//! [files.scan]
+//! git_ignore = "auto" # auto | true | false
+//! ignore_globs = [".git/**", ".jj/**", ".hg/**", ".svn/**"]
+//!
 //! [comments.mentions]
 //! file_scope = "repo" # changed | repo
 //! finder = "auto"     # auto | builtin | fzf
@@ -59,7 +63,7 @@
 
 use crate::color::{self, AnimationGradient};
 use ratatui::style::Color;
-use serde::Deserialize;
+use serde::{de, Deserialize};
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -1205,6 +1209,8 @@ pub struct FilesConfig {
     pub panel_width: u16,
     /// When to show per-file +/- counts in the file panel
     pub counts: FileCountMode,
+    /// Directory scan filtering configuration
+    pub scan: FileScanConfig,
 }
 
 impl Default for FilesConfig {
@@ -1213,6 +1219,65 @@ impl Default for FilesConfig {
             panel_visible: true,
             panel_width: 30,
             counts: FileCountMode::Active,
+            scan: FileScanConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum GitIgnoreMode {
+    #[default]
+    Auto,
+    On,
+    Off,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum GitIgnoreModeDef {
+    Bool(bool),
+    String(String),
+}
+
+impl<'de> Deserialize<'de> for GitIgnoreMode {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        match GitIgnoreModeDef::deserialize(deserializer)? {
+            GitIgnoreModeDef::Bool(true) => Ok(Self::On),
+            GitIgnoreModeDef::Bool(false) => Ok(Self::Off),
+            GitIgnoreModeDef::String(value) => match value.as_str() {
+                "auto" => Ok(Self::Auto),
+                "true" | "on" => Ok(Self::On),
+                "false" | "off" => Ok(Self::Off),
+                other => Err(de::Error::unknown_variant(
+                    other,
+                    &["auto", "true", "false", "on", "off"],
+                )),
+            },
+        }
+    }
+}
+
+/// Directory scan filtering configuration.
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct FileScanConfig {
+    /// Whether manual directory scans should respect git ignore files.
+    pub git_ignore: GitIgnoreMode,
+    /// Glob patterns to exclude from manual directory scans.
+    pub ignore_globs: Vec<String>,
+}
+
+impl Default for FileScanConfig {
+    fn default() -> Self {
+        Self {
+            git_ignore: GitIgnoreMode::Auto,
+            ignore_globs: oyo_core::multi::DEFAULT_SCAN_IGNORE_GLOBS
+                .iter()
+                .map(|pattern| (*pattern).to_string())
+                .collect(),
         }
     }
 }

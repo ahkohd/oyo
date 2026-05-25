@@ -20,6 +20,7 @@ anyhow = "1.0"
 # Diff engine
 imara-diff = "0.2"
 rustc-hash = "1.1"
+ignore = "0.4"
 
 # TUI
 ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }

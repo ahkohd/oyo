@@ -17,6 +17,7 @@ thiserror = { workspace = true }
 anyhow = { workspace = true }
 imara-diff = { workspace = true }
 rustc-hash = { workspace = true }
+ignore = { workspace = true }
 
 [dev-dependencies]
 criterion = "0.8"

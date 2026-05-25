@@ -4,6 +4,8 @@ use crate::change::{Change, ChangeSpan};
 use crate::diff::{DiffEngine, DiffResult};
 use crate::git::{ChangedFile, FileStatus};
 use crate::step::{DiffNavigator, StepDirection};
+use ignore::overrides::OverrideBuilder;
+use ignore::WalkBuilder;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -90,6 +92,26 @@ const DEFAULT_FULL_CONTEXT_MAX_BYTES: u64 = 2 * 1024 * 1024;
 static DIFF_MAX_BYTES: AtomicU64 = AtomicU64::new(DEFAULT_DIFF_MAX_BYTES);
 static FULL_CONTEXT_MAX_BYTES: AtomicU64 = AtomicU64::new(DEFAULT_FULL_CONTEXT_MAX_BYTES);
 static DIFF_DEFER: AtomicBool = AtomicBool::new(true);
+
+pub const DEFAULT_SCAN_IGNORE_GLOBS: &[&str] = &[".git/**", ".jj/**", ".hg/**", ".svn/**"];
+
+#[derive(Debug, Clone)]
+pub struct DirectoryScanOptions {
+    pub git_ignore: bool,
+    pub ignore_globs: Vec<String>,
+}
+
+impl Default for DirectoryScanOptions {
+    fn default() -> Self {
+        Self {
+            git_ignore: true,
+            ignore_globs: DEFAULT_SCAN_IGNORE_GLOBS
+                .iter()
+                .map(|pattern| (*pattern).to_string())
+                .collect(),
+        }
+    }
+}
 
 impl MultiFileDiff {
     const MAX_TEXT_BYTES: u64 = 32 * 1024 * 1024;
@@ -558,6 +580,14 @@ impl MultiFileDiff {
 
     /// Create from two directories
     pub fn from_directories(old_dir: &Path, new_dir: &Path) -> Result<Self, MultiDiffError> {
+        Self::from_directories_with_options(old_dir, new_dir, &DirectoryScanOptions::default())
+    }
+
+    pub fn from_directories_with_options(
+        old_dir: &Path,
+        new_dir: &Path,
+        scan_options: &DirectoryScanOptions,
+    ) -> Result<Self, MultiDiffError> {
         let mut files = Vec::new();
         let mut old_contents = Vec::new();
         let mut new_contents = Vec::new();
@@ -567,10 +597,10 @@ impl MultiFileDiff {
         let mut all_files = std::collections::HashSet::new();
 
         if old_dir.is_dir() {
-            collect_files(old_dir, old_dir, &mut all_files)?;
+            collect_files(old_dir, old_dir, &mut all_files, scan_options)?;
         }
         if new_dir.is_dir() {
-            collect_files(new_dir, new_dir, &mut all_files)?;
+            collect_files(new_dir, new_dir, &mut all_files, scan_options)?;
         }
 
         let mut all_files: Vec<_> = all_files.into_iter().collect();
@@ -1293,27 +1323,53 @@ fn collect_files(
     dir: &Path,
     base: &Path,
     files: &mut std::collections::HashSet<PathBuf>,
+    scan_options: &DirectoryScanOptions,
 ) -> Result<(), std::io::Error> {
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
+    let mut builder = WalkBuilder::new(dir);
+    builder
+        .standard_filters(false)
+        .hidden(false)
+        .parents(scan_options.git_ignore)
+        .ignore(false)
+        .git_ignore(scan_options.git_ignore)
+        .git_global(scan_options.git_ignore)
+        .git_exclude(scan_options.git_ignore)
+        .require_git(false);
 
-        // Skip hidden files and common ignore patterns
-        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-            if name.starts_with('.') || name == "node_modules" || name == "target" {
-                continue;
+    if !scan_options.ignore_globs.is_empty() {
+        let mut overrides = OverrideBuilder::new(base);
+        for pattern in &scan_options.ignore_globs {
+            if let Some(dir_pattern) = pattern.strip_suffix("/**") {
+                if !dir_pattern.is_empty() {
+                    overrides
+                        .add(&format!("!{dir_pattern}"))
+                        .map_err(ignore_error_to_io)?;
+                }
             }
+            overrides
+                .add(&format!("!{pattern}"))
+                .map_err(ignore_error_to_io)?;
         }
+        builder.overrides(overrides.build().map_err(ignore_error_to_io)?);
+    }
 
-        if path.is_dir() {
-            collect_files(&path, base, files)?;
-        } else if path.is_file() {
+    for entry in builder.build() {
+        let entry = entry.map_err(ignore_error_to_io)?;
+        let path = entry.path();
+        if path == dir {
+            continue;
+        }
+        if path.is_file() {
             if let Ok(rel) = path.strip_prefix(base) {
                 files.insert(rel.to_path_buf());
             }
         }
     }
     Ok(())
+}
+
+fn ignore_error_to_io(error: ignore::Error) -> std::io::Error {
+    std::io::Error::other(error)
 }
 
 fn format_ref(reference: &str) -> String {
@@ -1332,8 +1388,100 @@ fn shorten_hash(hash: &str) -> String {
 mod tests {
     use super::*;
     use std::sync::Mutex;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     static DIFF_SETTINGS_LOCK: Mutex<()> = Mutex::new(());
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("oyo-core-{name}-{}-{nanos}", std::process::id()))
+    }
+
+    fn write_file(path: &Path, content: &str) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, content).unwrap();
+    }
+
+    fn display_names(diff: &MultiFileDiff) -> Vec<String> {
+        diff.files
+            .iter()
+            .map(|file| file.display_name.clone())
+            .collect()
+    }
+
+    #[test]
+    fn directory_scan_includes_dotfiles() {
+        let root = temp_dir("dotfiles");
+        let old_dir = root.join("old");
+        let new_dir = root.join("new");
+        std::fs::create_dir_all(&old_dir).unwrap();
+        write_file(
+            &new_dir.join(".github/actions/foo/action.yml"),
+            "name: test\n",
+        );
+        write_file(&new_dir.join(".env.example"), "KEY=value\n");
+
+        let diff = MultiFileDiff::from_directories(&old_dir, &new_dir).unwrap();
+        let names = display_names(&diff);
+        assert!(names.contains(&".github/actions/foo/action.yml".to_string()));
+        assert!(names.contains(&".env.example".to_string()));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn directory_scan_respects_gitignore_when_enabled() {
+        let root = temp_dir("gitignore");
+        let old_dir = root.join("old");
+        let new_dir = root.join("new");
+        write_file(&old_dir.join(".gitignore"), "ignored.txt\n");
+        write_file(&new_dir.join(".gitignore"), "ignored.txt\n");
+        write_file(&old_dir.join("ignored.txt"), "old\n");
+        write_file(&new_dir.join("ignored.txt"), "new\n");
+
+        let ignored = MultiFileDiff::from_directories_with_options(
+            &old_dir,
+            &new_dir,
+            &DirectoryScanOptions {
+                git_ignore: true,
+                ignore_globs: Vec::new(),
+            },
+        )
+        .unwrap();
+        assert!(!display_names(&ignored).contains(&"ignored.txt".to_string()));
+
+        let included = MultiFileDiff::from_directories_with_options(
+            &old_dir,
+            &new_dir,
+            &DirectoryScanOptions {
+                git_ignore: false,
+                ignore_globs: Vec::new(),
+            },
+        )
+        .unwrap();
+        assert!(display_names(&included).contains(&"ignored.txt".to_string()));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn directory_scan_skips_vcs_metadata_by_default() {
+        let root = temp_dir("vcs-metadata");
+        let old_dir = root.join("old");
+        let new_dir = root.join("new");
+        write_file(&old_dir.join(".git/config"), "old\n");
+        write_file(&new_dir.join(".git/config"), "new\n");
+
+        let diff = MultiFileDiff::from_directories(&old_dir, &new_dir).unwrap();
+        assert!(!display_names(&diff).contains(&".git/config".to_string()));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     #[test]
     fn deferred_diff_upgrades_to_ready() {
