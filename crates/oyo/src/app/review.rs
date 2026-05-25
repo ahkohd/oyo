@@ -713,7 +713,7 @@ impl App {
             });
         }
 
-        overlays.sort_by(|a, b| a.display_idx.cmp(&b.display_idx));
+        overlays.sort_by_key(|overlay| overlay.display_idx);
         overlays
     }
 
