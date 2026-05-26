@@ -26,11 +26,11 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use oyo_core::{DirectoryScanOptions, LineKind, MultiFileDiff, ViewLine};
+use oyo_core::{multi::BlameSource, DirectoryScanOptions, LineKind, MultiFileDiff, ViewLine};
 use ratatui::prelude::*;
 use std::fs::OpenOptions;
 use std::io::{self, IsTerminal};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command as ProcessCommand;
 use std::time::Duration;
 
@@ -336,10 +336,23 @@ fn setup_terminal() -> Result<TuiTerminal> {
     Ok(terminal)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EditorSide {
+    Old,
+    New,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct EditorFocus {
+    side: EditorSide,
+    line: usize,
+}
+
 struct EditorTarget {
     path: PathBuf,
     line: Option<usize>,
     cwd: Option<PathBuf>,
+    refresh_after_edit: bool,
 }
 
 fn resolve_editor_command(config: &config::EditorConfig) -> String {
@@ -355,25 +368,52 @@ fn resolve_editor_command(config: &config::EditorConfig) -> String {
         .unwrap_or_else(|| "vi".to_string())
 }
 
-fn current_editor_target(app: &mut App, needs_line: bool) -> Option<EditorTarget> {
-    let (file_path, cwd) = {
-        let file = app.multi_diff.current_file()?;
-        (
-            file.path.clone(),
-            app.multi_diff.repo_root().map(Path::to_path_buf),
-        )
-    };
-    let path = cwd
-        .as_ref()
-        .map(|root| root.join(&file_path))
-        .unwrap_or(file_path);
-    let line = if needs_line {
-        current_editor_line(app)
+fn current_editor_target(app: &mut App, needs_line: bool) -> Result<Option<EditorTarget>> {
+    let focus = if needs_line {
+        current_editor_focus(app)
     } else {
         None
     };
+    let side = focus.map(|focus| focus.side).unwrap_or(EditorSide::New);
+    let line = focus.map(|focus| focus.line);
 
-    Some(EditorTarget { path, line, cwd })
+    let file_index = app.multi_diff.selected_index;
+    let file = match app.multi_diff.current_file() {
+        Some(file) => file.clone(),
+        None => return Ok(None),
+    };
+    let display_path = match side {
+        EditorSide::Old => file.old_path.clone().unwrap_or_else(|| file.path.clone()),
+        EditorSide::New => file.path.clone(),
+    };
+
+    if side == EditorSide::New {
+        if let (Some(root), Some((_, BlameSource::Worktree))) =
+            (app.multi_diff.repo_root(), app.multi_diff.blame_sources())
+        {
+            return Ok(Some(EditorTarget {
+                path: root.join(&file.path),
+                line,
+                cwd: Some(root.to_path_buf()),
+                refresh_after_edit: true,
+            }));
+        }
+    }
+
+    let Some((old_content, new_content)) = app.multi_diff.file_contents(file_index) else {
+        return Ok(None);
+    };
+    let content = match side {
+        EditorSide::Old => old_content,
+        EditorSide::New => new_content,
+    };
+    let path = write_editor_snapshot(&display_path, side, content)?;
+    Ok(Some(EditorTarget {
+        path,
+        line,
+        cwd: None,
+        refresh_after_edit: false,
+    }))
 }
 
 fn editor_needs_line(config: &config::EditorConfig) -> bool {
@@ -415,13 +455,54 @@ fn render_editor_args(
     args
 }
 
-fn current_editor_line(app: &mut App) -> Option<usize> {
+fn snapshot_rel_path(path: &Path) -> PathBuf {
+    let rel = path.components().filter_map(|component| match component {
+        Component::Normal(part) => Some(part),
+        _ => None,
+    });
+    let mut out = PathBuf::new();
+    for part in rel {
+        out.push(part);
+    }
+    if out.as_os_str().is_empty() {
+        out.push("file");
+    }
+    out
+}
+
+fn write_editor_snapshot(display_path: &Path, side: EditorSide, content: &str) -> Result<PathBuf> {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    let side_dir = match side {
+        EditorSide::Old => "old",
+        EditorSide::New => "new",
+    };
+    let mut path = std::env::temp_dir()
+        .join("oy-editor")
+        .join(format!("{}-{nanos}", std::process::id()))
+        .join(side_dir);
+    path.push(snapshot_rel_path(display_path));
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, content)?;
+    if let Ok(metadata) = std::fs::metadata(&path) {
+        let mut permissions = metadata.permissions();
+        permissions.set_readonly(true);
+        let _ = std::fs::set_permissions(&path, permissions);
+    }
+    Ok(path)
+}
+
+fn current_editor_focus(app: &mut App) -> Option<EditorFocus> {
     let frame = app.animation_frame();
     let view = app.current_view_with_frame(frame);
     if app.stepping {
-        return primary_editor_line(&view)
-            .or_else(|| active_editor_line(&view))
-            .or_else(|| visible_editor_line(app, &view));
+        return primary_editor_focus(&view)
+            .or_else(|| active_editor_focus(&view))
+            .or_else(|| visible_editor_focus(app, &view));
     }
 
     let hunk_cursor = {
@@ -429,43 +510,54 @@ fn current_editor_line(app: &mut App) -> Option<usize> {
         state.last_nav_was_hunk && state.cursor_change.is_some()
     };
     if hunk_cursor {
-        primary_editor_line(&view).or_else(|| visible_editor_line(app, &view))
+        primary_editor_focus(&view).or_else(|| visible_editor_focus(app, &view))
     } else {
-        visible_editor_line(app, &view).or_else(|| primary_editor_line(&view))
+        visible_editor_focus(app, &view).or_else(|| primary_editor_focus(&view))
     }
 }
 
-fn primary_editor_line(view: &[ViewLine]) -> Option<usize> {
+fn primary_editor_focus(view: &[ViewLine]) -> Option<EditorFocus> {
     view.iter()
         .find(|line| line.is_primary_active)
-        .and_then(editor_line_number)
+        .and_then(editor_focus_for_line)
 }
 
-fn active_editor_line(view: &[ViewLine]) -> Option<usize> {
+fn active_editor_focus(view: &[ViewLine]) -> Option<EditorFocus> {
     view.iter()
         .find(|line| line.is_active)
-        .and_then(editor_line_number)
+        .and_then(editor_focus_for_line)
 }
 
-fn editor_line_number(line: &ViewLine) -> Option<usize> {
-    line.new_line.or(line.old_line).filter(|line| *line > 0)
+fn editor_focus_for_line(line: &ViewLine) -> Option<EditorFocus> {
+    if let Some(line_number) = line.new_line.filter(|line| *line > 0) {
+        return Some(EditorFocus {
+            side: EditorSide::New,
+            line: line_number,
+        });
+    }
+    line.old_line
+        .filter(|line| *line > 0)
+        .map(|line_number| EditorFocus {
+            side: EditorSide::Old,
+            line: line_number,
+        })
 }
 
-fn visible_editor_line(app: &App, view: &[ViewLine]) -> Option<usize> {
+fn visible_editor_focus(app: &App, view: &[ViewLine]) -> Option<EditorFocus> {
     let target = app.render_scroll_offset();
     match app.view_mode {
-        ViewMode::Split => visible_split_editor_line(app, view, target),
+        ViewMode::Split => visible_split_editor_focus(app, view, target),
         ViewMode::Evolution => view
             .iter()
             .filter(|line| !matches!(line.kind, LineKind::Deleted | LineKind::PendingDelete))
             .enumerate()
             .skip_while(|(idx, _)| *idx < target)
-            .find_map(|(_, line)| editor_line_number(line)),
-        _ => view.iter().skip(target).find_map(editor_line_number),
+            .find_map(|(_, line)| editor_focus_for_line(line)),
+        _ => view.iter().skip(target).find_map(editor_focus_for_line),
     }
 }
 
-fn visible_split_editor_line(app: &App, view: &[ViewLine], target: usize) -> Option<usize> {
+fn visible_split_editor_focus(app: &App, view: &[ViewLine], target: usize) -> Option<EditorFocus> {
     let mut old_idx = 0usize;
     let mut new_idx = 0usize;
     let mut old_match = None;
@@ -480,13 +572,26 @@ fn visible_split_editor_line(app: &App, view: &[ViewLine], target: usize) -> Opt
 
         if old_present || (app.split_align_lines && new_present) {
             if old_idx >= target && old_match.is_none() {
-                old_match = editor_line_number(line);
+                old_match = line
+                    .old_line
+                    .filter(|line| *line > 0)
+                    .map(|line_number| EditorFocus {
+                        side: EditorSide::Old,
+                        line: line_number,
+                    });
             }
             old_idx += 1;
         }
         if new_present || (app.split_align_lines && old_present) {
             if new_idx >= target && new_match.is_none() {
-                new_match = editor_line_number(line);
+                new_match = line
+                    .new_line
+                    .filter(|line| *line > 0)
+                    .map(|line_number| EditorFocus {
+                        side: EditorSide::New,
+                        line: line_number,
+                    })
+                    .or_else(|| editor_focus_for_line(line));
             }
             new_idx += 1;
         }
@@ -555,7 +660,7 @@ fn open_current_file_in_editor(
     app: &mut App,
     config: &config::EditorConfig,
 ) -> Result<()> {
-    let Some(target) = current_editor_target(app, editor_needs_line(config)) else {
+    let Some(target) = current_editor_target(app, editor_needs_line(config))? else {
         return Ok(());
     };
     let command = resolve_editor_command(config);
@@ -566,7 +671,7 @@ fn open_current_file_in_editor(
     let resume_result = resume_terminal_after_child(terminal);
     resume_result?;
 
-    if editor_result.is_ok() {
+    if editor_result.is_ok() && target.refresh_after_edit {
         app.refresh_current_file();
     }
     Ok(())
