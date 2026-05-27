@@ -1,4 +1,5 @@
 use super::{AnimationPhase, App, FileDiskStamp, ViewMode};
+use oyo_core::multi::FileSide;
 use std::time::{Duration, Instant};
 
 impl App {
@@ -313,11 +314,16 @@ impl App {
             return FileDiskStamp::default();
         };
 
-        let full_path = if let Some(repo_root) = self.multi_diff.repo_root() {
-            repo_root.join(&file.path)
-        } else {
-            file.path.clone()
-        };
+        let full_path = self
+            .multi_diff
+            .source_path(idx, FileSide::New)
+            .unwrap_or_else(|| {
+                if let Some(repo_root) = self.multi_diff.repo_root() {
+                    repo_root.join(&file.path)
+                } else {
+                    file.path.clone()
+                }
+            });
 
         match std::fs::metadata(&full_path) {
             Ok(meta) => FileDiskStamp {

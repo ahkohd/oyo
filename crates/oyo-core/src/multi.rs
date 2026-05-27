@@ -24,11 +24,25 @@ pub enum MultiDiffError {
 pub struct FileEntry {
     pub path: PathBuf,
     pub old_path: Option<PathBuf>,
+    pub old_source_path: Option<PathBuf>,
+    pub new_source_path: Option<PathBuf>,
     pub display_name: String,
     pub status: FileStatus,
     pub insertions: usize,
     pub deletions: usize,
     pub binary: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileSide {
+    Old,
+    New,
+}
+
+#[derive(Debug, Clone)]
+struct SourceRoots {
+    old: PathBuf,
+    new: PathBuf,
 }
 
 /// Multi-file diff session
@@ -46,6 +60,8 @@ pub struct MultiFileDiff {
     repo_root: Option<PathBuf>,
     /// Git diff mode (if in git mode)
     git_mode: Option<GitDiffMode>,
+    /// Real file roots for non-git diffs, when known.
+    source_roots: Option<SourceRoots>,
     /// Old contents for each file
     old_contents: Vec<Arc<str>>,
     /// New contents for each file
@@ -344,6 +360,8 @@ impl MultiFileDiff {
                 display_name: change.path.display().to_string(),
                 path: change.path,
                 old_path: change.old_path,
+                old_source_path: None,
+                new_source_path: None,
                 status: change.status,
                 insertions,
                 deletions,
@@ -366,6 +384,7 @@ impl MultiFileDiff {
             navigator_is_placeholder,
             repo_root: Some(repo_root),
             git_mode: Some(GitDiffMode::Uncommitted),
+            source_roots: None,
             old_contents,
             new_contents,
             precomputed_diffs,
@@ -407,6 +426,8 @@ impl MultiFileDiff {
                 display_name: change.path.display().to_string(),
                 path: change.path,
                 old_path: change.old_path,
+                old_source_path: None,
+                new_source_path: None,
                 status: change.status,
                 insertions,
                 deletions,
@@ -429,6 +450,7 @@ impl MultiFileDiff {
             navigator_is_placeholder,
             repo_root: Some(repo_root),
             git_mode: Some(GitDiffMode::Staged),
+            source_roots: None,
             old_contents,
             new_contents,
             precomputed_diffs,
@@ -484,6 +506,8 @@ impl MultiFileDiff {
                 display_name: change.path.display().to_string(),
                 path: change.path,
                 old_path: change.old_path,
+                old_source_path: None,
+                new_source_path: None,
                 status: change.status,
                 insertions,
                 deletions,
@@ -506,6 +530,7 @@ impl MultiFileDiff {
             navigator_is_placeholder,
             repo_root: Some(repo_root),
             git_mode: Some(GitDiffMode::IndexRange { from, to_index }),
+            source_roots: None,
             old_contents,
             new_contents,
             precomputed_diffs,
@@ -549,6 +574,8 @@ impl MultiFileDiff {
                 display_name: change.path.display().to_string(),
                 path: change.path,
                 old_path: change.old_path,
+                old_source_path: None,
+                new_source_path: None,
                 status: change.status,
                 insertions,
                 deletions,
@@ -571,6 +598,7 @@ impl MultiFileDiff {
             navigator_is_placeholder,
             repo_root: Some(repo_root),
             git_mode: Some(GitDiffMode::Range { from, to }),
+            source_roots: None,
             old_contents,
             new_contents,
             precomputed_diffs,
@@ -666,6 +694,8 @@ impl MultiFileDiff {
                 display_name: rel_path.display().to_string(),
                 path: rel_path,
                 old_path: None,
+                old_source_path: None,
+                new_source_path: None,
                 status,
                 insertions,
                 deletions,
@@ -688,6 +718,10 @@ impl MultiFileDiff {
             navigator_is_placeholder,
             repo_root: None,
             git_mode: None,
+            source_roots: Some(SourceRoots {
+                old: old_dir.to_path_buf(),
+                new: new_dir.to_path_buf(),
+            }),
             old_contents,
             new_contents,
             precomputed_diffs,
@@ -702,11 +736,27 @@ impl MultiFileDiff {
         old_content: String,
         new_content: String,
     ) -> Self {
-        Self::from_file_pair_bytes(new_path, old_content.into_bytes(), new_content.into_bytes())
+        Self::from_file_pair_with_sources(
+            new_path.clone(),
+            old_content.into_bytes(),
+            new_content.into_bytes(),
+            None,
+            Some(new_path),
+        )
     }
 
     /// Create from a single file pair (bytes, with binary detection).
     pub fn from_file_pair_bytes(new_path: PathBuf, old_bytes: Vec<u8>, new_bytes: Vec<u8>) -> Self {
+        Self::from_file_pair_with_sources(new_path, old_bytes, new_bytes, None, None)
+    }
+
+    pub fn from_file_pair_with_sources(
+        new_path: PathBuf,
+        old_bytes: Vec<u8>,
+        new_bytes: Vec<u8>,
+        old_source: Option<PathBuf>,
+        new_source: Option<PathBuf>,
+    ) -> Self {
         let (old_content, old_binary) = Self::decode_bytes(old_bytes);
         let (new_content, new_binary) = Self::decode_bytes(new_bytes);
         let binary = old_binary || new_binary;
@@ -718,6 +768,8 @@ impl MultiFileDiff {
             display_name: new_path.display().to_string(),
             path: new_path,
             old_path: None,
+            old_source_path: old_source,
+            new_source_path: new_source,
             status: FileStatus::Modified,
             insertions,
             deletions,
@@ -731,6 +783,7 @@ impl MultiFileDiff {
             navigator_is_placeholder: vec![false],
             repo_root: None,
             git_mode: None,
+            source_roots: None,
             old_contents: vec![Arc::from(old_content)],
             new_contents: vec![Arc::from(new_content)],
             precomputed_diffs: vec![precomputed],
@@ -757,6 +810,8 @@ impl MultiFileDiff {
                 display_name: path.display().to_string(),
                 path,
                 old_path: None,
+                old_source_path: None,
+                new_source_path: None,
                 status: FileStatus::Modified,
                 insertions,
                 deletions,
@@ -775,6 +830,7 @@ impl MultiFileDiff {
             navigator_is_placeholder: vec![false; old_contents.len()],
             repo_root: None,
             git_mode: None,
+            source_roots: None,
             old_contents,
             new_contents,
             precomputed_diffs,
@@ -834,6 +890,54 @@ impl MultiFileDiff {
         let old = self.old_contents.get(idx)?;
         let new = self.new_contents.get(idx)?;
         Some((old.clone(), new.clone()))
+    }
+
+    pub fn set_source_roots(&mut self, old: PathBuf, new: PathBuf) {
+        self.source_roots = Some(SourceRoots { old, new });
+    }
+
+    pub fn clear_source_roots(&mut self) {
+        self.source_roots = None;
+    }
+
+    pub fn source_path(&self, idx: usize, side: FileSide) -> Option<PathBuf> {
+        let file = self.files.get(idx)?;
+        if let Some(path) = match side {
+            FileSide::Old => file.old_source_path.as_ref(),
+            FileSide::New => file.new_source_path.as_ref(),
+        } {
+            return Some(path.clone());
+        }
+
+        let rel_path = match side {
+            FileSide::Old => file.old_path.as_ref().or_else(|| {
+                if self.source_roots.is_some() || self.repo_root.is_some() {
+                    Some(&file.path)
+                } else {
+                    None
+                }
+            })?,
+            FileSide::New => &file.path,
+        };
+
+        if rel_path.is_absolute() {
+            return Some(rel_path.clone());
+        }
+
+        if let Some(roots) = &self.source_roots {
+            let root = match side {
+                FileSide::Old => &roots.old,
+                FileSide::New => &roots.new,
+            };
+            return Some(root.join(rel_path));
+        }
+
+        self.repo_root.as_ref().map(|root| root.join(rel_path))
+    }
+
+    pub fn existing_source_path(&self, idx: usize, side: FileSide) -> Option<PathBuf> {
+        let path = self.source_path(idx, side)?;
+        path.is_file().then_some(path)
     }
 
     /// Check if the current file is binary
@@ -1184,6 +1288,8 @@ impl MultiFileDiff {
                 display_name: change.path.display().to_string(),
                 path: change.path,
                 old_path: change.old_path,
+                old_source_path: None,
+                new_source_path: None,
                 status: change.status,
                 insertions,
                 deletions,
@@ -1284,13 +1390,17 @@ impl MultiFileDiff {
                     }
                 }
                 _ => {
-                    let (new_content, new_binary) = Self::read_text_or_binary(&file.path);
-                    (
-                        self.old_contents[idx].as_ref().to_string(),
-                        false,
-                        new_content,
-                        new_binary,
-                    )
+                    let old_content = self.old_contents[idx].as_ref().to_string();
+                    let (old_content, old_binary) = self
+                        .source_path(idx, FileSide::Old)
+                        .filter(|path| path.is_file())
+                        .map(|path| Self::read_text_or_binary(&path))
+                        .unwrap_or((old_content, false));
+                    let new_path = self
+                        .source_path(idx, FileSide::New)
+                        .unwrap_or_else(|| file.path.clone());
+                    let (new_content, new_binary) = Self::read_text_or_binary(&new_path);
+                    (old_content, old_binary, new_content, new_binary)
                 }
             };
 
@@ -1479,6 +1589,53 @@ mod tests {
 
         let diff = MultiFileDiff::from_directories(&old_dir, &new_dir).unwrap();
         assert!(!display_names(&diff).contains(&".git/config".to_string()));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn directory_diff_exposes_source_paths() {
+        let root = temp_dir("source-paths");
+        let old_dir = root.join("old");
+        let new_dir = root.join("new");
+        write_file(&old_dir.join("file.txt"), "old\n");
+        write_file(&new_dir.join("file.txt"), "new\n");
+
+        let diff = MultiFileDiff::from_directories(&old_dir, &new_dir).unwrap();
+        assert_eq!(
+            diff.existing_source_path(0, FileSide::Old),
+            Some(old_dir.join("file.txt"))
+        );
+        assert_eq!(
+            diff.existing_source_path(0, FileSide::New),
+            Some(new_dir.join("file.txt"))
+        );
+
+        write_file(&old_dir.join("file.txt"), "older\n");
+        let mut diff = diff;
+        diff.refresh_current_file();
+        assert_eq!(diff.file_contents(0).map(|(old, _)| old), Some("older\n"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn file_pair_exposes_explicit_source_path() {
+        let root = temp_dir("file-pair-source");
+        let old_path = root.join("old.txt");
+        let new_path = root.join("new.txt");
+        write_file(&old_path, "old\n");
+        write_file(&new_path, "new\n");
+
+        let diff = MultiFileDiff::from_file_pair_with_sources(
+            PathBuf::from("display.txt"),
+            b"old\n".to_vec(),
+            b"new\n".to_vec(),
+            Some(old_path.clone()),
+            Some(new_path.clone()),
+        );
+        assert_eq!(diff.existing_source_path(0, FileSide::Old), Some(old_path));
+        assert_eq!(diff.existing_source_path(0, FileSide::New), Some(new_path));
 
         let _ = std::fs::remove_dir_all(root);
     }

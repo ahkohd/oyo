@@ -26,7 +26,7 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use oyo_core::{multi::BlameSource, DirectoryScanOptions, LineKind, MultiFileDiff, ViewLine};
+use oyo_core::{multi::FileSide, DirectoryScanOptions, LineKind, MultiFileDiff, ViewLine};
 use ratatui::prelude::*;
 use std::fs::OpenOptions;
 use std::io::{self, IsTerminal};
@@ -293,6 +293,50 @@ fn looks_like_jj_external_diff_dirs(old_path: &Path, new_path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+fn is_jj_diff_dir(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.starts_with("jj-diff-"))
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "linux")]
+fn parent_pid(pid: u32) -> Option<u32> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let (_, after_name) = stat.rsplit_once(") ")?;
+    let mut fields = after_name.split_whitespace();
+    fields.next()?;
+    fields.next()?.parse().ok()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn parent_pid(_pid: u32) -> Option<u32> {
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn process_cwd(pid: u32) -> Option<PathBuf> {
+    std::fs::read_link(format!("/proc/{pid}/cwd")).ok()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn process_cwd(_pid: u32) -> Option<PathBuf> {
+    None
+}
+
+fn infer_external_diff_workspace_root() -> Option<PathBuf> {
+    let mut pid = parent_pid(std::process::id())?;
+    for _ in 0..8 {
+        if let Some(cwd) = process_cwd(pid) {
+            if cwd.is_dir() && !is_jj_diff_dir(&cwd) {
+                return Some(cwd);
+            }
+        }
+        pid = parent_pid(pid)?;
+    }
+    None
+}
+
 fn directory_scan_options(
     config: &config::Config,
     args: &Args,
@@ -387,17 +431,17 @@ fn current_editor_target(app: &mut App, needs_line: bool) -> Result<Option<Edito
         EditorSide::New => file.path.clone(),
     };
 
-    if side == EditorSide::New {
-        if let (Some(root), Some((_, BlameSource::Worktree))) =
-            (app.multi_diff.repo_root(), app.multi_diff.blame_sources())
-        {
-            return Ok(Some(EditorTarget {
-                path: root.join(&file.path),
-                line,
-                cwd: Some(root.to_path_buf()),
-                refresh_after_edit: true,
-            }));
-        }
+    let file_side = match side {
+        EditorSide::Old => FileSide::Old,
+        EditorSide::New => FileSide::New,
+    };
+    if let Some(path) = app.multi_diff.existing_source_path(file_index, file_side) {
+        return Ok(Some(EditorTarget {
+            path,
+            line,
+            cwd: app.multi_diff.repo_root().map(Path::to_path_buf),
+            refresh_after_edit: true,
+        }));
     }
 
     let Some((old_content, new_content)) = app.multi_diff.file_contents(file_index) else {
@@ -806,15 +850,31 @@ fn build_diff_from_input_mode(
                 oyo_core::git::get_current_branch(&std::env::current_dir().unwrap_or_default())
                     .ok();
 
-            let diff =
-                MultiFileDiff::from_file_pair_bytes(display_path.clone(), old_bytes, new_bytes);
+            let cwd = std::env::current_dir().unwrap_or_default();
+            let new_source = cwd.join(display_path);
+            let diff = MultiFileDiff::from_file_pair_with_sources(
+                display_path.clone(),
+                old_bytes,
+                new_bytes,
+                None,
+                Some(new_source),
+            );
             (diff, branch)
         }
         InputMode::TwoPaths { old_path, new_path } => {
             let diff = if old_path.is_dir() && new_path.is_dir() {
                 let scan_options = directory_scan_options(config, args, old_path, new_path);
-                MultiFileDiff::from_directories_with_options(old_path, new_path, &scan_options)
-                    .context("Failed to create diff from directories")?
+                let mut diff =
+                    MultiFileDiff::from_directories_with_options(old_path, new_path, &scan_options)
+                        .context("Failed to create diff from directories")?;
+                if looks_like_jj_external_diff_dirs(old_path, new_path) {
+                    if let Some(root) = infer_external_diff_workspace_root() {
+                        diff.set_source_roots(root.clone(), root);
+                    } else {
+                        diff.clear_source_roots();
+                    }
+                }
+                diff
             } else {
                 let old_bytes = if old_path.to_string_lossy() == "/dev/null" {
                     Vec::new()
@@ -829,7 +889,17 @@ fn build_diff_from_input_mode(
                         .context(format!("Failed to read: {}", new_path.display()))?
                 };
 
-                MultiFileDiff::from_file_pair_bytes(new_path.clone(), old_bytes, new_bytes)
+                let old_source =
+                    (old_path.to_string_lossy() != "/dev/null").then(|| old_path.clone());
+                let new_source =
+                    (new_path.to_string_lossy() != "/dev/null").then(|| new_path.clone());
+                MultiFileDiff::from_file_pair_with_sources(
+                    new_path.clone(),
+                    old_bytes,
+                    new_bytes,
+                    old_source,
+                    new_source,
+                )
             };
             (diff, None)
         }
@@ -880,8 +950,13 @@ fn build_diff_from_input_mode(
                 Vec::new()
             };
 
-            let diff =
-                MultiFileDiff::from_file_pair_bytes(rel_path.to_path_buf(), old_bytes, new_bytes);
+            let diff = MultiFileDiff::from_file_pair_with_sources(
+                rel_path.to_path_buf(),
+                old_bytes,
+                new_bytes,
+                None,
+                Some(abs_path),
+            );
             let branch = oyo_core::git::get_current_branch(&repo_root).ok();
             (diff, branch)
         }
