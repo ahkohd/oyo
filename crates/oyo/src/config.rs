@@ -59,12 +59,17 @@
 //! # command = "nvim"
 //! # args = ["+{line}", "{file}"]
 //! open_at_line = true
+//!
+//! [keybindings.normal]
+//! step_down = ["j", "down"]
+//! step_up = ["k", "up"]
+//! goto_start = ["g g", "home"]
 //! ```
 
 use crate::color::{self, AnimationGradient};
 use ratatui::style::Color;
 use serde::{de, Deserialize};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -1370,6 +1375,60 @@ pub struct CommentsConfig {
     pub mentions: MentionConfig,
 }
 
+/// User keybinding overrides grouped by keybinding mode.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct KeybindingsConfig {
+    pub modes: BTreeMap<String, BTreeMap<String, Vec<String>>>,
+}
+
+impl<'de> Deserialize<'de> for KeybindingsConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = toml::Value::deserialize(deserializer)?;
+        let Some(table) = value.as_table() else {
+            eprintln!("Warning: Ignoring [keybindings]: expected a table");
+            return Ok(Self::default());
+        };
+        let mut modes = BTreeMap::new();
+        for (mode, mode_value) in table {
+            let Some(mode_table) = mode_value.as_table() else {
+                eprintln!("Warning: Ignoring [keybindings.{}]: expected a table", mode);
+                continue;
+            };
+            let mut actions = BTreeMap::new();
+            for (action, action_value) in mode_table {
+                let Some(keys) = action_value.as_array() else {
+                    eprintln!(
+                        "Warning: Ignoring keybinding '{}.{}': expected an array of strings",
+                        mode, action
+                    );
+                    continue;
+                };
+                let mut parsed_keys = Vec::new();
+                let mut valid = true;
+                for key in keys {
+                    let Some(key) = key.as_str() else {
+                        eprintln!(
+                            "Warning: Ignoring keybinding '{}.{}': expected an array of strings",
+                            mode, action
+                        );
+                        valid = false;
+                        break;
+                    };
+                    parsed_keys.push(key.to_string());
+                }
+                if valid {
+                    actions.insert(action.clone(), parsed_keys);
+                }
+            }
+            modes.insert(mode.clone(), actions);
+        }
+        Ok(Self { modes })
+    }
+}
+
 /// Root configuration
 #[derive(Debug, Deserialize, Default)]
 #[serde(default)]
@@ -1381,6 +1440,7 @@ pub struct Config {
     pub no_step: NoStepConfig,
     pub comments: CommentsConfig,
     pub editor: EditorConfig,
+    pub keybindings: KeybindingsConfig,
 }
 
 impl Config {

@@ -5,6 +5,7 @@ mod blame;
 mod color;
 mod config;
 mod dashboard;
+mod keybindings;
 mod syntax;
 #[cfg(test)]
 mod test_utils;

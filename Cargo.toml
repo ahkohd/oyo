@@ -25,6 +25,7 @@ ignore = "0.4"
 # TUI
 ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
 crossterm = "0.29"
+keymap = { version = "1.0.0-rc.6", features = ["crossterm"] }
 tui-textarea = "0.7"
 
 # Async

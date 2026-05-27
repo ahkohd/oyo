@@ -21,6 +21,7 @@ serde_json = { workspace = true }
 anyhow = { workspace = true }
 ratatui = { workspace = true }
 crossterm = { workspace = true, features = ["use-dev-tty"] }
+keymap = { workspace = true, features = ["crossterm"] }
 clap = { workspace = true }
 flate2 = { workspace = true }
 tokio = { workspace = true }
