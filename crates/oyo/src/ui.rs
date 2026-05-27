@@ -2,6 +2,7 @@
 
 use crate::app::{App, ViewMode, DIFF_VIEW_MIN_WIDTH, FILE_PANEL_MIN_WIDTH};
 use crate::color;
+use crate::keybindings::{HelpAction, NormalAction, ReviewEditorAction};
 use crate::views::{render_blame, render_evolution, render_split, render_unified_pane};
 use oyo_core::{multi::DiffStatus, FileStatus};
 use ratatui::{
@@ -70,6 +71,18 @@ fn truncate_filename_keep_ext(name: &str, max_width: usize) -> String {
 
 fn text_width(text: &str) -> usize {
     UnicodeWidthStr::width(text)
+}
+
+fn paired<A>(keys: &impl Fn(A) -> String, first: A, second: A) -> String {
+    format!("{} / {}", keys(first), keys(second))
+}
+
+fn counted_binding_label(binding: &str) -> String {
+    binding
+        .split(" / ")
+        .map(|key| format!("<count>{key}"))
+        .collect::<Vec<_>>()
+        .join(" / ")
 }
 
 fn spans_width(spans: &[Span]) -> usize {
@@ -1227,7 +1240,11 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
         } else if has_query {
             app.file_filter.clone()
         } else {
-            "\"/\" Filter".to_string()
+            format!(
+                "{} Filter",
+                app.keybindings
+                    .normal_keys(NormalAction::OpenSearchOrFileFilter)
+            )
         };
         let filter_style = if app.file_filter_active {
             Style::default().fg(app.theme.text)
@@ -1497,7 +1514,12 @@ fn draw_review_editor_overlay(frame: &mut Frame, app: &mut App) {
                 .add_modifier(Modifier::BOLD),
         ))
         .title_bottom(Span::styled(
-            " Ctrl+Enter save • Esc cancel • @ mention ",
+            format!(
+                " {} save • {} cancel • @ mention ",
+                app.keybindings.review_editor_keys(ReviewEditorAction::Save),
+                app.keybindings
+                    .review_editor_keys(ReviewEditorAction::Cancel)
+            ),
             Style::default().fg(app.theme.text_muted),
         ))
         .borders(Borders::ALL)
@@ -1744,45 +1766,83 @@ fn draw_help_popover(frame: &mut Frame, app: &mut App) {
     let dim_style = Style::default().fg(app.theme.text_muted);
     let section_style = Style::default().fg(app.theme.primary);
 
+    let normal = |action| app.keybindings.normal_keys(action);
+    let help = |action| app.keybindings.help_keys(action);
     let mut help_keys = vec![
-        "j / k / ↑↓",
-        "h / l / ←→",
-        "b / e",
-        "p / P",
-        "y / Y",
-        "/",
-        "n / N",
-        "c / C",
-        "m / M",
-        "x / X",
-        "Ctrl+x",
-        ":<line>",
-        ":h<num>",
-        ":s<num>",
-        "< / >",
-        "gg / G",
-        "J / K",
-        "H / L",
-        "0 / $",
-        "^U / ^D",
-        "^G",
-        "o / Ctrl+e",
-        "z",
-        "w",
-        "t",
-        "s",
-        "S",
-        "Space / B",
-        "+ / -",
-        "a",
-        "Tab",
-        "Z",
-        "r",
-        "Ctrl+P",
-        "Ctrl+Shift+P",
+        paired(&normal, NormalAction::StepDown, NormalAction::StepUp),
+        paired(&normal, NormalAction::PrevHunk, NormalAction::NextHunk),
+        paired(&normal, NormalAction::HunkStart, NormalAction::HunkEnd),
+        paired(
+            &normal,
+            NormalAction::TogglePeekChange,
+            NormalAction::TogglePeekHunk,
+        ),
+        paired(&normal, NormalAction::YankChange, NormalAction::YankHunk),
+        normal(NormalAction::OpenSearchOrFileFilter),
+        paired(&normal, NormalAction::SearchNext, NormalAction::SearchPrev),
+        paired(
+            &normal,
+            NormalAction::NextConflict,
+            NormalAction::PrevConflict,
+        ),
+        paired(
+            &normal,
+            NormalAction::LineComment,
+            NormalAction::HunkComment,
+        ),
+        paired(
+            &normal,
+            NormalAction::RemoveLineComment,
+            NormalAction::RemoveHunkComment,
+        ),
+        normal(NormalAction::ClearComments),
+        ":<line>".to_string(),
+        ":h<num>".to_string(),
+        ":s<num>".to_string(),
+        paired(&normal, NormalAction::FirstStep, NormalAction::LastStep),
+        paired(&normal, NormalAction::GotoStart, NormalAction::GotoEnd),
+        paired(&normal, NormalAction::ScrollDown, NormalAction::ScrollUp),
+        paired(&normal, NormalAction::ScrollLeft, NormalAction::ScrollRight),
+        paired(&normal, NormalAction::LineStart, NormalAction::LineEnd),
+        paired(
+            &normal,
+            NormalAction::HalfPageUp,
+            NormalAction::HalfPageDown,
+        ),
+        normal(NormalAction::TogglePathPopup),
+        normal(NormalAction::OpenEditor),
+        normal(NormalAction::CenterActive),
+        normal(NormalAction::ToggleLineWrap),
+        normal(NormalAction::ToggleSyntax),
+        normal(NormalAction::ToggleStepping),
+        normal(NormalAction::ToggleStrikethrough),
+        paired(
+            &normal,
+            NormalAction::ToggleAutoplay,
+            NormalAction::ToggleAutoplayReverse,
+        ),
+        paired(
+            &normal,
+            NormalAction::IncreaseSpeed,
+            NormalAction::DecreaseSpeed,
+        ),
+        normal(NormalAction::ToggleAnimation),
+        normal(NormalAction::ToggleViewMode),
+        normal(NormalAction::ToggleZen),
+        normal(NormalAction::ReplayStep),
+        normal(NormalAction::OpenCommandPalette),
+        normal(NormalAction::OpenFileSearch),
+        help(HelpAction::Close),
+        normal(NormalAction::Quit),
     ];
     if app.is_multi_file() {
-        help_keys.extend_from_slice(&["[ / ]", "f", "Enter", "j / k / ↑↓", "/", "r"]);
+        help_keys.extend([
+            paired(&normal, NormalAction::PrevFile, NormalAction::NextFile),
+            normal(NormalAction::ToggleFilePanel),
+            normal(NormalAction::ToggleFileListFocus),
+            paired(&normal, NormalAction::StepDown, NormalAction::StepUp),
+            normal(NormalAction::OpenSearchOrFileFilter),
+        ]);
     }
 
     let content_width = popup_width.saturating_sub(2) as usize;
@@ -1914,78 +1974,274 @@ fn draw_help_popover(frame: &mut Frame, app: &mut App) {
     };
 
     let mut lines = vec![Line::from(Span::styled(" Navigation", section_style))];
-    push_help_line(&mut lines, "j / k / ↑↓", "Step forward/back");
-    push_help_line(&mut lines, "h / l / ←→", "Prev/next hunk");
-    push_help_line(&mut lines, "b / e", "Hunk begin/end");
-    push_help_line(&mut lines, "g b", "Blame (step)");
-    push_help_line(&mut lines, "p", "Peek change");
-    push_help_line(&mut lines, "P", "Peek old hunk");
-    push_help_line(&mut lines, "y / Y", "Yank line/hunk");
-    push_help_line(&mut lines, "g y / g Y", "Copy patch (line/hunk)");
-    push_help_line(&mut lines, "/", "Search (diff pane)");
-    push_help_line(&mut lines, "n / N", "Next/prev match");
-    push_help_line(&mut lines, "c / C", "Next/prev conflict");
-    push_help_line(&mut lines, "m / M", "Add/update line/hunk comment");
-    push_help_line(&mut lines, "x / X", "Remove line/hunk comment");
-    push_help_line(&mut lines, "Ctrl+x", "Clear all comments");
+    push_help_line(
+        &mut lines,
+        &paired(&normal, NormalAction::StepDown, NormalAction::StepUp),
+        "Step forward/back",
+    );
+    push_help_line(
+        &mut lines,
+        &paired(&normal, NormalAction::PrevHunk, NormalAction::NextHunk),
+        "Prev/next hunk",
+    );
+    push_help_line(
+        &mut lines,
+        &paired(&normal, NormalAction::HunkStart, NormalAction::HunkEnd),
+        "Hunk begin/end",
+    );
+    push_help_line(&mut lines, &normal(NormalAction::BlameHint), "Blame (step)");
+    push_help_line(
+        &mut lines,
+        &normal(NormalAction::TogglePeekChange),
+        "Peek change",
+    );
+    push_help_line(
+        &mut lines,
+        &normal(NormalAction::TogglePeekHunk),
+        "Peek old hunk",
+    );
+    push_help_line(
+        &mut lines,
+        &paired(&normal, NormalAction::YankChange, NormalAction::YankHunk),
+        "Yank line/hunk",
+    );
+    push_help_line(
+        &mut lines,
+        &paired(
+            &normal,
+            NormalAction::YankChangePatch,
+            NormalAction::YankHunkPatch,
+        ),
+        "Copy patch (line/hunk)",
+    );
+    push_help_line(
+        &mut lines,
+        &normal(NormalAction::OpenSearchOrFileFilter),
+        "Search (diff pane)",
+    );
+    push_help_line(
+        &mut lines,
+        &paired(&normal, NormalAction::SearchNext, NormalAction::SearchPrev),
+        "Next/prev match",
+    );
+    push_help_line(
+        &mut lines,
+        &paired(
+            &normal,
+            NormalAction::NextConflict,
+            NormalAction::PrevConflict,
+        ),
+        "Next/prev conflict",
+    );
+    push_help_line(
+        &mut lines,
+        &paired(
+            &normal,
+            NormalAction::LineComment,
+            NormalAction::HunkComment,
+        ),
+        "Add/update line/hunk comment",
+    );
+    push_help_line(
+        &mut lines,
+        &paired(
+            &normal,
+            NormalAction::RemoveLineComment,
+            NormalAction::RemoveHunkComment,
+        ),
+        "Remove line/hunk comment",
+    );
+    push_help_line(
+        &mut lines,
+        &normal(NormalAction::ClearComments),
+        "Clear all comments",
+    );
     push_help_line(&mut lines, ":<line>", "Go to line");
     push_help_line(&mut lines, ":h<num>", "Go to hunk");
     push_help_line(&mut lines, ":s<num>", "Go to step");
-    push_help_line(&mut lines, "< / >", "First/last step (or hunk in no-step)");
-    push_help_line(&mut lines, "gg / G", "Go to start/end");
-    push_help_line(&mut lines, "J / K", "Scroll up/down");
-    push_help_line(&mut lines, "H / L", "Scroll left/right");
-    push_help_line(&mut lines, "0 / $", "Scroll to line start/end");
-    push_help_line(&mut lines, "^U / ^D", "Scroll half-page");
-    push_help_line(&mut lines, "^G", "Show full file path");
-    push_help_line(&mut lines, "o / Ctrl+e", "Open file in editor");
-    push_help_line(&mut lines, "z", "Center on active");
-    push_help_line(&mut lines, "w", "Toggle line wrap");
-    push_help_line(&mut lines, "f", "Toggle context folding");
-    push_help_line(&mut lines, "t", "Toggle syntax highlight");
-    if app.view_mode == ViewMode::Evolution {
-        push_help_line(&mut lines, "E", "Toggle evo syntax (context/full)");
-    }
-    push_help_line(&mut lines, "s", "Toggle stepping");
-    push_help_line(&mut lines, "S", "Toggle strikethrough");
-    push_help_line(&mut lines, "Ctrl+P", "Command palette");
-    push_help_line(&mut lines, "Ctrl+Shift+P", "Quick file search");
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(" Playback", section_style)));
-    push_help_line(&mut lines, "Space / B", "Autoplay forward/reverse");
-    push_help_line(&mut lines, "r", "Replay last step");
-    push_help_line(&mut lines, "nr", "Replay last n steps");
     push_help_line(
         &mut lines,
-        "+ / -",
+        &paired(&normal, NormalAction::FirstStep, NormalAction::LastStep),
+        "First/last step (or hunk in no-step)",
+    );
+    push_help_line(
+        &mut lines,
+        &paired(&normal, NormalAction::GotoStart, NormalAction::GotoEnd),
+        "Go to start/end",
+    );
+    push_help_line(
+        &mut lines,
+        &paired(&normal, NormalAction::ScrollDown, NormalAction::ScrollUp),
+        "Scroll up/down",
+    );
+    push_help_line(
+        &mut lines,
+        &paired(&normal, NormalAction::ScrollLeft, NormalAction::ScrollRight),
+        "Scroll left/right",
+    );
+    push_help_line(
+        &mut lines,
+        &paired(&normal, NormalAction::LineStart, NormalAction::LineEnd),
+        "Scroll to line start/end",
+    );
+    push_help_line(
+        &mut lines,
+        &paired(
+            &normal,
+            NormalAction::HalfPageUp,
+            NormalAction::HalfPageDown,
+        ),
+        "Scroll half-page",
+    );
+    push_help_line(
+        &mut lines,
+        &normal(NormalAction::TogglePathPopup),
+        "Show full file path",
+    );
+    push_help_line(
+        &mut lines,
+        &normal(NormalAction::OpenEditor),
+        "Open file in editor",
+    );
+    push_help_line(
+        &mut lines,
+        &normal(NormalAction::CenterActive),
+        "Center on active",
+    );
+    push_help_line(
+        &mut lines,
+        &normal(NormalAction::ToggleLineWrap),
+        "Toggle line wrap",
+    );
+    push_help_line(
+        &mut lines,
+        &normal(NormalAction::ToggleFoldContext),
+        "Toggle context folding",
+    );
+    push_help_line(
+        &mut lines,
+        &normal(NormalAction::ToggleSyntax),
+        "Toggle syntax highlight",
+    );
+    if app.view_mode == ViewMode::Evolution {
+        push_help_line(
+            &mut lines,
+            &normal(NormalAction::ToggleEvoSyntax),
+            "Toggle evo syntax (context/full)",
+        );
+    }
+    push_help_line(
+        &mut lines,
+        &normal(NormalAction::ToggleStepping),
+        "Toggle stepping",
+    );
+    push_help_line(
+        &mut lines,
+        &normal(NormalAction::ToggleStrikethrough),
+        "Toggle strikethrough",
+    );
+    push_help_line(
+        &mut lines,
+        &normal(NormalAction::OpenCommandPalette),
+        "Command palette",
+    );
+    push_help_line(
+        &mut lines,
+        &normal(NormalAction::OpenFileSearch),
+        "Quick file search",
+    );
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(" Playback", section_style)));
+    push_help_line(
+        &mut lines,
+        &paired(
+            &normal,
+            NormalAction::ToggleAutoplay,
+            NormalAction::ToggleAutoplayReverse,
+        ),
+        "Autoplay forward/reverse",
+    );
+    push_help_line(
+        &mut lines,
+        &normal(NormalAction::ReplayStep),
+        "Replay last step",
+    );
+    push_help_line(
+        &mut lines,
+        &counted_binding_label(&normal(NormalAction::ReplayStep)),
+        "Replay last n steps",
+    );
+    push_help_line(
+        &mut lines,
+        &paired(
+            &normal,
+            NormalAction::IncreaseSpeed,
+            NormalAction::DecreaseSpeed,
+        ),
         &format!("Speed ({}ms)", app.animation_speed),
     );
-    push_help_line(&mut lines, "a", "Toggle animation");
+    push_help_line(
+        &mut lines,
+        &normal(NormalAction::ToggleAnimation),
+        "Toggle animation",
+    );
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(" View", section_style)));
-    push_help_line(&mut lines, "Tab", "Cycle view mode");
-    push_help_line(&mut lines, "Shift-Tab", "Cycle view mode (reverse)");
-    push_help_line(&mut lines, "Z", "Zen mode");
-    push_help_line(&mut lines, "R", "Refresh all files");
+    push_help_line(
+        &mut lines,
+        &normal(NormalAction::ToggleViewMode),
+        "Cycle view mode",
+    );
+    push_help_line(
+        &mut lines,
+        &normal(NormalAction::ToggleViewModeReverse),
+        "Cycle view mode (reverse)",
+    );
+    push_help_line(&mut lines, &normal(NormalAction::ToggleZen), "Zen mode");
+    push_help_line(
+        &mut lines,
+        &normal(NormalAction::Refresh),
+        "Refresh all files",
+    );
 
     if app.is_multi_file() {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(" Files", section_style)));
-        push_help_line(&mut lines, "[ / ]", "Prev/next file");
-        push_help_line(&mut lines, "Ctrl+F", "Toggle file panel");
-        push_help_line(&mut lines, "Enter", "Focus file list");
-        push_help_line(&mut lines, "j / k / ↑↓", "Move selection (focused)");
-        push_help_line(&mut lines, "/", "Filter files (when focused)");
+        push_help_line(
+            &mut lines,
+            &paired(&normal, NormalAction::PrevFile, NormalAction::NextFile),
+            "Prev/next file",
+        );
+        push_help_line(
+            &mut lines,
+            &normal(NormalAction::ToggleFilePanel),
+            "Toggle file panel",
+        );
+        push_help_line(
+            &mut lines,
+            &normal(NormalAction::ToggleFileListFocus),
+            "Focus file list",
+        );
+        push_help_line(
+            &mut lines,
+            &paired(&normal, NormalAction::StepDown, NormalAction::StepUp),
+            "Move selection (focused)",
+        );
+        push_help_line(
+            &mut lines,
+            &normal(NormalAction::OpenSearchOrFileFilter),
+            "Filter files (when focused)",
+        );
     }
 
     lines.push(Line::from(""));
     lines.push(Line::from(vec![
-        Span::styled(format!("  {:<12}", "?"), key_style),
+        Span::styled(format!("  {:<12}", help(HelpAction::Close)), key_style),
         Span::styled("Close help", dim_style),
     ]));
     let quit_label = "Quit (prints comments if any)";
     lines.push(Line::from(vec![
-        Span::styled(format!("  {:<12}", "q / Esc"), key_style),
+        Span::styled(format!("  {:<12}", normal(NormalAction::Quit)), key_style),
         Span::styled(quit_label, label_style),
     ]));
 
@@ -2302,4 +2558,19 @@ fn draw_file_search_popover(frame: &mut Frame, app: &mut App) {
     }
     let list = List::new(items).highlight_style(highlight_style);
     frame.render_stateful_widget(list, chunks[1], &mut state);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::counted_binding_label;
+
+    #[test]
+    fn counted_binding_label_uses_current_binding() {
+        assert_eq!(counted_binding_label("r"), "<count>r");
+        assert_eq!(counted_binding_label("g r"), "<count>g r");
+        assert_eq!(
+            counted_binding_label("r / ctrl-r"),
+            "<count>r / <count>ctrl-r"
+        );
+    }
 }
