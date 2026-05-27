@@ -6,6 +6,7 @@ use crate::config::{
     FileCountMode, FoldContextMode, HunkWrapMode, MentionFileScope, MentionFinder,
     ModifiedStepMode, ResolvedTheme, StepWrapMode, SyntaxMode,
 };
+use crate::keybindings::Keybindings;
 use crate::syntax::{SyntaxCache, SyntaxEngine};
 use crate::time_format::TimeFormatter;
 use oyo_core::{
@@ -81,6 +82,8 @@ pub struct App {
     files_visited: Vec<bool>,
     /// Whether to quit
     pub should_quit: bool,
+    /// Runtime keyboard bindings and sequence state
+    pub(crate) keybindings: Keybindings,
     /// Whether to open the commit picker dashboard
     pub open_dashboard: bool,
     /// Current animation phase
@@ -141,8 +144,6 @@ pub struct App {
     pub animation_duration: u64,
     /// Pending count for vim-style commands (e.g., 10j = scroll down 10 lines)
     pub pending_count: Option<usize>,
-    /// Pending "g" prefix for vim-style commands (e.g., gg)
-    pub pending_g_prefix: bool,
     /// True when at least one tracked file changed on disk since refresh
     pub files_changed_on_disk: bool,
     /// Last time we checked file mtimes
@@ -515,6 +516,7 @@ impl App {
             no_step_visited: vec![false; file_count],
             files_visited: vec![false; file_count],
             should_quit: false,
+            keybindings: Keybindings::default(),
             open_dashboard: false,
             animation_phase: AnimationPhase::Idle,
             animation_progress: 1.0,
@@ -545,7 +547,6 @@ impl App {
             topbar: true,
             animation_duration: 150,
             pending_count: None,
-            pending_g_prefix: false,
             files_changed_on_disk: false,
             last_fs_check: Instant::now(),
             file_disk_baseline: vec![FileDiskStamp::default(); file_count],

@@ -5,6 +5,7 @@ mod blame;
 mod color;
 mod config;
 mod dashboard;
+mod input;
 mod keybindings;
 mod syntax;
 #[cfg(test)]
@@ -14,6 +15,8 @@ mod ui;
 mod views;
 
 use crate::dashboard::{Dashboard, DashboardConfig, DashboardSelection};
+use crate::input::handle_app_key;
+use crate::keybindings::{DashboardAction, DashboardFilterAction, Dispatch, Keybindings};
 use crate::syntax::{list_syntax_themes, SyntaxEngine};
 use crate::time_format::TimeFormatter;
 use anyhow::{anyhow, Context, Result};
@@ -723,6 +726,13 @@ fn open_current_file_in_editor(
 }
 
 fn apply_config_to_app(app: &mut App, config: &config::Config, args: &Args, light_mode: bool) {
+    let mut keybinding_warnings = Vec::new();
+    app.keybindings =
+        Keybindings::from_config_with_warnings(&config.keybindings, &mut keybinding_warnings);
+    for warning in keybinding_warnings {
+        eprintln!("Warning: {warning}");
+    }
+
     app.zen_mode = config.ui.zen;
     app.animation_enabled = config.playback.animation;
     app.animation_duration = config.playback.animation_duration;
@@ -1475,734 +1485,7 @@ fn run_app(
                 Event::Key(key)
                     if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
                 {
-                    if app.show_help {
-                        match key.code {
-                            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?') => {
-                                app.toggle_help();
-                            }
-                            KeyCode::Down | KeyCode::Char('j') => {
-                                app.help_scroll_down();
-                            }
-                            KeyCode::Up | KeyCode::Char('k') => {
-                                app.help_scroll_up();
-                            }
-                            _ => {}
-                        }
-                        continue;
-                    }
-
-                    if app.review_editor_active() {
-                        match key.code {
-                            KeyCode::Esc if !app.review_cancel_mention_picker() => {
-                                app.review_cancel_editor();
-                            }
-                            KeyCode::Enter if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                                app.review_save_editor();
-                            }
-                            KeyCode::Enter if !app.review_accept_mention() => {
-                                app.review_insert_newline();
-                            }
-                            KeyCode::Tab => {
-                                let _ = app.review_accept_mention();
-                            }
-                            KeyCode::Backspace => app.review_backspace(),
-                            KeyCode::Delete => app.review_delete(),
-                            KeyCode::Left => app.review_move_left(),
-                            KeyCode::Right => app.review_move_right(),
-                            KeyCode::Up => {
-                                if app.review_mention_picker_active() {
-                                    app.review_mention_move_selection(-1);
-                                } else {
-                                    app.review_move_up();
-                                }
-                            }
-                            KeyCode::Down => {
-                                if app.review_mention_picker_active() {
-                                    app.review_mention_move_selection(1);
-                                } else {
-                                    app.review_move_down();
-                                }
-                            }
-                            KeyCode::Home => app.review_move_home(),
-                            KeyCode::End => app.review_move_end(),
-                            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                                app.review_clear_editor_text();
-                            }
-                            KeyCode::Char('n')
-                                if key.modifiers.contains(KeyModifiers::CONTROL)
-                                    && app.review_mention_picker_active() =>
-                            {
-                                app.review_mention_move_selection(1);
-                            }
-                            KeyCode::Char('p')
-                                if key.modifiers.contains(KeyModifiers::CONTROL)
-                                    && app.review_mention_picker_active() =>
-                            {
-                                app.review_mention_move_selection(-1);
-                            }
-                            KeyCode::Char(c)
-                                if !key.modifiers.contains(KeyModifiers::CONTROL)
-                                    && !key.modifiers.contains(KeyModifiers::ALT) =>
-                            {
-                                app.review_insert_char(c);
-                            }
-                            _ => {}
-                        }
-                        continue;
-                    }
-
-                    let is_ctrl_p = key.modifiers.contains(KeyModifiers::CONTROL)
-                        && matches!(key.code, KeyCode::Char('p') | KeyCode::Char('P'));
-                    let is_ctrl_shift_p = key.modifiers.contains(KeyModifiers::CONTROL)
-                        && key.modifiers.contains(KeyModifiers::SHIFT)
-                        && matches!(key.code, KeyCode::Char('p') | KeyCode::Char('P'));
-
-                    if is_ctrl_shift_p {
-                        if app.file_search_active() {
-                            app.stop_file_search();
-                        } else {
-                            app.start_file_search();
-                        }
-                        continue;
-                    }
-
-                    if is_ctrl_p {
-                        if app.command_palette_active() {
-                            app.stop_command_palette();
-                        } else {
-                            app.start_command_palette();
-                        }
-                        continue;
-                    }
-
-                    if app.command_palette_active() {
-                        match key.code {
-                            KeyCode::Esc => {
-                                app.stop_command_palette();
-                            }
-                            KeyCode::Enter => {
-                                app.apply_command_palette_selection();
-                            }
-                            KeyCode::Backspace => {
-                                if app.command_palette_query().is_empty() {
-                                    app.stop_command_palette();
-                                } else {
-                                    app.pop_command_palette_char();
-                                }
-                            }
-                            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                                app.clear_command_palette_text();
-                            }
-                            KeyCode::Down => {
-                                app.move_command_palette_selection(1);
-                            }
-                            KeyCode::Up => {
-                                app.move_command_palette_selection(-1);
-                            }
-                            KeyCode::Char(c)
-                                if !key.modifiers.contains(KeyModifiers::CONTROL)
-                                    && !key.modifiers.contains(KeyModifiers::ALT) =>
-                            {
-                                app.push_command_palette_char(c);
-                            }
-                            _ => {}
-                        }
-                        continue;
-                    }
-
-                    if app.file_search_active() {
-                        match key.code {
-                            KeyCode::Esc => {
-                                app.stop_file_search();
-                            }
-                            KeyCode::Enter => {
-                                app.apply_file_search_selection();
-                            }
-                            KeyCode::Backspace => {
-                                if app.file_search_query().is_empty() {
-                                    app.stop_file_search();
-                                } else {
-                                    app.pop_file_search_char();
-                                }
-                            }
-                            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                                app.clear_file_search_text();
-                            }
-                            KeyCode::Down => {
-                                app.move_file_search_selection(1);
-                            }
-                            KeyCode::Up => {
-                                app.move_file_search_selection(-1);
-                            }
-                            KeyCode::Char(c)
-                                if !key.modifiers.contains(KeyModifiers::CONTROL)
-                                    && !key.modifiers.contains(KeyModifiers::ALT) =>
-                            {
-                                app.push_file_search_char(c);
-                            }
-                            _ => {}
-                        }
-                        continue;
-                    }
-
-                    if app.file_filter_active {
-                        match key.code {
-                            KeyCode::Esc | KeyCode::Enter => {
-                                app.stop_file_filter();
-                            }
-                            KeyCode::Backspace => {
-                                app.pop_file_filter_char();
-                            }
-                            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                                app.clear_file_filter();
-                            }
-                            KeyCode::Char(c)
-                                if !key.modifiers.contains(KeyModifiers::CONTROL)
-                                    && !key.modifiers.contains(KeyModifiers::ALT) =>
-                            {
-                                app.push_file_filter_char(c);
-                            }
-                            _ => {}
-                        }
-                        continue;
-                    }
-                    if app.goto_active() {
-                        match key.code {
-                            KeyCode::Esc => {
-                                app.clear_goto();
-                            }
-                            KeyCode::Enter => {
-                                app.apply_goto();
-                                app.clear_goto();
-                            }
-                            KeyCode::Backspace => {
-                                if app.goto_query().is_empty() {
-                                    app.clear_goto();
-                                } else {
-                                    app.pop_goto_char();
-                                }
-                            }
-                            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                                app.clear_goto_text();
-                            }
-                            KeyCode::Char(c)
-                                if !key.modifiers.contains(KeyModifiers::CONTROL)
-                                    && !key.modifiers.contains(KeyModifiers::ALT) =>
-                            {
-                                app.push_goto_char(c);
-                            }
-                            _ => {}
-                        }
-                        continue;
-                    }
-                    if app.search_active() {
-                        match key.code {
-                            KeyCode::Esc => {
-                                app.clear_search();
-                            }
-                            KeyCode::Enter => {
-                                app.stop_search();
-                                app.search_next();
-                            }
-                            KeyCode::Backspace => {
-                                if app.search_query().is_empty() {
-                                    app.clear_search();
-                                } else {
-                                    app.pop_search_char();
-                                }
-                            }
-                            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                                app.clear_search_text();
-                            }
-                            KeyCode::Char(c)
-                                if !key.modifiers.contains(KeyModifiers::CONTROL)
-                                    && !key.modifiers.contains(KeyModifiers::ALT) =>
-                            {
-                                app.push_search_char(c);
-                            }
-                            _ => {}
-                        }
-                        continue;
-                    }
-
-                    if app.pending_g_prefix {
-                        let is_plain_g = matches!(key.code, KeyCode::Char('g'))
-                            && !key.modifiers.contains(KeyModifiers::CONTROL)
-                            && !key.modifiers.contains(KeyModifiers::ALT);
-                        let is_blame_gb = matches!(key.code, KeyCode::Char('b'))
-                            && !key.modifiers.contains(KeyModifiers::CONTROL)
-                            && !key.modifiers.contains(KeyModifiers::ALT);
-                        let is_patch_line = matches!(key.code, KeyCode::Char('y'))
-                            && !key.modifiers.contains(KeyModifiers::CONTROL)
-                            && !key.modifiers.contains(KeyModifiers::ALT);
-                        let is_patch_hunk = matches!(key.code, KeyCode::Char('Y'))
-                            && !key.modifiers.contains(KeyModifiers::CONTROL)
-                            && !key.modifiers.contains(KeyModifiers::ALT);
-                        if is_plain_g {
-                            app.pending_g_prefix = false;
-                            app.reset_count();
-                            app.goto_start();
-                            continue;
-                        }
-                        if is_blame_gb {
-                            app.pending_g_prefix = false;
-                            app.reset_count();
-                            if app.blame_enabled {
-                                app.trigger_blame_hint();
-                            }
-                            continue;
-                        }
-                        if is_patch_line {
-                            app.pending_g_prefix = false;
-                            app.reset_count();
-                            app.yank_current_change_patch();
-                            continue;
-                        }
-                        if is_patch_hunk {
-                            app.pending_g_prefix = false;
-                            app.reset_count();
-                            app.yank_current_hunk_patch();
-                            continue;
-                        }
-                        app.pending_g_prefix = false;
-                    }
-                    if matches!(key.code, KeyCode::Esc)
-                        && !app.show_help
-                        && !app.show_path_popup
-                        && (app.search_active()
-                            || !app.search_query().is_empty()
-                            || app.goto_active()
-                            || !app.goto_query().is_empty())
-                    {
-                        app.reset_count();
-                        app.clear_search();
-                        app.clear_goto();
-                        continue;
-                    }
-
-                    match key.code {
-                        // Digit keys for vim-style counts (e.g., 10j, 5l)
-                        KeyCode::Char(c @ '0'..='9') => {
-                            // Don't treat '0' as count if no pending count (it's a command)
-                            if c == '0' && app.pending_count.is_none() {
-                                // '0' without pending count = go to start of line (like vim)
-                                app.scroll_to_line_start();
-                            } else {
-                                app.push_count_digit(c as u8 - b'0');
-                            }
-                        }
-                        // $ = go to end of line (horizontal scroll to end, like vim)
-                        KeyCode::Char('$') => {
-                            app.reset_count();
-                            app.scroll_to_line_end();
-                        }
-                        KeyCode::Char('q') | KeyCode::Esc => {
-                            app.reset_count();
-                            if app.show_help {
-                                app.show_help = false;
-                            } else if app.show_path_popup {
-                                app.show_path_popup = false;
-                            } else {
-                                app.submit_review_and_quit();
-                                continue;
-                            }
-                        }
-                        // Step navigation (supports count)
-                        KeyCode::Down | KeyCode::Char('j') => {
-                            let count = if app.pending_count.is_some() {
-                                app.take_count()
-                            } else {
-                                coalesce_key_repeats(key, &mut pending_event)?
-                            };
-                            for _ in 0..count {
-                                if app.file_list_focused {
-                                    app.next_file();
-                                } else if app.stepping {
-                                    app.next_step();
-                                } else {
-                                    app.scroll_down();
-                                }
-                            }
-                        }
-                        KeyCode::Up | KeyCode::Char('k') => {
-                            let count = if app.pending_count.is_some() {
-                                app.take_count()
-                            } else {
-                                coalesce_key_repeats(key, &mut pending_event)?
-                            };
-                            for _ in 0..count {
-                                if app.file_list_focused {
-                                    app.prev_file();
-                                } else if app.stepping {
-                                    app.prev_step();
-                                } else {
-                                    app.scroll_up();
-                                }
-                            }
-                        }
-                        // Hunk navigation (h/l and arrow keys, supports count)
-                        KeyCode::Right | KeyCode::Char('l') => {
-                            let count = if app.pending_count.is_some() {
-                                app.take_count()
-                            } else {
-                                coalesce_key_repeats(key, &mut pending_event)?
-                            };
-                            app.defer_view_build_for_jump();
-                            for _ in 0..count {
-                                if app.stepping {
-                                    app.next_hunk();
-                                } else {
-                                    // Scroll-only navigation in no-step mode
-                                    app.next_hunk_scroll();
-                                }
-                            }
-                        }
-                        KeyCode::Left | KeyCode::Char('h') => {
-                            let count = if app.pending_count.is_some() {
-                                app.take_count()
-                            } else {
-                                coalesce_key_repeats(key, &mut pending_event)?
-                            };
-                            app.defer_view_build_for_jump();
-                            for _ in 0..count {
-                                if app.stepping {
-                                    app.prev_hunk();
-                                } else {
-                                    // Scroll-only navigation in no-step mode
-                                    app.prev_hunk_scroll();
-                                }
-                            }
-                        }
-                        // Jump to begin/end of current hunk
-                        KeyCode::Char('b') => {
-                            app.reset_count();
-                            app.defer_view_build_for_jump();
-                            if app.stepping {
-                                app.goto_hunk_start();
-                            } else {
-                                app.goto_hunk_start_scroll();
-                            }
-                        }
-                        KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            app.reset_count();
-                            open_current_file_in_editor(terminal, app, editor_config)?;
-                        }
-                        KeyCode::Char('e') => {
-                            app.reset_count();
-                            app.defer_view_build_for_jump();
-                            if app.stepping {
-                                app.goto_hunk_end();
-                            } else {
-                                app.goto_hunk_end_scroll();
-                            }
-                        }
-                        // Peek old without stepping (unified view)
-                        KeyCode::Char('p') => {
-                            app.reset_count();
-                            if app.stepping {
-                                app.toggle_peek_old_change();
-                            }
-                        }
-                        KeyCode::Char('P') => {
-                            app.reset_count();
-                            if app.stepping {
-                                app.toggle_peek_old_hunk();
-                            }
-                        }
-                        // Yank to clipboard
-                        KeyCode::Char('y') => {
-                            app.reset_count();
-                            app.yank_current_change();
-                        }
-                        KeyCode::Char('Y') => {
-                            app.reset_count();
-                            app.yank_current_hunk();
-                        }
-                        KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            app.reset_count();
-                            // Toggle file path popup
-                            app.toggle_path_popup();
-                        }
-                        KeyCode::Char('o')
-                            if !key.modifiers.contains(KeyModifiers::CONTROL)
-                                && !key.modifiers.contains(KeyModifiers::ALT) =>
-                        {
-                            app.reset_count();
-                            open_current_file_in_editor(terminal, app, editor_config)?;
-                        }
-                        KeyCode::Home => {
-                            app.reset_count();
-                            app.defer_view_build_for_jump();
-                            app.goto_start();
-                        }
-                        KeyCode::Char('g') => {
-                            app.reset_count();
-                            app.pending_g_prefix = true;
-                        }
-                        KeyCode::End | KeyCode::Char('G') => {
-                            app.reset_count();
-                            app.defer_view_build_for_jump();
-                            app.goto_end();
-                        }
-                        KeyCode::Char('<') => {
-                            app.reset_count();
-                            app.defer_view_build_for_jump();
-                            if app.stepping {
-                                app.goto_first_step();
-                            } else {
-                                app.goto_first_hunk_scroll();
-                            }
-                        }
-                        KeyCode::Char('>') => {
-                            app.reset_count();
-                            app.defer_view_build_for_jump();
-                            if app.stepping {
-                                app.goto_last_step();
-                            } else {
-                                app.goto_last_hunk_scroll();
-                            }
-                        }
-                        // File navigation (supports count)
-                        KeyCode::Char('[') => {
-                            let count = app.take_count();
-                            for _ in 0..count {
-                                app.prev_file();
-                            }
-                        }
-                        KeyCode::Char(']') => {
-                            let count = app.take_count();
-                            for _ in 0..count {
-                                app.next_file();
-                            }
-                        }
-                        // General controls
-                        KeyCode::Char(' ') => {
-                            app.reset_count();
-                            if app.stepping {
-                                app.toggle_autoplay();
-                            }
-                        }
-                        KeyCode::Char('B') => {
-                            app.reset_count();
-                            if app.stepping {
-                                app.toggle_autoplay_reverse();
-                            }
-                        }
-                        KeyCode::Tab => {
-                            app.reset_count();
-                            app.toggle_view_mode();
-                        }
-                        KeyCode::BackTab => {
-                            app.reset_count();
-                            app.toggle_view_mode_reverse();
-                        }
-                        // Scroll navigation (supports count)
-                        KeyCode::Char('K') => {
-                            let count = app.take_count();
-                            for _ in 0..count {
-                                app.scroll_up();
-                            }
-                        }
-                        KeyCode::Char('J') => {
-                            let count = app.take_count();
-                            for _ in 0..count {
-                                app.scroll_down();
-                            }
-                        }
-                        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            app.reset_count();
-                            if let Ok((_, rows)) = crossterm::terminal::size() {
-                                let viewport_height = rows.saturating_sub(6) as usize;
-                                app.scroll_half_page_up(viewport_height);
-                            }
-                        }
-                        KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            app.reset_count();
-                            if let Ok((_, rows)) = crossterm::terminal::size() {
-                                let viewport_height = rows.saturating_sub(6) as usize;
-                                app.scroll_half_page_down(viewport_height);
-                            }
-                        }
-                        KeyCode::Enter => {
-                            app.reset_count();
-                            // Switch focus between file list and diff view
-                            if app.is_multi_file() {
-                                app.file_list_focused = !app.file_list_focused;
-                                if !app.file_list_focused {
-                                    app.stop_file_filter();
-                                }
-                            }
-                        }
-                        KeyCode::Char('+') | KeyCode::Char('=') => {
-                            app.reset_count();
-                            if app.is_multi_file() && app.file_list_focused {
-                                if let Ok((cols, _)) = crossterm::terminal::size() {
-                                    app.resize_file_panel(2, cols);
-                                }
-                            } else {
-                                app.increase_speed();
-                            }
-                        }
-                        KeyCode::Char('-') => {
-                            app.reset_count();
-                            if app.is_multi_file() && app.file_list_focused {
-                                if let Ok((cols, _)) = crossterm::terminal::size() {
-                                    app.resize_file_panel(-2, cols);
-                                }
-                            } else {
-                                app.decrease_speed();
-                            }
-                        }
-                        KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            app.reset_count();
-                            // Toggle file list focus (Ctrl+A)
-                            if app.is_multi_file() {
-                                app.file_list_focused = !app.file_list_focused;
-                                if !app.file_list_focused {
-                                    app.stop_file_filter();
-                                }
-                            }
-                        }
-                        KeyCode::Char('a') => {
-                            app.reset_count();
-                            // Toggle animation mode
-                            app.toggle_animation();
-                        }
-                        KeyCode::Char('w') => {
-                            app.reset_count();
-                            // Toggle line wrap
-                            app.toggle_line_wrap();
-                        }
-                        KeyCode::Char('t') => {
-                            app.reset_count();
-                            // Toggle syntax highlighting mode
-                            app.toggle_syntax();
-                        }
-                        KeyCode::Char('E') => {
-                            app.reset_count();
-                            if app.view_mode == ViewMode::Evolution {
-                                app.toggle_evo_syntax();
-                            }
-                        }
-                        KeyCode::Char('s') => {
-                            app.reset_count();
-                            // Toggle stepping state
-                            app.toggle_stepping();
-                        }
-                        KeyCode::Char('S') => {
-                            app.reset_count();
-                            // Toggle strikethrough for deletions
-                            app.toggle_strikethrough_deletions();
-                        }
-                        KeyCode::Char('H') => {
-                            // Scroll left (horizontal)
-                            let count = app.take_count();
-                            for _ in 0..count {
-                                app.scroll_left();
-                            }
-                        }
-                        KeyCode::Char('L') => {
-                            // Scroll right (horizontal)
-                            let count = app.take_count();
-                            for _ in 0..count {
-                                app.scroll_right();
-                            }
-                        }
-                        KeyCode::Char('z') => {
-                            app.reset_count();
-                            // Center on active change (like Vim's zz)
-                            if let Ok((_, rows)) = crossterm::terminal::size() {
-                                let viewport_height = rows.saturating_sub(4) as usize;
-                                app.center_on_active(viewport_height);
-                            }
-                        }
-                        KeyCode::Char('Z') => {
-                            app.reset_count();
-                            // Toggle zen mode
-                            app.toggle_zen();
-                        }
-                        KeyCode::Char('r') => {
-                            app.replay_step();
-                        }
-                        KeyCode::Char('R') => {
-                            app.reset_count();
-                            // Refresh the full file set so added/removed files are reflected.
-                            if app.multi_diff.is_git_mode() {
-                                app.refresh_all_files();
-                            } else {
-                                app.refresh_current_file();
-                            }
-                        }
-                        KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            app.reset_count();
-                            // Toggle file panel visibility
-                            if app.is_multi_file() {
-                                app.toggle_file_panel();
-                            }
-                        }
-                        KeyCode::Char('f') => {
-                            app.reset_count();
-                            app.toggle_fold_context();
-                        }
-                        KeyCode::Char('/') => {
-                            app.reset_count();
-                            if app.file_list_focused {
-                                app.start_file_filter();
-                            } else {
-                                app.start_search();
-                            }
-                        }
-                        KeyCode::Char(':') => {
-                            app.reset_count();
-                            if !app.file_list_focused {
-                                app.start_goto();
-                            }
-                        }
-                        KeyCode::Char('n') => {
-                            app.reset_count();
-                            app.search_next();
-                        }
-                        KeyCode::Char('N') => {
-                            app.reset_count();
-                            app.search_prev();
-                        }
-                        KeyCode::Char('c') => {
-                            app.reset_count();
-                            app.next_conflict();
-                        }
-                        KeyCode::Char('C') => {
-                            app.reset_count();
-                            app.prev_conflict();
-                        }
-                        KeyCode::Char('m') => {
-                            app.reset_count();
-                            app.start_line_comment();
-                        }
-                        KeyCode::Char('M') => {
-                            app.reset_count();
-                            app.start_hunk_comment();
-                        }
-                        KeyCode::Char('x') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            app.reset_count();
-                            app.clear_all_review_comments();
-                        }
-                        KeyCode::Char('x') => {
-                            app.reset_count();
-                            app.remove_line_comment_at_cursor();
-                        }
-                        KeyCode::Char('X') => {
-                            app.reset_count();
-                            app.remove_hunk_comment_at_cursor();
-                        }
-                        KeyCode::Char('?') => {
-                            app.reset_count();
-                            // Toggle help popover
-                            app.toggle_help();
-                        }
-                        _ => {
-                            app.reset_count();
-                        }
-                    }
+                    handle_app_key(app, key, &mut pending_event, terminal, editor_config)?;
                 }
                 _ => {}
             }
@@ -2262,81 +1545,83 @@ fn run_dashboard<B: Backend>(
                     let list_height =
                         dashboard.list_height(terminal.size().map_err(|e| anyhow!("{e}"))?.height);
                     if dashboard.filter_active() {
-                        match key.code {
-                            KeyCode::Esc => {
+                        match dashboard.keybindings_mut().dashboard_filter(key) {
+                            Dispatch::Matched(DashboardFilterAction::Cancel) => {
                                 dashboard.stop_filter();
                             }
-                            KeyCode::Enter => {
+                            Dispatch::Matched(DashboardFilterAction::Accept) => {
                                 if let Some(selection) = dashboard.selection() {
                                     return Ok(Some(selection));
                                 }
                             }
-                            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            Dispatch::Matched(DashboardFilterAction::Clear) => {
                                 dashboard.clear_filter();
                             }
-                            KeyCode::Backspace => {
+                            Dispatch::Matched(DashboardFilterAction::Backspace) => {
                                 dashboard.pop_filter_char();
                             }
-                            KeyCode::Char('j') | KeyCode::Down => {
+                            Dispatch::Matched(DashboardFilterAction::SelectNext) => {
                                 dashboard.move_selection(1, list_height);
                             }
-                            KeyCode::Char('k') | KeyCode::Up => {
+                            Dispatch::Matched(DashboardFilterAction::SelectPrev) => {
                                 dashboard.move_selection(-1, list_height);
                             }
-                            KeyCode::PageDown => {
+                            Dispatch::Matched(DashboardFilterAction::PageDown) => {
                                 dashboard.page_down(list_height);
                             }
-                            KeyCode::PageUp => {
+                            Dispatch::Matched(DashboardFilterAction::PageUp) => {
                                 dashboard.page_up(list_height);
                             }
-                            KeyCode::Char('g') | KeyCode::Home => {
+                            Dispatch::Matched(DashboardFilterAction::SelectFirst) => {
                                 dashboard.select_first(list_height);
                             }
-                            KeyCode::Char('G') | KeyCode::End => {
+                            Dispatch::Matched(DashboardFilterAction::SelectLast) => {
                                 dashboard.select_last(list_height);
                             }
-                            KeyCode::Char(ch) => {
-                                dashboard.push_filter_char(ch);
+                            Dispatch::Pending => {}
+                            Dispatch::Unmatched => {
+                                if let Some(ch) = printable_dashboard_char(key) {
+                                    dashboard.push_filter_char(ch);
+                                }
                             }
-                            _ => {}
                         }
                         continue;
                     }
-                    match key.code {
-                        KeyCode::Esc | KeyCode::Char('q') => return Ok(None),
-                        KeyCode::Char('/') => {
+                    match dashboard.keybindings_mut().dashboard(key) {
+                        Dispatch::Matched(DashboardAction::Quit) => return Ok(None),
+                        Dispatch::Matched(DashboardAction::StartFilter) => {
                             dashboard.start_filter();
                         }
-                        KeyCode::Char('r') => {
+                        Dispatch::Matched(DashboardAction::ClearPin) => {
                             dashboard.clear_pin();
                         }
-                        KeyCode::Char(' ') => {
+                        Dispatch::Matched(DashboardAction::TogglePin) => {
                             dashboard.toggle_pin();
                         }
-                        KeyCode::Enter => {
+                        Dispatch::Matched(DashboardAction::Accept) => {
                             if let Some(selection) = dashboard.selection() {
                                 return Ok(Some(selection));
                             }
                         }
-                        KeyCode::Char('j') | KeyCode::Down => {
+                        Dispatch::Matched(DashboardAction::SelectNext) => {
                             dashboard.move_selection(1, list_height);
                         }
-                        KeyCode::Char('k') | KeyCode::Up => {
+                        Dispatch::Matched(DashboardAction::SelectPrev) => {
                             dashboard.move_selection(-1, list_height);
                         }
-                        KeyCode::PageDown => {
+                        Dispatch::Matched(DashboardAction::PageDown) => {
                             dashboard.page_down(list_height);
                         }
-                        KeyCode::PageUp => {
+                        Dispatch::Matched(DashboardAction::PageUp) => {
                             dashboard.page_up(list_height);
                         }
-                        KeyCode::Char('g') | KeyCode::Home => {
+                        Dispatch::Matched(DashboardAction::SelectFirst) => {
                             dashboard.select_first(list_height);
                         }
-                        KeyCode::Char('G') | KeyCode::End => {
+                        Dispatch::Matched(DashboardAction::SelectLast) => {
                             dashboard.select_last(list_height);
                         }
-                        _ => {}
+                        Dispatch::Pending | Dispatch::Unmatched => {}
                     }
                 }
                 Event::Mouse(mouse) => {
@@ -2363,6 +1648,18 @@ fn run_dashboard<B: Backend>(
                 _ => {}
             }
         }
+    }
+}
+
+fn printable_dashboard_char(key: KeyEvent) -> Option<char> {
+    match key.code {
+        KeyCode::Char(ch)
+            if !key.modifiers.contains(KeyModifiers::CONTROL)
+                && !key.modifiers.contains(KeyModifiers::ALT) =>
+        {
+            Some(ch)
+        }
+        _ => None,
     }
 }
 
@@ -2399,6 +1696,7 @@ fn run_commit_picker<B: Backend>(
         primary_marker: config.ui.primary_marker.clone(),
         extent_marker: config.ui.extent_marker.clone(),
         time_format,
+        keybindings: Keybindings::from_config(&config.keybindings),
     });
 
     let selection = run_dashboard(terminal, &mut dashboard)?;

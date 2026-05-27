@@ -1,6 +1,7 @@
 //! Git range picker dashboard for oy view
 
 use crate::config::ResolvedTheme;
+use crate::keybindings::{DashboardAction, Keybindings};
 use crate::time_format::TimeFormatter;
 use oyo_core::git::CommitEntry;
 use ratatui::{
@@ -52,7 +53,7 @@ struct DashboardEntry {
     kind: EntryKind,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Dashboard {
     repo_root: PathBuf,
     branch: Option<String>,
@@ -69,9 +70,10 @@ pub struct Dashboard {
     extent_marker: String,
     last_list_area: Rect,
     time_format: TimeFormatter,
+    keybindings: Keybindings,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct DashboardConfig {
     pub repo_root: PathBuf,
     pub branch: Option<String>,
@@ -82,6 +84,7 @@ pub struct DashboardConfig {
     pub primary_marker: String,
     pub extent_marker: String,
     pub time_format: TimeFormatter,
+    pub keybindings: Keybindings,
 }
 
 struct RenderLineContext<'a> {
@@ -141,11 +144,16 @@ impl Dashboard {
             extent_marker: config.extent_marker,
             last_list_area: Rect::default(),
             time_format: config.time_format,
+            keybindings: config.keybindings,
         }
     }
 
     pub fn filter_active(&self) -> bool {
         self.filter_active
+    }
+
+    pub(crate) fn keybindings_mut(&mut self) -> &mut Keybindings {
+        &mut self.keybindings
     }
 
     pub fn start_filter(&mut self) {
@@ -473,8 +481,12 @@ impl Dashboard {
                 Style::default().fg(self.theme.text),
             )));
         } else {
+            let hint = format!(
+                "{} to mark range start",
+                self.keybindings.dashboard_keys(DashboardAction::TogglePin)
+            );
             lines.push(Line::from(Span::styled(
-                "Space to mark range start",
+                hint,
                 Style::default()
                     .fg(self.theme.text_muted)
                     .add_modifier(Modifier::DIM),
@@ -497,7 +509,11 @@ impl Dashboard {
                 format!("> {}", self.filter)
             }
         } else if self.filter.is_empty() {
-            "\"/\" Filter".to_string()
+            format!(
+                "{} Filter",
+                self.keybindings
+                    .dashboard_keys(DashboardAction::StartFilter)
+            )
         } else {
             self.filter.clone()
         };
@@ -506,7 +522,12 @@ impl Dashboard {
         } else {
             Style::default().fg(self.theme.text_muted)
         };
-        let hint_text = "Enter open • Space pin • Esc quit";
+        let hint_text = format!(
+            "{} open • {} pin • {} quit",
+            self.keybindings.dashboard_keys(DashboardAction::Accept),
+            self.keybindings.dashboard_keys(DashboardAction::TogglePin),
+            self.keybindings.dashboard_keys(DashboardAction::Quit)
+        );
         let lines = vec![
             Line::raw(""),
             Line::from(Span::styled(
@@ -514,7 +535,7 @@ impl Dashboard {
                 filter_style,
             )),
             Line::from(Span::styled(
-                truncate_text(hint_text, area.width as usize),
+                truncate_text(&hint_text, area.width as usize),
                 Style::default()
                     .fg(self.theme.text_muted)
                     .add_modifier(Modifier::DIM),
