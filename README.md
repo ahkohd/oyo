@@ -373,6 +373,18 @@ open_at_line = true          # Used when args is omitted
 [comments.mentions]
 file_scope = "repo"         # "changed" | "repo" (git-aware via ls-files)
 finder = "auto"             # "auto" | "builtin" | "fzf"
+
+[keybindings.normal]
+# Omitted actions keep defaults. An empty array unbinds the action.
+step_down = ["j", "down"]
+step_up = ["k", "up"]
+goto_start = ["g g", "home"]
+toggle_help = ["?"]
+
+[keybindings.search]
+cancel = ["esc"]
+accept = ["enter"]
+clear = ["ctrl-u"]
 ```
 
 Example config:
@@ -421,6 +433,9 @@ autoplay = false
 [comments.mentions]
 file_scope = "repo"
 finder = "auto"
+
+[keybindings.normal]
+step_down = ["o"] # replaces the default j/down binding
 ```
 
 Config is loaded from (in priority order):
