@@ -60,7 +60,12 @@
 //! # args = ["+{line}", "{file}"]
 //! open_at_line = true
 //!
+//! [keybindings.global]
+//! open_command_palette = ["ctrl-p"]
+//! open_file_search = ["ctrl-shift-p"]
+//!
 //! [keybindings.normal]
+//! # Unmodified 1-9 are reserved for counts.
 //! step_down = ["j", "down"]
 //! step_up = ["k", "up"]
 //! goto_start = ["g g", "home"]

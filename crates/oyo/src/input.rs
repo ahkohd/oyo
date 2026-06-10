@@ -1,8 +1,8 @@
 use crate::app::{App, ViewMode};
 use crate::config;
 use crate::keybindings::{
-    Dispatch, FileFilterAction, HelpAction, LineInputAction, NormalAction, PickerAction,
-    ReviewEditorAction,
+    Dispatch, FileFilterAction, GlobalAction, HelpAction, LineInputAction, NormalAction,
+    PickerAction, ReviewEditorAction,
 };
 use anyhow::Result;
 use crossterm::{
@@ -26,6 +26,10 @@ pub(crate) fn handle_app_key(
 
     if app.review_editor_active() {
         handle_review_editor_key(app, key);
+        return Ok(());
+    }
+
+    if handle_global_key(app, key) {
         return Ok(());
     }
 
@@ -55,6 +59,31 @@ pub(crate) fn handle_app_key(
     }
 
     handle_normal_key(app, key, pending_event, terminal, editor_config)
+}
+
+fn handle_global_key(app: &mut App, key: KeyEvent) -> bool {
+    match app.keybindings.global(key) {
+        Dispatch::Matched(GlobalAction::OpenCommandPalette) => {
+            app.reset_count();
+            if app.command_palette_active() {
+                app.stop_command_palette();
+            } else {
+                app.start_command_palette();
+            }
+            true
+        }
+        Dispatch::Matched(GlobalAction::OpenFileSearch) => {
+            app.reset_count();
+            if app.file_search_active() {
+                app.stop_file_search();
+            } else {
+                app.start_file_search();
+            }
+            true
+        }
+        Dispatch::Pending => true,
+        Dispatch::Unmatched => false,
+    }
 }
 
 fn printable_char(key: KeyEvent) -> Option<char> {
@@ -242,6 +271,20 @@ fn handle_search_key(app: &mut App, key: KeyEvent) {
     }
 }
 
+fn count_digit(key: KeyEvent, pending_count: bool) -> Option<u8> {
+    if !key.modifiers.is_empty() {
+        return None;
+    }
+    let KeyCode::Char(c @ '0'..='9') = key.code else {
+        return None;
+    };
+    if c != '0' || pending_count {
+        Some(c as u8 - b'0')
+    } else {
+        None
+    }
+}
+
 fn repeat_count(
     app: &mut App,
     key: KeyEvent,
@@ -264,11 +307,9 @@ fn handle_normal_key(
     terminal: &mut TuiTerminal,
     editor_config: &config::EditorConfig,
 ) -> Result<()> {
-    if matches!(key.code, KeyCode::Char(c @ '0'..='9') if c != '0' || app.pending_count.is_some()) {
-        if let KeyCode::Char(c) = key.code {
-            app.keybindings.clear_sequence();
-            app.push_count_digit(c as u8 - b'0');
-        }
+    if let Some(digit) = count_digit(key, app.pending_count.is_some()) {
+        app.keybindings.clear_sequence();
+        app.push_count_digit(digit);
         return Ok(());
     }
 
@@ -665,4 +706,42 @@ fn dispatch_normal_action(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use oyo_core::MultiFileDiff;
+
+    fn key(ch: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(ch), KeyModifiers::empty())
+    }
+
+    fn ctrl(ch: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(ch), KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn global_palette_binding_opens_from_search_mode() {
+        let diff = MultiFileDiff::from_file_pair(
+            "old.txt".into(),
+            "new.txt".into(),
+            "old\n".to_string(),
+            "new\n".to_string(),
+        );
+        let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+        app.start_search();
+
+        assert!(handle_global_key(&mut app, ctrl('p')));
+        assert!(app.command_palette_active());
+        assert!(!app.search_active());
+    }
+
+    #[test]
+    fn count_digits_require_plain_digit_keys() {
+        assert_eq!(count_digit(key('1'), false), Some(1));
+        assert_eq!(count_digit(key('0'), false), None);
+        assert_eq!(count_digit(key('0'), true), Some(0));
+        assert_eq!(count_digit(ctrl('1'), false), None);
+    }
 }

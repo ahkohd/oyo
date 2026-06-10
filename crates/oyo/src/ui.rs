@@ -2,7 +2,7 @@
 
 use crate::app::{App, ViewMode, DIFF_VIEW_MIN_WIDTH, FILE_PANEL_MIN_WIDTH};
 use crate::color;
-use crate::keybindings::{HelpAction, NormalAction, ReviewEditorAction};
+use crate::keybindings::{GlobalAction, HelpAction, NormalAction, ReviewEditorAction};
 use crate::views::{render_blame, render_evolution, render_split, render_unified_pane};
 use oyo_core::{multi::DiffStatus, FileStatus};
 use ratatui::{
@@ -1766,6 +1766,7 @@ fn draw_help_popover(frame: &mut Frame, app: &mut App) {
     let dim_style = Style::default().fg(app.theme.text_muted);
     let section_style = Style::default().fg(app.theme.primary);
 
+    let global = |action| app.keybindings.global_keys(action);
     let normal = |action| app.keybindings.normal_keys(action);
     let help = |action| app.keybindings.help_keys(action);
     let mut help_keys = vec![
@@ -1830,8 +1831,8 @@ fn draw_help_popover(frame: &mut Frame, app: &mut App) {
         normal(NormalAction::ToggleViewMode),
         normal(NormalAction::ToggleZen),
         normal(NormalAction::ReplayStep),
-        normal(NormalAction::OpenCommandPalette),
-        normal(NormalAction::OpenFileSearch),
+        global(GlobalAction::OpenCommandPalette),
+        global(GlobalAction::OpenFileSearch),
         help(HelpAction::Close),
         normal(NormalAction::Quit),
     ];
@@ -2142,12 +2143,12 @@ fn draw_help_popover(frame: &mut Frame, app: &mut App) {
     );
     push_help_line(
         &mut lines,
-        &normal(NormalAction::OpenCommandPalette),
+        &global(GlobalAction::OpenCommandPalette),
         "Command palette",
     );
     push_help_line(
         &mut lines,
-        &normal(NormalAction::OpenFileSearch),
+        &global(GlobalAction::OpenFileSearch),
         "Quick file search",
     );
     lines.push(Line::from(""));

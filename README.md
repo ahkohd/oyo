@@ -374,8 +374,14 @@ open_at_line = true          # Used when args is omitted
 file_scope = "repo"         # "changed" | "repo" (git-aware via ls-files)
 finder = "auto"             # "auto" | "builtin" | "fzf"
 
+[keybindings.global]
+# Checked before text input modes, except help and review editor.
+open_command_palette = ["ctrl-p"]
+open_file_search = ["ctrl-shift-p"]
+
 [keybindings.normal]
 # Omitted actions keep defaults. An empty array unbinds the action.
+# Unmodified 1-9 are reserved for counts.
 step_down = ["j", "down"]
 step_up = ["k", "up"]
 goto_start = ["g g", "home"]
@@ -433,6 +439,9 @@ autoplay = false
 [comments.mentions]
 file_scope = "repo"
 finder = "auto"
+
+[keybindings.global]
+open_command_palette = ["ctrl-o"]
 
 [keybindings.normal]
 step_down = ["o"] # replaces the default j/down binding

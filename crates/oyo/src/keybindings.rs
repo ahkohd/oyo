@@ -6,6 +6,7 @@ use std::hash::Hash;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum KeybindingMode {
+    Global,
     Normal,
     Help,
     ReviewEditor,
@@ -21,6 +22,7 @@ pub(crate) enum KeybindingMode {
 impl KeybindingMode {
     fn id(self) -> &'static str {
         match self {
+            Self::Global => "global",
             Self::Normal => "normal",
             Self::Help => "help",
             Self::ReviewEditor => "review_editor",
@@ -33,6 +35,12 @@ impl KeybindingMode {
             Self::DashboardFilter => "dashboard_filter",
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum GlobalAction {
+    OpenCommandPalette,
+    OpenFileSearch,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -217,6 +225,11 @@ macro_rules! binding_action {
     };
 }
 
+binding_action!(GlobalAction, [
+    OpenCommandPalette => ("open_command_palette", "Command palette", ["ctrl-p"]),
+    OpenFileSearch => ("open_file_search", "Quick file search", ["ctrl-shift-p"]),
+]);
+
 binding_action!(NormalAction, [
     Quit => ("quit", "Quit (prints comments if any)", ["q", "esc"]),
     StepDown => ("step_down", "Step forward", ["j", "down"]),
@@ -358,6 +371,7 @@ binding_action!(DashboardFilterAction, [
 
 #[derive(Debug)]
 pub(crate) struct Keybindings {
+    global: ModeBindings<GlobalAction>,
     normal: ModeBindings<NormalAction>,
     help: ModeBindings<HelpAction>,
     review_editor: ModeBindings<ReviewEditorAction>,
@@ -405,6 +419,7 @@ impl Keybindings {
     ) -> Self {
         warn_unknown_modes(config, warnings);
         Self {
+            global: ModeBindings::build(KeybindingMode::Global, config, warnings),
             normal: ModeBindings::build(KeybindingMode::Normal, config, warnings),
             help: ModeBindings::build(KeybindingMode::Help, config, warnings),
             review_editor: ModeBindings::build(KeybindingMode::ReviewEditor, config, warnings),
@@ -425,6 +440,7 @@ impl Keybindings {
 
     pub(crate) fn clear_sequence(&mut self) {
         match self.active_sequence_mode.take() {
+            Some(KeybindingMode::Global) => self.global.clear_sequence(),
             Some(KeybindingMode::Normal) => self.normal.clear_sequence(),
             Some(KeybindingMode::Help) => self.help.clear_sequence(),
             Some(KeybindingMode::ReviewEditor) => self.review_editor.clear_sequence(),
@@ -437,6 +453,11 @@ impl Keybindings {
             Some(KeybindingMode::DashboardFilter) => self.dashboard_filter.clear_sequence(),
             None => {}
         }
+    }
+
+    pub(crate) fn global(&mut self, key: KeyEvent) -> Dispatch<GlobalAction> {
+        self.prepare_mode(KeybindingMode::Global);
+        dispatch_mode(&mut self.active_sequence_mode, &mut self.global, key)
     }
 
     pub(crate) fn normal(&mut self, key: KeyEvent) -> Dispatch<NormalAction> {
@@ -495,6 +516,10 @@ impl Keybindings {
             &mut self.dashboard_filter,
             key,
         )
+    }
+
+    pub(crate) fn global_keys(&self, action: GlobalAction) -> String {
+        self.global.keys_label(action)
     }
 
     pub(crate) fn normal_keys(&self, action: NormalAction) -> String {
@@ -556,7 +581,14 @@ impl<A: BindingAction + 'static> ModeBindings<A> {
             }
         }
 
-        if let Err(error) = validate_effective_bindings::<A>(&effective) {
+        let validation = validate_effective_bindings::<A>(&effective).and_then(|_| {
+            if mode == KeybindingMode::Normal {
+                validate_normal_count_bindings(&effective)
+            } else {
+                Ok(())
+            }
+        });
+        if let Err(error) = validation {
             warnings.push(format!(
                 "Ignoring [keybindings.{}]: {}; using defaults for this mode",
                 mode.id(),
@@ -630,6 +662,7 @@ impl<A: BindingAction + 'static> ModeBindings<A> {
 fn warn_unknown_modes(config: &KeybindingsConfig, warnings: &mut Vec<String>) {
     for mode in config.modes.keys() {
         if ![
+            KeybindingMode::Global.id(),
             KeybindingMode::Normal.id(),
             KeybindingMode::Help.id(),
             KeybindingMode::ReviewEditor.id(),
@@ -694,6 +727,25 @@ fn validate_effective_bindings<A: BindingAction + 'static>(
                 ));
             }
             seen.push((parsed, id, key.clone()));
+        }
+    }
+    Ok(())
+}
+
+fn validate_normal_count_bindings(
+    bindings: &BTreeMap<&'static str, Vec<String>>,
+) -> Result<(), String> {
+    for (id, keys) in bindings {
+        for key in keys {
+            if let Some(token) = key
+                .split_whitespace()
+                .find(|token| matches!(*token, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9"))
+            {
+                return Err(format!(
+                    "key '{}' for '{}' uses reserved count digit '{}'",
+                    key, id, token
+                ));
+            }
         }
     }
     Ok(())
@@ -853,6 +905,49 @@ mod tests {
     }
 
     #[test]
+    fn global_palette_bindings_are_configurable() {
+        let config = KeybindingsConfig {
+            modes: BTreeMap::from([(
+                "global".to_string(),
+                BTreeMap::from([(
+                    "open_command_palette".to_string(),
+                    vec!["ctrl-o".to_string()],
+                )]),
+            )]),
+        };
+        let mut warnings = Vec::new();
+        let mut bindings = Keybindings::from_config_with_warnings(&config, &mut warnings);
+
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(
+            bindings.global(ctrl('o')),
+            Dispatch::Matched(GlobalAction::OpenCommandPalette)
+        );
+        assert_eq!(bindings.global(ctrl('p')), Dispatch::Unmatched);
+    }
+
+    #[test]
+    fn normal_digit_binding_falls_back_to_defaults() {
+        let config = KeybindingsConfig {
+            modes: BTreeMap::from([(
+                "normal".to_string(),
+                BTreeMap::from([("step_down".to_string(), vec!["1".to_string()])]),
+            )]),
+        };
+        let mut warnings = Vec::new();
+        let mut bindings = Keybindings::from_config_with_warnings(&config, &mut warnings);
+
+        assert!(warnings
+            .iter()
+            .any(|warning| warning.contains("reserved count digit")));
+        assert_eq!(
+            bindings.normal(key('j')),
+            Dispatch::Matched(NormalAction::StepDown)
+        );
+        assert_eq!(bindings.normal(key('1')), Dispatch::Unmatched);
+    }
+
+    #[test]
     fn ctrl_shift_binding_matches_configured_default() {
         let mut bindings = Keybindings::default();
         let key = KeyEvent::new(
@@ -861,8 +956,20 @@ mod tests {
         );
 
         assert_eq!(
+            bindings.global(key),
+            Dispatch::Matched(GlobalAction::OpenFileSearch)
+        );
+        let key = KeyEvent::new(
+            KeyCode::Char('p'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        );
+        assert_eq!(
             bindings.normal(key),
             Dispatch::Matched(NormalAction::OpenFileSearch)
+        );
+        assert_eq!(
+            bindings.global(ctrl('p')),
+            Dispatch::Matched(GlobalAction::OpenCommandPalette)
         );
         assert_eq!(
             bindings.normal(ctrl('p')),
