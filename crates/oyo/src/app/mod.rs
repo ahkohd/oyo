@@ -1612,26 +1612,46 @@ impl App {
         self.center_with_display_idx(viewport_height, total_len, global_idx);
     }
 
-    /// Called every frame to update animations and autoplay
-    pub fn tick(&mut self) {
+    pub fn redraw_interval(&self) -> Duration {
+        if self.animation_phase != AnimationPhase::Idle || self.snap_frame.is_some() {
+            Duration::from_millis(33)
+        } else if self.autoplay
+            || self.diff_inflight.is_some()
+            || !self.diff_queue.is_empty()
+            || self.syntax_warmup_pending()
+            || self.step_edge_hint.is_some()
+            || self.hunk_edge_hint.is_some()
+        {
+            Duration::from_millis(100)
+        } else {
+            Duration::from_millis(250)
+        }
+    }
+
+    /// Update animations and background work. Returns true when the UI changed.
+    pub fn tick(&mut self) -> bool {
         let now = Instant::now();
+        let mut dirty = false;
 
         if let Some(hint) = self.step_edge_hint {
             if now >= hint.until {
                 self.step_edge_hint = None;
+                dirty = true;
             }
         }
         if let Some(hint) = self.hunk_edge_hint {
             if now >= hint.until {
                 self.hunk_edge_hint = None;
+                dirty = true;
             }
         }
 
-        self.poll_diff_responses();
-        self.maybe_queue_idle_diff();
-        self.maybe_check_file_changes();
+        dirty |= self.poll_diff_responses();
+        dirty |= self.maybe_queue_idle_diff();
+        dirty |= self.maybe_check_file_changes();
 
         if let Some(frame) = self.snap_frame {
+            dirty = true;
             let started_at = self.snap_frame_started_at.get_or_insert(now);
             let phase_duration = Duration::from_millis(SNAP_PHASE_MS);
             if now.duration_since(*started_at) >= phase_duration {
@@ -1654,6 +1674,7 @@ impl App {
 
         // Update animation
         if self.animation_phase != AnimationPhase::Idle {
+            dirty = true;
             let elapsed = now.duration_since(self.last_animation_tick);
             let phase_duration = Duration::from_millis(self.animation_duration);
 
@@ -1687,6 +1708,7 @@ impl App {
         if self.stepping && self.autoplay && self.animation_phase == AnimationPhase::Idle {
             let autoplay_interval = Duration::from_millis(self.animation_speed * 2);
             if now.duration_since(self.last_autoplay_tick) >= autoplay_interval {
+                dirty = true;
                 let moved = if self.autoplay_reverse {
                     self.step_backward()
                 } else {
@@ -1707,7 +1729,8 @@ impl App {
             }
         }
 
-        self.maybe_warm_syntax_cache();
+        dirty |= self.maybe_warm_syntax_cache();
+        dirty
     }
 }
 

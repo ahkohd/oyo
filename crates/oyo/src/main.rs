@@ -1379,23 +1379,30 @@ fn run_app(
     app: &mut App,
     editor_config: &config::EditorConfig,
 ) -> Result<AppExit> {
-    let tick_rate = Duration::from_millis(16);
     let mut pending_event: Option<Event> = None;
+    let mut needs_draw = true;
 
     loop {
-        terminal
-            .draw(|f| ui::draw(f, app))
-            .map_err(|e| anyhow!("{e}"))?;
+        if needs_draw {
+            terminal
+                .draw(|f| ui::draw(f, app))
+                .map_err(|e| anyhow!("{e}"))?;
+            needs_draw = false;
 
-        // Clear active change after render (one-frame extent marker display when animation disabled)
-        if app.clear_active_on_next_render {
-            app.multi_diff.current_navigator().clear_active_change();
-            app.clear_active_on_next_render = false;
+            // Clear active change after render (one-frame extent marker display when animation disabled)
+            if app.clear_active_on_next_render {
+                app.multi_diff.current_navigator().clear_active_change();
+                app.clear_active_on_next_render = false;
+                needs_draw = true;
+            }
+            if needs_draw {
+                continue;
+            }
         }
 
         let event = if let Some(event) = pending_event.take() {
             Some(event)
-        } else if event::poll(tick_rate)? {
+        } else if event::poll(app.redraw_interval())? {
             Some(event::read()?)
         } else {
             None
@@ -1403,6 +1410,7 @@ fn run_app(
 
         if let Some(event) = event {
             app.mark_user_input();
+            needs_draw = true;
             match event {
                 Event::Mouse(me) => {
                     if app.show_help || app.show_path_popup {
@@ -1491,8 +1499,9 @@ fn run_app(
             }
         }
 
-        // Handle autoplay
-        app.tick();
+        if app.tick() {
+            needs_draw = true;
+        }
 
         if app.open_dashboard {
             app.open_dashboard = false;
@@ -1532,14 +1541,19 @@ fn run_dashboard<B: Backend>(
     terminal: &mut Terminal<B>,
     dashboard: &mut Dashboard,
 ) -> Result<Option<DashboardSelection>> {
-    let tick_rate = Duration::from_millis(16);
+    let tick_rate = Duration::from_millis(250);
+    let mut needs_draw = true;
 
     loop {
-        terminal
-            .draw(|f| dashboard.draw(f))
-            .map_err(|e| anyhow!("{e}"))?;
+        if needs_draw {
+            terminal
+                .draw(|f| dashboard.draw(f))
+                .map_err(|e| anyhow!("{e}"))?;
+            needs_draw = false;
+        }
 
         if event::poll(tick_rate)? {
+            needs_draw = true;
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
                     let list_height =

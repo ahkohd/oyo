@@ -54,12 +54,12 @@ impl App {
         cache.rendered_spans(side, line_num - 1)
     }
 
-    pub(crate) fn maybe_warm_syntax_cache(&mut self) {
+    pub(crate) fn maybe_warm_syntax_cache(&mut self) -> bool {
         if !self.syntax_enabled() {
-            return;
+            return false;
         }
         if self.animation_phase != AnimationPhase::Idle || self.snap_frame.is_some() {
-            return;
+            return false;
         }
         let idle = self.diff_last_input.elapsed().as_millis();
         let idle_threshold = self.diff_idle_ms as u128;
@@ -74,7 +74,7 @@ impl App {
             .map(|at| now.duration_since(at).as_millis() >= debounce as u128)
             .unwrap_or(true);
         if self.syntax_warmup_target.is_some() && !target_ready {
-            return;
+            return false;
         }
         let target = if target_ready {
             self.syntax_warmup_target
@@ -84,9 +84,9 @@ impl App {
         let target_applied = self.syntax_warmup_target_applied;
         let current_index = self.multi_diff.selected_index;
 
-        let (apply_target, clear_target) = {
+        let (apply_target, clear_target, warmed) = {
             let Some(cache) = self.ensure_syntax_cache() else {
-                return;
+                return false;
             };
 
             let mut apply_target = None;
@@ -104,7 +104,7 @@ impl App {
 
             let warm_pending = cache.warm_pending();
             if idle < idle_threshold && !warm_pending {
-                return;
+                return false;
             }
             let budget = if idle >= idle_threshold {
                 idle_lines
@@ -113,20 +113,25 @@ impl App {
             } else {
                 active_lines
             };
-            let _ = cache.warm_checkpoints(budget);
-            (apply_target, clear_target)
+            let warmed = cache.warm_checkpoints(budget) > 0;
+            (apply_target, clear_target, warmed)
         };
 
+        let mut changed = warmed;
         if clear_target {
             self.syntax_warmup_target = None;
             self.syntax_warmup_target_applied = None;
+            changed = true;
         }
         if let Some(target) = apply_target {
             self.syntax_warmup_target_applied = Some(target);
+            changed = true;
         }
         if target_ready && self.syntax_warmup_target.is_some() {
             self.syntax_warmup_target_at = None;
+            changed = true;
         }
+        changed
     }
 
     pub(crate) fn begin_syntax_warmup_frame(&mut self) {

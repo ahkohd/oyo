@@ -354,7 +354,9 @@ impl App {
         }
     }
 
-    fn recompute_file_change_state(&mut self) {
+    fn recompute_file_change_state(&mut self) -> bool {
+        let old_any = self.files_changed_on_disk;
+        let old_changed = self.file_disk_changed.clone();
         let file_count = self.multi_diff.file_count();
         if self.file_disk_baseline.len() != file_count {
             self.rebuild_file_disk_baseline();
@@ -372,6 +374,7 @@ impl App {
             any_changed |= changed;
         }
         self.files_changed_on_disk = any_changed;
+        old_any != self.files_changed_on_disk || old_changed != self.file_disk_changed
     }
 
     pub(crate) fn file_changed_on_disk(&self, idx: usize) -> bool {
@@ -379,13 +382,13 @@ impl App {
     }
 
     /// Check if tracked files changed on disk since the last refresh baseline.
-    pub fn maybe_check_file_changes(&mut self) {
+    pub fn maybe_check_file_changes(&mut self) -> bool {
         let now = Instant::now();
         if now.duration_since(self.last_fs_check) < Duration::from_secs(1) {
-            return;
+            return false;
         }
         self.last_fs_check = now;
-        self.recompute_file_change_state();
+        self.recompute_file_change_state()
     }
 
     /// Refresh current file from disk

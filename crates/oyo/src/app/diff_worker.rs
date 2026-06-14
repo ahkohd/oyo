@@ -32,39 +32,40 @@ impl App {
         self.diff_worker_rx = Some(resp_rx);
     }
 
-    pub(crate) fn queue_diff_for_file(&mut self, idx: usize) {
+    pub(crate) fn queue_diff_for_file(&mut self, idx: usize) -> bool {
         if !self.diff_defer {
-            return;
+            return false;
         }
         if !matches!(
             self.multi_diff.diff_status(idx),
             oyo_core::multi::DiffStatus::Deferred
         ) {
-            return;
+            return false;
         }
         if self.diff_inflight == Some(idx) || self.diff_queue.contains(&idx) {
-            return;
+            return false;
         }
         self.diff_queue.push_back(idx);
-        self.start_next_diff_job();
+        let _ = self.start_next_diff_job();
+        true
     }
 
-    pub(crate) fn queue_current_file_diff(&mut self) {
+    pub(crate) fn queue_current_file_diff(&mut self) -> bool {
         let idx = self.multi_diff.selected_index;
-        self.queue_diff_for_file(idx);
+        self.queue_diff_for_file(idx)
     }
 
-    fn start_next_diff_job(&mut self) {
+    fn start_next_diff_job(&mut self) -> bool {
         if self.diff_inflight.is_some() {
-            return;
+            return false;
         }
         let Some(idx) = self.diff_queue.pop_front() else {
-            return;
+            return false;
         };
         self.ensure_diff_worker();
         let (old, new) = match self.multi_diff.file_contents_arc(idx) {
             Some((old, new)) => (old, new),
-            None => return,
+            None => return false,
         };
         if let Some(tx) = self.diff_worker_tx.as_ref() {
             self.multi_diff.mark_diff_computing(idx);
@@ -77,17 +78,20 @@ impl App {
             if tx.send(request).is_err() {
                 self.diff_inflight = None;
             }
+            return true;
         }
+        false
     }
 
-    pub(crate) fn poll_diff_responses(&mut self) {
+    pub(crate) fn poll_diff_responses(&mut self) -> bool {
         let Some(rx) = self.diff_worker_rx.as_mut() else {
-            return;
+            return false;
         };
         let mut responses = Vec::new();
         while let Ok(resp) = rx.try_recv() {
             responses.push(resp);
         }
+        let changed = !responses.is_empty();
         for resp in responses {
             if self.diff_inflight == Some(resp.file_index) {
                 self.diff_inflight = None;
@@ -112,28 +116,29 @@ impl App {
                 }
             }
         }
-        self.start_next_diff_job();
+        let started = self.start_next_diff_job();
+        changed || started
     }
 
-    pub(crate) fn maybe_queue_idle_diff(&mut self) {
+    pub(crate) fn maybe_queue_idle_diff(&mut self) -> bool {
         if !self.diff_defer || self.diff_inflight.is_some() {
-            return;
+            return false;
         }
         if !self.diff_queue.is_empty() {
-            return;
+            return false;
         }
         let idle = self.diff_last_input.elapsed().as_millis();
         if idle < self.diff_idle_ms as u128 {
-            return;
+            return false;
         }
         for idx in 0..self.multi_diff.file_count() {
             if matches!(
                 self.multi_diff.diff_status(idx),
                 oyo_core::multi::DiffStatus::Deferred
             ) {
-                self.queue_diff_for_file(idx);
-                break;
+                return self.queue_diff_for_file(idx);
             }
         }
+        false
     }
 }
