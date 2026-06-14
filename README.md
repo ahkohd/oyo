@@ -393,6 +393,8 @@ accept = ["enter"]
 clear = ["ctrl-u"]
 ```
 
+Full keybinding reference: [KEYBINDINGS.md](./docs/KEYBINDINGS.md).
+
 Example config:
 
 ```toml
@@ -453,6 +455,7 @@ Config is loaded from (in priority order):
 3. Platform-specific (e.g., `~/Library/Application Support/oyo/config.toml` on macOS)
 
 Theme and syntax theme configuration is documented in [THEME.md](./docs/THEME.md).
+Keybinding actions are documented in [KEYBINDINGS.md](./docs/KEYBINDINGS.md).
 
 [![diff preview](./assets/ui_syntax_off.png)](./docs/DIFF_PREVIEWS.md)
 

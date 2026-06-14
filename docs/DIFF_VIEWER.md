@@ -16,7 +16,7 @@ and avoids implementation details.
 ## Navigation & Stepping
 
 Key examples below are default bindings. Users can override them through
-`[keybindings.<mode>]` in `config.toml`; global shortcuts use `[keybindings.global]`.
+`[keybindings.<mode>]` in `config.toml`; see [KEYBINDINGS.md](./KEYBINDINGS.md).
 
 - **Step forward/back** (`j` / `k`): apply/unapply the next/previous change.
 - **Hunk jump** (`h` / `l`, `:h<num>`): jump to previous/next hunk.
