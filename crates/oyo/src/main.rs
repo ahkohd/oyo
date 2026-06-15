@@ -776,6 +776,8 @@ fn apply_config_to_app(app: &mut App, config: &config::Config, args: &Args, ligh
     app.no_step_auto_jump_on_enter = config.no_step.auto_jump_on_enter;
     app.review_mention_file_scope = config.comments.mentions.file_scope;
     app.review_mention_finder = config.comments.mentions.finder;
+    app.review_hooks = config.review.hooks.clone();
+    app.review_actions = config.review.actions.clone();
     app.hunk_wrap = config.navigation.wrap.hunk;
     app.step_wrap = config.navigation.wrap.step;
     app.primary_marker = config.ui.primary_marker.clone();
@@ -1166,6 +1168,7 @@ fn main() -> Result<()> {
 
         let mut exit_message: Option<String> = None;
         let mut review_output: Option<String> = None;
+        let mut review_hook_warnings = Vec::new();
         loop {
             let empty_message = match &input_mode {
                 InputMode::GitUncommitted => Some("No uncommitted changes found.".to_string()),
@@ -1204,6 +1207,7 @@ fn main() -> Result<()> {
             if review_output.is_none() {
                 review_output = app.take_review_submission_output();
             }
+            review_hook_warnings.extend(app.take_review_hook_warnings());
             match exit {
                 AppExit::Quit => break,
                 AppExit::OpenDashboard => {
@@ -1228,6 +1232,9 @@ fn main() -> Result<()> {
             args.review_output_file.as_ref(),
             !args.no_print_review,
         )?;
+        for warning in review_hook_warnings {
+            eprintln!("Warning: {warning}");
+        }
         if let Some(message) = exit_message {
             println!("{message}");
         }
@@ -1273,6 +1280,7 @@ fn main() -> Result<()> {
 
     let mut exit_message: Option<String> = None;
     let mut review_output: Option<String> = None;
+    let mut review_hook_warnings = Vec::new();
     let mut pending_diff = Some(prefetched);
     loop {
         let empty_message = match &input_mode {
@@ -1315,6 +1323,7 @@ fn main() -> Result<()> {
         if review_output.is_none() {
             review_output = app.take_review_submission_output();
         }
+        review_hook_warnings.extend(app.take_review_hook_warnings());
         match exit {
             AppExit::Quit => break,
             AppExit::OpenDashboard => {
@@ -1341,6 +1350,9 @@ fn main() -> Result<()> {
         args.review_output_file.as_ref(),
         !args.no_print_review,
     )?;
+    for warning in review_hook_warnings {
+        eprintln!("Warning: {warning}");
+    }
     if let Some(message) = exit_message {
         println!("{message}");
     }

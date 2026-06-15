@@ -153,6 +153,9 @@ fn handle_help_key(app: &mut App, key: KeyEvent) {
 }
 
 fn handle_review_editor_key(app: &mut App, key: KeyEvent) {
+    if app.handle_review_action_key(key) {
+        return;
+    }
     match app.keybindings.review_editor(key) {
         Dispatch::Matched(ReviewEditorAction::Cancel) => {
             if !app.review_cancel_mention_picker() {

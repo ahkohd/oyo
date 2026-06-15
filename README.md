@@ -383,6 +383,14 @@ open_at_line = true          # Used when args is omitted
 file_scope = "repo"         # "changed" | "repo" (git-aware via ls-files)
 finder = "auto"             # "auto" | "builtin" | "fzf"
 
+[[review.hooks]]
+# Run a command when final review output is ready. See docs/REVIEW_HOOKS.md.
+id = "review-ready"
+on = "review_ready"
+command = ".oyo/hooks/review-ready"
+stdin = "json"
+blocking = true
+
 [keybindings.global]
 # Checked before text input modes, except help and review editor.
 open_command_palette = ["ctrl-p"]
@@ -476,6 +484,7 @@ Config is loaded from (in priority order):
 
 Theme and syntax theme configuration is documented in [THEME.md](./docs/THEME.md).
 Keybinding actions are documented in [KEYBINDINGS.md](./docs/KEYBINDINGS.md).
+Review hooks are documented in [REVIEW_HOOKS.md](./docs/REVIEW_HOOKS.md).
 
 [![diff preview](./assets/ui_syntax_off.png)](./docs/DIFF_PREVIEWS.md)
 

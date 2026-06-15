@@ -4,7 +4,8 @@ use crate::blame::BlameInfo;
 use crate::config::{
     BlameMode, DiffExtentMarkerMode, DiffExtentMarkerScope, DiffForegroundMode, DiffHighlightMode,
     FileCountMode, FilePanelPosition, FoldContextMode, HunkWrapMode, MentionFileScope,
-    MentionFinder, ModifiedStepMode, ResolvedTheme, StepWrapMode, SyntaxMode,
+    MentionFinder, ModifiedStepMode, ResolvedTheme, ReviewActionConfig, ReviewHookConfig,
+    StepWrapMode, SyntaxMode,
 };
 use crate::keybindings::Keybindings;
 use crate::syntax::{SyntaxCache, SyntaxEngine};
@@ -420,6 +421,12 @@ pub struct App {
     review_repo_file_cache: Option<Vec<String>>,
     /// Monotonic revision for review state changes (cache invalidation)
     review_revision: u64,
+    /// Commands run on review lifecycle events.
+    pub review_hooks: Vec<ReviewHookConfig>,
+    /// User-visible review commands.
+    pub review_actions: Vec<ReviewActionConfig>,
+    /// Non-fatal review hook warnings to print after TUI exits.
+    review_hook_warnings: Vec<String>,
     /// Last matched display index for search navigation
     search_last_target: Option<usize>,
     /// Pending scroll to a search target
@@ -703,6 +710,9 @@ impl App {
             review_mention_fzf_available: None,
             review_repo_file_cache: None,
             review_revision: 0,
+            review_hooks: Vec::new(),
+            review_actions: Vec::new(),
+            review_hook_warnings: Vec::new(),
             search_last_target: None,
             needs_scroll_to_search: false,
             search_target: None,
