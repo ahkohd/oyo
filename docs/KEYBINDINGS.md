@@ -130,7 +130,7 @@ Notes:
 | Action | Default keys | Description |
 | --- | --- | --- |
 | `cancel` | `esc` | Cancel editor |
-| `save` | `ctrl-enter` | Save comment |
+| `save` | `ctrl-o` | Save comment |
 | `insert_newline` | `enter` | Insert newline |
 | `accept_mention` | `tab` | Accept mention |
 | `backspace` | `backspace` | Backspace |

@@ -304,7 +304,7 @@ binding_action!(HelpAction, [
 
 binding_action!(ReviewEditorAction, [
     Cancel => ("cancel", "Cancel editor", ["esc"]),
-    Save => ("save", "Save comment", ["ctrl-enter"]),
+    Save => ("save", "Save comment", ["ctrl-o"]),
     InsertNewline => ("insert_newline", "Insert newline", ["enter"]),
     AcceptMention => ("accept_mention", "Accept mention", ["tab"]),
     Backspace => ("backspace", "Backspace", ["backspace"]),
