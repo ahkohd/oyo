@@ -2,7 +2,7 @@ use crate::app::{App, ViewMode};
 use crate::config;
 use crate::keybindings::{
     Dispatch, FileFilterAction, GlobalAction, HelpAction, LineInputAction, NormalAction,
-    PickerAction, ReviewEditorAction,
+    PickerAction, ReviewEditorAction, SelectionAction,
 };
 use anyhow::Result;
 use crossterm::{
@@ -58,7 +58,49 @@ pub(crate) fn handle_app_key(
         return Ok(());
     }
 
+    if app.diff_selection_mode_active() && handle_selection_key(app, key) {
+        return Ok(());
+    }
+
     handle_normal_key(app, key, pending_event, terminal, editor_config)
+}
+
+fn handle_selection_key(app: &mut App, key: KeyEvent) -> bool {
+    match app.keybindings.selection(key) {
+        Dispatch::Matched(SelectionAction::Cancel) => {
+            app.clear_diff_selection();
+            true
+        }
+        Dispatch::Matched(SelectionAction::Copy) => {
+            app.copy_diff_selection();
+            app.clear_diff_selection();
+            true
+        }
+        Dispatch::Matched(SelectionAction::Left) => app.move_diff_selection(-1, 0),
+        Dispatch::Matched(SelectionAction::Right) => app.move_diff_selection(1, 0),
+        Dispatch::Matched(SelectionAction::Up) => app.move_diff_selection(0, -1),
+        Dispatch::Matched(SelectionAction::Down) => app.move_diff_selection(0, 1),
+        Dispatch::Matched(SelectionAction::ReanchorLeft) => app.reanchor_diff_selection(-1, 0),
+        Dispatch::Matched(SelectionAction::ReanchorRight) => app.reanchor_diff_selection(1, 0),
+        Dispatch::Matched(SelectionAction::ReanchorUp) => app.reanchor_diff_selection(0, -1),
+        Dispatch::Matched(SelectionAction::ReanchorDown) => app.reanchor_diff_selection(0, 1),
+        Dispatch::Matched(SelectionAction::ReanchorStart) => {
+            app.reanchor_diff_selection_to_boundary(false)
+        }
+        Dispatch::Matched(SelectionAction::ReanchorEnd) => {
+            app.reanchor_diff_selection_to_boundary(true)
+        }
+        Dispatch::Matched(SelectionAction::ReanchorHalfPageDown) => {
+            app.reanchor_diff_selection_half_page_down()
+        }
+        Dispatch::Matched(SelectionAction::GotoStart) => app.move_diff_selection_to_boundary(false),
+        Dispatch::Matched(SelectionAction::GotoEnd) => app.move_diff_selection_to_boundary(true),
+        Dispatch::Matched(SelectionAction::GotoHalfPageDown) => {
+            app.move_diff_selection_half_page_down()
+        }
+        Dispatch::Pending => true,
+        Dispatch::Unmatched => false,
+    }
 }
 
 fn handle_global_key(app: &mut App, key: KeyEvent) -> bool {
@@ -308,6 +350,7 @@ fn handle_normal_key(
     editor_config: &config::EditorConfig,
 ) -> Result<()> {
     if let Some(digit) = count_digit(key, app.pending_count.is_some()) {
+        app.clear_diff_selection();
         app.keybindings.clear_sequence();
         app.push_count_digit(digit);
         return Ok(());
@@ -331,6 +374,16 @@ fn dispatch_normal_action(
     terminal: &mut TuiTerminal,
     editor_config: &config::EditorConfig,
 ) -> Result<()> {
+    if !matches!(
+        action,
+        NormalAction::YankChange
+            | NormalAction::StartSelection
+            | NormalAction::StartLineSelection
+            | NormalAction::StartBlockSelection
+    ) {
+        app.clear_diff_selection();
+    }
+
     match action {
         NormalAction::Quit => {
             app.reset_count();
@@ -424,7 +477,12 @@ fn dispatch_normal_action(
         }
         NormalAction::YankChange => {
             app.reset_count();
-            app.yank_current_change();
+            if app.diff_selection_active() {
+                app.copy_diff_selection();
+                app.clear_diff_selection();
+            } else {
+                app.yank_current_change();
+            }
         }
         NormalAction::YankHunk => {
             app.reset_count();
@@ -437,6 +495,18 @@ fn dispatch_normal_action(
         NormalAction::YankHunkPatch => {
             app.reset_count();
             app.yank_current_hunk_patch();
+        }
+        NormalAction::StartSelection => {
+            app.reset_count();
+            app.start_keyboard_selection();
+        }
+        NormalAction::StartLineSelection => {
+            app.reset_count();
+            app.start_keyboard_line_selection();
+        }
+        NormalAction::StartBlockSelection => {
+            app.reset_count();
+            app.start_keyboard_block_selection();
         }
         NormalAction::TogglePathPopup => {
             app.reset_count();

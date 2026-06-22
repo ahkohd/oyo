@@ -1456,11 +1456,17 @@ fn run_app(
                             if app.handle_review_preview_click(me.column, me.row) {
                                 continue;
                             }
+                            if app.start_diff_selection(me.column, me.row) {
+                                continue;
+                            }
                             if app.handle_file_list_click(me.column, me.row) {
                                 continue;
                             }
                         }
                         MouseEventKind::Drag(MouseButton::Left) => {
+                            if app.drag_diff_selection(me.column, me.row) {
+                                continue;
+                            }
                             if let Ok((cols, _)) = crossterm::terminal::size() {
                                 if app.drag_file_panel_resize(me.column, cols) {
                                     continue;
@@ -1468,9 +1474,13 @@ fn run_app(
                             }
                         }
                         MouseEventKind::Up(MouseButton::Left) => {
+                            if app.finish_diff_selection(me.column, me.row) {
+                                continue;
+                            }
                             app.end_file_panel_resize();
                         }
                         MouseEventKind::ScrollUp => {
+                            app.clear_diff_selection();
                             if app.mouse_over_file_panel(me.column, me.row) {
                                 app.prev_file();
                             } else if app.stepping && app.current_file_diff_ready() {
@@ -1480,6 +1490,7 @@ fn run_app(
                             }
                         }
                         MouseEventKind::ScrollDown => {
+                            app.clear_diff_selection();
                             if app.mouse_over_file_panel(me.column, me.row) {
                                 app.next_file();
                             } else if app.stepping && app.current_file_diff_ready() {

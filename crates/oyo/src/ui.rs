@@ -353,6 +353,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         }
     }
 
+    capture_diff_selection_cells(frame, app);
+    draw_diff_selection(frame, app);
+
     // Draw help popover if active
     if app.show_help {
         draw_help_popover(frame, app);
@@ -1289,6 +1292,111 @@ fn draw_diff_view(frame: &mut Frame, app: &mut App, area: Rect) {
         ViewMode::Split => render_split(frame, app, area),
         ViewMode::Evolution => render_evolution(frame, app, area),
         ViewMode::Blame => render_blame(frame, app, area),
+    }
+}
+
+fn capture_diff_selection_cells(frame: &mut Frame, app: &mut App) {
+    let Some((x, y, width, height)) = app.diff_view_area else {
+        app.set_diff_selection_cells(Vec::new());
+        return;
+    };
+    let frame_area = frame.area();
+    let max_x = x
+        .saturating_add(width)
+        .min(frame_area.x.saturating_add(frame_area.width));
+    let max_y = y
+        .saturating_add(height)
+        .min(frame_area.y.saturating_add(frame_area.height));
+    let excluded = app.diff_selection_excluded_cols();
+    let content_ranges = app.diff_selection_content_ranges();
+    let cells = {
+        let buffer = frame.buffer_mut();
+        (y..max_y)
+            .map(|row| {
+                let mut cells = (x..max_x)
+                    .map(|col| {
+                        let local_col = col.saturating_sub(x);
+                        if excluded
+                            .iter()
+                            .any(|(start, end)| local_col >= *start && local_col < *end)
+                        {
+                            String::new()
+                        } else {
+                            buffer
+                                .cell((col, row))
+                                .map(|cell| {
+                                    let symbol = cell.symbol();
+                                    let align_fill = app.view_mode == ViewMode::Split
+                                        && !app.split_align_fill.is_empty()
+                                        && cell.style().add_modifier.contains(Modifier::DIM)
+                                        && symbol
+                                            .chars()
+                                            .all(|ch| app.split_align_fill.contains(ch));
+                                    if align_fill {
+                                        String::new()
+                                    } else {
+                                        symbol.to_string()
+                                    }
+                                })
+                                .unwrap_or_else(|| " ".to_string())
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                trim_diff_selection_padding(&mut cells, &content_ranges);
+                cells
+            })
+            .collect::<Vec<_>>()
+    };
+    app.set_diff_selection_cells(cells);
+}
+
+fn trim_diff_selection_padding(cells: &mut [String], content_ranges: &[(u16, u16)]) {
+    for (start, end) in content_ranges.iter().copied() {
+        let start = start as usize;
+        let end = (end as usize).min(cells.len());
+        if start >= end {
+            continue;
+        }
+        let keep_end = cells[start..end]
+            .iter()
+            .rposition(|symbol| !symbol.is_empty() && symbol != " ")
+            .map(|idx| start + idx + 1)
+            .unwrap_or(start);
+        for symbol in &mut cells[keep_end..end] {
+            if symbol == " " {
+                symbol.clear();
+            }
+        }
+    }
+}
+
+fn draw_diff_selection(frame: &mut Frame, app: &App) {
+    let ranges = app.diff_selection_ranges();
+    if ranges.is_empty() {
+        return;
+    }
+    let style = Style::default()
+        .fg(app.theme.background.unwrap_or(Color::Black))
+        .bg(app.theme.accent);
+    let Some((x, y, _, _)) = app.diff_view_area else {
+        return;
+    };
+    let buffer = frame.buffer_mut();
+    for (row, start_col, end_col) in ranges {
+        for col in start_col..end_col {
+            let local_row = row.saturating_sub(y) as usize;
+            let local_col = col.saturating_sub(x) as usize;
+            if app
+                .diff_selection_cells
+                .get(local_row)
+                .and_then(|line| line.get(local_col))
+                .is_some_and(|symbol| !symbol.is_empty())
+            {
+                if let Some(cell) = buffer.cell_mut((col, row)) {
+                    cell.set_style(style);
+                }
+            }
+        }
     }
 }
 

@@ -15,9 +15,30 @@ open_file_search = ["ctrl-shift-p"]
 step_down = ["j", "down"]
 goto_start = ["g g", "home"]
 open_editor = ["o", "ctrl-e"]
+start_selection = ["v"]
+start_line_selection = ["V"]
+start_block_selection = ["ctrl-v"]
 
 [keybindings.review_editor]
 save = ["ctrl-o"]
+
+[keybindings.selection]
+copy = ["y"]
+cancel = ["esc"]
+left = ["h", "left"]
+right = ["l", "right"]
+up = ["k", "up"]
+down = ["j", "down"]
+reanchor_left = ["H"]
+reanchor_right = ["L"]
+reanchor_up = ["K"]
+reanchor_down = ["J"]
+reanchor_start = ["ctrl-g"]
+reanchor_end = ["ctrl-shift-g"]
+reanchor_half_page_down = ["ctrl-d"]
+goto_start = ["g"]
+goto_end = ["G"]
+goto_half_page_down = ["d"]
 ```
 
 Notes:
@@ -45,6 +66,7 @@ Use each mode as `[keybindings.<mode>]`.
 | `file_filter` | `[keybindings.file_filter]` | File panel filter |
 | `goto` | `[keybindings.goto]` | Goto prompt |
 | `search` | `[keybindings.search]` | Diff search prompt |
+| `selection` | `[keybindings.selection]` | Diff text selection |
 | `dashboard` | `[keybindings.dashboard]` | Commit picker dashboard |
 | `dashboard_filter` | `[keybindings.dashboard_filter]` | Dashboard filter prompt |
 
@@ -69,10 +91,13 @@ Use each mode as `[keybindings.<mode>]`.
 | `blame_hint` | `g b` | Blame current step |
 | `toggle_peek_change` | `p` | Peek change |
 | `toggle_peek_hunk` | `P` | Peek old hunk |
-| `yank_change` | `y` | Yank line |
+| `yank_change` | `y` | Yank line or selection |
 | `yank_hunk` | `Y` | Yank hunk |
 | `yank_change_patch` | `g y` | Copy line patch |
 | `yank_hunk_patch` | `g Y` | Copy hunk patch |
+| `start_selection` | `v` | Start selection |
+| `start_line_selection` | `V` | Start line selection |
+| `start_block_selection` | `ctrl-v` | Start block selection |
 | `toggle_path_popup` | `ctrl-g` | Show full file path |
 | `open_editor` | `o`, `ctrl-e` | Open file in editor |
 | `goto_start` | `g g`, `home` | Go to start |
@@ -198,6 +223,27 @@ Use each mode as `[keybindings.<mode>]`.
 | `accept` | `enter` | Accept |
 | `backspace` | `backspace` | Backspace |
 | `clear` | `ctrl-u` | Clear query |
+
+## `selection`
+
+| Action | Default keys | Description |
+| --- | --- | --- |
+| `cancel` | `esc` | Cancel selection |
+| `copy` | `y` | Copy selection |
+| `left` | `h`, `left` | Extend left |
+| `right` | `l`, `right` | Extend right |
+| `up` | `k`, `up` | Extend up |
+| `down` | `j`, `down` | Extend down |
+| `reanchor_left` | `H` | Reanchor left |
+| `reanchor_right` | `L` | Reanchor right |
+| `reanchor_up` | `K` | Reanchor up |
+| `reanchor_down` | `J` | Reanchor down |
+| `reanchor_start` | `ctrl-g` | Reanchor to first visible cell |
+| `reanchor_end` | `ctrl-shift-g` | Reanchor to last visible cell |
+| `reanchor_half_page_down` | `ctrl-d` | Reanchor half page down |
+| `goto_start` | `g` | Extend to first visible cell |
+| `goto_end` | `G` | Extend to last visible cell |
+| `goto_half_page_down` | `d` | Extend half page down |
 
 ## `dashboard`
 

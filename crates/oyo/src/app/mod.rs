@@ -29,6 +29,7 @@ mod palette;
 mod playback;
 mod review;
 mod search;
+mod selection;
 mod syntax;
 mod types;
 mod utils;
@@ -106,6 +107,12 @@ pub struct App {
     pub file_panel_rect: Option<(u16, u16, u16, u16)>,
     /// Diff content area (x, y, width, height)
     pub diff_view_area: Option<(u16, u16, u16, u16)>,
+    /// Mouse/keyboard selection in the diff view
+    pub(crate) diff_selection: Option<selection::DiffSelection>,
+    /// Cursor used by selection mode when no range is active
+    pub(crate) diff_selection_cursor: Option<selection::DiffSelectionCursor>,
+    /// Last rendered diff cells for mouse selection copy
+    pub(crate) diff_selection_cells: Vec<Vec<String>>,
     /// True when dragging the file panel separator
     pub file_panel_resizing: bool,
     /// File list scroll offset
@@ -530,6 +537,9 @@ impl App {
             file_panel_position: FilePanelPosition::Left,
             file_panel_rect: None,
             diff_view_area: None,
+            diff_selection: None,
+            diff_selection_cursor: None,
+            diff_selection_cells: Vec::new(),
             file_panel_resizing: false,
             file_list_scroll: 0,
             file_list_area: None,

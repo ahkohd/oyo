@@ -70,9 +70,30 @@
 //! step_down = ["j", "down"]
 //! step_up = ["k", "up"]
 //! goto_start = ["g g", "home"]
+//! start_selection = ["v"]
+//! start_line_selection = ["V"]
+//! start_block_selection = ["ctrl-v"]
 //!
 //! [keybindings.review_editor]
 //! save = ["ctrl-o"]
+//!
+//! [keybindings.selection]
+//! copy = ["y"]
+//! cancel = ["esc"]
+//! left = ["h", "left"]
+//! right = ["l", "right"]
+//! up = ["k", "up"]
+//! down = ["j", "down"]
+//! reanchor_left = ["H"]
+//! reanchor_right = ["L"]
+//! reanchor_up = ["K"]
+//! reanchor_down = ["J"]
+//! reanchor_start = ["ctrl-g"]
+//! reanchor_end = ["ctrl-shift-g"]
+//! reanchor_half_page_down = ["ctrl-d"]
+//! goto_start = ["g"]
+//! goto_end = ["G"]
+//! goto_half_page_down = ["d"]
 //! ```
 
 use crate::color::{self, AnimationGradient};

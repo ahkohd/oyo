@@ -15,6 +15,7 @@ pub(crate) enum KeybindingMode {
     FileFilter,
     Goto,
     Search,
+    Selection,
     Dashboard,
     DashboardFilter,
 }
@@ -31,6 +32,7 @@ impl KeybindingMode {
             Self::FileFilter => "file_filter",
             Self::Goto => "goto",
             Self::Search => "search",
+            Self::Selection => "selection",
             Self::Dashboard => "dashboard",
             Self::DashboardFilter => "dashboard_filter",
         }
@@ -59,6 +61,9 @@ pub(crate) enum NormalAction {
     YankHunk,
     YankChangePatch,
     YankHunkPatch,
+    StartSelection,
+    StartLineSelection,
+    StartBlockSelection,
     TogglePathPopup,
     OpenEditor,
     GotoStart,
@@ -155,6 +160,26 @@ pub(crate) enum LineInputAction {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SelectionAction {
+    Cancel,
+    Copy,
+    Left,
+    Right,
+    Up,
+    Down,
+    ReanchorLeft,
+    ReanchorRight,
+    ReanchorUp,
+    ReanchorDown,
+    ReanchorStart,
+    ReanchorEnd,
+    ReanchorHalfPageDown,
+    GotoStart,
+    GotoEnd,
+    GotoHalfPageDown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum FileFilterAction {
     Close,
     Backspace,
@@ -241,10 +266,13 @@ binding_action!(NormalAction, [
     BlameHint => ("blame_hint", "Blame current step", ["g b"]),
     TogglePeekChange => ("toggle_peek_change", "Peek change", ["p"]),
     TogglePeekHunk => ("toggle_peek_hunk", "Peek old hunk", ["P"]),
-    YankChange => ("yank_change", "Yank line", ["y"]),
+    YankChange => ("yank_change", "Yank line/selection", ["y"]),
     YankHunk => ("yank_hunk", "Yank hunk", ["Y"]),
     YankChangePatch => ("yank_change_patch", "Copy line patch", ["g y"]),
     YankHunkPatch => ("yank_hunk_patch", "Copy hunk patch", ["g Y"]),
+    StartSelection => ("start_selection", "Start selection", ["v"]),
+    StartLineSelection => ("start_line_selection", "Start line selection", ["V"]),
+    StartBlockSelection => ("start_block_selection", "Start block selection", ["ctrl-v"]),
     TogglePathPopup => ("toggle_path_popup", "Show full file path", ["ctrl-g"]),
     OpenEditor => ("open_editor", "Open file in editor", ["o", "ctrl-e"]),
     GotoStart => ("goto_start", "Go to start", ["g g", "home"]),
@@ -342,6 +370,25 @@ binding_action!(FileFilterAction, [
     Clear => ("clear", "Clear filter", ["ctrl-u"]),
 ]);
 
+binding_action!(SelectionAction, [
+    Cancel => ("cancel", "Cancel selection", ["esc"]),
+    Copy => ("copy", "Copy selection", ["y"]),
+    Left => ("left", "Extend left", ["h", "left"]),
+    Right => ("right", "Extend right", ["l", "right"]),
+    Up => ("up", "Extend up", ["k", "up"]),
+    Down => ("down", "Extend down", ["j", "down"]),
+    ReanchorLeft => ("reanchor_left", "Reanchor left", ["H"]),
+    ReanchorRight => ("reanchor_right", "Reanchor right", ["L"]),
+    ReanchorUp => ("reanchor_up", "Reanchor up", ["K"]),
+    ReanchorDown => ("reanchor_down", "Reanchor down", ["J"]),
+    ReanchorStart => ("reanchor_start", "Reanchor to first visible cell", ["ctrl-g"]),
+    ReanchorEnd => ("reanchor_end", "Reanchor to last visible cell", ["ctrl-shift-g"]),
+    ReanchorHalfPageDown => ("reanchor_half_page_down", "Reanchor half page down", ["ctrl-d"]),
+    GotoStart => ("goto_start", "Extend to first visible cell", ["g"]),
+    GotoEnd => ("goto_end", "Extend to last visible cell", ["G"]),
+    GotoHalfPageDown => ("goto_half_page_down", "Extend half page down", ["d"]),
+]);
+
 binding_action!(DashboardAction, [
     Quit => ("quit", "Quit dashboard", ["esc", "q"]),
     StartFilter => ("start_filter", "Filter commits", ["/"]),
@@ -380,6 +427,7 @@ pub(crate) struct Keybindings {
     file_filter: ModeBindings<FileFilterAction>,
     goto: ModeBindings<LineInputAction>,
     search: ModeBindings<LineInputAction>,
+    selection: ModeBindings<SelectionAction>,
     dashboard: ModeBindings<DashboardAction>,
     dashboard_filter: ModeBindings<DashboardFilterAction>,
     active_sequence_mode: Option<KeybindingMode>,
@@ -428,6 +476,7 @@ impl Keybindings {
             file_filter: ModeBindings::build(KeybindingMode::FileFilter, config, warnings),
             goto: ModeBindings::build(KeybindingMode::Goto, config, warnings),
             search: ModeBindings::build(KeybindingMode::Search, config, warnings),
+            selection: ModeBindings::build(KeybindingMode::Selection, config, warnings),
             dashboard: ModeBindings::build(KeybindingMode::Dashboard, config, warnings),
             dashboard_filter: ModeBindings::build(
                 KeybindingMode::DashboardFilter,
@@ -449,6 +498,7 @@ impl Keybindings {
             Some(KeybindingMode::FileFilter) => self.file_filter.clear_sequence(),
             Some(KeybindingMode::Goto) => self.goto.clear_sequence(),
             Some(KeybindingMode::Search) => self.search.clear_sequence(),
+            Some(KeybindingMode::Selection) => self.selection.clear_sequence(),
             Some(KeybindingMode::Dashboard) => self.dashboard.clear_sequence(),
             Some(KeybindingMode::DashboardFilter) => self.dashboard_filter.clear_sequence(),
             None => {}
@@ -502,6 +552,11 @@ impl Keybindings {
     pub(crate) fn search(&mut self, key: KeyEvent) -> Dispatch<LineInputAction> {
         self.prepare_mode(KeybindingMode::Search);
         dispatch_mode(&mut self.active_sequence_mode, &mut self.search, key)
+    }
+
+    pub(crate) fn selection(&mut self, key: KeyEvent) -> Dispatch<SelectionAction> {
+        self.prepare_mode(KeybindingMode::Selection);
+        dispatch_mode(&mut self.active_sequence_mode, &mut self.selection, key)
     }
 
     pub(crate) fn dashboard(&mut self, key: KeyEvent) -> Dispatch<DashboardAction> {
@@ -671,6 +726,7 @@ fn warn_unknown_modes(config: &KeybindingsConfig, warnings: &mut Vec<String>) {
             KeybindingMode::FileFilter.id(),
             KeybindingMode::Goto.id(),
             KeybindingMode::Search.id(),
+            KeybindingMode::Selection.id(),
             KeybindingMode::Dashboard.id(),
             KeybindingMode::DashboardFilter.id(),
         ]
@@ -776,15 +832,18 @@ fn canonical_key(mut key: KeyEvent) -> KeyEvent {
     let KeyCode::Char(c) = key.code else {
         return key;
     };
-    if !key.modifiers.contains(KeyModifiers::SHIFT) || !c.is_ascii_uppercase() {
+    if !key.modifiers.contains(KeyModifiers::SHIFT) {
         return key;
     }
     if key
         .modifiers
         .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
     {
-        key.code = KeyCode::Char(c.to_ascii_lowercase());
-    } else {
+        if c.is_ascii_uppercase() {
+            key.code = KeyCode::Char(c.to_ascii_lowercase());
+        }
+    } else if c.is_ascii_alphabetic() {
+        key.code = KeyCode::Char(c.to_ascii_uppercase());
         key.modifiers.remove(KeyModifiers::SHIFT);
     }
     key
@@ -802,12 +861,60 @@ mod tests {
         KeyEvent::new(KeyCode::Char(ch), KeyModifiers::CONTROL)
     }
 
+    fn shift(ch: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(ch), KeyModifiers::SHIFT)
+    }
+
+    #[test]
+    fn selection_start_keys_match_terminal_shift_variants() {
+        let mut bindings = Keybindings::default();
+
+        assert_eq!(
+            bindings.normal(key('v')),
+            Dispatch::Matched(NormalAction::StartSelection)
+        );
+        assert_eq!(
+            bindings.normal(shift('v')),
+            Dispatch::Matched(NormalAction::StartLineSelection)
+        );
+        assert_eq!(
+            bindings.normal(key('V')),
+            Dispatch::Matched(NormalAction::StartLineSelection)
+        );
+        assert_eq!(
+            bindings.normal(ctrl('v')),
+            Dispatch::Matched(NormalAction::StartBlockSelection)
+        );
+    }
+
+    #[test]
+    fn selection_mode_accepts_shift_hjkl_as_reanchor() {
+        let mut bindings = Keybindings::default();
+
+        assert_eq!(
+            bindings.selection(shift('h')),
+            Dispatch::Matched(SelectionAction::ReanchorLeft)
+        );
+        assert_eq!(
+            bindings.selection(shift('j')),
+            Dispatch::Matched(SelectionAction::ReanchorDown)
+        );
+        assert_eq!(
+            bindings.selection(shift('k')),
+            Dispatch::Matched(SelectionAction::ReanchorUp)
+        );
+        assert_eq!(
+            bindings.selection(shift('l')),
+            Dispatch::Matched(SelectionAction::ReanchorRight)
+        );
+    }
+
     #[test]
     fn keybinding_override_replaces_one_action_and_keeps_other_defaults() {
         let config: crate::config::Config = toml::from_str(
             r#"
             [keybindings.normal]
-            step_down = ["v"]
+            step_down = ["u"]
             "#,
         )
         .unwrap();
@@ -817,7 +924,7 @@ mod tests {
 
         assert!(warnings.is_empty(), "{warnings:?}");
         assert_eq!(
-            bindings.normal(key('v')),
+            bindings.normal(key('u')),
             Dispatch::Matched(NormalAction::StepDown)
         );
         assert_eq!(

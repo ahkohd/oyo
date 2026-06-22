@@ -51,6 +51,7 @@ oyo does **not** replace classic diffs, it adds a new way to review them.
   - **Evolution**: Watch the file evolve, deletions simply disappear
   - **Blame**: Per-line git blame gutter (opt-in)
 - **Inline review comments**: Add/update/remove line and hunk comments across views; printed to stdout on quit
+- **Visual selection**: Select visible diff text with char, line, and block modes, then yank to clipboard
 - **Word-level diffing**: See exactly which words changed within a line
 - **Multi-file support**: Navigate between changed files with preserved positions
 - **Search**: Regex search with to jump between matches
@@ -234,7 +235,8 @@ Full configurable action list: [KEYBINDINGS.md](./docs/KEYBINDINGS.md).
 | `e` | Jump to end of current hunk (scrolls in no-step mode) |
 | `gb` | Blame current step (opt-in, step mode) |
 | `p` / `P` | Peek change (modified → old → mixed) / Peek old hunk |
-| `y` / `Y` | Yank line/hunk to clipboard |
+| `v` / `V` / `Ctrl+v` | Start selection / line / block selection mode |
+| `y` / `Y` | Yank selected text or line / hunk to clipboard |
 | `/` | Search (diff pane, regex) |
 | `n` / `N` | Next/previous match |
 | `:line` / `:h<num>` / `:s<num>` | Go to line / hunk / step |
@@ -283,6 +285,7 @@ Full configurable action list: [KEYBINDINGS.md](./docs/KEYBINDINGS.md).
 | `?` | Toggle help |
 | `q` / `Esc` | Quit (prints comments if any; closes help/path popups) |
 
+Selection: mouse drag or `v` / `V` / `Ctrl+v`, `y` copies, `Esc` clears. Full mappings: [KEYBINDINGS.md](./docs/KEYBINDINGS.md).
 Clipboard support uses system tools: `pbcopy` (macOS), `wl-copy` / `xclip` / `xsel` (Linux), `clip` (Windows).
 Search is case-insensitive regex; invalid patterns fall back to literal matching.
 
@@ -389,10 +392,17 @@ open_file_search = ["ctrl-shift-p"]
 step_down = ["j", "down"]
 step_up = ["k", "up"]
 goto_start = ["g g", "home"]
+start_selection = ["v"]
+start_line_selection = ["V"]
+start_block_selection = ["ctrl-v"]
 toggle_help = ["?"]
 
 [keybindings.review_editor]
 save = ["ctrl-o"]
+
+[keybindings.selection]
+copy = ["y"]
+cancel = ["esc"]
 
 [keybindings.search]
 cancel = ["esc"]
