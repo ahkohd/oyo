@@ -45,6 +45,7 @@
 //! [files]
 //! panel_visible = true
 //! panel_width = 30
+//! panel_position = "left"
 //! counts = "active"
 //!
 //! [files.scan]
@@ -1209,6 +1210,14 @@ impl Default for PlaybackConfig {
     }
 }
 
+#[derive(Debug, Deserialize, Clone, Copy, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum FilePanelPosition {
+    #[default]
+    Left,
+    Right,
+}
+
 /// Files panel configuration
 #[derive(Debug, Deserialize)]
 #[serde(default)]
@@ -1217,6 +1226,8 @@ pub struct FilesConfig {
     pub panel_visible: bool,
     /// File panel width (columns)
     pub panel_width: u16,
+    /// File panel position
+    pub panel_position: FilePanelPosition,
     /// When to show per-file +/- counts in the file panel
     pub counts: FileCountMode,
     /// Directory scan filtering configuration
@@ -1228,6 +1239,7 @@ impl Default for FilesConfig {
         Self {
             panel_visible: true,
             panel_width: 30,
+            panel_position: FilePanelPosition::Left,
             counts: FileCountMode::Active,
             scan: FileScanConfig::default(),
         }

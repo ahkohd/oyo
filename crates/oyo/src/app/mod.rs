@@ -3,8 +3,8 @@
 use crate::blame::BlameInfo;
 use crate::config::{
     BlameMode, DiffExtentMarkerMode, DiffExtentMarkerScope, DiffForegroundMode, DiffHighlightMode,
-    FileCountMode, FoldContextMode, HunkWrapMode, MentionFileScope, MentionFinder,
-    ModifiedStepMode, ResolvedTheme, StepWrapMode, SyntaxMode,
+    FileCountMode, FilePanelPosition, FoldContextMode, HunkWrapMode, MentionFileScope,
+    MentionFinder, ModifiedStepMode, ResolvedTheme, StepWrapMode, SyntaxMode,
 };
 use crate::keybindings::Keybindings;
 use crate::syntax::{SyntaxCache, SyntaxEngine};
@@ -100,6 +100,8 @@ pub struct App {
     pub file_panel_visible: bool,
     /// File panel width (in columns)
     pub file_panel_width: u16,
+    /// File panel position
+    pub file_panel_position: FilePanelPosition,
     /// File panel full area (x, y, width, height)
     pub file_panel_rect: Option<(u16, u16, u16, u16)>,
     /// Diff content area (x, y, width, height)
@@ -525,6 +527,7 @@ impl App {
             file_list_focused: false,
             file_panel_visible: true,
             file_panel_width: 30,
+            file_panel_position: FilePanelPosition::Left,
             file_panel_rect: None,
             diff_view_area: None,
             file_panel_resizing: false,

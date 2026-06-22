@@ -1,4 +1,5 @@
 use super::{App, DIFF_VIEW_MIN_WIDTH, FILE_PANEL_MIN_WIDTH};
+use crate::config::FilePanelPosition;
 
 fn point_in_rect(rect: (u16, u16, u16, u16), column: u16, row: u16) -> bool {
     let (x, y, width, height) = rect;
@@ -104,7 +105,11 @@ impl App {
             Some(rect) => rect,
             None => return false,
         };
-        let sep_x = x.saturating_add(width.saturating_sub(1));
+        let sep_x = if self.file_panel_position == FilePanelPosition::Left {
+            x.saturating_add(width.saturating_sub(1))
+        } else {
+            x
+        };
         let end_y = y.saturating_add(height);
         if column == sep_x && row >= y && row < end_y {
             self.file_panel_resizing = true;
@@ -118,8 +123,12 @@ impl App {
         if !self.file_panel_resizing {
             return false;
         }
-        if let Some((x, _, _, _)) = self.file_panel_rect {
-            let width = column.saturating_sub(x).saturating_add(1);
+        if let Some((x, _, width, _)) = self.file_panel_rect {
+            let width = if self.file_panel_position == FilePanelPosition::Left {
+                column.saturating_sub(x).saturating_add(1)
+            } else {
+                x.saturating_add(width).saturating_sub(column)
+            };
             self.file_panel_width = width;
             self.file_panel_width = self.clamp_file_panel_width(viewport_width);
             return true;

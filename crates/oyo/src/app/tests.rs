@@ -236,6 +236,23 @@ fn make_app_with_unified_hunk_two_changes() -> TestApp {
     })
 }
 
+#[test]
+fn test_right_file_panel_resize_uses_left_edge() {
+    let multi_diff = MultiFileDiff::from_file_pair(
+        std::path::PathBuf::from("a.txt"),
+        std::path::PathBuf::from("a.txt"),
+        "old".to_string(),
+        "new".to_string(),
+    );
+    let mut app = App::new(multi_diff, ViewMode::UnifiedPane, 0, false, None);
+    app.file_panel_position = FilePanelPosition::Right;
+    app.file_panel_rect = Some((70, 0, 30, 20));
+
+    assert!(app.start_file_panel_resize(70, 5));
+    assert!(app.drag_file_panel_resize(65, 100));
+    assert_eq!(app.file_panel_width, 35);
+}
+
 fn make_large_app(lines: usize, change_line: usize) -> App {
     let old_lines: Vec<String> = (0..lines).map(|i| format!("line{}", i)).collect();
     let mut new_lines = old_lines.clone();

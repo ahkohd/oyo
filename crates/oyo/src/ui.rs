@@ -2,6 +2,7 @@
 
 use crate::app::{App, ViewMode, DIFF_VIEW_MIN_WIDTH, FILE_PANEL_MIN_WIDTH};
 use crate::color;
+use crate::config::FilePanelPosition;
 use crate::keybindings::{GlobalAction, HelpAction, NormalAction, ReviewEditorAction};
 use crate::views::{render_blame, render_evolution, render_split, render_unified_pane};
 use oyo_core::{multi::DiffStatus, FileStatus};
@@ -795,24 +796,35 @@ fn draw_content(frame: &mut Frame, app: &mut App, area: Rect, show_topbar: bool)
     };
 
     if show_panel {
-        // Split: file list on left, diff view on right
         let panel_width = app.clamp_file_panel_width(area.width);
         app.file_panel_width = panel_width;
+        let constraints = if app.file_panel_position == FilePanelPosition::Left {
+            [Constraint::Length(panel_width), Constraint::Min(0)]
+        } else {
+            [Constraint::Min(0), Constraint::Length(panel_width)]
+        };
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Length(panel_width), // File list width
-                Constraint::Min(0),              // Diff view
-            ])
+            .constraints(constraints)
             .split(area);
+        let (panel_area, diff_area) = if app.file_panel_position == FilePanelPosition::Left {
+            (chunks[0], chunks[1])
+        } else {
+            (chunks[1], chunks[0])
+        };
 
-        app.file_panel_rect = Some((chunks[0].x, chunks[0].y, chunks[0].width, chunks[0].height));
-        draw_file_list(frame, app, chunks[0]);
+        app.file_panel_rect = Some((
+            panel_area.x,
+            panel_area.y,
+            panel_area.width,
+            panel_area.height,
+        ));
+        draw_file_list(frame, app, panel_area);
         if show_topbar {
             let diff_chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([Constraint::Length(1), Constraint::Min(0)])
-                .split(chunks[1]);
+                .split(diff_area);
             draw_top_bar(frame, app, diff_chunks[0]);
             app.last_viewport_height = diff_chunks[1].height as usize;
             app.diff_view_area = Some((
@@ -823,10 +835,10 @@ fn draw_content(frame: &mut Frame, app: &mut App, area: Rect, show_topbar: bool)
             ));
             draw_diff_view(frame, app, diff_chunks[1]);
         } else {
-            app.last_viewport_height = chunks[1].height as usize;
+            app.last_viewport_height = diff_area.height as usize;
             app.diff_view_area =
-                Some((chunks[1].x, chunks[1].y, chunks[1].width, chunks[1].height));
-            draw_diff_view(frame, app, chunks[1]);
+                Some((diff_area.x, diff_area.y, diff_area.width, diff_area.height));
+            draw_diff_view(frame, app, diff_area);
         }
     } else {
         // Single file mode, file panel hidden, or viewport too narrow
@@ -857,17 +869,21 @@ fn draw_content(frame: &mut Frame, app: &mut App, area: Rect, show_topbar: bool)
 }
 
 fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
-    // Split area: content on left, separator on right
+    let constraints = if app.file_panel_position == FilePanelPosition::Left {
+        [Constraint::Min(0), Constraint::Length(1)]
+    } else {
+        [Constraint::Length(1), Constraint::Min(0)]
+    };
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Min(0),    // Content
-            Constraint::Length(1), // Separator
-        ])
+        .constraints(constraints)
         .split(area);
 
-    let content_area = chunks[0];
-    let separator_area = chunks[1];
+    let (content_area, separator_area) = if app.file_panel_position == FilePanelPosition::Left {
+        (chunks[0], chunks[1])
+    } else {
+        (chunks[1], chunks[0])
+    };
 
     // Border color based on focus
     let border_fg = if app.file_list_focused {
@@ -877,7 +893,7 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
     };
     let panel_bg = app.theme.background_panel.or(app.theme.background);
 
-    // Draw right separator - use main background, not panel background
+    // Draw separator - use main background, not panel background
     let mut separator_style = Style::default().fg(border_fg);
     if let Some(bg) = app.theme.background {
         separator_style = separator_style.bg(bg);
