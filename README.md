@@ -222,6 +222,8 @@ command = ["oy", "$left", "$right"]
 
 **Vim-style counts**: Most navigation commands support count prefixes (e.g., `10j` moves 10 steps forward, `5J` scrolls down 5 lines).
 
+Full configurable action list: [KEYBINDINGS.md](./docs/KEYBINDINGS.md).
+
 | Key | Action |
 |-----|--------|
 | `↓` / `j` | Next step (scrolls in no-step mode; moves file selection when focused) |
@@ -265,6 +267,7 @@ command = ["oy", "$left", "$right"]
 | `E` | Toggle evo syntax (context/full) |
 | `c` / `C` | Next/prev conflict |
 | `m` / `M` | Add/update line/hunk comment |
+| `Ctrl+o` | Save inline comment (inside comment editor) |
 | `x` / `X` | Remove line/hunk comment |
 | `Ctrl+x` | Clear all comments |
 | `s` | Toggle stepping (no-step mode) |
@@ -388,6 +391,9 @@ step_up = ["k", "up"]
 goto_start = ["g g", "home"]
 toggle_help = ["?"]
 
+[keybindings.review_editor]
+save = ["ctrl-o"]
+
 [keybindings.search]
 cancel = ["esc"]
 accept = ["enter"]
@@ -444,7 +450,7 @@ file_scope = "repo"
 finder = "auto"
 
 [keybindings.global]
-open_command_palette = ["ctrl-o"]
+open_command_palette = ["ctrl-p"]
 
 [keybindings.normal]
 step_down = ["o"] # replaces the default j/down binding

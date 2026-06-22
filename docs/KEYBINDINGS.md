@@ -1,6 +1,7 @@
 # Keybindings Reference
 
 Oyo keybindings are configured in `config.toml` with `[keybindings.<mode>]` tables.
+Every configurable action is listed below as `<mode>.<action>`.
 Action names are snake_case. Omitted actions keep defaults. An empty array unbinds an action.
 
 Example:
@@ -14,6 +15,9 @@ open_file_search = ["ctrl-shift-p"]
 step_down = ["j", "down"]
 goto_start = ["g g", "home"]
 open_editor = ["o", "ctrl-e"]
+
+[keybindings.review_editor]
+save = ["ctrl-o"]
 ```
 
 Notes:
@@ -28,19 +32,21 @@ Notes:
 
 ## Modes
 
-| Mode | When used |
-| --- | --- |
-| `global` | Global app shortcuts before most input modes |
-| `normal` | Main diff view |
-| `help` | Help popover |
-| `review_editor` | Inline comment editor |
-| `command_palette` | Command palette picker |
-| `file_search` | Quick file search picker |
-| `file_filter` | File panel filter |
-| `goto` | Goto prompt |
-| `search` | Diff search prompt |
-| `dashboard` | Commit picker dashboard |
-| `dashboard_filter` | Dashboard filter prompt |
+Use each mode as `[keybindings.<mode>]`.
+
+| Mode | Config table | When used |
+| --- | --- | --- |
+| `global` | `[keybindings.global]` | Global app shortcuts before most input modes |
+| `normal` | `[keybindings.normal]` | Main diff view |
+| `help` | `[keybindings.help]` | Help popover |
+| `review_editor` | `[keybindings.review_editor]` | Inline comment editor |
+| `command_palette` | `[keybindings.command_palette]` | Command palette picker |
+| `file_search` | `[keybindings.file_search]` | Quick file search picker |
+| `file_filter` | `[keybindings.file_filter]` | File panel filter |
+| `goto` | `[keybindings.goto]` | Goto prompt |
+| `search` | `[keybindings.search]` | Diff search prompt |
+| `dashboard` | `[keybindings.dashboard]` | Commit picker dashboard |
+| `dashboard_filter` | `[keybindings.dashboard_filter]` | Dashboard filter prompt |
 
 ## `global`
 

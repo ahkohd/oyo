@@ -70,6 +70,9 @@
 //! step_down = ["j", "down"]
 //! step_up = ["k", "up"]
 //! goto_start = ["g g", "home"]
+//!
+//! [keybindings.review_editor]
+//! save = ["ctrl-o"]
 //! ```
 
 use crate::color::{self, AnimationGradient};
