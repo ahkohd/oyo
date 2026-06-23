@@ -741,6 +741,7 @@ fn apply_config_to_app(app: &mut App, config: &config::Config, args: &Args, ligh
     app.file_panel_position = config.files.panel_position;
     app.file_count_mode = config.files.counts;
     app.auto_center = config.ui.auto_center;
+    app.watch = config.ui.watch;
     app.overscroll = config.ui.overscroll;
     app.topbar = config.ui.topbar;
     app.line_wrap = config.ui.line_wrap;
@@ -988,9 +989,6 @@ fn build_diff_from_input_mode(
                 oyo_core::git::get_repo_root(&cwd).context("Failed to get git repository root")?;
             let changes = oyo_core::git::get_uncommitted_changes(&repo_root)
                 .context("Failed to get uncommitted changes")?;
-            if changes.is_empty() {
-                return Ok(None);
-            }
             let branch = oyo_core::git::get_current_branch(&repo_root).ok();
             let diff = MultiFileDiff::from_git_changes(repo_root, changes)
                 .context("Failed to create diff from git changes")?;
@@ -1012,9 +1010,6 @@ fn build_diff_from_input_mode(
                 oyo_core::git::get_repo_root(&cwd).context("Failed to get git repository root")?;
             let changes = oyo_core::git::get_staged_changes(&repo_root)
                 .context("Failed to get staged changes")?;
-            if changes.is_empty() {
-                return Ok(None);
-            }
             let branch = oyo_core::git::get_current_branch(&repo_root).ok();
             let diff = MultiFileDiff::from_git_staged(repo_root, changes)
                 .context("Failed to create diff from staged changes")?;
@@ -1036,7 +1031,7 @@ fn build_diff_from_input_mode(
                 oyo_core::git::get_repo_root(&cwd).context("Failed to get git repository root")?;
             let is_index_from = from == INDEX_REF;
             let is_index_to = to == INDEX_REF;
-            let (changes, diff) = if is_index_from || is_index_to {
+            let (_changes, diff) = if is_index_from || is_index_to {
                 let (commit, to_index) = if is_index_to {
                     (from.clone(), true)
                 } else {
@@ -1046,9 +1041,6 @@ fn build_diff_from_input_mode(
                 let changes =
                     oyo_core::git::get_changes_between_index(&repo_root, &commit, reverse)
                         .context("Failed to get index range changes")?;
-                if changes.is_empty() {
-                    return Ok(None);
-                }
                 let diff = MultiFileDiff::from_git_index_range(
                     repo_root.clone(),
                     changes.clone(),
@@ -1060,9 +1052,6 @@ fn build_diff_from_input_mode(
             } else {
                 let changes = oyo_core::git::get_changes_between(&repo_root, from, to)
                     .context("Failed to get range changes")?;
-                if changes.is_empty() {
-                    return Ok(None);
-                }
                 let diff = MultiFileDiff::from_git_range(
                     repo_root.clone(),
                     changes.clone(),
@@ -1072,9 +1061,6 @@ fn build_diff_from_input_mode(
                 .context("Failed to create diff from range")?;
                 (changes, diff)
             };
-            if changes.is_empty() {
-                return Ok(None);
-            }
             let branch = oyo_core::git::get_current_branch(&repo_root).ok();
             (diff, branch)
         }
@@ -1198,11 +1184,6 @@ fn main() -> Result<()> {
                     }
                 };
 
-            if multi_diff.file_count() == 0 {
-                exit_message = Some("No changes found.".to_string());
-                break;
-            }
-
             let view_mode: ViewMode = args.view.into();
             let view_mode = config.parse_view_mode().unwrap_or(view_mode);
             let speed = if args.speed != 200 {
@@ -1213,6 +1194,7 @@ fn main() -> Result<()> {
             let autoplay = args.autoplay || config.playback.autoplay;
 
             let mut app = App::new(multi_diff, view_mode, speed, autoplay, git_branch);
+            app.no_changes_message = empty_message.clone();
             apply_config_to_app(&mut app, &config, &args, light_mode);
             app.set_review_persist_enabled(!args.no_review_persist);
             app.set_review_clear_session_on_start(args.clear_review_session);
@@ -1286,11 +1268,6 @@ fn main() -> Result<()> {
             return Ok(());
         }
     };
-    if prefetched.0.file_count() == 0 {
-        println!("No changes found.");
-        return Ok(());
-    }
-
     let mut terminal = setup_terminal()?;
     let dashboard_limit = view_limit.unwrap_or(200);
 
@@ -1318,11 +1295,6 @@ fn main() -> Result<()> {
             }
         };
 
-        if multi_diff.file_count() == 0 {
-            exit_message = Some("No changes found.".to_string());
-            break;
-        }
-
         let view_mode: ViewMode = args.view.into();
         let view_mode = config.parse_view_mode().unwrap_or(view_mode);
         let speed = if args.speed != 200 {
@@ -1333,6 +1305,7 @@ fn main() -> Result<()> {
         let autoplay = args.autoplay || config.playback.autoplay;
 
         let mut app = App::new(multi_diff, view_mode, speed, autoplay, git_branch);
+        app.no_changes_message = empty_message.clone();
         apply_config_to_app(&mut app, &config, &args, light_mode);
         app.set_review_persist_enabled(!args.no_review_persist);
         app.set_review_clear_session_on_start(args.clear_review_session);

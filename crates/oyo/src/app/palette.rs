@@ -234,6 +234,17 @@ impl App {
     }
 
     fn execute_palette_action(&mut self, action: PaletteAction) {
+        if self.multi_diff.file_count() == 0
+            && !matches!(
+                action,
+                PaletteAction::ToggleHelp
+                    | PaletteAction::OpenDashboard
+                    | PaletteAction::Quit
+                    | PaletteAction::RefreshAllFiles
+            )
+        {
+            return;
+        }
         match action {
             PaletteAction::ToggleStepping => self.toggle_stepping(),
             PaletteAction::ToggleViewMode => self.toggle_view_mode(),

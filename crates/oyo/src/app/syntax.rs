@@ -7,7 +7,7 @@ use std::time::Instant;
 
 impl App {
     pub fn syntax_enabled(&self) -> bool {
-        if self.multi_diff.current_file_is_binary() {
+        if self.multi_diff.file_count() == 0 || self.multi_diff.current_file_is_binary() {
             return false;
         }
         match self.syntax_mode {
@@ -227,10 +227,13 @@ impl App {
             return None;
         }
         let idx = self.multi_diff.selected_index;
+        if idx >= self.multi_diff.file_count() {
+            return None;
+        }
         if idx >= self.syntax_caches.len() {
             self.syntax_caches = vec![None; self.multi_diff.file_count()];
         }
-        if self.syntax_caches[idx].is_none() {
+        if self.syntax_caches.get(idx)?.is_none() {
             let file_name = self.current_file_path();
             let (old_content, new_content) = self.multi_diff.file_contents_arc(idx)?;
             let force_lazy = self.multi_diff.current_file_diff_disabled()

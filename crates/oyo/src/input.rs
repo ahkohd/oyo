@@ -104,6 +104,9 @@ fn handle_selection_key(app: &mut App, key: KeyEvent) -> bool {
 }
 
 fn handle_global_key(app: &mut App, key: KeyEvent) -> bool {
+    if app.multi_diff.file_count() == 0 {
+        return false;
+    }
     match app.keybindings.global(key) {
         Dispatch::Matched(GlobalAction::OpenCommandPalette) => {
             app.reset_count();
@@ -374,6 +377,16 @@ fn dispatch_normal_action(
     terminal: &mut TuiTerminal,
     editor_config: &config::EditorConfig,
 ) -> Result<()> {
+    if app.multi_diff.file_count() == 0
+        && !matches!(
+            action,
+            NormalAction::Quit | NormalAction::Refresh | NormalAction::ToggleHelp
+        )
+    {
+        app.reset_count();
+        return Ok(());
+    }
+
     if !matches!(
         action,
         NormalAction::YankChange

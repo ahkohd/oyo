@@ -785,6 +785,142 @@ fn test_files_changed_indicator_detects_disk_modification_and_clears_on_refresh(
 }
 
 #[test]
+fn test_empty_git_diff_no_step_does_not_panic() {
+    let _guard = DiffSettingsGuard::default();
+    let diff = MultiFileDiff::from_git_changes(std::env::temp_dir(), Vec::new()).expect("diff");
+    let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+
+    app.stepping = false;
+    app.enter_no_step_mode();
+    app.toggle_stepping();
+
+    assert_eq!(app.multi_diff.file_count(), 0);
+    assert!(!app.syntax_enabled());
+    assert!(!app.tick());
+    assert_eq!(app.stats(), (0, 0));
+}
+
+#[test]
+fn test_tick_watch_refreshes_changed_files_on_disk() {
+    let _guard = DiffSettingsGuard::default();
+    let path = std::env::temp_dir().join(format!(
+        "oyo_watch_test_{}_{}.txt",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos()
+    ));
+    std::fs::write(&path, "new\n").expect("write test file");
+
+    let diff = MultiFileDiff::from_file_pair_with_sources(
+        path.clone(),
+        b"old\n".to_vec(),
+        b"new\n".to_vec(),
+        None,
+        Some(path.clone()),
+    );
+    let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+    assert!(app.watch);
+
+    std::fs::write(&path, "new changed on disk\n").expect("update test file");
+    app.last_fs_check = Instant::now() - Duration::from_secs(2);
+
+    assert!(app.tick());
+    assert!(!app.files_changed_on_disk);
+    assert!(!app.file_changed_on_disk(0));
+    assert_eq!(
+        app.multi_diff.file_contents(0).map(|(_, new)| new),
+        Some("new changed on disk\n")
+    );
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn test_tick_watch_adds_new_untracked_file() {
+    let _guard = DiffSettingsGuard::default();
+    let repo = std::env::temp_dir().join(format!(
+        "oyo_watch_repo_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&repo).expect("create repo");
+    std::process::Command::new("git")
+        .arg("init")
+        .arg("-q")
+        .current_dir(&repo)
+        .status()
+        .expect("git init");
+
+    let changes = oyo_core::git::get_uncommitted_changes(&repo).expect("changes");
+    let diff = MultiFileDiff::from_git_changes(repo.clone(), changes).expect("diff");
+    let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+    assert_eq!(app.multi_diff.file_count(), 0);
+
+    std::fs::write(repo.join("new.txt"), "new\n").expect("write new file");
+    app.last_git_watch_check = Instant::now() - Duration::from_secs(2);
+
+    assert!(app.maybe_watch_refresh_git_files());
+    assert_eq!(app.multi_diff.file_count(), 1);
+    assert_eq!(app.current_file_path(), "new.txt");
+    assert_eq!(
+        app.multi_diff.file_contents(0).map(|(_, new)| new),
+        Some("new\n")
+    );
+
+    let _ = std::fs::remove_dir_all(repo);
+}
+
+#[test]
+fn test_tick_watch_refreshes_non_current_changed_file() {
+    let _guard = DiffSettingsGuard::default();
+    let now_nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let path_a = std::env::temp_dir().join(format!(
+        "oyo_watch_a_{}_{}.txt",
+        std::process::id(),
+        now_nanos
+    ));
+    let path_b = std::env::temp_dir().join(format!(
+        "oyo_watch_b_{}_{}.txt",
+        std::process::id(),
+        now_nanos
+    ));
+    std::fs::write(&path_a, "A\n").expect("write file a");
+    std::fs::write(&path_b, "B\n").expect("write file b");
+
+    let diff = MultiFileDiff::from_file_pairs(vec![
+        (path_a.clone(), "old A\n".to_string(), "A\n".to_string()),
+        (path_b.clone(), "old B\n".to_string(), "B\n".to_string()),
+    ]);
+    let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+
+    std::fs::write(&path_a, "A changed\n").expect("update file a");
+    std::fs::write(&path_b, "B changed\n").expect("update file b");
+    app.last_fs_check = Instant::now() - Duration::from_secs(2);
+
+    assert!(app.tick());
+    assert!(!app.files_changed_on_disk);
+    assert_eq!(
+        app.multi_diff.file_contents(0).map(|(_, new)| new),
+        Some("A changed\n")
+    );
+    assert_eq!(
+        app.multi_diff.file_contents(1).map(|(_, new)| new),
+        Some("B changed\n")
+    );
+
+    let _ = std::fs::remove_file(path_a);
+    let _ = std::fs::remove_file(path_b);
+}
+
+#[test]
 fn test_refresh_current_file_keeps_changed_indicator_if_other_file_is_modified() {
     let _guard = DiffSettingsGuard::default();
     let now_nanos = std::time::SystemTime::now()

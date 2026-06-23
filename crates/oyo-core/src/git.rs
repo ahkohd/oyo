@@ -82,6 +82,29 @@ pub fn get_current_branch(path: &Path) -> Result<String, GitError> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+/// Get the path to the git index file.
+pub fn get_index_path(path: &Path) -> Result<PathBuf, GitError> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .arg("rev-parse")
+        .arg("--git-path")
+        .arg("index")
+        .output()?;
+
+    if !output.status.success() {
+        return Err(GitError::NotARepo);
+    }
+
+    let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let index_path = PathBuf::from(raw);
+    Ok(if index_path.is_absolute() {
+        index_path
+    } else {
+        path.join(index_path)
+    })
+}
+
 /// Get the root of the git repository
 pub fn get_repo_root(path: &Path) -> Result<PathBuf, GitError> {
     let output = Command::new("git")

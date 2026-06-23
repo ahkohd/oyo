@@ -8,6 +8,7 @@
 //! zen = false
 //! topbar = true
 //! auto_center = true
+//! watch = true
 //! overscroll = false
 //! view_mode = "unified"
 //! line_wrap = false
@@ -717,6 +718,8 @@ pub struct UiConfig {
     pub topbar: bool,
     /// Auto-center on active change after stepping (like vim's zz)
     pub auto_center: bool,
+    /// Watch files and refresh changed diff entries
+    pub watch: bool,
     /// Allow overscroll near EOF when centering
     pub overscroll: bool,
     /// Default view mode: "unified", "split", or "evolution"
@@ -765,6 +768,7 @@ impl Default for UiConfig {
             zen: false,
             topbar: true,
             auto_center: true,
+            watch: true,
             overscroll: false,
             view_mode: None,
             line_wrap: false,

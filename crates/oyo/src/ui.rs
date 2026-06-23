@@ -319,9 +319,59 @@ fn truncate_text(text: &str, max_width: usize) -> String {
     format!("{acc}…")
 }
 
+fn no_changes_message(app: &App) -> &str {
+    app.no_changes_message
+        .as_deref()
+        .unwrap_or("No changes found.")
+}
+
+fn no_changes_hint(app: &App) -> &str {
+    if app.watch {
+        "Watching for changes. Press q to quit."
+    } else {
+        "Press R to refresh or q to quit."
+    }
+}
+
+fn draw_no_changes(frame: &mut Frame, app: &App, area: Rect) {
+    if let Some(bg) = app.theme.background {
+        frame.render_widget(Block::default().style(Style::default().bg(bg)), area);
+    }
+    let text = vec![
+        Line::from(Span::styled(
+            no_changes_message(app),
+            Style::default()
+                .fg(app.theme.text)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            no_changes_hint(app),
+            Style::default().fg(app.theme.text_muted),
+        )),
+    ];
+    let height = 3.min(area.height);
+    let y = area.y + area.height.saturating_sub(height) / 2;
+    let mut paragraph = Paragraph::new(text).alignment(Alignment::Center);
+    if let Some(bg) = app.theme.background {
+        paragraph = paragraph.style(Style::default().bg(bg));
+    }
+    frame.render_widget(paragraph, Rect::new(area.x, y, area.width, height));
+}
+
 /// Main drawing function
 pub fn draw(frame: &mut Frame, app: &mut App) {
     app.clear_review_preview_boxes();
+
+    if app.multi_diff.file_count() == 0 {
+        app.clear_diff_selection();
+        app.set_diff_selection_cells(Vec::new());
+        draw_no_changes(frame, app, frame.area());
+        if app.show_help {
+            draw_help_popover(frame, app);
+        }
+        return;
+    }
 
     if app.zen_mode {
         // Zen mode: just the content with minimal progress indicator
@@ -1287,6 +1337,10 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn draw_diff_view(frame: &mut Frame, app: &mut App, area: Rect) {
+    if app.multi_diff.file_count() == 0 {
+        draw_no_changes(frame, app, area);
+        return;
+    }
     match app.view_mode {
         ViewMode::UnifiedPane => render_unified_pane(frame, app, area),
         ViewMode::Split => render_split(frame, app, area),
@@ -1865,6 +1919,9 @@ fn draw_review_editor_overlay(frame: &mut Frame, app: &mut App) {
 }
 
 fn draw_zen_progress(frame: &mut Frame, app: &mut App) {
+    if app.multi_diff.file_count() == 0 {
+        return;
+    }
     let state = app.state();
     let label = format!(" {}/{} ", state.current_step + 1, state.total_steps);
 

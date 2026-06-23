@@ -1100,6 +1100,63 @@ impl MultiFileDiff {
         self.repo_root.is_some()
     }
 
+    pub fn uses_git_index(&self) -> bool {
+        matches!(
+            self.git_mode,
+            Some(GitDiffMode::Staged | GitDiffMode::IndexRange { .. })
+        )
+    }
+
+    fn change_key(path: &Path, old_path: Option<&Path>, status: FileStatus) -> String {
+        format!(
+            "{}\0{}\0{:?}",
+            path.display(),
+            old_path
+                .map(|path| path.display().to_string())
+                .unwrap_or_default(),
+            status
+        )
+    }
+
+    fn change_signature_for_files(&self) -> Vec<String> {
+        let mut keys: Vec<String> = self
+            .files
+            .iter()
+            .map(|file| Self::change_key(&file.path, file.old_path.as_deref(), file.status))
+            .collect();
+        keys.sort();
+        keys
+    }
+
+    /// True if the git path/status list changed since this diff was built.
+    pub fn git_change_list_changed(&self) -> bool {
+        let Some(repo_root) = self.repo_root.as_ref() else {
+            return false;
+        };
+        let Some(mode) = self.git_mode.as_ref() else {
+            return false;
+        };
+
+        let changes = match mode {
+            GitDiffMode::Uncommitted => crate::git::get_uncommitted_changes(repo_root),
+            GitDiffMode::Staged => crate::git::get_staged_changes(repo_root),
+            GitDiffMode::Range { from, to } => crate::git::get_changes_between(repo_root, from, to),
+            GitDiffMode::IndexRange { from, to_index } => {
+                crate::git::get_changes_between_index(repo_root, from, !to_index)
+            }
+        };
+        let Ok(changes) = changes else {
+            return false;
+        };
+
+        let mut fresh: Vec<String> = changes
+            .iter()
+            .map(|change| Self::change_key(&change.path, change.old_path.as_deref(), change.status))
+            .collect();
+        fresh.sort();
+        fresh != self.change_signature_for_files()
+    }
+
     /// Return a display-friendly git range for header usage (if applicable).
     pub fn git_range_display(&self) -> Option<(String, String)> {
         let mode = self.git_mode.as_ref()?;
@@ -1323,7 +1380,14 @@ impl MultiFileDiff {
 
     /// Refresh the current file from disk (re-read and re-diff)
     pub fn refresh_current_file(&mut self) {
-        let idx = self.selected_index;
+        self.refresh_file(self.selected_index);
+    }
+
+    /// Refresh a file from disk (re-read and re-diff)
+    pub fn refresh_file(&mut self, idx: usize) {
+        if idx >= self.files.len() {
+            return;
+        }
         let file = &self.files[idx];
         let old_path = file.old_path.clone().unwrap_or_else(|| file.path.clone());
 

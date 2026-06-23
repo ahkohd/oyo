@@ -54,6 +54,7 @@ oyo does **not** replace classic diffs, it adds a new way to review them.
 - **Visual selection**: Select visible diff text with char, line, and block modes, then yank to clipboard
 - **Word-level diffing**: See exactly which words changed within a line
 - **Multi-file support**: Navigate between changed files with preserved positions
+- **Watch mode**: Refresh changed files on disk by default
 - **Search**: Regex search with to jump between matches
 - **Syntax highlighting**: Toggle on/off for code-aware coloring (auto-enabled in no-step mode)
 - **Blame hints**: One-shot or toggle blame previews while stepping (opt-in)
@@ -296,6 +297,7 @@ Create a config file at `~/.config/oyo/config.toml`:
 ```toml
 [ui]
 auto_center = true          # Auto-center on active change (default: true)
+watch = true                # Refresh changed files on disk
 overscroll = false         # EOF overscroll when centering (opt-in)
 topbar = true               # Show top bar in diff view (default: true)
 view_mode = "unified"       # Default: "unified", "split", "evolution", or "blame"
@@ -418,6 +420,7 @@ Example config:
 [ui]
 zen = false
 auto_center = true
+watch = true
 overscroll = false
 view_mode = "unified"
 gutter_signs = false

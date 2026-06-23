@@ -145,6 +145,8 @@ pub struct App {
     pub git_branch: Option<String>,
     /// Auto-center on active change after stepping (like vim's zz)
     pub auto_center: bool,
+    /// Watch files and refresh changed diff entries
+    pub watch: bool,
     /// Allow overscroll near EOF when centering
     pub overscroll: bool,
     /// Show top bar in diff view
@@ -161,6 +163,12 @@ pub struct App {
     file_disk_baseline: Vec<FileDiskStamp>,
     /// Per-file changed-on-disk flags (same indexing as multi_diff.files)
     file_disk_changed: Vec<bool>,
+    /// Last time we checked git path/status changes
+    last_git_watch_check: Instant,
+    /// Baseline git index stamp for staged/index-backed diffs
+    git_index_baseline: FileDiskStamp,
+    /// Message shown when a git diff currently has no files
+    pub no_changes_message: Option<String>,
     /// Defer heavy view rebuild by one frame (for large-file jumps)
     view_build_defer: bool,
     /// True while a deferred view rebuild is pending
@@ -556,6 +564,7 @@ impl App {
             help_max_scroll: 0,
             git_branch,
             auto_center: true,
+            watch: true,
             overscroll: false,
             topbar: true,
             animation_duration: 150,
@@ -564,6 +573,9 @@ impl App {
             last_fs_check: Instant::now(),
             file_disk_baseline: vec![FileDiskStamp::default(); file_count],
             file_disk_changed: vec![false; file_count],
+            last_git_watch_check: Instant::now(),
+            git_index_baseline: FileDiskStamp::default(),
+            no_changes_message: None,
             view_build_defer: false,
             view_build_pending: false,
             horizontal_scroll: 0,
@@ -709,6 +721,7 @@ impl App {
             view_window_total_len: None,
         };
         app.rebuild_file_disk_baseline();
+        app.git_index_baseline = app.git_index_stamp();
         app
     }
 
@@ -1662,6 +1675,12 @@ impl App {
         dirty |= self.poll_diff_responses();
         dirty |= self.maybe_queue_idle_diff();
         dirty |= self.maybe_check_file_changes();
+        dirty |= self.maybe_watch_refresh_git_files();
+        dirty |= self.maybe_watch_refresh_changed_files();
+
+        if self.multi_diff.file_count() == 0 {
+            return dirty;
+        }
 
         if let Some(frame) = self.snap_frame {
             dirty = true;

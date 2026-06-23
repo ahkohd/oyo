@@ -2056,6 +2056,13 @@ impl App {
 
     /// Enter no-step mode without changing scroll position.
     pub fn enter_no_step_mode(&mut self) {
+        if self.multi_diff.file_count() == 0 {
+            self.peek_state = None;
+            self.animation_phase = AnimationPhase::Idle;
+            self.animation_progress = 1.0;
+            self.needs_scroll_to_active = false;
+            return;
+        }
         // Evolution mode requires stepping, so switch to Unified view
         if self.view_mode == ViewMode::Evolution {
             self.view_mode = ViewMode::UnifiedPane;
@@ -2080,6 +2087,9 @@ impl App {
     }
 
     pub fn toggle_stepping(&mut self) {
+        if self.multi_diff.file_count() == 0 {
+            return;
+        }
         let current_index = self.multi_diff.selected_index;
         if self.stepping {
             // Turning OFF stepping: snapshot state and scroll, then enter no-step.

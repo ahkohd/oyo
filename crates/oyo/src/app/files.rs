@@ -174,6 +174,9 @@ impl App {
     /// Handle entering a file (marks visited, optionally auto-steps to first change)
     /// Called on initial file and when switching files.
     pub fn handle_file_enter(&mut self) {
+        if self.multi_diff.file_count() == 0 {
+            return;
+        }
         self.queue_current_file_diff();
         if self.stepping && !self.current_file_diff_ready() {
             return;
@@ -182,6 +185,9 @@ impl App {
     }
 
     pub(crate) fn finish_file_enter(&mut self) {
+        if self.multi_diff.file_count() == 0 {
+            return;
+        }
         let idx = self.multi_diff.selected_index;
 
         if !self.stepping {
@@ -309,6 +315,26 @@ impl App {
             .unwrap_or_default()
     }
 
+    pub(crate) fn git_index_stamp(&self) -> FileDiskStamp {
+        if !self.multi_diff.uses_git_index() {
+            return FileDiskStamp::default();
+        }
+        let Some(repo_root) = self.multi_diff.repo_root() else {
+            return FileDiskStamp::default();
+        };
+        let Ok(path) = oyo_core::git::get_index_path(repo_root) else {
+            return FileDiskStamp::default();
+        };
+        match std::fs::metadata(path) {
+            Ok(meta) => FileDiskStamp {
+                modified: meta.modified().ok(),
+                len: meta.len(),
+                exists: true,
+            },
+            Err(_) => FileDiskStamp::default(),
+        }
+    }
+
     fn disk_stamp_for_index(&self, idx: usize) -> FileDiskStamp {
         let Some(file) = self.multi_diff.files.get(idx) else {
             return FileDiskStamp::default();
@@ -391,8 +417,63 @@ impl App {
         self.recompute_file_change_state()
     }
 
+    pub(crate) fn maybe_watch_refresh_git_files(&mut self) -> bool {
+        if !self.watch || !self.multi_diff.is_git_mode() {
+            return false;
+        }
+        let now = Instant::now();
+        if now.duration_since(self.last_git_watch_check) < Duration::from_secs(1) {
+            return false;
+        }
+        self.last_git_watch_check = now;
+
+        let index_stamp = self.git_index_stamp();
+        let changed =
+            self.multi_diff.git_change_list_changed() || index_stamp != self.git_index_baseline;
+        if !changed {
+            return false;
+        }
+
+        self.refresh_all_files();
+        true
+    }
+
+    pub(crate) fn maybe_watch_refresh_changed_files(&mut self) -> bool {
+        if !self.watch || !self.files_changed_on_disk {
+            return false;
+        }
+
+        let changed: Vec<usize> = self
+            .file_disk_changed
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, changed)| changed.then_some(idx))
+            .collect();
+        if changed.is_empty() {
+            return false;
+        }
+
+        let current = self.multi_diff.selected_index;
+        for idx in changed {
+            if idx == current {
+                self.refresh_current_file();
+                continue;
+            }
+            self.multi_diff.refresh_file(idx);
+            if idx < self.syntax_caches.len() {
+                self.syntax_caches[idx] = None;
+            }
+            self.refresh_file_disk_baseline_for(idx);
+        }
+        self.recompute_file_change_state();
+        true
+    }
+
     /// Refresh current file from disk
     pub fn refresh_current_file(&mut self) {
+        if self.multi_diff.file_count() == 0 {
+            return;
+        }
         // Preserve no-step hunk scope/cursor context when possible.
         let preserve_no_step_hunk = if !self.stepping {
             let nav = self.multi_diff.current_navigator();
@@ -494,6 +575,7 @@ impl App {
             self.handle_file_enter();
 
             self.rebuild_file_disk_baseline();
+            self.git_index_baseline = self.git_index_stamp();
             self.files_changed_on_disk = false;
             self.invalidate_review_repo_file_cache();
         }
@@ -508,7 +590,7 @@ impl App {
 
     /// Get statistics about the current file's diff
     pub fn stats(&mut self) -> (usize, usize) {
-        if self.current_file_is_binary() {
+        if self.multi_diff.file_count() == 0 || self.current_file_is_binary() {
             return (0, 0);
         }
         let diff = self.multi_diff.current_navigator().diff();
