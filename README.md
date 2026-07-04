@@ -28,22 +28,20 @@ You can:
 Start with:
 
 ```sh
-oy --no-step
+oy
 ```
-
-You can also press `s` in the TUI, or set `stepping = false` in config.
 
 ### Step-through diff
 
-Step-through mode is the default.
-
-Use it when you want to see how a file changes over time. This helps with large refactors and careful reviews.
+Use step-through mode when you want to see how a file changes over time. This helps with large refactors and careful reviews.
 
 Start with:
 
 ```sh
-oy
+oy --step
 ```
+
+You can also press `s` in the TUI, or set `stepping = true` in config.
 
 ## Features
 
@@ -111,10 +109,10 @@ cargo install oyo --locked --force
 oy
 ```
 
-### Show uncommitted changes without stepping
+### Step through uncommitted changes
 
 ```sh
-oy --no-step
+oy --step
 ```
 
 ### Compare 2 files
@@ -146,14 +144,14 @@ oy --range main...feature
 
 ```sh
 oy old.rs new.rs --view split
-oy old.rs new.rs --view evolution
+oy old.rs new.rs --step --view evolution
 ```
 
 ### Use autoplay
 
 ```sh
-oy old.rs new.rs --autoplay
-oy old.rs new.rs --speed 100
+oy old.rs new.rs --step --autoplay
+oy old.rs new.rs --step --speed 100
 ```
 
 ### Pick a commit range
@@ -167,31 +165,31 @@ oy view
 Add comments while reviewing. Oyo prints them when you quit.
 
 ```sh
-oy --no-step
+oy
 ```
 
 Write comments to a file:
 
 ```sh
-oy --no-step --review-output-file /tmp/oy-review.txt
+oy --review-output-file /tmp/oy-review.txt
 ```
 
 Write comments only to a file:
 
 ```sh
-oy --no-step --review-output-file /tmp/oy-review.txt --no-print-review
+oy --review-output-file /tmp/oy-review.txt --no-print-review
 ```
 
 Disable persisted review sessions:
 
 ```sh
-oy --no-step --no-review-persist
+oy --no-review-persist
 ```
 
 Start a fresh persisted review session:
 
 ```sh
-oy --no-step --clear-review-session
+oy --clear-review-session
 ```
 
 Review hooks are documented in [review hooks](./docs/REVIEW_HOOKS.md).
@@ -242,8 +240,8 @@ Common defaults:
 
 | Key | Action |
 | --- | --- |
-| `j`, `down` | Next step, or scroll in no-step mode |
-| `k`, `up` | Previous step, or scroll in no-step mode |
+| `j`, `down` | Scroll down, or next step in step mode |
+| `k`, `up` | Scroll up, or previous step in step mode |
 | `l`, `right` | Next hunk |
 | `h`, `left` | Previous hunk |
 | `v` | Start character selection |
@@ -288,7 +286,7 @@ Minimal config:
 ```toml
 [ui]
 view_mode = "unified"
-stepping = true
+stepping = false
 watch = true
 line_wrap = false
 fold_context = "off"
