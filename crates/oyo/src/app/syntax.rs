@@ -16,6 +16,60 @@ impl App {
         }
     }
 
+    pub(crate) fn preview_source_spans(
+        &mut self,
+        file_name: &str,
+        text: &str,
+    ) -> Option<Vec<Vec<Span<'static>>>> {
+        if matches!(self.syntax_mode, crate::config::SyntaxMode::Off) {
+            return None;
+        }
+        if self.syntax_engine.is_none() {
+            self.syntax_engine = Some(SyntaxEngine::new(&self.syntax_theme, self.theme_is_light));
+        }
+        let engine = self.syntax_engine.as_ref()?;
+        Some(
+            engine
+                .highlight(text, file_name)
+                .into_iter()
+                .map(|line| {
+                    line.into_iter()
+                        .map(|span| Span::styled(span.text, span.style))
+                        .collect()
+                })
+                .collect(),
+        )
+    }
+
+    /// Syntax-highlight the body of a fenced code block, selecting the grammar
+    /// from the fence's language token. Returns one span vector per code line,
+    /// or `None` when highlighting is disabled or no language was given.
+    pub(crate) fn highlight_code_block(
+        &mut self,
+        lang: Option<&str>,
+        code: &str,
+    ) -> Option<Vec<Vec<Span<'static>>>> {
+        if matches!(self.syntax_mode, crate::config::SyntaxMode::Off) {
+            return None;
+        }
+        let lang = lang?;
+        if self.syntax_engine.is_none() {
+            self.syntax_engine = Some(SyntaxEngine::new(&self.syntax_theme, self.theme_is_light));
+        }
+        let engine = self.syntax_engine.as_ref()?;
+        Some(
+            engine
+                .highlight_by_token(code, lang)
+                .into_iter()
+                .map(|line| {
+                    line.into_iter()
+                        .map(|span| Span::styled(span.text, span.style))
+                        .collect()
+                })
+                .collect(),
+        )
+    }
+
     pub(crate) fn syntax_cache_epoch(&self) -> u64 {
         if !self.syntax_enabled() {
             return 0;
@@ -329,6 +383,7 @@ impl App {
                     old_line.map(|line_num| (SyntaxSide::Old, line_num))
                 }
             }
+            ViewMode::Preview => None,
         }
     }
 }

@@ -222,6 +222,7 @@ pub fn display_metrics(
         ViewMode::Split => {
             split_display_metrics(view, scroll_offset, step_direction, split_align_lines)
         }
+        ViewMode::Preview => (view.len(), None),
     }
 }
 

@@ -32,5 +32,7 @@ two-face = "0.5.0-rc1"
 regex = { workspace = true }
 unicode-width = { workspace = true }
 unicode-segmentation = { workspace = true }
+pulldown-cmark = { workspace = true }
+image = { workspace = true }
 time = { workspace = true }
 rustc-hash = { workspace = true }

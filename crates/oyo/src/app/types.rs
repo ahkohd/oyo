@@ -35,6 +35,8 @@ pub enum ViewMode {
     Evolution,
     /// Blame view - code with per-line blame gutter
     Blame,
+    /// Preview view - rendered markdown or source text
+    Preview,
 }
 
 impl ViewMode {
@@ -44,7 +46,8 @@ impl ViewMode {
             ViewMode::UnifiedPane => ViewMode::Split,
             ViewMode::Split => ViewMode::Evolution,
             ViewMode::Evolution => ViewMode::Blame,
-            ViewMode::Blame => ViewMode::UnifiedPane,
+            ViewMode::Blame => ViewMode::Preview,
+            ViewMode::Preview => ViewMode::UnifiedPane,
         }
     }
 
@@ -55,6 +58,7 @@ impl ViewMode {
             ViewMode::Split => ViewMode::UnifiedPane,
             ViewMode::Evolution => ViewMode::Split,
             ViewMode::Blame => ViewMode::Evolution,
+            ViewMode::Preview => ViewMode::Blame,
         }
     }
 }

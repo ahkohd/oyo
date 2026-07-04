@@ -55,7 +55,7 @@ Use `[ui]` for general display and navigation defaults.
 | `auto_center` | `true`, `false` | `true` | Keeps the active change centred while stepping |
 | `watch` | `true`, `false` | `true` | Refreshes changed files on disk |
 | `overscroll` | `true`, `false` | `false` | Allows extra end-of-file scroll while centring |
-| `view_mode` | `unified`, `split`, `evolution`, `blame` | `unified` | Sets the default view mode |
+| `view_mode` | `unified`, `split`, `evolution`, `blame`, `preview` | `unified` | Sets the default view mode |
 | `line_wrap` | `true`, `false` | `false` | Wraps long lines instead of horizontal scrolling |
 | `fold_context` | `off`, `on`, `counts` | `off` | Folds long unchanged blocks |
 | `scrollbar` | `true`, `false` | `true` | Shows the diff and file panel scrollbars |

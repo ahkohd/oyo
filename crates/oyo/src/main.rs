@@ -193,6 +193,8 @@ enum CliViewMode {
     Evolution,
     /// Blame view - per-line blame gutter
     Blame,
+    /// Preview view - rendered Markdown or source text
+    Preview,
 }
 
 impl From<CliViewMode> for ViewMode {
@@ -202,6 +204,7 @@ impl From<CliViewMode> for ViewMode {
             CliViewMode::Split => ViewMode::Split,
             CliViewMode::Evolution => ViewMode::Evolution,
             CliViewMode::Blame => ViewMode::Blame,
+            CliViewMode::Preview => ViewMode::Preview,
         }
     }
 }
@@ -1564,6 +1567,9 @@ fn run_app(
                             if app.handle_review_preview_click(me.column, me.row) {
                                 continue;
                             }
+                            if app.handle_preview_link_click(me.column, me.row) {
+                                continue;
+                            }
                             if app.start_diff_selection(me.column, me.row) {
                                 continue;
                             }
@@ -1611,7 +1617,10 @@ fn run_app(
                         MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
                             let target = if app.mouse_over_file_panel(me.column, me.row) {
                                 MouseScrollTarget::FilePanel
-                            } else if app.stepping && app.current_file_diff_ready() {
+                            } else if app.view_mode != ViewMode::Preview
+                                && app.stepping
+                                && app.current_file_diff_ready()
+                            {
                                 MouseScrollTarget::Step
                             } else {
                                 MouseScrollTarget::Diff

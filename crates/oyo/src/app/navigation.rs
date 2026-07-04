@@ -735,6 +735,7 @@ impl App {
                     }
                 }
             }
+            ViewMode::Preview => {}
         }
 
         matches
@@ -2090,6 +2091,10 @@ impl App {
         if self.multi_diff.file_count() == 0 {
             return;
         }
+        if self.view_mode == ViewMode::Preview {
+            self.stepping = !self.stepping;
+            return;
+        }
         let current_index = self.multi_diff.selected_index;
         if self.stepping {
             // Turning OFF stepping: snapshot state and scroll, then enter no-step.
@@ -2512,11 +2517,11 @@ impl App {
                     if allow_blame {
                         ViewMode::Blame
                     } else {
-                        ViewMode::UnifiedPane
+                        ViewMode::Preview
                     }
                 }
-                ViewMode::Blame => ViewMode::UnifiedPane,
-                ViewMode::Evolution => ViewMode::UnifiedPane,
+                ViewMode::Blame => ViewMode::Preview,
+                ViewMode::Preview | ViewMode::Evolution => ViewMode::UnifiedPane,
             };
         } else if allow_blame {
             self.view_mode = self.view_mode.next();
@@ -2524,8 +2529,8 @@ impl App {
             self.view_mode = match self.view_mode {
                 ViewMode::UnifiedPane => ViewMode::Split,
                 ViewMode::Split => ViewMode::Evolution,
-                ViewMode::Evolution => ViewMode::UnifiedPane,
-                ViewMode::Blame => ViewMode::UnifiedPane,
+                ViewMode::Evolution => ViewMode::Preview,
+                ViewMode::Preview | ViewMode::Blame => ViewMode::UnifiedPane,
             };
         }
         if self.stepping && self.view_mode == ViewMode::Evolution {
@@ -2563,7 +2568,8 @@ impl App {
         if !self.stepping {
             // In no-step mode, skip Evolution view as it requires stepping
             self.view_mode = match self.view_mode {
-                ViewMode::UnifiedPane => {
+                ViewMode::UnifiedPane => ViewMode::Preview,
+                ViewMode::Preview => {
                     if allow_blame {
                         ViewMode::Blame
                     } else {
@@ -2578,7 +2584,8 @@ impl App {
             self.view_mode = self.view_mode.prev();
         } else {
             self.view_mode = match self.view_mode {
-                ViewMode::UnifiedPane => ViewMode::Evolution,
+                ViewMode::UnifiedPane => ViewMode::Preview,
+                ViewMode::Preview => ViewMode::Evolution,
                 ViewMode::Split => ViewMode::UnifiedPane,
                 ViewMode::Evolution => ViewMode::Split,
                 ViewMode::Blame => ViewMode::UnifiedPane,

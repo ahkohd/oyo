@@ -460,6 +460,34 @@ fn test_no_step_snapshot_restores_cursor_or_jumps() {
     assert!(cursor_id > 0);
 }
 
+fn topbar_tab(id: usize, file_index: usize) -> TopbarTab {
+    TopbarTab {
+        id,
+        content: TopbarTabContent::File(file_index),
+        view_mode: ViewMode::UnifiedPane,
+        step_view_mode: ViewMode::UnifiedPane,
+        stepping: true,
+        scroll_offset: 0,
+        horizontal_scroll: 0,
+        preview_rendered: true,
+        navigator_state: None,
+    }
+}
+
+fn topbar_files(app: &App) -> Vec<usize> {
+    app.topbar_tabs
+        .iter()
+        .filter_map(|tab| match tab.content {
+            TopbarTabContent::File(index) => Some(index),
+            TopbarTabContent::Help => None,
+        })
+        .collect()
+}
+
+fn topbar_ids(app: &App) -> Vec<usize> {
+    app.topbar_tabs.iter().map(|tab| tab.id).collect()
+}
+
 #[test]
 fn topbar_close_keeps_last_tab() {
     let diff = MultiFileDiff::from_file_pairs(vec![
@@ -475,28 +503,142 @@ fn topbar_close_keeps_last_tab() {
         ),
     ]);
     let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
-    app.select_file(1);
+    app.topbar_tabs = vec![topbar_tab(1, 0), topbar_tab(2, 1)];
+    app.active_topbar_tab = Some(2);
+    app.multi_diff.select_file(1);
     app.topbar_tab_hits = vec![TopbarTabHit {
-        file_index: 1,
+        tab_id: 2,
         row: 0,
         start_col: 0,
         end_col: 7,
         close_col: Some(5),
     }];
 
+    assert!(app.update_topbar_hover(5, 0));
+    assert_eq!(app.topbar_hover_close, Some(2));
+    assert!(app.update_topbar_hover(1, 0));
+    assert_eq!(app.topbar_hover_close, None);
+
     assert!(app.handle_topbar_mouse_down(5, 0));
-    assert_eq!(app.topbar_tabs, vec![0]);
+    assert_eq!(topbar_files(&app), vec![0]);
+    assert_eq!(app.active_topbar_tab, Some(1));
     assert_eq!(app.multi_diff.selected_index, 0);
 
     app.topbar_tab_hits = vec![TopbarTabHit {
-        file_index: 0,
+        tab_id: 1,
         row: 0,
         start_col: 0,
         end_col: 7,
         close_col: Some(5),
     }];
     assert!(app.handle_topbar_mouse_down(5, 0));
-    assert_eq!(app.topbar_tabs, vec![0]);
+    assert_eq!(topbar_files(&app), vec![0]);
+}
+
+#[test]
+fn topbar_select_replaces_active_tab_file() {
+    let diff = MultiFileDiff::from_file_pairs(vec![
+        (
+            std::path::PathBuf::from("a.txt"),
+            "a\n".to_string(),
+            "aa\n".to_string(),
+        ),
+        (
+            std::path::PathBuf::from("b.txt"),
+            "b\n".to_string(),
+            "bb\n".to_string(),
+        ),
+    ]);
+    let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+
+    app.select_file(1);
+    assert_eq!(topbar_files(&app), vec![1]);
+
+    app.new_topbar_tab();
+    assert_eq!(topbar_files(&app), vec![1, 1]);
+    app.select_file(0);
+    assert_eq!(topbar_files(&app), vec![1, 0]);
+}
+
+#[test]
+fn help_opens_as_preview_tab() {
+    let diff = MultiFileDiff::from_file_pairs(vec![
+        (
+            std::path::PathBuf::from("a.md"),
+            "# old\n".to_string(),
+            "# new\n".to_string(),
+        ),
+        (
+            std::path::PathBuf::from("b.txt"),
+            "b\n".to_string(),
+            "bb\n".to_string(),
+        ),
+    ]);
+    let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+
+    app.open_help_tab();
+    assert_eq!(app.view_mode, ViewMode::Preview);
+    assert_eq!(app.active_topbar_content(), Some(TopbarTabContent::Help));
+    assert_eq!(app.topbar_tabs.len(), 2);
+
+    app.open_help_tab();
+    assert_eq!(app.topbar_tabs.len(), 2);
+
+    app.select_file(1);
+    assert_eq!(app.active_topbar_content(), Some(TopbarTabContent::File(1)));
+}
+
+#[test]
+fn preview_render_toggle_is_per_tab() {
+    let diff = MultiFileDiff::from_file_pairs(vec![
+        (
+            std::path::PathBuf::from("a.md"),
+            "# old\n".to_string(),
+            "# new\n".to_string(),
+        ),
+        (
+            std::path::PathBuf::from("b.md"),
+            "# b\n".to_string(),
+            "# bb\n".to_string(),
+        ),
+    ]);
+    let mut app = App::new(diff, ViewMode::Preview, 0, false, None);
+    app.toggle_preview_rendered();
+    assert!(!app.active_preview_rendered());
+
+    app.new_topbar_tab();
+    assert!(!app.active_preview_rendered());
+    app.select_file(1);
+    assert!(app.active_preview_rendered());
+}
+
+#[test]
+fn topbar_tabs_keep_view_and_step_state() {
+    let diff = MultiFileDiff::from_file_pairs(vec![(
+        std::path::PathBuf::from("a.txt"),
+        "a\nb\n".to_string(),
+        "aa\nbb\n".to_string(),
+    )]);
+    let mut app = App::new(diff, ViewMode::Split, 0, false, None);
+    app.stepping = false;
+    app.multi_diff.current_navigator().goto(1);
+    app.new_topbar_tab();
+    let first = app.topbar_tabs[0].id;
+    let second = app.topbar_tabs[1].id;
+
+    app.view_mode = ViewMode::UnifiedPane;
+    app.stepping = true;
+    app.multi_diff.current_navigator().goto(0);
+
+    app.select_topbar_tab(first);
+    assert_eq!(app.view_mode, ViewMode::Split);
+    assert!(!app.stepping);
+    assert_eq!(app.multi_diff.current_navigator().state().current_step, 1);
+
+    app.select_topbar_tab(second);
+    assert_eq!(app.view_mode, ViewMode::UnifiedPane);
+    assert!(app.stepping);
+    assert_eq!(app.multi_diff.current_navigator().state().current_step, 0);
 }
 
 #[test]
@@ -519,24 +661,25 @@ fn topbar_drag_reorders_tabs() {
         ),
     ]);
     let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
-    app.topbar_tabs = vec![0, 1, 2];
+    app.topbar_tabs = vec![topbar_tab(1, 0), topbar_tab(2, 1), topbar_tab(3, 2)];
+    app.active_topbar_tab = Some(1);
     app.topbar_tab_hits = vec![
         TopbarTabHit {
-            file_index: 0,
+            tab_id: 1,
             row: 0,
             start_col: 0,
             end_col: 6,
             close_col: Some(4),
         },
         TopbarTabHit {
-            file_index: 1,
+            tab_id: 2,
             row: 0,
             start_col: 7,
             end_col: 13,
             close_col: Some(11),
         },
         TopbarTabHit {
-            file_index: 2,
+            tab_id: 3,
             row: 0,
             start_col: 14,
             end_col: 20,
@@ -555,7 +698,7 @@ fn topbar_drag_reorders_tabs() {
     assert!(app.drag_topbar_tab(14, 0));
     assert_eq!(app.topbar_drag_target, Some(2));
     assert!(app.finish_topbar_drag());
-    assert_eq!(app.topbar_tabs, vec![1, 0, 2]);
+    assert_eq!(topbar_ids(&app), vec![2, 1, 3]);
 }
 
 #[test]

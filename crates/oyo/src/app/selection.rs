@@ -597,6 +597,7 @@ fn push_segment(
 
 fn content_ranges(view_mode: ViewMode, width: u16) -> Vec<(u16, u16)> {
     let mut ranges = match view_mode {
+        ViewMode::Preview => vec![(0, width)],
         ViewMode::UnifiedPane | ViewMode::Evolution => vec![(8.min(width), width)],
         ViewMode::Blame => {
             let chunks = Layout::default()

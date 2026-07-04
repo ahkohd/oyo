@@ -1730,6 +1730,7 @@ impl Config {
             "split" | "sbs" => Some(crate::app::ViewMode::Split),
             "evolution" | "evo" => Some(crate::app::ViewMode::Evolution),
             "blame" => Some(crate::app::ViewMode::Blame),
+            "preview" => Some(crate::app::ViewMode::Preview),
             _ => None,
         })
     }

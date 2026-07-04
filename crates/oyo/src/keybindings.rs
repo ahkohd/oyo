@@ -589,8 +589,36 @@ impl Keybindings {
         self.review_editor.keys_label(action)
     }
 
+    pub(crate) fn command_palette_keys(&self, action: PickerAction) -> String {
+        self.command_palette.keys_label(action)
+    }
+
+    pub(crate) fn file_search_keys(&self, action: PickerAction) -> String {
+        self.file_search.keys_label(action)
+    }
+
+    pub(crate) fn file_filter_keys(&self, action: FileFilterAction) -> String {
+        self.file_filter.keys_label(action)
+    }
+
+    pub(crate) fn goto_keys(&self, action: LineInputAction) -> String {
+        self.goto.keys_label(action)
+    }
+
+    pub(crate) fn search_keys(&self, action: LineInputAction) -> String {
+        self.search.keys_label(action)
+    }
+
+    pub(crate) fn selection_keys(&self, action: SelectionAction) -> String {
+        self.selection.keys_label(action)
+    }
+
     pub(crate) fn dashboard_keys(&self, action: DashboardAction) -> String {
         self.dashboard.keys_label(action)
+    }
+
+    pub(crate) fn dashboard_filter_keys(&self, action: DashboardFilterAction) -> String {
+        self.dashboard_filter.keys_label(action)
     }
 
     fn prepare_mode(&mut self, mode: KeybindingMode) {

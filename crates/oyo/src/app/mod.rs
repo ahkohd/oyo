@@ -83,12 +83,40 @@ pub(crate) struct FilePanelScrollbarState {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TopbarTabContent {
+    File(usize),
+    Help,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct TopbarTab {
+    pub id: usize,
+    pub content: TopbarTabContent,
+    pub view_mode: ViewMode,
+    pub step_view_mode: ViewMode,
+    pub stepping: bool,
+    pub scroll_offset: usize,
+    pub horizontal_scroll: usize,
+    pub preview_rendered: bool,
+    pub navigator_state: Option<StepState>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct TopbarTabHit {
-    pub file_index: usize,
+    pub tab_id: usize,
     pub row: u16,
     pub start_col: u16,
     pub end_col: u16,
     pub close_col: Option<u16>,
+}
+
+/// A clickable hyperlink region in the markdown preview (screen coordinates).
+#[derive(Debug, Clone)]
+pub(crate) struct PreviewLinkBox {
+    pub x: u16,
+    pub y: u16,
+    pub width: u16,
+    pub url: String,
 }
 
 pub(crate) fn diff_scrollbar_thumb(
@@ -270,10 +298,15 @@ pub struct App {
     diff_scrollbar_dragging: bool,
     pub(crate) file_panel_scrollbar: Option<FilePanelScrollbarState>,
     file_panel_scrollbar_dragging: bool,
-    pub(crate) topbar_tabs: Vec<usize>,
+    pub(crate) topbar_tabs: Vec<TopbarTab>,
+    pub(crate) active_topbar_tab: Option<usize>,
+    next_topbar_tab_id: usize,
     pub(crate) topbar_tab_hits: Vec<TopbarTabHit>,
     pub(crate) topbar_plus_hit: Option<(u16, u16, u16, u16)>,
+    pub(crate) preview_toggle_hit: Option<(u16, u16, u16, u16)>,
     pub(crate) topbar_hover_tab: Option<usize>,
+    pub(crate) topbar_hover_close: Option<usize>,
+    pub(crate) topbar_plus_hover: bool,
     pub(crate) topbar_drag_target: Option<usize>,
     topbar_drag_tab: Option<usize>,
     /// Show strikethrough on deleted text
@@ -489,6 +522,8 @@ pub struct App {
     review_submission_output: Option<String>,
     /// Click hitboxes for rendered review comment previews
     review_preview_boxes: Vec<review::ReviewPreviewBox>,
+    /// Click hitboxes for hyperlinks in the markdown preview
+    preview_link_boxes: Vec<PreviewLinkBox>,
     /// Active inline mention picker state for comment editor
     review_mention_picker: Option<review::ReviewMentionPickerState>,
     /// File source scope for @ mention candidates.
@@ -680,10 +715,28 @@ impl App {
             diff_scrollbar_dragging: false,
             file_panel_scrollbar: None,
             file_panel_scrollbar_dragging: false,
-            topbar_tabs: (file_count > 0).then_some(0).into_iter().collect(),
+            topbar_tabs: (file_count > 0)
+                .then(|| TopbarTab {
+                    id: 1,
+                    content: TopbarTabContent::File(0),
+                    view_mode,
+                    step_view_mode: view_mode,
+                    stepping: true,
+                    scroll_offset: 0,
+                    horizontal_scroll: 0,
+                    preview_rendered: true,
+                    navigator_state: None,
+                })
+                .into_iter()
+                .collect(),
+            active_topbar_tab: (file_count > 0).then_some(1),
+            next_topbar_tab_id: 2,
             topbar_tab_hits: Vec::new(),
             topbar_plus_hit: None,
+            preview_toggle_hit: None,
             topbar_hover_tab: None,
+            topbar_hover_close: None,
+            topbar_plus_hover: false,
             topbar_drag_target: None,
             topbar_drag_tab: None,
             strikethrough_deletions: false,
@@ -794,6 +847,7 @@ impl App {
             review_next_comment_id: 1,
             review_submission_output: None,
             review_preview_boxes: Vec::new(),
+            preview_link_boxes: Vec::new(),
             review_mention_picker: None,
             review_mention_file_scope: MentionFileScope::default(),
             review_mention_finder: MentionFinder::default(),
@@ -1509,6 +1563,12 @@ impl App {
         &mut self,
         frame: AnimationFrame,
     ) -> std::sync::Arc<Vec<ViewLine>> {
+        if self.view_mode == ViewMode::Preview {
+            self.view_window_start = 0;
+            self.view_window_total_len = None;
+            self.view_build_pending = false;
+            return std::sync::Arc::new(Vec::new());
+        }
         let window = self.compute_view_window();
         let windowed = window.is_some();
         let window_start = window.map(|w| w.start).unwrap_or(0);

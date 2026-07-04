@@ -39,6 +39,7 @@ fn render_buffer(app: &mut App, width: u16, height: u16) -> Buffer {
                 ViewMode::Split => render_split(frame, app, area),
                 ViewMode::Evolution => render_evolution(frame, app, area),
                 ViewMode::Blame => render_blame(frame, app, area),
+                ViewMode::Preview => {}
             }
         })
         .expect("draw");

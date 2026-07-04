@@ -401,6 +401,34 @@ impl SyntaxEngine {
         out
     }
 
+    /// Highlight `content` using the syntax matched by a language token
+    /// (e.g. "rust", "rs", "python", "toml") as found in a fenced code block.
+    /// Falls back to plain text when the token is unknown.
+    pub fn highlight_by_token(&self, content: &str, token: &str) -> Vec<Vec<SyntaxSpan>> {
+        let syntax = self
+            .syntax_set
+            .find_syntax_by_token(token)
+            .unwrap_or_else(|| self.syntax_set.find_syntax_plain_text());
+        let mut highlighter = HighlightLines::new(syntax, self.theme.as_ref());
+        let mut out = Vec::new();
+
+        for line in LinesWithEndings::from(content) {
+            let ranges = highlighter
+                .highlight_line(line, &self.syntax_set)
+                .unwrap_or_default();
+            out.push(ranges_to_spans(ranges, self.plain));
+        }
+
+        if out.is_empty() {
+            out.push(vec![SyntaxSpan {
+                text: String::new(),
+                style: Style::default().fg(self.plain),
+            }]);
+        }
+
+        out
+    }
+
     pub fn collect_scopes(&self, content: &str, file_name: &str) -> BTreeMap<String, usize> {
         let syntax = self.syntax_for_file(file_name);
         let mut state = ParseState::new(syntax);

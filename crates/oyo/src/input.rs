@@ -772,7 +772,7 @@ fn dispatch_normal_action(
         }
         NormalAction::ToggleHelp => {
             app.reset_count();
-            app.toggle_help();
+            app.open_help_tab();
         }
         NormalAction::OpenCommandPalette => {
             app.reset_count();

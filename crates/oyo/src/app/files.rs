@@ -1,8 +1,73 @@
-use super::{AnimationPhase, App, FileDiskStamp, ViewMode};
+use super::{
+    AnimationPhase, App, FileDiskStamp, PreviewLinkBox, TopbarTab, TopbarTabContent, ViewMode,
+};
 use oyo_core::multi::FileSide;
 use std::time::{Duration, Instant};
 
+/// Whether a URL is safe to hand to the OS opener: only http(s)/mailto, so we
+/// never launch `file://`, `javascript:`, or other schemes from preview clicks.
+fn is_openable_url(url: &str) -> bool {
+    ["http://", "https://", "mailto:"]
+        .iter()
+        .any(|s| url.len() > s.len() && url[..s.len()].eq_ignore_ascii_case(s))
+}
+
+/// Open a URL with the operating system's default handler. The URL is passed as
+/// a single argument so it can never be interpreted by a shell.
+fn open_url(url: &str) {
+    if !is_openable_url(url) {
+        return;
+    }
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut c = std::process::Command::new("open");
+        c.arg(url);
+        c
+    };
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut c = std::process::Command::new("cmd");
+        c.args(["/C", "start", "", url]);
+        c
+    };
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let mut command = {
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(url);
+        c
+    };
+    let _ = command.spawn();
+}
+
 impl App {
+    pub fn clear_preview_link_boxes(&mut self) {
+        self.preview_link_boxes.clear();
+    }
+
+    pub fn add_preview_link_box(&mut self, x: u16, y: u16, width: u16, url: String) {
+        self.preview_link_boxes
+            .push(PreviewLinkBox { x, y, width, url });
+    }
+
+    /// Open a previewed hyperlink if the click landed on one. Returns whether a
+    /// link was hit (so the caller can stop further click handling).
+    pub fn handle_preview_link_click(&mut self, column: u16, row: u16) -> bool {
+        if self.view_mode != ViewMode::Preview {
+            return false;
+        }
+        let url = self.preview_link_boxes.iter().rev().find_map(|b| {
+            (row == b.y && column >= b.x && column < b.x.saturating_add(b.width))
+                .then(|| b.url.clone())
+        });
+        match url {
+            Some(url) => {
+                open_url(&url);
+                true
+            }
+            None => false,
+        }
+    }
+
     // File navigation methods
     pub fn next_file(&mut self) {
         if !self.file_filter.is_empty() {
@@ -135,7 +200,15 @@ impl App {
     }
 
     pub fn select_file(&mut self, index: usize) {
-        self.open_topbar_tab(index);
+        if index >= self.multi_diff.file_count() {
+            return;
+        }
+        self.save_active_topbar_tab_state();
+        self.replace_active_topbar_tab_file(index);
+        self.select_file_in_active_tab(index);
+    }
+
+    fn select_file_in_active_tab(&mut self, index: usize) {
         let old_index = self.multi_diff.selected_index;
         self.clear_step_edge_hint();
         self.clear_hunk_edge_hint();
@@ -161,52 +234,297 @@ impl App {
         let count = self.multi_diff.file_count();
         if count == 0 {
             self.topbar_tabs.clear();
+            self.active_topbar_tab = None;
             self.topbar_drag_target = None;
             return;
         }
-        self.topbar_tabs.retain(|idx| *idx < count);
+        self.topbar_tabs.retain(|tab| match tab.content {
+            TopbarTabContent::File(index) => index < count,
+            TopbarTabContent::Help => true,
+        });
+        if self.topbar_tabs.is_empty() {
+            self.add_topbar_tab_for(self.multi_diff.selected_index.min(count.saturating_sub(1)));
+        }
+        if self
+            .active_topbar_tab
+            .is_none_or(|id| !self.topbar_tabs.iter().any(|tab| tab.id == id))
+        {
+            self.active_topbar_tab = self.topbar_tabs.first().map(|tab| tab.id);
+        }
         if self
             .topbar_drag_target
             .is_some_and(|idx| idx > self.topbar_tabs.len())
         {
             self.topbar_drag_target = None;
         }
-        self.open_topbar_tab(self.multi_diff.selected_index);
     }
 
-    fn open_topbar_tab(&mut self, index: usize) {
-        if index >= self.multi_diff.file_count() {
+    fn add_topbar_tab_for(&mut self, file_index: usize) -> usize {
+        let id = self.next_topbar_tab_id;
+        self.next_topbar_tab_id = self.next_topbar_tab_id.saturating_add(1);
+        self.topbar_tabs.push(TopbarTab {
+            id,
+            content: TopbarTabContent::File(file_index),
+            view_mode: self.view_mode,
+            step_view_mode: self.step_view_mode,
+            stepping: self.stepping,
+            scroll_offset: self.scroll_offset,
+            horizontal_scroll: self.horizontal_scroll,
+            preview_rendered: true,
+            navigator_state: None,
+        });
+        id
+    }
+
+    fn replace_active_topbar_tab_file(&mut self, index: usize) {
+        let Some(active) = self.active_topbar_tab else {
+            self.active_topbar_tab = Some(self.add_topbar_tab_for(index));
+            return;
+        };
+        let Some(tab) = self.topbar_tabs.iter_mut().find(|tab| tab.id == active) else {
+            self.active_topbar_tab = Some(self.add_topbar_tab_for(index));
+            return;
+        };
+        if tab.content != TopbarTabContent::File(index) {
+            tab.content = TopbarTabContent::File(index);
+            tab.navigator_state = None;
+            tab.scroll_offset = 0;
+            tab.horizontal_scroll = 0;
+            tab.preview_rendered = true;
+        }
+        tab.view_mode = self.view_mode;
+        tab.step_view_mode = self.step_view_mode;
+        tab.stepping = self.stepping;
+    }
+
+    pub(crate) fn save_active_topbar_tab_state(&mut self) {
+        if self.multi_diff.file_count() == 0 {
             return;
         }
-        if !self.topbar_tabs.contains(&index) {
-            self.topbar_tabs.push(index);
+        let Some(active) = self.active_topbar_tab else {
+            return;
+        };
+        let content = self
+            .topbar_tabs
+            .iter()
+            .find(|tab| tab.id == active)
+            .map(|tab| tab.content)
+            .unwrap_or(TopbarTabContent::File(self.multi_diff.selected_index));
+        let content = match content {
+            TopbarTabContent::File(_) => TopbarTabContent::File(self.multi_diff.selected_index),
+            TopbarTabContent::Help => TopbarTabContent::Help,
+        };
+        let view_mode = self.view_mode;
+        let step_view_mode = self.step_view_mode;
+        let stepping = self.stepping;
+        let scroll_offset = self.scroll_offset;
+        let horizontal_scroll = self.horizontal_scroll;
+        let navigator_state = match content {
+            TopbarTabContent::File(_) => Some(self.multi_diff.current_navigator().state().clone()),
+            TopbarTabContent::Help => None,
+        };
+        if let Some(tab) = self.topbar_tabs.iter_mut().find(|tab| tab.id == active) {
+            tab.content = content;
+            tab.view_mode = view_mode;
+            tab.step_view_mode = step_view_mode;
+            tab.stepping = stepping;
+            tab.scroll_offset = scroll_offset;
+            tab.horizontal_scroll = horizontal_scroll;
+            tab.navigator_state = navigator_state;
         }
     }
 
-    fn close_topbar_tab(&mut self, index: usize) {
+    pub(crate) fn new_topbar_tab(&mut self) {
+        if self.multi_diff.file_count() == 0 {
+            return;
+        }
+        self.save_active_topbar_tab_state();
+        let id = self.next_topbar_tab_id;
+        self.next_topbar_tab_id = self.next_topbar_tab_id.saturating_add(1);
+        let mut tab = self
+            .active_topbar_tab
+            .and_then(|active| {
+                self.topbar_tabs
+                    .iter()
+                    .find(|tab| tab.id == active)
+                    .cloned()
+            })
+            .unwrap_or_else(|| TopbarTab {
+                id,
+                content: TopbarTabContent::File(self.multi_diff.selected_index),
+                view_mode: self.view_mode,
+                step_view_mode: self.step_view_mode,
+                stepping: self.stepping,
+                scroll_offset: self.scroll_offset,
+                horizontal_scroll: self.horizontal_scroll,
+                preview_rendered: true,
+                navigator_state: None,
+            });
+        tab.id = id;
+        self.topbar_tabs.push(tab);
+        self.active_topbar_tab = Some(id);
+    }
+
+    fn close_topbar_tab(&mut self, tab_id: usize) {
         if self.topbar_tabs.len() <= 1 {
             return;
         }
-        let Some(pos) = self.topbar_tabs.iter().position(|idx| *idx == index) else {
+        let Some(pos) = self.topbar_tabs.iter().position(|tab| tab.id == tab_id) else {
             return;
         };
         self.topbar_tabs.remove(pos);
-        if self.multi_diff.selected_index == index {
+        if self.active_topbar_tab == Some(tab_id) {
             let next_pos = pos.min(self.topbar_tabs.len().saturating_sub(1));
-            if let Some(next) = self.topbar_tabs.get(next_pos).copied() {
-                self.select_file(next);
+            if let Some(next) = self.topbar_tabs.get(next_pos).map(|tab| tab.id) {
+                self.select_topbar_tab(next);
+            }
+        }
+    }
+
+    pub(crate) fn select_topbar_tab(&mut self, tab_id: usize) {
+        if self.active_topbar_tab == Some(tab_id) {
+            return;
+        }
+        if self.multi_diff.file_count() == 0 {
+            return;
+        }
+        let Some(tab) = self
+            .topbar_tabs
+            .iter()
+            .find(|tab| tab.id == tab_id)
+            .cloned()
+        else {
+            return;
+        };
+        if let TopbarTabContent::File(index) = tab.content {
+            if index >= self.multi_diff.file_count() {
+                return;
+            }
+        }
+        let old_index = self.multi_diff.selected_index;
+        self.save_active_topbar_tab_state();
+        if !self.stepping {
+            self.save_no_step_state_snapshot(old_index);
+        }
+        self.save_scroll_position_for(old_index);
+        self.clear_step_edge_hint();
+        self.clear_hunk_edge_hint();
+        self.clear_blame_step_hint();
+        self.clear_blame_hunk_hint();
+        self.active_topbar_tab = Some(tab_id);
+        self.view_mode = tab.view_mode;
+        self.step_view_mode = tab.step_view_mode;
+        self.stepping = tab.stepping;
+        self.scroll_offset = tab.scroll_offset;
+        self.horizontal_scroll = tab.horizontal_scroll;
+        self.animation_phase = AnimationPhase::Idle;
+        self.animation_progress = 1.0;
+        self.view_build_defer = false;
+        self.view_build_pending = false;
+        self.reset_search_for_file_switch();
+        self.centered_once = false;
+        match tab.content {
+            TopbarTabContent::File(index) => {
+                self.multi_diff.select_file(index);
+                self.update_file_list_scroll();
+                let restored = tab
+                    .navigator_state
+                    .map(|state| self.multi_diff.current_navigator().set_state(state))
+                    .unwrap_or(false);
+                if restored {
+                    self.queue_current_file_diff();
+                } else {
+                    self.handle_file_enter();
+                }
+            }
+            TopbarTabContent::Help => {
+                self.view_mode = ViewMode::Preview;
+                self.clear_diff_selection();
+            }
+        }
+    }
+
+    pub(crate) fn open_help_tab(&mut self) {
+        if self.multi_diff.file_count() == 0 {
+            self.toggle_help();
+            return;
+        }
+        if let Some(id) = self
+            .topbar_tabs
+            .iter()
+            .find(|tab| tab.content == TopbarTabContent::Help)
+            .map(|tab| tab.id)
+        {
+            self.select_topbar_tab(id);
+            return;
+        }
+        self.save_active_topbar_tab_state();
+        let id = self.next_topbar_tab_id;
+        self.next_topbar_tab_id = self.next_topbar_tab_id.saturating_add(1);
+        self.topbar_tabs.push(TopbarTab {
+            id,
+            content: TopbarTabContent::Help,
+            view_mode: ViewMode::Preview,
+            step_view_mode: self.step_view_mode,
+            stepping: self.stepping,
+            scroll_offset: 0,
+            horizontal_scroll: 0,
+            preview_rendered: true,
+            navigator_state: None,
+        });
+        self.active_topbar_tab = Some(id);
+        self.view_mode = ViewMode::Preview;
+        self.scroll_offset = 0;
+        self.horizontal_scroll = 0;
+        self.clear_diff_selection();
+        self.show_help = false;
+    }
+
+    pub(crate) fn active_topbar_content(&self) -> Option<TopbarTabContent> {
+        self.active_topbar_tab.and_then(|id| {
+            self.topbar_tabs
+                .iter()
+                .find(|tab| tab.id == id)
+                .map(|tab| tab.content)
+        })
+    }
+
+    pub(crate) fn active_preview_rendered(&self) -> bool {
+        self.active_topbar_tab
+            .and_then(|id| self.topbar_tabs.iter().find(|tab| tab.id == id))
+            .map(|tab| tab.preview_rendered)
+            .unwrap_or(true)
+    }
+
+    pub(crate) fn toggle_preview_rendered(&mut self) {
+        if let Some(active) = self.active_topbar_tab {
+            if let Some(tab) = self.topbar_tabs.iter_mut().find(|tab| tab.id == active) {
+                tab.preview_rendered = !tab.preview_rendered;
             }
         }
     }
 
     pub(crate) fn handle_topbar_mouse_down(&mut self, column: u16, row: u16) -> bool {
         self.update_topbar_hover(column, row);
+        if self
+            .preview_toggle_hit
+            .is_some_and(|(x, y, width, height)| {
+                column >= x
+                    && column < x.saturating_add(width)
+                    && row >= y
+                    && row < y.saturating_add(height)
+            })
+        {
+            self.toggle_preview_rendered();
+            return true;
+        }
         if self.topbar_plus_hit.is_some_and(|(x, y, width, height)| {
             column >= x
                 && column < x.saturating_add(width)
                 && row >= y
                 && row < y.saturating_add(height)
         }) {
+            self.new_topbar_tab();
             self.start_file_search();
             return true;
         }
@@ -214,11 +532,11 @@ impl App {
             return false;
         };
         if hit.close_col == Some(column) && self.topbar_tabs.len() > 1 {
-            self.close_topbar_tab(hit.file_index);
+            self.close_topbar_tab(hit.tab_id);
             return true;
         }
-        self.select_file(hit.file_index);
-        self.topbar_drag_tab = Some(hit.file_index);
+        self.select_topbar_tab(hit.tab_id);
+        self.topbar_drag_tab = Some(hit.tab_id);
         self.topbar_drag_target = None;
         true
     }
@@ -241,8 +559,8 @@ impl App {
         true
     }
 
-    fn move_topbar_tab(&mut self, file_index: usize, target: usize) {
-        let Some(from) = self.topbar_tabs.iter().position(|idx| *idx == file_index) else {
+    fn move_topbar_tab(&mut self, tab_id: usize, target: usize) {
+        let Some(from) = self.topbar_tabs.iter().position(|tab| tab.id == tab_id) else {
             return;
         };
         let tab = self.topbar_tabs.remove(from);
@@ -254,16 +572,31 @@ impl App {
     }
 
     pub(crate) fn update_topbar_hover(&mut self, column: u16, row: u16) -> bool {
-        let hover = self.topbar_hit(column, row).map(|hit| hit.file_index);
-        if self.topbar_hover_tab == hover {
+        let hit = self.topbar_hit(column, row);
+        let hover = hit.map(|hit| hit.tab_id);
+        let close_hover = hit
+            .filter(|hit| hit.close_col == Some(column))
+            .map(|hit| hit.tab_id);
+        let plus_hover = self.topbar_plus_hit.is_some_and(|(x, y, width, height)| {
+            column >= x
+                && column < x.saturating_add(width)
+                && row >= y
+                && row < y.saturating_add(height)
+        });
+        if self.topbar_hover_tab == hover
+            && self.topbar_hover_close == close_hover
+            && self.topbar_plus_hover == plus_hover
+        {
             return false;
         }
         self.topbar_hover_tab = hover;
+        self.topbar_hover_close = close_hover;
+        self.topbar_plus_hover = plus_hover;
         true
     }
 
-    fn topbar_drop_target(&self, file_index: usize, column: u16, row: u16) -> Option<usize> {
-        let from = self.topbar_tabs.iter().position(|idx| *idx == file_index)?;
+    fn topbar_drop_target(&self, tab_id: usize, column: u16, row: u16) -> Option<usize> {
+        let from = self.topbar_tabs.iter().position(|tab| tab.id == tab_id)?;
         let target = self.topbar_tab_insert_index(column, row)?;
         if target == from || target == from + 1 {
             return None;
@@ -279,7 +612,7 @@ impl App {
             let pos = self
                 .topbar_tabs
                 .iter()
-                .position(|idx| *idx == hit.file_index)?;
+                .position(|tab| tab.id == hit.tab_id)?;
             if column < hit.start_col {
                 return Some(pos);
             }
@@ -294,7 +627,7 @@ impl App {
         let last_pos = self
             .topbar_tabs
             .iter()
-            .position(|idx| *idx == last.file_index)?;
+            .position(|tab| tab.id == last.tab_id)?;
         let end_col = self
             .topbar_plus_hit
             .map(|(x, _, _, _)| x)
@@ -479,6 +812,9 @@ impl App {
 
     /// Get current file path for display
     pub fn current_file_path(&self) -> String {
+        if self.active_topbar_content() == Some(TopbarTabContent::Help) {
+            return "Help".to_string();
+        }
         self.multi_diff
             .current_file()
             .map(|f| f.display_name.clone())
@@ -769,5 +1105,25 @@ impl App {
 
     pub fn current_file_is_binary(&self) -> bool {
         self.multi_diff.current_file_is_binary()
+    }
+}
+
+#[cfg(test)]
+mod link_tests {
+    use super::is_openable_url;
+
+    #[test]
+    fn only_web_and_mailto_urls_open() {
+        assert!(is_openable_url("https://example.com"));
+        assert!(is_openable_url("http://example.com/path?q=1"));
+        assert!(is_openable_url("HTTPS://EXAMPLE.COM"));
+        assert!(is_openable_url("mailto:me@victorare.mu"));
+        // Rejected schemes.
+        assert!(!is_openable_url("file:///etc/passwd"));
+        assert!(!is_openable_url("javascript:alert(1)"));
+        assert!(!is_openable_url("./assets/logo.png"));
+        assert!(!is_openable_url("ftp://example.com"));
+        assert!(!is_openable_url(""));
+        assert!(!is_openable_url("https://"));
     }
 }

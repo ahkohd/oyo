@@ -124,6 +124,18 @@ Set `ui.evo.syntax` to:
 
 Use `E` to toggle this setting in evolution view.
 
+## Preview view
+
+Preview view shows the file content instead of the diff.
+
+In preview view:
+
+- Markdown files render as Markdown
+- other text files show source text with syntax highlighting when syntax is on
+- deleted files preview the old side
+- other files preview the new side
+- the top-right toggle switches Markdown between rendered and source
+
 ## No-step mode
 
 No-step mode works like a scroll-only diff viewer.

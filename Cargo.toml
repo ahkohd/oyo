@@ -41,4 +41,6 @@ dirs = "5.0"
 regex = "1.10"
 unicode-width = "0.2"
 unicode-segmentation = "1.11"
+pulldown-cmark = "0.13"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
 time = { version = "0.3", features = ["std", "formatting", "parsing"] }

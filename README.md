@@ -48,7 +48,7 @@ You can also press `s` in the TUI, or set `stepping = true` in config.
 - scroll-only diff mode
 - step-through navigation
 - hunk navigation
-- unified, split, evolution and blame views
+- unified, split, evolution, blame and preview views
 - inline review comments
 - visual text selection with copy to clipboard
 - word-level diffing

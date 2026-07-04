@@ -162,6 +162,10 @@ impl App {
                 label: "View: Evolution".to_string(),
                 action: PaletteAction::SetViewMode(ViewMode::Evolution),
             },
+            PaletteEntry {
+                label: "View: Preview".to_string(),
+                action: PaletteAction::SetViewMode(ViewMode::Preview),
+            },
         ];
 
         if self.blame_enabled {
@@ -273,7 +277,7 @@ impl App {
             PaletteAction::ToggleLineWrap => self.toggle_line_wrap(),
             PaletteAction::ToggleFoldContext => self.toggle_fold_context(),
             PaletteAction::ToggleSyntax => self.toggle_syntax(),
-            PaletteAction::ToggleHelp => self.toggle_help(),
+            PaletteAction::ToggleHelp => self.open_help_tab(),
             PaletteAction::ToggleZen => self.toggle_zen(),
             PaletteAction::ToggleFilePanel => self.toggle_file_panel(),
             PaletteAction::ToggleAutoplay => self.toggle_autoplay(),

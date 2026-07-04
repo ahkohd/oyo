@@ -1288,6 +1288,7 @@ pub(crate) fn maybe_log_view_debug(
                 }
             }
         }
+        ViewMode::Preview => {}
     }
 
     if let Some(mut file) = view_debug_open(path) {

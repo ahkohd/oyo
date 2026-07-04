@@ -296,6 +296,7 @@ impl App {
                     }
                 }
             }
+            ViewMode::Preview => {}
         }
 
         matches.sort_unstable();
