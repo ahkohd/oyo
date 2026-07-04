@@ -323,12 +323,6 @@ Use these docs for full configuration:
 
 [Diff styling previews](./docs/DIFF_PREVIEWS.md) include screenshots.
 
-## How stepping works
-
-Stepping applies changes in file order.
-
-The view renders applied changes, highlights the active change and keeps pending changes muted.
-
 ## Development
 
 ```sh
