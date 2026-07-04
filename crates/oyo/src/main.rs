@@ -1492,17 +1492,24 @@ fn run_app(
                     if app.command_palette_active() {
                         match me.kind {
                             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-                                queue_mouse_scroll(
+                                if queue_mouse_scroll(
                                     app,
                                     MouseScrollTarget::CommandPalette,
                                     me.kind,
                                     &mut pending_event,
                                     &mut pending_mouse_scroll,
                                     &mut blocked_mouse_scroll,
-                                    &mut needs_draw,
-                                    &mut scroll_draw_pending,
                                     last_scroll_draw,
-                                )?;
+                                )? {
+                                    schedule_mouse_scroll_draw(
+                                        &mut needs_draw,
+                                        &mut scroll_draw_pending,
+                                        last_scroll_draw,
+                                    );
+                                } else {
+                                    needs_draw = false;
+                                    scroll_draw_pending = false;
+                                }
                             }
                             MouseEventKind::Down(MouseButton::Left) => {
                                 app.handle_command_palette_click(me.column, me.row);
@@ -1514,17 +1521,24 @@ fn run_app(
                     if app.file_search_active() {
                         match me.kind {
                             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-                                queue_mouse_scroll(
+                                if queue_mouse_scroll(
                                     app,
                                     MouseScrollTarget::FileSearch,
                                     me.kind,
                                     &mut pending_event,
                                     &mut pending_mouse_scroll,
                                     &mut blocked_mouse_scroll,
-                                    &mut needs_draw,
-                                    &mut scroll_draw_pending,
                                     last_scroll_draw,
-                                )?;
+                                )? {
+                                    schedule_mouse_scroll_draw(
+                                        &mut needs_draw,
+                                        &mut scroll_draw_pending,
+                                        last_scroll_draw,
+                                    );
+                                } else {
+                                    needs_draw = false;
+                                    scroll_draw_pending = false;
+                                }
                             }
                             MouseEventKind::Down(MouseButton::Left) => {
                                 app.handle_file_search_click(me.column, me.row);
@@ -1572,17 +1586,24 @@ fn run_app(
                             } else {
                                 MouseScrollTarget::Diff
                             };
-                            queue_mouse_scroll(
+                            if queue_mouse_scroll(
                                 app,
                                 target,
                                 me.kind,
                                 &mut pending_event,
                                 &mut pending_mouse_scroll,
                                 &mut blocked_mouse_scroll,
-                                &mut needs_draw,
-                                &mut scroll_draw_pending,
                                 last_scroll_draw,
-                            )?;
+                            )? {
+                                schedule_mouse_scroll_draw(
+                                    &mut needs_draw,
+                                    &mut scroll_draw_pending,
+                                    last_scroll_draw,
+                                );
+                            } else {
+                                needs_draw = false;
+                                scroll_draw_pending = false;
+                            }
                         }
                         _ => {}
                     }
@@ -1780,16 +1801,12 @@ fn queue_mouse_scroll(
     pending_event: &mut Option<Event>,
     pending: &mut Option<PendingMouseScroll>,
     blocked: &mut Option<BlockedMouseScroll>,
-    needs_draw: &mut bool,
-    scroll_draw_pending: &mut bool,
     last_scroll_draw: Instant,
-) -> std::io::Result<()> {
+) -> std::io::Result<bool> {
     let delta =
         collect_mouse_scroll_delta(kind, pending_event, last_scroll_draw + MOUSE_SCROLL_FRAME)?;
     if blocks_mouse_scroll(*blocked, target, delta) {
-        *needs_draw = false;
-        *scroll_draw_pending = false;
-        return Ok(());
+        return Ok(false);
     }
     if delta != 0 {
         *blocked = None;
@@ -1797,8 +1814,7 @@ fn queue_mouse_scroll(
     if let Some(scroll) = push_pending_mouse_scroll(pending, target, delta) {
         apply_mouse_scroll(app, scroll);
     }
-    schedule_mouse_scroll_draw(needs_draw, scroll_draw_pending, last_scroll_draw);
-    Ok(())
+    Ok(true)
 }
 
 fn apply_pending_mouse_scroll(app: &mut App, pending: &mut Option<PendingMouseScroll>) -> bool {
@@ -1831,15 +1847,13 @@ fn apply_mouse_scroll(app: &mut App, scroll: PendingMouseScroll) {
                 match scroll.target {
                     MouseScrollTarget::FilePanel if delta < 0 => app.prev_file(),
                     MouseScrollTarget::FilePanel => app.next_file(),
-                    MouseScrollTarget::Step if delta < 0 => {
-                        if app.stepping && app.current_file_diff_ready() {
-                            app.prev_step();
-                        }
+                    MouseScrollTarget::Step
+                        if delta < 0 && app.stepping && app.current_file_diff_ready() =>
+                    {
+                        app.prev_step();
                     }
-                    MouseScrollTarget::Step => {
-                        if app.stepping && app.current_file_diff_ready() {
-                            app.next_step();
-                        }
+                    MouseScrollTarget::Step if app.stepping && app.current_file_diff_ready() => {
+                        app.next_step();
                     }
                     MouseScrollTarget::Diff if delta < 0 => app.scroll_up(),
                     MouseScrollTarget::Diff => app.scroll_down(),
