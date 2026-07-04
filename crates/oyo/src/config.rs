@@ -1609,6 +1609,48 @@ pub struct Config {
     pub keybindings: KeybindingsConfig,
 }
 
+fn append_config_array(path: &[String]) -> bool {
+    matches!(path, [review, name] if review == "review" && matches!(name.as_str(), "hooks" | "actions"))
+}
+
+fn merge_config_value_at(base: &mut toml::Value, overlay: toml::Value, path: &mut Vec<String>) {
+    if append_config_array(path) {
+        match overlay {
+            toml::Value::Array(mut overlay_array) => {
+                if let Some(base_array) = base.as_array_mut() {
+                    base_array.append(&mut overlay_array);
+                } else {
+                    *base = toml::Value::Array(overlay_array);
+                }
+                return;
+            }
+            overlay => {
+                *base = overlay;
+                return;
+            }
+        }
+    }
+
+    match (base, overlay) {
+        (toml::Value::Table(base_table), toml::Value::Table(overlay_table)) => {
+            for (key, value) in overlay_table {
+                path.push(key.clone());
+                if let Some(base_value) = base_table.get_mut(&key) {
+                    merge_config_value_at(base_value, value, path);
+                } else {
+                    base_table.insert(key, value);
+                }
+                path.pop();
+            }
+        }
+        (base, overlay) => *base = overlay,
+    }
+}
+
+fn merge_config_value(base: &mut toml::Value, overlay: toml::Value) {
+    merge_config_value_at(base, overlay, &mut Vec::new());
+}
+
 impl Config {
     /// Get all possible config file paths in priority order
     fn config_paths() -> Vec<PathBuf> {
@@ -1641,19 +1683,43 @@ impl Config {
         Self::config_paths().into_iter().find(|p| p.exists())
     }
 
-    /// Load config from XDG config path
-    /// Returns default config if file doesn't exist or can't be parsed
+    fn read_config_value(path: &Path) -> Result<toml::Value, String> {
+        let content = fs::read_to_string(path)
+            .map_err(|e| format!("Failed to read config {}: {}", path.display(), e))?;
+        toml::from_str(&content)
+            .map_err(|e| format!("Failed to parse config {}: {}", path.display(), e))
+    }
+
+    fn merge_user_config(merged: &mut toml::Value) {
+        let Some(path) = Self::config_path() else {
+            return;
+        };
+        match Self::read_config_value(&path) {
+            Ok(value) => merge_config_value(merged, value),
+            Err(error) => eprintln!("Warning: {error}"),
+        }
+    }
+
+    /// Load config from XDG config path, then merge extra config files in order.
+    pub fn load_with_extra(extra_paths: &[PathBuf]) -> Result<Self, String> {
+        let mut merged = toml::Value::Table(toml::map::Map::new());
+        Self::merge_user_config(&mut merged);
+        for path in extra_paths {
+            let value = Self::read_config_value(path)?;
+            merge_config_value(&mut merged, value);
+        }
+        merged
+            .try_into()
+            .map_err(|e| format!("Failed to load merged config: {e}"))
+    }
+
+    /// Load config from XDG config path.
     pub fn load() -> Self {
-        Self::config_path()
-            .and_then(|path| std::fs::read_to_string(&path).ok())
-            .and_then(|content| {
-                toml::from_str(&content)
-                    .map_err(|e| {
-                        eprintln!("Warning: Failed to parse config: {}", e);
-                        e
-                    })
-                    .ok()
-            })
+        let mut merged = toml::Value::Table(toml::map::Map::new());
+        Self::merge_user_config(&mut merged);
+        merged
+            .try_into()
+            .map_err(|e| eprintln!("Warning: Failed to load config: {}", e))
             .unwrap_or_default()
     }
 
@@ -1666,5 +1732,64 @@ impl Config {
             "blame" => Some(crate::app::ViewMode::Blame),
             _ => None,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extra_config_merges_tables_and_appends_review_hooks() {
+        let mut base: toml::Value = toml::from_str(
+            r#"
+[ui]
+topbar = false
+
+[keybindings.normal]
+step_down = ["j"]
+
+[[review.hooks]]
+id = "base"
+command = "base-hook"
+"#,
+        )
+        .unwrap();
+        let overlay: toml::Value = toml::from_str(
+            r#"
+[ui]
+topbar = true
+
+[keybindings.normal]
+step_down = ["down"]
+step_up = ["up"]
+
+[[review.hooks]]
+id = "extra"
+command = "extra-hook"
+
+[[review.actions]]
+id = "send"
+command = "send-hook"
+"#,
+        )
+        .unwrap();
+
+        merge_config_value(&mut base, overlay);
+        let config: Config = base.try_into().unwrap();
+
+        assert!(config.ui.topbar);
+        assert_eq!(config.review.hooks.len(), 2);
+        assert_eq!(config.review.hooks[0].id, "base");
+        assert_eq!(config.review.hooks[1].id, "extra");
+        assert_eq!(config.review.actions.len(), 1);
+        assert_eq!(
+            config.keybindings.modes["normal"]["step_down"],
+            vec!["down".to_string()]
+        );
+        assert_eq!(
+            config.keybindings.modes["normal"]["step_up"],
+            vec!["up".to_string()]
+        );
     }
 }
