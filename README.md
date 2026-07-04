@@ -1,6 +1,6 @@
 <div align="center">
 
-# oyo
+# Oyo
 
 A diff viewer for stepping through changes and reviewing scrollable diffs.
 
@@ -9,7 +9,7 @@ https://github.com/user-attachments/assets/0f43b54b-69fe-4cf3-9221-a7749872342b
 
 </div>
 
-oyo is a terminal diff viewer.
+Oyo is a terminal diff viewer.
 
 Use it as a normal scrollable diff viewer, or step through changes one at a time. You can switch between both modes at any time.
 
@@ -101,7 +101,7 @@ paru -S oyo
 cargo install oyo --locked --force
 ```
 
-## Use oyo
+## Use Oyo
 
 ### Show uncommitted changes
 
@@ -271,7 +271,7 @@ Clipboard support uses system tools:
 - `wl-copy`, `xclip` or `xsel` on Linux
 - `clip` on Windows
 
-## Configure oyo
+## Configure Oyo
 
 Create a config file at `~/.config/oyo/config.toml`.
 
