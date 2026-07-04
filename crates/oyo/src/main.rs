@@ -36,12 +36,39 @@ use std::fs::OpenOptions;
 use std::io::{self, IsTerminal};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command as ProcessCommand;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const INDEX_REF: &str = "INDEX";
+const MAX_COALESCED_MOUSE_SCROLL_READS: usize = 4096;
+const MAX_DIFF_MOUSE_SCROLL_ACTIONS_PER_FRAME: isize = 16;
+const MAX_DISCRETE_MOUSE_SCROLL_ACTIONS_PER_FRAME: isize = 8;
+const MAX_EXIT_INPUT_DRAIN_EVENTS: usize = 65_536;
+const EXIT_INPUT_DRAIN: Duration = Duration::from_millis(100);
+const MOUSE_SCROLL_FRAME: Duration = Duration::from_millis(16);
 
 type TuiBackend = CrosstermBackend<Box<dyn io::Write>>;
 type TuiTerminal = Terminal<TuiBackend>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MouseScrollTarget {
+    CommandPalette,
+    FileSearch,
+    FilePanel,
+    Step,
+    Diff,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PendingMouseScroll {
+    target: MouseScrollTarget,
+    delta: isize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BlockedMouseScroll {
+    target: MouseScrollTarget,
+    direction: isize,
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "oy")]
@@ -376,6 +403,17 @@ fn directory_scan_options(
     }
 }
 
+fn install_panic_terminal_restore() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = execute!(io::stderr(), DisableMouseCapture);
+        drain_queued_input_events();
+        let _ = disable_raw_mode();
+        let _ = execute!(io::stderr(), LeaveAlternateScreen);
+        default_hook(info);
+    }));
+}
+
 fn setup_terminal() -> Result<TuiTerminal> {
     enable_raw_mode()?;
     let mut stdout: Box<dyn io::Write> = if io::stdout().is_terminal() {
@@ -659,15 +697,34 @@ fn visible_split_editor_focus(app: &App, view: &[ViewLine], target: usize) -> Op
     new_match.or(old_match)
 }
 
-fn suspend_terminal_for_child(terminal: &mut TuiTerminal) -> Result<()> {
+fn drain_queued_input_events() {
+    let started = Instant::now();
+    for _ in 0..MAX_EXIT_INPUT_DRAIN_EVENTS {
+        if started.elapsed() >= EXIT_INPUT_DRAIN {
+            break;
+        }
+        match event::poll(Duration::from_millis(1)) {
+            Ok(true) => {
+                if event::read().is_err() {
+                    break;
+                }
+            }
+            Ok(false) | Err(_) => break,
+        }
+    }
+}
+
+fn restore_terminal(terminal: &mut TuiTerminal) -> Result<()> {
+    execute!(terminal.backend_mut(), DisableMouseCapture)?;
+    drain_queued_input_events();
     disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
     Ok(())
+}
+
+fn suspend_terminal_for_child(terminal: &mut TuiTerminal) -> Result<()> {
+    restore_terminal(terminal)
 }
 
 fn resume_terminal_after_child(terminal: &mut TuiTerminal) -> Result<()> {
@@ -1090,6 +1147,7 @@ fn build_diff_from_input_mode(
 }
 
 fn main() -> Result<()> {
+    install_panic_terminal_restore();
     let args = Args::parse();
     let view_limit = match args.command {
         Some(Command::Themes) => {
@@ -1169,13 +1227,7 @@ fn main() -> Result<()> {
         let mut input_mode = match run_commit_picker(&mut terminal, &config, light_mode, limit)? {
             Some(mode) => mode,
             None => {
-                disable_raw_mode()?;
-                execute!(
-                    terminal.backend_mut(),
-                    LeaveAlternateScreen,
-                    DisableMouseCapture
-                )?;
-                terminal.show_cursor()?;
+                restore_terminal(&mut terminal)?;
                 return Ok(());
             }
         };
@@ -1234,13 +1286,7 @@ fn main() -> Result<()> {
             }
         }
 
-        disable_raw_mode()?;
-        execute!(
-            terminal.backend_mut(),
-            LeaveAlternateScreen,
-            DisableMouseCapture
-        )?;
-        terminal.show_cursor()?;
+        restore_terminal(&mut terminal)?;
         emit_review_output(
             review_output,
             args.review_output_file.as_ref(),
@@ -1352,13 +1398,7 @@ fn main() -> Result<()> {
         }
     }
 
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
-    terminal.show_cursor()?;
+    restore_terminal(&mut terminal)?;
     emit_review_output(
         review_output,
         args.review_output_file.as_ref(),
@@ -1381,13 +1421,32 @@ fn run_app(
 ) -> Result<AppExit> {
     let mut pending_event: Option<Event> = None;
     let mut needs_draw = true;
+    let mut scroll_draw_pending = false;
+    let mut last_scroll_draw = Instant::now() - MOUSE_SCROLL_FRAME;
+    let mut pending_mouse_scroll: Option<PendingMouseScroll> = None;
+    let mut blocked_mouse_scroll: Option<BlockedMouseScroll> = None;
 
     loop {
+        if scroll_draw_pending && last_scroll_draw.elapsed() >= MOUSE_SCROLL_FRAME {
+            needs_draw = true;
+        }
         if needs_draw {
+            let scroll_before_draw = app.scroll_offset;
+            let applied_mouse_scroll = pending_mouse_scroll;
+            if apply_pending_mouse_scroll(app, &mut pending_mouse_scroll) {
+                scroll_draw_pending = false;
+            }
             terminal
                 .draw(|f| ui::draw(f, app))
                 .map_err(|e| anyhow!("{e}"))?;
             needs_draw = false;
+            last_scroll_draw = Instant::now();
+            update_mouse_scroll_block(
+                &mut blocked_mouse_scroll,
+                applied_mouse_scroll,
+                scroll_before_draw,
+                app.scroll_offset,
+            );
 
             // Clear active change after render (one-frame extent marker display when animation disabled)
             if app.clear_active_on_next_render {
@@ -1400,9 +1459,16 @@ fn run_app(
             }
         }
 
+        let poll_timeout = if scroll_draw_pending {
+            MOUSE_SCROLL_FRAME
+                .checked_sub(last_scroll_draw.elapsed())
+                .unwrap_or_default()
+        } else {
+            app.redraw_interval()
+        };
         let event = if let Some(event) = pending_event.take() {
             Some(event)
-        } else if event::poll(app.redraw_interval())? {
+        } else if event::poll(poll_timeout)? {
             Some(event::read()?)
         } else {
             None
@@ -1411,6 +1477,12 @@ fn run_app(
         if let Some(event) = event {
             app.mark_user_input();
             needs_draw = true;
+            if !is_mouse_scroll_event(&event) {
+                blocked_mouse_scroll = None;
+                if apply_pending_mouse_scroll(app, &mut pending_mouse_scroll) {
+                    scroll_draw_pending = false;
+                }
+            }
             match event {
                 Event::Mouse(me) => {
                     if app.show_help || app.show_path_popup {
@@ -1419,11 +1491,25 @@ fn run_app(
                     app.reset_count();
                     if app.command_palette_active() {
                         match me.kind {
-                            MouseEventKind::ScrollUp => {
-                                app.move_command_palette_selection(-1);
-                            }
-                            MouseEventKind::ScrollDown => {
-                                app.move_command_palette_selection(1);
+                            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                                if queue_mouse_scroll(
+                                    app,
+                                    MouseScrollTarget::CommandPalette,
+                                    me.kind,
+                                    &mut pending_event,
+                                    &mut pending_mouse_scroll,
+                                    &mut blocked_mouse_scroll,
+                                    last_scroll_draw,
+                                )? {
+                                    schedule_mouse_scroll_draw(
+                                        &mut needs_draw,
+                                        &mut scroll_draw_pending,
+                                        last_scroll_draw,
+                                    );
+                                } else {
+                                    needs_draw = false;
+                                    scroll_draw_pending = false;
+                                }
                             }
                             MouseEventKind::Down(MouseButton::Left) => {
                                 app.handle_command_palette_click(me.column, me.row);
@@ -1434,11 +1520,25 @@ fn run_app(
                     }
                     if app.file_search_active() {
                         match me.kind {
-                            MouseEventKind::ScrollUp => {
-                                app.move_file_search_selection(-1);
-                            }
-                            MouseEventKind::ScrollDown => {
-                                app.move_file_search_selection(1);
+                            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                                if queue_mouse_scroll(
+                                    app,
+                                    MouseScrollTarget::FileSearch,
+                                    me.kind,
+                                    &mut pending_event,
+                                    &mut pending_mouse_scroll,
+                                    &mut blocked_mouse_scroll,
+                                    last_scroll_draw,
+                                )? {
+                                    schedule_mouse_scroll_draw(
+                                        &mut needs_draw,
+                                        &mut scroll_draw_pending,
+                                        last_scroll_draw,
+                                    );
+                                } else {
+                                    needs_draw = false;
+                                    scroll_draw_pending = false;
+                                }
                             }
                             MouseEventKind::Down(MouseButton::Left) => {
                                 app.handle_file_search_click(me.column, me.row);
@@ -1478,24 +1578,31 @@ fn run_app(
                             }
                             app.end_file_panel_resize();
                         }
-                        MouseEventKind::ScrollUp => {
-                            app.clear_diff_selection();
-                            if app.mouse_over_file_panel(me.column, me.row) {
-                                app.prev_file();
+                        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                            let target = if app.mouse_over_file_panel(me.column, me.row) {
+                                MouseScrollTarget::FilePanel
                             } else if app.stepping && app.current_file_diff_ready() {
-                                app.prev_step();
+                                MouseScrollTarget::Step
                             } else {
-                                app.scroll_up();
-                            }
-                        }
-                        MouseEventKind::ScrollDown => {
-                            app.clear_diff_selection();
-                            if app.mouse_over_file_panel(me.column, me.row) {
-                                app.next_file();
-                            } else if app.stepping && app.current_file_diff_ready() {
-                                app.next_step();
+                                MouseScrollTarget::Diff
+                            };
+                            if queue_mouse_scroll(
+                                app,
+                                target,
+                                me.kind,
+                                &mut pending_event,
+                                &mut pending_mouse_scroll,
+                                &mut blocked_mouse_scroll,
+                                last_scroll_draw,
+                            )? {
+                                schedule_mouse_scroll_draw(
+                                    &mut needs_draw,
+                                    &mut scroll_draw_pending,
+                                    last_scroll_draw,
+                                );
                             } else {
-                                app.scroll_down();
+                                needs_draw = false;
+                                scroll_draw_pending = false;
                             }
                         }
                         _ => {}
@@ -1508,9 +1615,11 @@ fn run_app(
                 }
                 _ => {}
             }
+        } else if scroll_draw_pending {
+            needs_draw = true;
         }
 
-        if app.tick() {
+        if app.tick() && !(scroll_draw_pending && last_scroll_draw.elapsed() < MOUSE_SCROLL_FRAME) {
             needs_draw = true;
         }
 
@@ -1546,6 +1655,213 @@ fn coalesce_key_repeats(
         }
     }
     Ok(count)
+}
+
+fn schedule_mouse_scroll_draw(
+    needs_draw: &mut bool,
+    scroll_draw_pending: &mut bool,
+    last_scroll_draw: Instant,
+) {
+    *scroll_draw_pending = true;
+    *needs_draw = last_scroll_draw.elapsed() >= MOUSE_SCROLL_FRAME;
+}
+
+fn is_mouse_scroll_event(event: &Event) -> bool {
+    matches!(event, Event::Mouse(mouse) if mouse_scroll_delta(mouse.kind).is_some())
+}
+
+fn mouse_scroll_delta(kind: MouseEventKind) -> Option<isize> {
+    match kind {
+        MouseEventKind::ScrollUp => Some(-1),
+        MouseEventKind::ScrollDown => Some(1),
+        _ => None,
+    }
+}
+
+fn collect_mouse_scroll_delta(
+    kind: MouseEventKind,
+    pending_event: &mut Option<Event>,
+    read_until: Instant,
+) -> std::io::Result<isize> {
+    let mut reads = 1usize;
+    let mut delta = mouse_scroll_delta(kind).unwrap_or(0);
+    let direction = delta.signum();
+    while reads < MAX_COALESCED_MOUSE_SCROLL_READS {
+        let timeout = read_until
+            .checked_duration_since(Instant::now())
+            .unwrap_or_default();
+        if !event::poll(timeout)? {
+            break;
+        }
+        let next = event::read()?;
+        match next {
+            Event::Mouse(mouse) => {
+                if let Some(next_delta) = mouse_scroll_delta(mouse.kind) {
+                    if next_delta.signum() != direction {
+                        *pending_event = Some(Event::Mouse(mouse));
+                        break;
+                    }
+                    reads = reads.saturating_add(1);
+                    delta = delta.saturating_add(next_delta);
+                } else {
+                    *pending_event = Some(Event::Mouse(mouse));
+                    break;
+                }
+            }
+            _ => {
+                *pending_event = Some(next);
+                break;
+            }
+        }
+    }
+    Ok(delta)
+}
+
+fn mouse_scroll_action_cap(target: MouseScrollTarget) -> isize {
+    match target {
+        MouseScrollTarget::Diff => MAX_DIFF_MOUSE_SCROLL_ACTIONS_PER_FRAME,
+        MouseScrollTarget::CommandPalette
+        | MouseScrollTarget::FileSearch
+        | MouseScrollTarget::FilePanel
+        | MouseScrollTarget::Step => MAX_DISCRETE_MOUSE_SCROLL_ACTIONS_PER_FRAME,
+    }
+}
+
+fn clamp_mouse_scroll_delta(target: MouseScrollTarget, delta: isize) -> isize {
+    let cap = mouse_scroll_action_cap(target);
+    delta.clamp(-cap, cap)
+}
+
+fn blocks_mouse_scroll(
+    blocked: Option<BlockedMouseScroll>,
+    target: MouseScrollTarget,
+    delta: isize,
+) -> bool {
+    delta != 0
+        && blocked.is_some_and(|block| block.target == target && block.direction == delta.signum())
+}
+
+fn update_mouse_scroll_block(
+    blocked: &mut Option<BlockedMouseScroll>,
+    applied: Option<PendingMouseScroll>,
+    scroll_before: usize,
+    scroll_after: usize,
+) {
+    let Some(scroll) = applied else {
+        return;
+    };
+    if scroll.target != MouseScrollTarget::Diff || scroll.delta == 0 {
+        return;
+    }
+    if scroll_before == scroll_after {
+        *blocked = Some(BlockedMouseScroll {
+            target: scroll.target,
+            direction: scroll.delta.signum(),
+        });
+    } else {
+        *blocked = None;
+    }
+}
+
+fn push_pending_mouse_scroll(
+    pending: &mut Option<PendingMouseScroll>,
+    target: MouseScrollTarget,
+    delta: isize,
+) -> Option<PendingMouseScroll> {
+    if delta == 0 {
+        return None;
+    }
+    let Some(current) = pending.as_mut() else {
+        *pending = Some(PendingMouseScroll {
+            target,
+            delta: clamp_mouse_scroll_delta(target, delta),
+        });
+        return None;
+    };
+    if current.target != target {
+        let old = pending.take();
+        *pending = Some(PendingMouseScroll {
+            target,
+            delta: clamp_mouse_scroll_delta(target, delta),
+        });
+        return old;
+    }
+    if current.delta.signum() != delta.signum() {
+        current.delta = clamp_mouse_scroll_delta(target, delta);
+    } else {
+        current.delta = clamp_mouse_scroll_delta(target, current.delta.saturating_add(delta));
+    }
+    None
+}
+
+fn queue_mouse_scroll(
+    app: &mut App,
+    target: MouseScrollTarget,
+    kind: MouseEventKind,
+    pending_event: &mut Option<Event>,
+    pending: &mut Option<PendingMouseScroll>,
+    blocked: &mut Option<BlockedMouseScroll>,
+    last_scroll_draw: Instant,
+) -> std::io::Result<bool> {
+    let delta =
+        collect_mouse_scroll_delta(kind, pending_event, last_scroll_draw + MOUSE_SCROLL_FRAME)?;
+    if blocks_mouse_scroll(*blocked, target, delta) {
+        return Ok(false);
+    }
+    if delta != 0 {
+        *blocked = None;
+    }
+    if let Some(scroll) = push_pending_mouse_scroll(pending, target, delta) {
+        apply_mouse_scroll(app, scroll);
+    }
+    Ok(true)
+}
+
+fn apply_pending_mouse_scroll(app: &mut App, pending: &mut Option<PendingMouseScroll>) -> bool {
+    let Some(scroll) = pending.take() else {
+        return false;
+    };
+    apply_mouse_scroll(app, scroll);
+    true
+}
+
+fn apply_mouse_scroll(app: &mut App, scroll: PendingMouseScroll) {
+    let delta = scroll.delta;
+    if delta == 0 {
+        return;
+    }
+    match scroll.target {
+        MouseScrollTarget::CommandPalette => {
+            if app.command_palette_active() {
+                app.move_command_palette_selection(delta);
+            }
+        }
+        MouseScrollTarget::FileSearch => {
+            if app.file_search_active() {
+                app.move_file_search_selection(delta);
+            }
+        }
+        MouseScrollTarget::FilePanel | MouseScrollTarget::Step | MouseScrollTarget::Diff => {
+            app.clear_diff_selection();
+            for _ in 0..delta.unsigned_abs() {
+                match scroll.target {
+                    MouseScrollTarget::FilePanel if delta < 0 => app.prev_file(),
+                    MouseScrollTarget::FilePanel => app.next_file(),
+                    MouseScrollTarget::Step
+                        if delta < 0 && app.stepping && app.current_file_diff_ready() =>
+                    {
+                        app.prev_step();
+                    }
+                    MouseScrollTarget::Step if app.stepping && app.current_file_diff_ready() => {
+                        app.next_step();
+                    }
+                    MouseScrollTarget::Diff if delta < 0 => app.scroll_up(),
+                    MouseScrollTarget::Diff => app.scroll_down(),
+                    _ => {}
+                }
+            }
+        }
+    }
 }
 
 fn run_dashboard<B: Backend>(
@@ -1737,7 +2053,12 @@ fn run_commit_picker<B: Backend>(
 
 #[cfg(test)]
 mod tests {
-    use super::{config, detect_input_mode, parse_range, render_editor_args, InputMode};
+    use super::{
+        blocks_mouse_scroll, config, detect_input_mode, parse_range, push_pending_mouse_scroll,
+        render_editor_args, update_mouse_scroll_block, BlockedMouseScroll, InputMode,
+        MouseScrollTarget, PendingMouseScroll, MAX_DIFF_MOUSE_SCROLL_ACTIONS_PER_FRAME,
+        MAX_DISCRETE_MOUSE_SCROLL_ACTIONS_PER_FRAME,
+    };
     use std::path::{Path, PathBuf};
 
     #[test]
@@ -1780,6 +2101,103 @@ mod tests {
             InputMode::GitFile { path } => assert_eq!(path, PathBuf::from("main.rs")),
             _ => panic!("unexpected input mode"),
         }
+    }
+
+    #[test]
+    fn mouse_scroll_clamps_and_reverses_pending_delta() {
+        let mut pending = None;
+
+        assert_eq!(
+            push_pending_mouse_scroll(&mut pending, MouseScrollTarget::Diff, 100),
+            None
+        );
+        assert_eq!(
+            pending,
+            Some(PendingMouseScroll {
+                target: MouseScrollTarget::Diff,
+                delta: MAX_DIFF_MOUSE_SCROLL_ACTIONS_PER_FRAME,
+            })
+        );
+
+        assert_eq!(
+            push_pending_mouse_scroll(&mut pending, MouseScrollTarget::Diff, -3),
+            None
+        );
+        assert_eq!(
+            pending,
+            Some(PendingMouseScroll {
+                target: MouseScrollTarget::Diff,
+                delta: -3,
+            })
+        );
+    }
+
+    #[test]
+    fn mouse_scroll_flushes_when_target_changes() {
+        let mut pending = Some(PendingMouseScroll {
+            target: MouseScrollTarget::Diff,
+            delta: 5,
+        });
+
+        assert_eq!(
+            push_pending_mouse_scroll(&mut pending, MouseScrollTarget::Step, -100),
+            Some(PendingMouseScroll {
+                target: MouseScrollTarget::Diff,
+                delta: 5,
+            })
+        );
+        assert_eq!(
+            pending,
+            Some(PendingMouseScroll {
+                target: MouseScrollTarget::Step,
+                delta: -MAX_DISCRETE_MOUSE_SCROLL_ACTIONS_PER_FRAME,
+            })
+        );
+    }
+
+    #[test]
+    fn mouse_scroll_blocks_same_direction_at_edge() {
+        let mut blocked = None;
+
+        update_mouse_scroll_block(
+            &mut blocked,
+            Some(PendingMouseScroll {
+                target: MouseScrollTarget::Diff,
+                delta: MAX_DIFF_MOUSE_SCROLL_ACTIONS_PER_FRAME,
+            }),
+            10,
+            10,
+        );
+
+        assert_eq!(
+            blocked,
+            Some(BlockedMouseScroll {
+                target: MouseScrollTarget::Diff,
+                direction: 1,
+            })
+        );
+        assert!(blocks_mouse_scroll(blocked, MouseScrollTarget::Diff, 1));
+        assert!(!blocks_mouse_scroll(blocked, MouseScrollTarget::Diff, -1));
+    }
+
+    #[test]
+    fn mouse_scroll_does_not_block_after_movement() {
+        let mut blocked = Some(BlockedMouseScroll {
+            target: MouseScrollTarget::Diff,
+            direction: 1,
+        });
+
+        update_mouse_scroll_block(
+            &mut blocked,
+            Some(PendingMouseScroll {
+                target: MouseScrollTarget::Diff,
+                delta: MAX_DIFF_MOUSE_SCROLL_ACTIONS_PER_FRAME,
+            }),
+            10,
+            20,
+        );
+
+        assert_eq!(blocked, None);
     }
 
     #[test]

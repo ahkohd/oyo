@@ -801,7 +801,7 @@ impl App {
 
     pub fn scroll_down(&mut self) {
         self.centered_once = false;
-        self.scroll_offset += 1;
+        self.scroll_offset = self.scroll_offset.saturating_add(1);
     }
 
     pub fn scroll_half_page_up(&mut self, viewport_height: usize) {
@@ -836,7 +836,7 @@ impl App {
     pub fn scroll_half_page_down(&mut self, viewport_height: usize) {
         self.centered_once = false;
         let half = viewport_height / 2;
-        self.scroll_offset += half;
+        self.scroll_offset = self.scroll_offset.saturating_add(half);
     }
 
     pub fn scroll_left(&mut self) {
@@ -847,7 +847,7 @@ impl App {
 
     pub fn scroll_right(&mut self) {
         if !self.line_wrap {
-            self.horizontal_scroll += 4;
+            self.horizontal_scroll = self.horizontal_scroll.saturating_add(4);
         }
     }
 
