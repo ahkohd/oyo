@@ -1,172 +1,234 @@
-# Diff Viewer Spec
+# Diff viewer behaviour
 
-This document defines user-visible behavior for stepping, hunk navigation, view
-mode rendering, and syntax/diff styling. It is intentionally behavior-focused
-and avoids implementation details.
+Use this page to understand how Oyo shows diffs, stepping, hunk navigation and styling.
 
-## Terminology
+This page describes user-visible behaviour. It does not describe implementation details.
 
-- **Change**: A single diff change (insert/delete/modify) at a line.
-- **Step**: One unit of progression through changes.
-- **Active change**: The current step target (cursor line).
-- **Applied change**: A change that has been stepped into (visible as new state).
-- **Hunk**: A group of nearby changes.
-- **Hunk preview**: Temporary full-hunk view after hunk navigation.
+## Terms
 
-## Navigation & Stepping
+| Term | Meaning |
+| --- | --- |
+| Change | One diff change, such as an insertion, deletion or modified line |
+| Step | One move through the diff changes |
+| Active change | The current step target, shown as the cursor line |
+| Applied change | A change you have stepped into, so the new state is visible |
+| Hunk | A group of nearby changes |
+| Hunk preview | A temporary full-hunk view after hunk navigation |
 
-Key examples below are default bindings. Users can override them through
-`[keybindings.<mode>]` in `config.toml`; see [KEYBINDINGS.md](./KEYBINDINGS.md).
+## Navigate and step through changes
 
-- **Step forward/back** (`j` / `k`): apply/unapply the next/previous change.
-- **Hunk jump** (`h` / `l`, `:h<num>`): jump to previous/next hunk.
-  - Entering a hunk via hunk jump shows a **full preview** of that hunk.
-  - Cursor lands at the **top** of the hunk when jumping forward, and at the
-    **bottom** when jumping backward.
-  - Extent markers remain visible while inside the hunk and clear when leaving it.
-- **First step after hunk preview** collapses the preview into normal stepping:
-  - **Step forward**: keeps the first change, applies the next, and proceeds
-    top-to-bottom.
-  - **Step backward**: removes the last applied change and proceeds
-    bottom-to-top.
-- **Peek change** (`p`): cycles single-line modified view: `modified -> old -> mixed`.
-- **Peek old hunk** (`P`): temporarily shows old state for the current hunk.
+The key examples below use the default bindings. You can change them in `[keybindings.<mode>]` in `config.toml`. See [keybindings](./KEYBINDINGS.md).
 
-## View Modes
+Use `j` and `k` to step forward and backward through changes.
 
-### Unified
+Use `h`, `l` or `:h<num>` to jump between hunks.
 
-Unified view shows a single stream that morphs as you step.
+When you enter a hunk by jumping:
 
-**Modified line lifecycle (unified view):**
+- Oyo shows a full preview of that hunk
+- the cursor lands at the top when you jump forward
+- the cursor lands at the bottom when you jump backward
+- extent markers stay visible while you are inside the hunk
+- extent markers clear when you leave the hunk
+
+After a hunk preview, the first step returns to normal stepping:
+
+- step forward keeps the first change, applies the next change and continues top to bottom
+- step backward removes the last applied change and continues bottom to top
+
+Use `p` to cycle the modified line view:
+
+- modified
+- old
+- mixed
+
+Use `P` to peek at the old state for the current hunk.
+
+## Unified view
+
+Unified view shows one stream. The file changes as you step.
+
+Modified lines behave like this:
 
 | State | What you see |
 | --- | --- |
 | Before step | Old text |
-| On step | Mixed (old + new inline) |
+| On step | Mixed old and new inline text |
 | After step | New text |
 
-**Insertions (unified view):**
-- Before step: hidden
-- On step: new text (active)
-- After step: new text
+Insertions behave like this:
 
-**Deletions (unified view):**
-- Before step: old text
-- On step: old text (active, fades out if animation enabled)
-- After step: hidden
+| State | What you see |
+| --- | --- |
+| Before step | Hidden |
+| On step | New text, active |
+| After step | New text |
 
-Hunk preview shows the full hunk (all changes applied); first step collapses to
-progressive stepping.
+Deletions behave like this:
 
-### Split
+| State | What you see |
+| --- | --- |
+| Before step | Old text |
+| On step | Old text, active. It fades out when animation is enabled |
+| After step | Hidden |
 
-Split view shows old on the left, new on the right.
+A hunk preview shows the full hunk with all changes applied. The first step after the preview returns to progressive stepping.
 
-**Modified line lifecycle (split view):**
+## Split view
+
+Split view shows the old file on the left and the new file on the right.
+
+Modified lines behave like this:
 
 | State | Left | Right |
 | --- | --- | --- |
 | Before step | Old text | Old text |
-| On step | Old text (active) | New text (active) |
+| On step | Old text, active | New text, active |
 | After step | Old text | New text |
 
-Inline word-level diffs remain visible after stepping through a modified line.
+Inline word-level diffs stay visible after you step through a modified line.
 
-**Insertions (split view):**
-- Before step: right shows old/context
-- On/after step: right shows new text
+Insertions behave like this:
 
-**Deletions (split view):**
-- Before step: left shows old text
-- On/after step: left shows old text (with delete styling)
+| State | What you see |
+| --- | --- |
+| Before step | The right pane shows old or context text |
+| On step | The right pane shows new text |
+| After step | The right pane shows new text |
 
-### Evolution
+Deletions behave like this:
 
-- Deleted lines disappear (no delete markers).
-- Diff background is always **off** to keep the morph view clean.
-- Syntax scope is controlled by `ui.evo.syntax`:
-  - `context`: syntax only on non-diff lines.
-  - `full`: syntax on diff + context lines (active line stays in diff colors).
-  - Toggle via `E` (Evolution view only).
+| State | What you see |
+| --- | --- |
+| Before step | The left pane shows old text |
+| On step | The left pane shows old text with deletion styling |
+| After step | The left pane shows old text with deletion styling |
 
-## No-step Mode
+## Evolution view
 
-- All changes are applied at once (scroll-only diff viewer).
-- `j`/`k` scroll; `h`/`l` jump between hunks.
-- Stepping and hunk preview are disabled.
+Evolution view shows the file changing over time.
 
-## Styling Rules
+In evolution view:
 
-### Foreground (diff vs syntax)
+- deleted lines disappear
+- delete markers are hidden
+- diff background is always off
+- `ui.evo.syntax` controls syntax highlighting
 
-- `ui.diff.fg = "theme"`: diff colors drive text.
-- `ui.diff.fg = "syntax"`: syntax colors for non-active lines; active line stays
-  in diff colors to retain focus.
+Set `ui.evo.syntax` to:
 
-### Background (diff.bg)
+| Value | What it does |
+| --- | --- |
+| `context` | Uses syntax only on non-diff lines |
+| `full` | Uses syntax on diff and context lines. The active line keeps diff colours |
 
-Applies to unified/split only (ignored in evolution):
+Use `E` to toggle this setting in evolution view.
 
-- `false`: no full-line background.
-- `true`: full-line background including gutter (line numbers/signs), but
-  cursor/ext markers do not take background.
+## No-step mode
 
-### Inline highlight (diff.highlight)
+No-step mode works like a scroll-only diff viewer.
 
-Applies to unified/split only (ignored in evolution):
+In no-step mode:
 
-- `text`: highlight changed spans including leading whitespace.
-- `word`: like `text`, but leading whitespace is not highlighted.
-- `none`: disable inline highlights.
+- all changes are applied at once
+- `j` and `k` scroll
+- `h` and `l` jump between hunks
+- stepping is disabled
+- hunk preview is disabled
 
-### Diff size limit (diff.max_bytes)
+## Diff foreground
 
-- Files larger than `ui.diff.max_bytes` are deferred and diffed in the background.
+Use `ui.diff.fg` to choose whether diff text uses theme colours or syntax colours.
 
-### Full-context limit (diff.full_context_max_bytes)
+| Value | What it does |
+| --- | --- |
+| `theme` | Uses diff colours from the UI theme |
+| `syntax` | Uses syntax colours on non-active lines. The active line stays in diff colours |
 
-- Files larger than `ui.diff.full_context_max_bytes` use limited context lines for rendering.
-- While deferred, the file renders immediately (scroll-only) and upgrades to a
-  full diff once computation completes.
+## Diff background
 
-### Deferred diffing
+Use `ui.diff.bg` to turn full-line diff backgrounds on or off.
 
-- `ui.diff.defer = true`: enable deferred diff computation for large files.
-- `ui.diff.idle_ms`: delay before background diffing starts after the last input.
+This setting applies to unified and split views. Evolution view ignores it.
 
-### Extent markers
+| Value | What it does |
+| --- | --- |
+| `false` | Shows no full-line background |
+| `true` | Shows full-line backgrounds, including gutter line numbers and signs |
 
-- `ui.diff.extent_marker = "neutral"`: hunk extent markers use the neutral marker color.
-- `ui.diff.extent_marker = "diff"`: hunk extent markers take the line’s diff color.
-- `ui.diff.extent_marker_scope = "progress"`: only already-applied change lines use diff colors.
-- `ui.diff.extent_marker_scope = "hunk"`: all lines in the current hunk use diff colors.
-- `ui.diff.extent_marker_context = true`: show extent markers on unchanged context lines.
+Cursor markers and extent markers do not take the background colour.
 
-## Line Wrap
+## Inline highlights
 
-- Wrap is visual-only; navigation still operates on logical lines.
-- Auto-center uses wrapped display metrics to keep the active line visible.
+Use `ui.diff.highlight` to control inline highlights.
 
-## Config Snapshot
+This setting applies to unified and split views. Evolution view ignores it.
+
+| Value | What it does |
+| --- | --- |
+| `text` | Highlights changed spans, including leading whitespace |
+| `word` | Highlights changed spans, excluding leading whitespace |
+| `none` | Turns inline highlights off |
+
+## Large diffs
+
+Use `ui.diff.max_bytes` to defer diffing for large files.
+
+Files larger than this value are shown immediately, then diffed in the background.
+
+Use `ui.diff.full_context_max_bytes` to choose when Oyo switches from full-context rendering to limited context rendering.
+
+If a file is deferred, Oyo first renders it in scroll-only mode. It upgrades to a full diff when background computation finishes.
+
+Use `ui.diff.defer = true` to enable deferred diffing.
+
+Use `ui.diff.idle_ms` to set how long Oyo waits after the last input before background diffing starts.
+
+## Extent markers
+
+Extent markers show the current hunk or step area.
+
+Use `ui.diff.extent_marker` to choose marker colour:
+
+| Value | What it does |
+| --- | --- |
+| `neutral` | Uses the neutral marker colour |
+| `diff` | Uses the line's diff colour |
+
+Use `ui.diff.extent_marker_scope` to choose how much of the hunk gets diff colours:
+
+| Value | What it does |
+| --- | --- |
+| `progress` | Uses diff colours only on already-applied change lines |
+| `hunk` | Uses diff colours on all lines in the current hunk |
+
+Set `ui.diff.extent_marker_context = true` to show extent markers on unchanged context lines.
+
+## Line wrap
+
+Line wrap is visual only. Navigation still uses logical lines.
+
+When auto-centre is on, Oyo uses wrapped display metrics to keep the active line visible.
+
+## Config example
 
 ```toml
 [ui]
-auto_center = true      # keep active change centered while stepping
-overscroll = false      # allow EOF overscroll when centering (opt-in)
+auto_center = true      # keep active change centred while stepping
+overscroll = false      # allow EOF overscroll when centring
 
 [ui.diff]
-bg = false            # true | false
-fg = "theme"          # theme | syntax
-highlight = "text"    # text | word | none
-max_bytes = 16777216  # defer diffing above this size (bytes)
-full_context_max_bytes = 2097152  # full-context render up to this size (bytes)
-defer = true          # enable deferred diffing for large files
-idle_ms = 250         # idle time before background diffing starts
-extent_marker = "neutral" # neutral | diff
-extent_marker_scope = "progress" # progress | hunk
-extent_marker_context = false # show markers on unchanged lines
+bg = false
+fg = "theme"
+highlight = "text"
+max_bytes = 16777216
+full_context_max_bytes = 2097152
+defer = true
+idle_ms = 250
+extent_marker = "neutral"
+extent_marker_scope = "progress"
+extent_marker_context = false
 
 [ui.evo]
-syntax = "context"    # context | full
+syntax = "context"
 ```

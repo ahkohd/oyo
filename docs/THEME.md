@@ -1,24 +1,24 @@
 # Themes
 
-## Overview
+Use themes to control Oyo colours.
 
-`oyo` has two separate concepts:
-- **UI theme**: colors for the chrome, diff markers, and UI elements.
-- **Syntax theme**: colors for code tokens (tmTheme-based).
+Oyo has 2 theme types:
 
-You can set them independently, but by default the syntax theme follows the UI theme
-when you don't specify a syntax theme.
+- UI themes control the chrome, diff markers and interface elements
+- syntax themes control code token colours
 
-## UI Themes
+You can set them separately. If you do not set a syntax theme, Oyo tries to use the UI theme name.
 
-Set a built-in UI theme:
+## Set a UI theme
+
+Set a built-in UI theme in `config.toml`:
 
 ```toml
 [ui.theme]
 name = "tokyonight"
 ```
 
-Light/dark selection:
+Set light or dark mode:
 
 ```toml
 [ui.theme]
@@ -28,62 +28,68 @@ mode = "light" # or "dark"
 
 List built-in UI themes:
 
-```bash
+```sh
 oy themes
 ```
 
-### Built-in UI Themes
+## Built-in UI themes
 
 | Theme | Dark | Light |
-|-------|:----:|:-----:|
-| aura | ✓ | — |
-| ayu | ✓ | — |
-| catppuccin | ✓ (mocha) | ✓ (latte) |
-| catppuccin-frappe | ✓ | — |
-| catppuccin-macchiato | ✓ | — |
-| cobalt2 | ✓ | — |
-| dracula | ✓ | — |
-| everforest | ✓ | ✓ |
-| flexoki | ✓ | ✓ |
-| github | ✓ | ✓ |
-| gruvbox | ✓ | ✓ |
-| kanagawa | ✓ | — |
-| material | ✓ | — |
-| monokai | ✓ | — |
-| nightowl | ✓ | ✓ |
-| nord | ✓ | — |
-| one-dark | ✓ | ✓ |
-| palenight | ✓ | — |
-| rosepine | ✓ | ✓ (dawn) |
-| solarized | ✓ | ✓ |
-| synthwave84 | ✓ | — |
-| tokyonight | ✓ | ✓ (day) |
-| zenburn | ✓ | — |
+| --- | --- | --- |
+| `aura` | yes | no |
+| `ayu` | yes | no |
+| `catppuccin` | yes, mocha | yes, latte |
+| `catppuccin-frappe` | yes | no |
+| `catppuccin-macchiato` | yes | no |
+| `cobalt2` | yes | no |
+| `dracula` | yes | no |
+| `everforest` | yes | yes |
+| `flexoki` | yes | yes |
+| `github` | yes | yes |
+| `gruvbox` | yes | yes |
+| `kanagawa` | yes | no |
+| `material` | yes | no |
+| `monokai` | yes | no |
+| `nightowl` | yes | yes |
+| `nord` | yes | no |
+| `one-dark` | yes | yes |
+| `palenight` | yes | no |
+| `rosepine` | yes | yes, dawn |
+| `solarized` | yes | yes |
+| `synthwave84` | yes | no |
+| `tokyonight` | yes | yes, day |
+| `zenburn` | yes | no |
 
-UI theme tokens are defined in [schema.json](crates/oyo/themes/schema.json).
+UI theme tokens are defined in [theme schema](../crates/oyo/themes/schema.json).
 
-### Custom UI themes
+## Add a custom UI theme
 
-Place JSON theme files in either:
+Put JSON theme files in one of these locations:
 
-```
+```text
 ~/.config/oyo/MyTheme.json
 ~/.config/oyo/themes/MyTheme.json
 ```
 
-Then reference them by file name (extension optional):
+Then use the file name in your config. The extension is optional.
 
 ```toml
 [ui.theme]
 name = "MyTheme"
 ```
 
-If you provide `MyTheme-light.json` and `MyTheme-dark.json`, `oyo` will pick the
-variant based on `ui.theme.mode` (and fall back to the other if one is missing).
+You can provide light and dark variants:
 
-#### ANSI color names
+```text
+~/.config/oyo/themes/MyTheme-light.json
+~/.config/oyo/themes/MyTheme-dark.json
+```
 
-Theme tokens accept ANSI color names, which use your terminal’s palette:
+Oyo picks the variant that matches `ui.theme.mode`. If one variant is missing, Oyo falls back to the other.
+
+## Use ANSI colour names
+
+Theme tokens can use ANSI colour names from your terminal palette.
 
 ```json
 {
@@ -94,15 +100,31 @@ Theme tokens accept ANSI color names, which use your terminal’s palette:
 }
 ```
 
-Supported names:
-`black`, `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `gray`,
-`dark_gray`, `light_red`, `light_green`, `light_yellow`, `light_blue`,
-`light_magenta`, `light_cyan`, `white`, and `default`/`reset`/`transparent`.
+Supported names are:
 
-## Syntax Themes
+- `black`
+- `red`
+- `green`
+- `yellow`
+- `blue`
+- `magenta`
+- `cyan`
+- `gray`
+- `dark_gray`
+- `light_red`
+- `light_green`
+- `light_yellow`
+- `light_blue`
+- `light_magenta`
+- `light_cyan`
+- `white`
+- `default`
+- `reset`
+- `transparent`
 
-Syntax highlighting is tmTheme-based. You can select a built-in syntax theme or provide
-your own `.tmTheme` file.
+## Set a syntax theme
+
+Syntax highlighting uses TextMate `.tmTheme` files. Use a built-in syntax theme or provide your own file.
 
 ```toml
 [ui.syntax]
@@ -110,7 +132,11 @@ mode = "on"         # "on" or "off"
 theme = "tokyonight"
 ```
 
-Optional warmup budgets for large files:
+If `ui.syntax.theme` is empty, Oyo uses `ui.theme.name`. If Oyo still cannot resolve a syntax theme, it uses `ansi`.
+
+## Set syntax warmup budgets
+
+Use warmup budgets to control how much syntax highlighting Oyo prepares for large files.
 
 ```toml
 [ui.syntax.warmup]
@@ -120,47 +146,54 @@ idle_lines = 1000
 debounce_ms = 80
 ```
 
-Defaults:
-- If `ui.syntax.theme` is empty, it inherits `ui.theme.name`.
-- If it still can't be resolved, it falls back to `ansi`.
+## Use light syntax variants
 
-### Light variants
+When `ui.theme.mode = "light"`, Oyo tries a light syntax variant first.
 
-When `ui.theme.mode = "light"`, `oyo` tries a light variant first:
-- `tokyonight` -> `tokyonight-day`
-- `rosepine` -> `rosepine-dawn`
-- `catppuccin` -> `catppuccin-latte`
+| UI theme | Syntax theme Oyo tries first |
+| --- | --- |
+| `tokyonight` | `tokyonight-day` |
+| `rosepine` | `rosepine-dawn` |
+| `catppuccin` | `catppuccin-latte` |
 
-Custom syntax themes can also provide `-light`/`-dark` variants (for example,
-`cyberdream-light.tmTheme` and `cyberdream-dark.tmTheme`). `oyo` will pick the
-appropriate variant based on `ui.theme.mode` and fall back to the other if needed.
+Custom syntax themes can also provide light and dark variants. For example:
 
-You can also pick the variant explicitly:
+```text
+cyberdream-light.tmTheme
+cyberdream-dark.tmTheme
+```
+
+Oyo picks the variant that matches `ui.theme.mode`. If one variant is missing, Oyo falls back to the other.
+
+You can also choose a variant directly:
 
 ```toml
 [ui.syntax]
 theme = "tokyonight-day"
 ```
 
-### List syntax themes
+## List syntax themes
 
-```bash
+Run:
+
+```sh
 oy syntax-themes
 ```
 
 This lists:
+
 - embedded syntax themes for built-in UI themes
-- any `.tmTheme` files in `~/.config/oyo/themes`
+- `.tmTheme` files in `~/.config/oyo/themes`
 
-### Custom tmTheme
+## Add a custom syntax theme
 
-Place a tmTheme file in:
+Put a `.tmTheme` file in:
 
-```
+```text
 ~/.config/oyo/themes/MyTheme.tmTheme
 ```
 
-Then reference it by name:
+Then use the theme name:
 
 ```toml
 [ui.syntax]
@@ -174,13 +207,13 @@ You can also pass a full path:
 theme = "/path/to/MyTheme.tmTheme"
 ```
 
-If the file can't be loaded, `oyo` falls back to `ansi`.
+If Oyo cannot load the file, it falls back to `ansi`.
 
-### CLI overrides
+## Override themes from the CLI
 
-```bash
+```sh
 oy --theme-name tokyonight --theme-mode light
 oy --syntax-theme tokyonight-day
 ```
 
-Note: syntax theme backgrounds are stripped to preserve the UI/diff background.
+Oyo strips syntax theme backgrounds so the UI and diff backgrounds stay consistent.

@@ -1,52 +1,63 @@
-# Performance
+# Performance checks
 
-This project includes Criterion benchmarks and lightweight perf guards to catch
-algorithmic regressions (O(n^2) surprises) in the diff engine.
+Use the performance checks to catch slowdowns in the diff engine.
 
-## Benchmarks
+The project has:
 
-Run the Criterion suite:
+- Criterion benchmarks
+- optional scaling tests for algorithmic regressions
+- profiling commands for local investigation
 
-```bash
+## Run benchmarks
+
+Run the Criterion benchmark suite:
+
+```sh
 cargo bench -p oyo-core --bench perf
 ```
 
-Notes:
-- Criterion will use gnuplot if available; otherwise it falls back to plotters.
-- You can save a baseline for comparison:
+Criterion uses gnuplot when it is available. Otherwise, it falls back to plotters.
 
-```bash
+## Compare with a baseline
+
+Save a baseline before you change performance-sensitive code:
+
+```sh
 cargo bench -p oyo-core --bench perf -- --save-baseline main
 ```
 
-Then compare against it later with:
+Compare against it later:
 
-```bash
+```sh
 cargo bench -p oyo-core --bench perf -- --baseline main
 ```
 
-## Perf guards (scaling checks)
+## Run scaling tests
 
-These tests are off by default to avoid CI flakiness. Enable them with
-`OYO_PERF_TESTS=1`:
+Scaling tests are off by default because timings can be noisy in CI.
 
-```bash
+Enable them with `OYO_PERF_TESTS=1`:
+
+```sh
 OYO_PERF_TESTS=1 cargo test -p oyo-core --test perf_guard
 ```
 
-The guards compare small vs large inputs to ensure linear scaling (not absolute
-time), so they are resilient across machines.
+These tests compare small and large inputs. They check scaling, not absolute time, so they are less sensitive to machine speed.
 
-## Profiling
+Use them to catch unexpected `O(n^2)` behaviour.
 
-Capture a Time Profiler trace and inspect it in Firefox Profiler:
+## Profile locally
 
-```bash
+On macOS, capture a Time Profiler trace:
+
+```sh
 xcrun xctrace record --template "Time Profiler" --launch -- ./target/release/oy
 ```
 
+Open the trace in Firefox Profiler.
+
 You can also use `samply`:
 
-```bash
+```sh
 samply record ./target/release/oy --range d7857b3...HEAD
 ```

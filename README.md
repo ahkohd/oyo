@@ -2,196 +2,209 @@
 
 # oyo
 
-A diff viewer that works **two ways**:
-**step through changes** or **review a classic scrollable diff**.
-
+A diff viewer for stepping through changes and reviewing scrollable diffs.
 
 <!-- Demo source: https://github.com/user-attachments/assets/0f43b54b-69fe-4cf3-9221-a7749872342b -->
 https://github.com/user-attachments/assets/0f43b54b-69fe-4cf3-9221-a7749872342b
 
 </div>
 
-**oyo** extends traditional diffs with an optional step-through mode. Use it like a normal diff viewer with scrolling and hunk navigation, or step through changes one at a time and watch the code evolve. You can switch between both modes at any time.
+oyo is a terminal diff viewer.
 
-## Two ways to use oyo
+Use it as a normal scrollable diff viewer, or step through changes one at a time. You can switch between both modes at any time.
 
-### 1. Classic diff (scroll-only)
-Review all changes at once, scroll freely, and jump between hunks, just like a traditional diff viewer.
+## Choose a review mode
 
-- Scroll the full diff
-- Jump between hunks
-- No stepping required
+### Scroll-only diff
 
-Enable with:
-- `oy --no-step`
-- Toggle in-TUI with `s`
-- Set `stepping = false` in config
+Use scroll-only mode when you want a traditional diff viewer.
 
-### 2. Step-through review (default)
-Apply changes incrementally and watch the file transform from old to new.
+You can:
 
-- Step change-by-change
-- See precise evolution of the code
-- Useful for large refactors or careful reviews
+- review all changes at once
+- scroll freely
+- jump between hunks
 
-oyo does **not** replace classic diffs, it adds a new way to review them.
+Start with:
 
+```sh
+oy --no-step
+```
+
+You can also press `s` in the TUI, or set `stepping = false` in config.
+
+### Step-through diff
+
+Step-through mode is the default.
+
+Use it when you want to see how a file changes over time. This helps with large refactors and careful reviews.
+
+Start with:
+
+```sh
+oy
+```
 
 ## Features
 
-- **Classic diff mode (no-step)**
-  Scroll the full diff with hunk navigation, no stepping required
-- **Step-through navigation**
-  Move through changes one at a time with keyboard shortcuts
-- **Hunk navigation**
-  Jump between groups of related changes in both modes
-- **Four view modes**:
-  - **Unified**: Watch the code morph from old to new state
-  - **Split**: See old and new versions with synchronized stepping
-  - **Evolution**: Watch the file evolve, deletions simply disappear
-  - **Blame**: Per-line git blame gutter (opt-in)
-- **Inline review comments**: Add/update/remove line and hunk comments across views; printed to stdout on quit
-- **Visual selection**: Select visible diff text with char, line, and block modes, then yank to clipboard
-- **Word-level diffing**: See exactly which words changed within a line
-- **Multi-file support**: Navigate between changed files with preserved positions
-- **Watch mode**: Refresh changed files on disk by default
-- **Search**: Regex search with to jump between matches
-- **Syntax highlighting**: Toggle on/off for code-aware coloring (auto-enabled in no-step mode)
-- **Blame hints**: One-shot or toggle blame previews while stepping (opt-in)
-- **Command palette**: Search for commands and files without leaving the diff
-- **Line wrap**: Toggle wrapping for long lines
-- **Fold unchanged blocks**: Toggle to collapse long context sections
-- **Animated transitions**: Smooth fade in/out animations as changes are applied
-- **Playback**: Automatically step through all changes at a configurable speed
-- **Git integration**: Works as a git external diff tool or standalone
-- **Commit picker**: Browse recent commits and pick ranges interactively (`oy view`)
-- **Themes**: Built-in themes plus `.tmTheme` syntax themes (configurable, with light/dark variants)
-- **Configurable**: XDG config file support for customization
+- scroll-only diff mode
+- step-through navigation
+- hunk navigation
+- unified, split, evolution and blame views
+- inline review comments
+- visual text selection with copy to clipboard
+- word-level diffing
+- multi-file navigation
+- watch mode that refreshes changed files on disk
+- regex search
+- syntax highlighting
+- blame hints
+- command palette
+- line wrap
+- context folding
+- animated transitions
+- autoplay
+- Git integration
+- commit picker with `oy view`
+- built-in themes and `.tmTheme` syntax themes
+- XDG config file support
 
-## Installation
+## Install
 
-### npm (macOS, Linux)
+### npm
 
-```bash
+```sh
 npm i -g @ahkohd/oyo
 ```
 
-### Pi package (`/diff`, `/review` commands)
+### Pi package
 
-```bash
+This gives you the `/diff` and `/review` commands.
+
+```sh
 pi install npm:@ahkohd/pi-oyo
 ```
 
-### Homebrew (macOS, Linux)
+### Homebrew
 
-```bash
+```sh
 brew install ahkohd/oyo/oy
 ```
 
-### AUR (Arch Linux)
+### Arch Linux
 
-```bash
+```sh
 paru -S oyo
 ```
 
 ### Cargo
 
-```bash
+```sh
 cargo install oyo --locked --force
 ```
 
-## Usage
+## Use oyo
 
-### Classic diff (scroll-only)
+### Show uncommitted changes
 
-```bash
-oy --no-step
-# or toggle in-app with `s`
-```
-
-### Step-through diff
-
-```bash
+```sh
 oy
 ```
 
-### Compare files
+### Show uncommitted changes without stepping
 
-```bash
+```sh
+oy --no-step
+```
+
+### Compare 2 files
+
+```sh
 oy old.rs new.rs
 ```
 
-### Compare a file against HEAD
+### Compare one file with HEAD
 
-```bash
+```sh
 oy path/to/file.rs
 ```
 
-Runs a working-tree vs `HEAD` diff for that file (like `git diff path/to/file.rs`).
+### Show staged changes
 
-### Commit picker
-
-```bash
-oy view
+```sh
+oy --staged
 ```
 
-### View modes
+### Show a Git range
 
-```bash
-oy old.rs new.rs --view split
-oy old.rs new.rs --view evolution
-```
-
-### Autoplay
-
-```bash
-oy old.rs new.rs --autoplay
-oy old.rs new.rs --speed 100
-```
-
-### Git ranges
-
-```bash
+```sh
 oy --range HEAD~1..HEAD
 oy --range main...feature
 ```
 
-### Staged changes
+### Choose a view mode
 
-```bash
-oy --staged
+```sh
+oy old.rs new.rs --view split
+oy old.rs new.rs --view evolution
 ```
 
-### Review output
+### Use autoplay
 
-```bash
-# default: prints review comments to stdout on quit
+```sh
+oy old.rs new.rs --autoplay
+oy old.rs new.rs --speed 100
+```
+
+### Pick a commit range
+
+```sh
+oy view
+```
+
+## Review comments
+
+Add comments while reviewing. Oyo prints them when you quit.
+
+```sh
 oy --no-step
+```
 
-# also write review comments to a file
+Write comments to a file:
+
+```sh
 oy --no-step --review-output-file /tmp/oy-review.txt
+```
 
-# file-only output (for tool integrations)
+Write comments only to a file:
+
+```sh
 oy --no-step --review-output-file /tmp/oy-review.txt --no-print-review
+```
 
-# ephemeral review session (disable autosave/restore)
+Disable persisted review sessions:
+
+```sh
 oy --no-step --no-review-persist
+```
 
-# start a fresh persisted review session (clear saved state for this diff)
+Start a fresh persisted review session:
+
+```sh
 oy --no-step --clear-review-session
 ```
 
----
+Review hooks are documented in [review hooks](./docs/REVIEW_HOOKS.md).
 
-## Git Integration
+## Use with Git
 
-### Recommended (`git difftool`)
+Use `git difftool`:
 
-```bash
+```sh
 git difftool -y --tool=oy
 ```
 
-`~/.gitconfig`:
+Add this to `~/.gitconfig`:
 
 ```gitconfig
 [difftool "oy"]
@@ -204,12 +217,13 @@ git difftool -y --tool=oy
     d = difftool -y --tool=oy
 ```
 
-> Note: keep your pager (`less`, `moar`, `moor`) for `git diff`.
-> Do **not** set `core.pager` or `interactive.diffFilter` to `oy`.
+Keep your pager, such as `less`, `moar` or `moor`, for `git diff`.
 
----
+Do not set `core.pager` or `interactive.diffFilter` to `oy`.
 
-## Jujutsu (jj)
+## Use with Jujutsu
+
+Add this to your Jujutsu config:
 
 ```toml
 [ui]
@@ -220,291 +234,105 @@ diff-formatter = ["oy", "$left", "$right"]
 command = ["oy", "$left", "$right"]
 ```
 
-### Keyboard Shortcuts
+## Keybindings
 
-**Vim-style counts**: Most navigation commands support count prefixes (e.g., `10j` moves 10 steps forward, `5J` scrolls down 5 lines).
+Most navigation commands support counts. For example, `10j` moves 10 steps forward and `5J` scrolls down 5 lines.
 
-Full configurable action list: [KEYBINDINGS.md](./docs/KEYBINDINGS.md).
+Common defaults:
 
 | Key | Action |
-|-----|--------|
-| `↓` / `j` | Next step (scrolls in no-step mode; moves file selection when focused) |
-| `↑` / `k` | Previous step (scrolls in no-step mode; moves file selection when focused) |
-| `→` / `l` | Next hunk (scrolls in no-step mode) |
-| `←` / `h` | Previous hunk (scrolls in no-step mode) |
-| `b` | Jump to beginning of current hunk (scrolls in no-step mode) |
-| `e` | Jump to end of current hunk (scrolls in no-step mode) |
-| `gb` | Blame current step (opt-in, step mode) |
-| `p` / `P` | Peek change (modified → old → mixed) / Peek old hunk |
-| `v` / `V` / `Ctrl+v` | Start selection / line / block selection mode |
-| `y` / `Y` | Yank selected text or line / hunk to clipboard |
-| `/` | Search (diff pane, regex) |
-| `n` / `N` | Next/previous match |
-| `:line` / `:h<num>` / `:s<num>` | Go to line / hunk / step |
-| `<` | First applied step |
-| `>` | Last step |
-| `gg` | Go to start (scroll-only in no-step mode) |
-| `G` | Go to end (scroll-only in no-step mode) |
-| `Space` / `B` | Autoplay forward/reverse |
-| `Tab` | Cycle view mode |
-| `Shift+Tab` | Cycle view mode (reverse) |
-| `K` | Scroll up (supports count) |
-| `J` | Scroll down (supports count) |
-| `H` | Scroll left (supports count) |
-| `L` | Scroll right (supports count) |
-| `0` | Start of line (horizontal) |
-| `$` | End of line (horizontal) |
-| `Ctrl+u` | Half page up |
-| `Ctrl+d` | Half page down |
-| `Ctrl+g` | Show full file path |
-| `o` / `Ctrl+e` | Open current file in editor |
-| `gy` / `gY` | Copy patch for line/hunk |
-| `Ctrl+p` | Command palette |
-| `Ctrl+Shift+p` | Quick file search |
-| `z` | Center on active change |
-| `Z` | Toggle zen mode |
-| `a` | Toggle animations |
-| `w` | Toggle line wrap |
-| `f` | Toggle context folding |
-| `t` | Toggle syntax highlight |
-| `E` | Toggle evo syntax (context/full) |
-| `c` / `C` | Next/prev conflict |
-| `m` / `M` | Add/update line/hunk comment |
-| `Ctrl+o` | Save inline comment (inside comment editor) |
-| `x` / `X` | Remove line/hunk comment |
-| `Ctrl+x` | Clear all comments |
-| `s` | Toggle stepping (no-step mode) |
-| `S` | Toggle strikethrough |
-| `r` | Replay last step (count supported) |
-| `R` | Refresh all files |
-| `Ctrl+f` | Toggle file panel |
-| `Enter` | Focus file list |
-| `]` | Next file (supports count) |
-| `[` | Previous file (supports count) |
-| `+` / `=` | Increase speed |
-| `-` | Decrease speed |
-| `?` | Toggle help |
-| `q` / `Esc` | Quit (prints comments if any; closes help/path popups) |
+| --- | --- |
+| `j`, `down` | Next step, or scroll in no-step mode |
+| `k`, `up` | Previous step, or scroll in no-step mode |
+| `l`, `right` | Next hunk |
+| `h`, `left` | Previous hunk |
+| `v` | Start character selection |
+| `V` | Start line selection |
+| `ctrl-v` | Start block selection |
+| `y` | Copy selection or current line |
+| `/` | Search |
+| `n` | Next search match |
+| `N` | Previous search match |
+| `tab` | Cycle view mode |
+| `s` | Toggle stepping |
+| `m` | Add or update a line comment |
+| `M` | Add or update a hunk comment |
+| `ctrl-o` | Save an inline comment |
+| `ctrl-p` | Open the command palette |
+| `R` | Refresh files |
+| `?` | Show help |
+| `q`, `esc` | Quit |
 
-Selection: mouse drag or `v` / `V` / `Ctrl+v`, `y` copies, `Esc` clears. Full mappings: [KEYBINDINGS.md](./docs/KEYBINDINGS.md).
-Clipboard support uses system tools: `pbcopy` (macOS), `wl-copy` / `xclip` / `xsel` (Linux), `clip` (Windows).
-Search is case-insensitive regex; invalid patterns fall back to literal matching.
+Full keybinding reference: [keybindings](./docs/KEYBINDINGS.md).
 
-## Configuration
+Selection works with mouse drag or `v`, `V` and `ctrl-v`. Press `y` to copy and `esc` to clear.
+
+Clipboard support uses system tools:
+
+- `pbcopy` on macOS
+- `wl-copy`, `xclip` or `xsel` on Linux
+- `clip` on Windows
+
+## Configure oyo
 
 Create a config file at `~/.config/oyo/config.toml`.
-You can also pass extra config files with repeatable `--config FILE`. Oyo merges them after your user config.
 
-```toml
-[ui]
-auto_center = true          # Auto-center on active change (default: true)
-watch = true                # Refresh changed files on disk
-overscroll = false         # EOF overscroll when centering (opt-in)
-topbar = true               # Show top bar in diff view (default: true)
-view_mode = "unified"       # Default: "unified", "split", "evolution", or "blame"
-line_wrap = false           # Wrap long lines (default: false, uses horizontal scroll)
-fold_context = "off"        # "off", "on", or "counts"
-scrollbar = false           # Show scrollbar (default: false)
-strikethrough_deletions = false # Show strikethrough on deleted text
-gutter_signs = true         # Show +/- sign column (unified/evolution)
-stepping = true             # Enable stepping (false = no-step mode)
+You can also pass extra config files with repeatable `--config FILE`. Oyo loads your user config first, then merges each extra config file in order.
 
-[navigation.wrap]
-step = "none"               # "none" | "step" | "file"
-hunk = "none"               # "none" | "hunk" | "file"
-# [ui.diff]
-# bg = false                # Full-line diff background (true/false)
-# fg = "theme"              # "theme" or "syntax"
-# highlight = "text"        # "text" | "word" | "none"
-# max_bytes = 16777216      # Defer diffing above this size (bytes)
-# full_context_max_bytes = 2097152  # Full-context render up to this size (bytes)
-# defer = true              # Defer large diffs and compute in background
-# idle_ms = 250             # Idle time before background diff compute
-# extent_marker = "neutral" # "neutral" or "diff"
-# extent_marker_scope = "progress" # "progress" or "hunk"
-# extent_marker_context = false # show extent markers on unchanged lines
-# [ui.blame]
-# enabled = false           # Show git blame hints (opt-in)
-# mode = "one_shot"         # "one_shot" or "toggle"
-# hunk_hint = true          # Show blame hint when jumping to a hunk
-# [ui.time]
-# mode = "relative"         # "relative" | "absolute" | "custom"
-# format = "[year]-[month]-[day] [hour]:[minute]" # Used when mode = "custom"
-# [ui.split]
-# align_lines = false       # Insert blanks to keep split panes aligned
-# align_fill = "╱"          # Fill character for aligned blanks (empty = no marker)
-# [ui.evo]
-# syntax = "context"         # "context" (non-diff only) or "full" (diff + context)
-# [ui.unified]
-# modified_step_mode = "mixed" # "mixed" or "modified" (unified pane only)
-# theme = { name = "tokyonight" } # Built-ins listed below
-primary_marker = "▶"        # Marker for primary active line (single-width char recommended)
-primary_marker_right = "◀"  # Right pane marker (optional, defaults to ◀)
-extent_marker = "▌"         # Left pane extent marker (Left Half Block)
-extent_marker_right = "▐"   # Right pane extent marker (optional, defaults to ▐)
-zen = false                 # Start in zen mode (minimal UI)
-
-[ui.syntax]
-mode = "on"                # "on" or "off"
-# theme = "tokyonight"     # builtin name or "custom.tmTheme" (from ~/.config/oyo/themes)
-#                           # default: ui.theme.name, fallback to "ansi"
-# [ui.syntax.warmup]
-# active_lines = 100       # lines per tick while navigating
-# pending_lines = 300      # lines per tick while catching up to a pending checkpoint
-# idle_lines = 1000        # lines per tick while idle
-# debounce_ms = 80         # wait before warming a new viewport target
-
-[playback]
-speed = 200                 # Autoplay interval in milliseconds
-autoplay = false            # Start with autoplay enabled
-animation = false           # Enable fade animations
-animation_duration = 150    # Animation duration per phase (ms)
-auto_step_on_enter = true   # Auto-step to first change when entering a file
-auto_step_blank_files = true # Auto-step when file would be blank at step 0 (new files)
-
-[files]
-panel_visible = true        # Show file panel in multi-file mode
-panel_width = 30            # File panel width (columns)
-panel_position = "left"     # File panel side: left, right
-counts = "active"           # Per-file +/- counts: active, focused, all, off
-
-[files.scan]
-git_ignore = "auto"         # "auto" | true | false (auto trusts VCS temp dirs)
-ignore_globs = [".git/**", ".jj/**", ".hg/**", ".svn/**"]
-
-[no_step]
-auto_jump_on_enter = true   # Jump to first hunk when entering a file in no-step mode
-
-[editor]
-# command = "nvim"           # Defaults to $VISUAL, then $EDITOR, then vi
-# args = ["+{line}", "{file}"] # Templates. VS Code: ["--goto", "{file}:{line}"]
-open_at_line = true          # Used when args is omitted
-
-[comments.mentions]
-file_scope = "repo"         # "changed" | "repo" (git-aware via ls-files)
-finder = "auto"             # "auto" | "builtin" | "fzf"
-
-[[review.hooks]]
-# Run a command when final review output is ready. See docs/REVIEW_HOOKS.md.
-id = "review-ready"
-on = "review_ready"
-command = ".oyo/hooks/review-ready"
-stdin = "json"
-blocking = true
-
-[keybindings.global]
-# Checked before text input modes, except help and review editor.
-open_command_palette = ["ctrl-p"]
-open_file_search = ["ctrl-shift-p"]
-
-[keybindings.normal]
-# Omitted actions keep defaults. An empty array unbinds the action.
-# Unmodified 1-9 are reserved for counts.
-step_down = ["j", "down"]
-step_up = ["k", "up"]
-goto_start = ["g g", "home"]
-start_selection = ["v"]
-start_line_selection = ["V"]
-start_block_selection = ["ctrl-v"]
-toggle_help = ["?"]
-
-[keybindings.review_editor]
-save = ["ctrl-o"]
-
-[keybindings.selection]
-copy = ["y"]
-cancel = ["esc"]
-
-[keybindings.search]
-cancel = ["esc"]
-accept = ["enter"]
-clear = ["ctrl-u"]
+```sh
+oy --config /tmp/oyo-plugin.toml
 ```
 
-Full keybinding reference: [KEYBINDINGS.md](./docs/KEYBINDINGS.md).
-
-Example config:
+Minimal config:
 
 ```toml
 [ui]
-zen = false
-auto_center = true
-watch = true
-overscroll = false
 view_mode = "unified"
-gutter_signs = false
-topbar = true
-
-[ui.blame]
-enabled = true
-
-[ui.theme]
-name = "tokyonight"
+stepping = true
+watch = true
+line_wrap = false
+fold_context = "off"
 
 [ui.diff]
-fg = "syntax"
-bg = true
+fg = "theme"
+bg = false
 highlight = "text"
-max_bytes = 16777216
-full_context_max_bytes = 2097152
-defer = true
-idle_ms = 250
-extent_marker = "diff"
-extent_marker_scope = "hunk"
 
 [ui.syntax]
 mode = "on"
 
-[ui.evo]
-syntax = "full"
-
-[ui.split]
-align_lines = true
-
-[playback]
-speed = 200
-animation = true
-animation_duration = 150
-autoplay = false
-
-[comments.mentions]
-file_scope = "repo"
-finder = "auto"
-
-[keybindings.global]
-open_command_palette = ["ctrl-p"]
-
-[keybindings.normal]
-step_down = ["o"] # replaces the default j/down binding
+[files]
+panel_visible = true
+panel_width = 30
+panel_position = "left"
 ```
 
-Config is loaded from (in priority order):
+Config is loaded from the first matching file:
+
 1. `$XDG_CONFIG_HOME/oyo/config.toml`
 2. `~/.config/oyo/config.toml`
-3. Platform-specific (e.g., `~/Library/Application Support/oyo/config.toml` on macOS)
+3. the platform config directory, such as `~/Library/Application Support/oyo/config.toml` on macOS
 
-Theme and syntax theme configuration is documented in [THEME.md](./docs/THEME.md).
-Keybinding actions are documented in [KEYBINDINGS.md](./docs/KEYBINDINGS.md).
-Review hooks are documented in [REVIEW_HOOKS.md](./docs/REVIEW_HOOKS.md).
+Use these docs for full configuration:
 
-[![diff preview](./assets/ui_syntax_off.png)](./docs/DIFF_PREVIEWS.md)
+- [theme configuration](./docs/THEME.md)
+- [keybinding actions](./docs/KEYBINDINGS.md)
+- [review hooks](./docs/REVIEW_HOOKS.md)
+- [diff behaviour](./docs/DIFF_VIEWER.md)
+- [diff styling previews](./docs/DIFF_PREVIEWS.md)
 
-*Diff styling previews are available in [DIFF_PREVIEWS.md](./docs/DIFF_PREVIEWS.md).*
+[Diff styling previews](./docs/DIFF_PREVIEWS.md) include screenshots.
 
-## How It Works
+## How stepping works
 
-Stepping applies changes in file order. The view renders applied changes, highlights the
-active change, and keeps pending changes muted.
+Stepping applies changes in file order.
+
+The view renders applied changes, highlights the active change and keeps pending changes muted.
 
 ## Development
 
-```bash
-# Build everything
+```sh
 cargo build
-
-# Run tests
 cargo test
-
-# Run CLI in development
 cargo run --bin oy -- old.rs new.rs
 ```

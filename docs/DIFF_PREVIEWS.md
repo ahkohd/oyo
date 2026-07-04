@@ -1,10 +1,16 @@
-# Diff Configuration Previews
+# Diff configuration previews
 
-## Foreground: Theme
+Use these previews to choose diff display settings.
 
-### bg = false
+Each example shows the TOML you need for `[ui.diff]`, followed by a screenshot.
 
-#### highlight = "none"
+## Theme foreground
+
+Use `fg = "theme"` to colour diff text with the UI theme.
+
+### Theme foreground without line backgrounds
+
+#### No inline highlight
 
 ```toml
 [ui.diff]
@@ -13,9 +19,9 @@ bg = false
 highlight = "none"
 ```
 
-![fg=theme, bg=false, highlight=none](../assets/fg_theme_bg_false_hi_none.png)
+![theme foreground, no line background, no inline highlight](../assets/fg_theme_bg_false_hi_none.png)
 
-#### highlight = "word"
+#### Word highlight
 
 ```toml
 [ui.diff]
@@ -24,9 +30,9 @@ bg = false
 highlight = "word"
 ```
 
-![fg=theme, bg=false, highlight=word](../assets/fg_theme_bg_false_hi_word.png)
+![theme foreground, no line background, word highlight](../assets/fg_theme_bg_false_hi_word.png)
 
-#### highlight = "text"
+#### Text highlight
 
 ```toml
 [ui.diff]
@@ -35,11 +41,11 @@ bg = false
 highlight = "text"
 ```
 
-![fg=theme, bg=false, highlight=text](../assets/diff_fg_theme_bg_false_hi_text.png)
+![theme foreground, no line background, text highlight](../assets/diff_fg_theme_bg_false_hi_text.png)
 
-### bg = true
+### Theme foreground with line backgrounds
 
-#### highlight = "none"
+#### No inline highlight
 
 ```toml
 [ui.diff]
@@ -48,9 +54,9 @@ bg = true
 highlight = "none"
 ```
 
-![fg=theme, bg=true, highlight=none](../assets/fg_theme_bg_true_hi_none.png)
+![theme foreground, line background, no inline highlight](../assets/fg_theme_bg_true_hi_none.png)
 
-#### highlight = "text"
+#### Text highlight
 
 ```toml
 [ui.diff]
@@ -59,9 +65,9 @@ bg = true
 highlight = "text"
 ```
 
-![fg=theme, bg=true, highlight=text](../assets/fg_theme_bg_true_hi_text.png)
+![theme foreground, line background, text highlight](../assets/fg_theme_bg_true_hi_text.png)
 
-#### highlight = "word"
+#### Word highlight
 
 ```toml
 [ui.diff]
@@ -70,13 +76,15 @@ bg = true
 highlight = "word"
 ```
 
-![fg=theme, bg=true, highlight=word](../assets/fg_theme_bg_true_word.png)
+![theme foreground, line background, word highlight](../assets/fg_theme_bg_true_word.png)
 
-## Foreground: Syntax
+## Syntax foreground
 
-### bg = false
+Use `fg = "syntax"` to keep syntax colours in diff text.
 
-#### highlight = "none"
+### Syntax foreground without line backgrounds
+
+#### No inline highlight
 
 ```toml
 [ui.diff]
@@ -85,9 +93,9 @@ bg = false
 highlight = "none"
 ```
 
-![fg=syntax, bg=false, highlight=none](../assets/fg_syntax_bg_false_hi_none.png)
+![syntax foreground, no line background, no inline highlight](../assets/fg_syntax_bg_false_hi_none.png)
 
-#### highlight = "text"
+#### Text highlight
 
 ```toml
 [ui.diff]
@@ -96,9 +104,9 @@ bg = false
 highlight = "text"
 ```
 
-![fg=syntax, bg=false, highlight=text](../assets/fg_syntax_bg_false_hi_text.png)
+![syntax foreground, no line background, text highlight](../assets/fg_syntax_bg_false_hi_text.png)
 
-#### highlight = "word"
+#### Word highlight
 
 ```toml
 [ui.diff]
@@ -107,11 +115,11 @@ bg = false
 highlight = "word"
 ```
 
-![fg=syntax, bg=false, highlight=word](../assets/fg_syntax_bg_false_hi_word.png)
+![syntax foreground, no line background, word highlight](../assets/fg_syntax_bg_false_hi_word.png)
 
-### bg = true
+### Syntax foreground with line backgrounds
 
-#### highlight = "none"
+#### No inline highlight
 
 ```toml
 [ui.diff]
@@ -120,9 +128,9 @@ bg = true
 highlight = "none"
 ```
 
-![fg=syntax, bg=true, highlight=none](../assets/fg_syntax_bg_true_hi_none.png)
+![syntax foreground, line background, no inline highlight](../assets/fg_syntax_bg_true_hi_none.png)
 
-#### highlight = "text"
+#### Text highlight
 
 ```toml
 [ui.diff]
@@ -131,9 +139,9 @@ bg = true
 highlight = "text"
 ```
 
-![fg=syntax, bg=true, highlight=text](../assets/fg_syntax_bg_true_hi_text.png)
+![syntax foreground, line background, text highlight](../assets/fg_syntax_bg_true_hi_text.png)
 
-#### highlight = "word"
+#### Word highlight
 
 ```toml
 [ui.diff]
@@ -142,46 +150,96 @@ bg = true
 highlight = "word"
 ```
 
-![fg=syntax, bg=true, highlight=word](../assets/fg_syntax_bg_true_hi_word.png)
+![syntax foreground, line background, word highlight](../assets/fg_syntax_bg_true_hi_word.png)
 
-## Other Options
+## Extent markers
 
-### Extent Markers
+Use extent markers to show the current hunk or step area.
 
-#### extent_marker = "diff"
+### Diff-coloured extent marker
 
-![extent marker diff](../assets/diff_extent_marker_diff.png)
+```toml
+[ui.diff]
+extent_marker = "diff"
+```
 
-#### extent_marker_scope = "hunk"
+![diff-coloured extent marker](../assets/diff_extent_marker_diff.png)
 
-![extent marker scope hunk](../assets/extent_marker_scope_hunk.png)
+### Hunk scope
 
-#### extent_marker_scope = "progress"
+```toml
+[ui.diff]
+extent_marker_scope = "hunk"
+```
 
-![extent marker scope progress](../assets/extent_marker_scope_progress.png)
+![extent marker scoped to hunk](../assets/extent_marker_scope_hunk.png)
 
-### Gutter Signs
+### Progress scope
 
-#### bg = false, gutter_signs = false
+```toml
+[ui.diff]
+extent_marker_scope = "progress"
+```
 
-![gutter signs disabled, bg=false](../assets/bg_false_gutter_signs_false.png)
+![extent marker scoped to progress](../assets/extent_marker_scope_progress.png)
 
-#### bg = true, gutter_signs = false
+## Gutter signs
 
-![gutter signs disabled, bg=true](../assets/bg_true_gutter_signs_false.png)
+Use `gutter_signs = false` to hide the sign column in unified and evolution views.
 
-### Split View: Align Lines
+### No line backgrounds
 
-#### align_lines = false
+```toml
+[ui]
+gutter_signs = false
 
-![align_lines false](../assets/align_lines_false.png)
+[ui.diff]
+bg = false
+```
 
-#### align_lines = true
+![gutter signs disabled without line backgrounds](../assets/bg_false_gutter_signs_false.png)
 
-![align_lines true](../assets/align_lines_true.png)
+### Line backgrounds
 
-### Syntax Highlighting
+```toml
+[ui]
+gutter_signs = false
 
-#### syntax = "off"
+[ui.diff]
+bg = true
+```
 
-![syntax off](../assets/ui_syntax_off.png)
+![gutter signs disabled with line backgrounds](../assets/bg_true_gutter_signs_false.png)
+
+## Split view line alignment
+
+Use `align_lines = true` to insert blank rows so old and new panes stay aligned.
+
+### Without line alignment
+
+```toml
+[ui.split]
+align_lines = false
+```
+
+![split view without line alignment](../assets/align_lines_false.png)
+
+### With line alignment
+
+```toml
+[ui.split]
+align_lines = true
+```
+
+![split view with line alignment](../assets/align_lines_true.png)
+
+## Syntax highlighting off
+
+Use this when you want plain diff colours without syntax highlighting.
+
+```toml
+[ui.syntax]
+mode = "off"
+```
+
+![syntax highlighting off](../assets/ui_syntax_off.png)
