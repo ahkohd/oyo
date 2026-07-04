@@ -292,7 +292,8 @@ Search is case-insensitive regex; invalid patterns fall back to literal matching
 
 ## Configuration
 
-Create a config file at `~/.config/oyo/config.toml`:
+Create a config file at `~/.config/oyo/config.toml`.
+You can also pass extra config files with repeatable `--config FILE`. Oyo merges them after your user config.
 
 ```toml
 [ui]

@@ -77,6 +77,10 @@ struct Args {
     #[arg(long, global = true)]
     theme_name: Option<String>,
 
+    /// Extra config file to merge after the default config (repeatable)
+    #[arg(long = "config", value_name = "FILE", global = true)]
+    config_files: Vec<PathBuf>,
+
     /// Syntax theme name or .tmTheme file (overrides config)
     #[arg(long, global = true)]
     syntax_theme: Option<String>,
@@ -1097,7 +1101,11 @@ fn main() -> Result<()> {
         Some(Command::View { limit }) => Some(limit),
         None => None,
     };
-    let mut config = config::Config::load();
+    let mut config = if args.config_files.is_empty() {
+        config::Config::load()
+    } else {
+        config::Config::load_with_extra(&args.config_files).map_err(|e| anyhow!(e))?
+    };
     if let Some(path) = args.dump_scopes.as_deref() {
         if let Some(name) = args.theme_name.as_deref() {
             config.ui.theme.name = Some(name.to_string());
