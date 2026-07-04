@@ -51,6 +51,23 @@ impl App {
         }
     }
 
+    pub fn scroll_file_panel_up(&mut self) {
+        self.file_list_scroll = self.file_list_scroll.saturating_sub(1);
+    }
+
+    pub fn scroll_file_panel_down(&mut self) {
+        let visible_rows = self
+            .file_list_area
+            .map(|(_, _, _, height)| height.saturating_sub(2) as usize)
+            .unwrap_or(1)
+            .max(1);
+        let max_scroll = self
+            .filtered_file_indices()
+            .len()
+            .saturating_sub(visible_rows);
+        self.file_list_scroll = self.file_list_scroll.saturating_add(1).min(max_scroll);
+    }
+
     pub(super) fn next_file_wrapped(&mut self) -> bool {
         if !self.file_filter.is_empty() {
             let indices = self.filtered_file_indices();

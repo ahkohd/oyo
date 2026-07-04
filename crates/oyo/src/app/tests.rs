@@ -9,6 +9,13 @@ use std::time::{Duration, Instant};
 
 static VIEW_DEBUG_ENV_LOCK: Mutex<()> = Mutex::new(());
 
+#[test]
+fn diff_scrollbar_thumb_tracks_scroll_offset() {
+    assert_eq!(diff_scrollbar_thumb(100, 10, 20, 0), Some((0, 2)));
+    assert_eq!(diff_scrollbar_thumb(100, 10, 20, 90), Some((18, 2)));
+    assert_eq!(diff_scrollbar_thumb(10, 10, 20, 0), None);
+}
+
 struct ViewDebugEnvGuard {
     _lock: MutexGuard<'static, ()>,
     old_view: Option<std::ffi::OsString>,

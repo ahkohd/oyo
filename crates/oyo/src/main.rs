@@ -1552,6 +1552,12 @@ fn run_app(
                             if app.start_file_panel_resize(me.column, me.row) {
                                 continue;
                             }
+                            if app.start_file_panel_scrollbar_drag(me.column, me.row) {
+                                continue;
+                            }
+                            if app.start_diff_scrollbar_drag(me.column, me.row) {
+                                continue;
+                            }
                             if app.handle_review_preview_click(me.column, me.row) {
                                 continue;
                             }
@@ -1563,6 +1569,12 @@ fn run_app(
                             }
                         }
                         MouseEventKind::Drag(MouseButton::Left) => {
+                            if app.drag_file_panel_scrollbar(me.row) {
+                                continue;
+                            }
+                            if app.drag_diff_scrollbar(me.row) {
+                                continue;
+                            }
                             if app.drag_diff_selection(me.column, me.row) {
                                 continue;
                             }
@@ -1573,6 +1585,12 @@ fn run_app(
                             }
                         }
                         MouseEventKind::Up(MouseButton::Left) => {
+                            if app.finish_file_panel_scrollbar_drag() {
+                                continue;
+                            }
+                            if app.finish_diff_scrollbar_drag() {
+                                continue;
+                            }
                             if app.finish_diff_selection(me.column, me.row) {
                                 continue;
                             }
@@ -1845,8 +1863,8 @@ fn apply_mouse_scroll(app: &mut App, scroll: PendingMouseScroll) {
             app.clear_diff_selection();
             for _ in 0..delta.unsigned_abs() {
                 match scroll.target {
-                    MouseScrollTarget::FilePanel if delta < 0 => app.prev_file(),
-                    MouseScrollTarget::FilePanel => app.next_file(),
+                    MouseScrollTarget::FilePanel if delta < 0 => app.scroll_file_panel_up(),
+                    MouseScrollTarget::FilePanel => app.scroll_file_panel_down(),
                     MouseScrollTarget::Step
                         if delta < 0 && app.stepping && app.current_file_diff_ready() =>
                     {

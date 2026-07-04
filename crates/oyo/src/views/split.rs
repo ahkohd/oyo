@@ -232,6 +232,7 @@ fn add_review_preview_boxes_for_rows(
 
 /// Render the split view
 pub fn render_split(frame: &mut Frame, app: &mut App, area: Rect) {
+    let (area, scrollbar_area) = super::reserve_diff_scrollbar_lane(app, area);
     let visible_height = area.height as usize;
     if app.current_file_is_binary() {
         render_empty_state(frame, area, &app.theme, false, true);
@@ -277,7 +278,7 @@ pub fn render_split(frame: &mut Frame, app: &mut App, area: Rect) {
         None
     };
 
-    if app.line_wrap {
+    let total_len = if app.line_wrap {
         let (display_len, active_idx) = split_wrap_display_metrics(
             app,
             &view_lines,
@@ -288,12 +289,7 @@ pub fn render_split(frame: &mut Frame, app: &mut App, area: Rect) {
             app.split_align_lines,
         );
         app.ensure_active_visible_if_needed_wrapped(visible_height, display_len, active_idx);
-        let total_len = app.render_total_lines(display_len);
-        let scroll_before = app.scroll_offset;
-        app.clamp_scroll(total_len, visible_height, app.allow_overscroll());
-        if app.scroll_offset != scroll_before {
-            scroll_offset = app.render_scroll_offset();
-        }
+        app.render_total_lines(display_len)
     } else {
         let (display_len, _) = crate::app::display_metrics(
             &view_lines,
@@ -303,12 +299,12 @@ pub fn render_split(frame: &mut Frame, app: &mut App, area: Rect) {
             step_direction,
             app.split_align_lines,
         );
-        let total_len = app.render_total_lines(display_len);
-        let scroll_before = app.scroll_offset;
-        app.clamp_scroll(total_len, visible_height, app.allow_overscroll());
-        if app.scroll_offset != scroll_before {
-            scroll_offset = app.render_scroll_offset();
-        }
+        app.render_total_lines(display_len)
+    };
+    let scroll_before = app.scroll_offset;
+    app.clamp_scroll(total_len, visible_height, app.allow_overscroll());
+    if app.scroll_offset != scroll_before {
+        scroll_offset = app.render_scroll_offset();
     }
     let hunk_overflow = if app.line_wrap {
         split_hunk_overflow_wrapped(
@@ -363,6 +359,14 @@ pub fn render_split(frame: &mut Frame, app: &mut App, area: Rect) {
         chunks[1],
         hunk_overflow,
         show_virtual_new,
+        scroll_offset,
+    );
+    super::render_diff_scrollbar(
+        frame,
+        app,
+        scrollbar_area,
+        total_len,
+        visible_height,
         scroll_offset,
     );
     app.commit_syntax_warmup_frame();

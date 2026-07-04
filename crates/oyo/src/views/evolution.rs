@@ -13,7 +13,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
+    widgets::{Paragraph, Wrap},
     Frame,
 };
 
@@ -57,6 +57,7 @@ fn hunk_overflow_wrapped_evolution(
 
 /// Render the evolution view - file morphing without deletion markers
 pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
+    let (area, scrollbar_area) = super::reserve_diff_scrollbar_lane(app, area);
     let visible_height = area.height as usize;
     let visible_width = area.width.saturating_sub(GUTTER_WIDTH) as usize;
     if !app.line_wrap {
@@ -1038,27 +1039,14 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
             }
         }
 
-        // Render scrollbar (if enabled)
-        if app.scrollbar_visible {
-            let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-                .begin_symbol(Some("↑"))
-                .end_symbol(Some("↓"));
-
-            let visible_lines = content_area.height as usize;
-            if display_len > visible_lines {
-                let mut scrollbar_state =
-                    ScrollbarState::new(display_len).position(app.scroll_offset);
-
-                frame.render_stateful_widget(
-                    scrollbar,
-                    area.inner(ratatui::layout::Margin {
-                        vertical: 1,
-                        horizontal: 0,
-                    }),
-                    &mut scrollbar_state,
-                );
-            }
-        }
+        super::render_diff_scrollbar(
+            frame,
+            app,
+            scrollbar_area,
+            display_len,
+            content_area.height as usize,
+            app.scroll_offset,
+        );
     }
 }
 

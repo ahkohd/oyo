@@ -22,8 +22,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::app::{diff_scrollbar_thumb, App, DiffScrollbarState};
 use oyo_core::{LineKind, ViewLine, ViewSpan};
-use ratatui::text::Span;
+use ratatui::{
+    layout::{Margin, Rect},
+    style::Style,
+    text::Span,
+    Frame,
+};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -66,6 +72,72 @@ pub(crate) fn merge_debug_extra(base: Option<String>, extra: Option<String>) -> 
         (Some(base), None) => Some(base),
         (None, Some(extra)) => Some(extra),
         (None, None) => None,
+    }
+}
+
+pub(crate) fn reserve_diff_scrollbar_lane(app: &App, area: Rect) -> (Rect, Rect) {
+    if !app.scrollbar_visible || area.width == 0 {
+        return (
+            area,
+            Rect::new(area.x.saturating_add(area.width), area.y, 0, area.height),
+        );
+    }
+    (
+        Rect::new(area.x, area.y, area.width.saturating_sub(1), area.height),
+        Rect::new(
+            area.x.saturating_add(area.width.saturating_sub(1)),
+            area.y,
+            1,
+            area.height,
+        ),
+    )
+}
+
+pub(crate) fn render_diff_scrollbar(
+    frame: &mut Frame,
+    app: &mut App,
+    area: Rect,
+    total_lines: usize,
+    visible_lines: usize,
+    scroll_offset: usize,
+) {
+    let track = area.inner(Margin {
+        vertical: 0,
+        horizontal: 0,
+    });
+    let Some((thumb_top, thumb_height)) =
+        diff_scrollbar_thumb(total_lines, visible_lines, track.height, scroll_offset)
+    else {
+        return;
+    };
+    if track.width == 0 {
+        return;
+    }
+    let x = track.x;
+    app.set_diff_scrollbar(DiffScrollbarState {
+        x,
+        y: track.y,
+        height: track.height,
+        total_lines,
+        visible_lines,
+        thumb_top,
+        thumb_height,
+    });
+    let symbol = if app.file_list_focused || app.file_filter_active {
+        "▕"
+    } else {
+        "▐"
+    };
+    let style = Style::default().fg(app.theme.text_muted);
+    let buffer = frame.buffer_mut();
+    let start = track.y.saturating_add(thumb_top);
+    let end = start
+        .saturating_add(thumb_height)
+        .min(track.y.saturating_add(track.height));
+    for row in start..end {
+        if let Some(cell) = buffer.cell_mut((x, row)) {
+            cell.set_symbol(symbol).set_style(style);
+        }
     }
 }
 
@@ -578,15 +650,14 @@ pub(crate) fn truncate_text(text: &str, max_width: usize) -> String {
     format!("{}…", &text[..suffix_len])
 }
 
-use crate::app::{AnimationPhase, App, ViewMode};
+use crate::app::{AnimationPhase, ViewMode};
 use crate::color;
 use crate::config::{DiffExtentMarkerMode, DiffExtentMarkerScope, ResolvedTheme};
 use ratatui::{
-    layout::{Alignment, Rect},
-    style::{Color, Modifier, Style},
+    layout::Alignment,
+    style::{Color, Modifier},
     text::Line,
     widgets::Paragraph,
-    Frame,
 };
 
 pub(crate) fn extent_marker_style(
