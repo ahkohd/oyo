@@ -1,10 +1,12 @@
-# Keybindings Reference
+# Keybindings
 
-Oyo keybindings are configured in `config.toml` with `[keybindings.<mode>]` tables.
-Every configurable action is listed below as `<mode>.<action>`.
-Action names are snake_case. Omitted actions keep defaults. An empty array unbinds an action.
+Configure keybindings in `config.toml` with `[keybindings.<mode>]` tables.
 
-Example:
+Each action below is listed as `<mode>.<action>`. Action names use `snake_case`.
+
+If you do not set an action, Oyo uses the default keys. Set an action to an empty array to unbind it.
+
+## Example config
 
 ```toml
 [keybindings.global]
@@ -41,21 +43,27 @@ goto_end = ["G"]
 goto_half_page_down = ["d"]
 ```
 
-Notes:
+## Key syntax
 
-- Key sequences use spaces: `g g`, `g b`, `ctrl-x`.
-- Modifiers use hyphens: `ctrl-p`, `ctrl-shift-p`, `alt-x`, `cmd-p`.
-- Common named keys: `esc`, `enter`, `tab`, `backtab`, `space`, `up`, `down`, `left`, `right`, `home`, `end`, `pagedown`, `pageup`, `backspace`, `delete`.
-- Duplicate bindings or prefix conflicts make that whole mode fall back to defaults with a warning.
-- In `normal`, plain `1` through `9` are reserved for counts. Plain `0` means `line_start` unless a count is already pending. Modified digits such as `ctrl-1` are allowed.
-- `global` is checked before text input modes, except `help` and `review_editor`.
-- `normal.open_command_palette` and `normal.open_file_search` still work in normal mode, but use `global` if the shortcuts should work while a picker, search box, or filter is active.
+Use these rules when you write keys:
+
+- key sequences use spaces, for example `g g`, `g b`, `ctrl-x`
+- modifiers use hyphens, for example `ctrl-p`, `ctrl-shift-p`, `alt-x`, `cmd-p`
+- named keys include `esc`, `enter`, `tab`, `backtab`, `space`, `up`, `down`, `left`, `right`, `home`, `end`, `pagedown`, `pageup`, `backspace` and `delete`
+
+Duplicate bindings or prefix conflicts make that whole mode fall back to defaults. Oyo prints a warning.
+
+In `normal` mode, plain `1` to `9` are reserved for counts. Plain `0` means `line_start` unless a count is already pending. Modified digits such as `ctrl-1` are allowed.
+
+`global` runs before most input modes. It does not run before `help` or `review_editor`.
+
+`normal.open_command_palette` and `normal.open_file_search` still work in normal mode. Use `global` if you want shortcuts to work while a picker, search box or filter is active.
 
 ## Modes
 
 Use each mode as `[keybindings.<mode>]`.
 
-| Mode | Config table | When used |
+| Mode | Config table | When Oyo uses it |
 | --- | --- | --- |
 | `global` | `[keybindings.global]` | Global app shortcuts before most input modes |
 | `normal` | `[keybindings.normal]` | Main diff view |
@@ -64,169 +72,173 @@ Use each mode as `[keybindings.<mode>]`.
 | `command_palette` | `[keybindings.command_palette]` | Command palette picker |
 | `file_search` | `[keybindings.file_search]` | Quick file search picker |
 | `file_filter` | `[keybindings.file_filter]` | File panel filter |
-| `goto` | `[keybindings.goto]` | Goto prompt |
+| `goto` | `[keybindings.goto]` | Go to prompt |
 | `search` | `[keybindings.search]` | Diff search prompt |
 | `selection` | `[keybindings.selection]` | Diff text selection |
 | `dashboard` | `[keybindings.dashboard]` | Commit picker dashboard |
 | `dashboard_filter` | `[keybindings.dashboard_filter]` | Dashboard filter prompt |
 
-## `global`
+## Global mode
 
-| Action | Default keys | Description |
+| Action | Default keys | What it does |
 | --- | --- | --- |
-| `open_command_palette` | `ctrl-p` | Command palette |
-| `open_file_search` | `ctrl-shift-p` | Quick file search |
+| `open_command_palette` | `ctrl-p` | Open the command palette |
+| `open_file_search` | `ctrl-shift-p` | Open quick file search |
 
-## `normal`
+## Normal mode
 
-| Action | Default keys | Description |
+| Action | Default keys | What it does |
 | --- | --- | --- |
 | `quit` | `q`, `esc` | Quit and print comments if any |
 | `step_down` | `j`, `down` | Step forward |
 | `step_up` | `k`, `up` | Step backward |
-| `next_hunk` | `l`, `right` | Next hunk |
-| `prev_hunk` | `h`, `left` | Previous hunk |
-| `hunk_start` | `b` | Hunk begin |
-| `hunk_end` | `e` | Hunk end |
-| `blame_hint` | `g b` | Blame current step |
-| `toggle_peek_change` | `p` | Peek change |
-| `toggle_peek_hunk` | `P` | Peek old hunk |
-| `yank_change` | `y` | Yank line or selection |
-| `yank_hunk` | `Y` | Yank hunk |
-| `yank_change_patch` | `g y` | Copy line patch |
-| `yank_hunk_patch` | `g Y` | Copy hunk patch |
-| `start_selection` | `v` | Start selection |
+| `next_hunk` | `l`, `right` | Go to the next hunk |
+| `prev_hunk` | `h`, `left` | Go to the previous hunk |
+| `hunk_start` | `b` | Go to the start of the hunk |
+| `hunk_end` | `e` | Go to the end of the hunk |
+| `blame_hint` | `g b` | Show blame for the current step |
+| `toggle_peek_change` | `p` | Peek at the change |
+| `toggle_peek_hunk` | `P` | Peek at the old hunk |
+| `yank_change` | `y` | Copy the current line or selection |
+| `yank_hunk` | `Y` | Copy the current hunk |
+| `yank_change_patch` | `g y` | Copy the current line patch |
+| `yank_hunk_patch` | `g Y` | Copy the current hunk patch |
+| `start_selection` | `v` | Start character selection |
 | `start_line_selection` | `V` | Start line selection |
 | `start_block_selection` | `ctrl-v` | Start block selection |
-| `toggle_path_popup` | `ctrl-g` | Show full file path |
-| `open_editor` | `o`, `ctrl-e` | Open file in editor |
-| `goto_start` | `g g`, `home` | Go to start |
-| `goto_end` | `G`, `end` | Go to end |
-| `first_step` | `<` | First step, or hunk in no-step |
-| `last_step` | `>` | Last step, or hunk in no-step |
-| `prev_file` | `[` | Previous file |
-| `next_file` | `]` | Next file |
-| `toggle_autoplay` | `space` | Autoplay forward |
-| `toggle_autoplay_reverse` | `B` | Autoplay reverse |
+| `toggle_path_popup` | `ctrl-g` | Show the full file path |
+| `open_editor` | `o`, `ctrl-e` | Open the file in your editor |
+| `goto_start` | `g g`, `home` | Go to the start |
+| `goto_end` | `G`, `end` | Go to the end |
+| `first_step` | `<` | Go to the first step, or first hunk in no-step mode |
+| `last_step` | `>` | Go to the last step, or last hunk in no-step mode |
+| `prev_file` | `[` | Go to the previous file |
+| `next_file` | `]` | Go to the next file |
+| `toggle_autoplay` | `space` | Start or stop forward autoplay |
+| `toggle_autoplay_reverse` | `B` | Start or stop reverse autoplay |
 | `toggle_view_mode` | `tab` | Cycle view mode |
-| `toggle_view_mode_reverse` | `backtab` | Cycle view mode reverse |
+| `toggle_view_mode_reverse` | `backtab` | Cycle view mode in reverse |
 | `scroll_up` | `K` | Scroll up |
 | `scroll_down` | `J` | Scroll down |
-| `half_page_up` | `ctrl-u` | Scroll half-page up |
-| `half_page_down` | `ctrl-d` | Scroll half-page down |
-| `toggle_file_list_focus` | `enter`, `ctrl-a` | Focus file list |
-| `increase_speed` | `+`, `=` | Increase speed |
-| `decrease_speed` | `-` | Decrease speed |
-| `toggle_animation` | `a` | Toggle animation |
-| `toggle_line_wrap` | `w` | Toggle line wrap |
-| `toggle_syntax` | `t` | Toggle syntax highlight |
-| `toggle_evo_syntax` | `E` | Toggle evo syntax |
-| `toggle_stepping` | `s` | Toggle stepping |
-| `toggle_strikethrough` | `S` | Toggle strikethrough |
+| `half_page_up` | `ctrl-u` | Scroll up half a page |
+| `half_page_down` | `ctrl-d` | Scroll down half a page |
+| `toggle_file_list_focus` | `enter`, `ctrl-a` | Focus the file list |
+| `increase_speed` | `+`, `=` | Increase playback speed |
+| `decrease_speed` | `-` | Decrease playback speed |
+| `toggle_animation` | `a` | Turn animation on or off |
+| `toggle_line_wrap` | `w` | Turn line wrap on or off |
+| `toggle_syntax` | `t` | Turn syntax highlighting on or off |
+| `toggle_evo_syntax` | `E` | Toggle evolution syntax mode |
+| `toggle_stepping` | `s` | Turn stepping on or off |
+| `toggle_strikethrough` | `S` | Turn deletion strikethrough on or off |
 | `scroll_left` | `H` | Scroll left |
 | `scroll_right` | `L` | Scroll right |
-| `line_start` | `0` | Scroll to line start |
-| `line_end` | `$` | Scroll to line end |
-| `center_active` | `z` | Center on active |
-| `toggle_zen` | `Z` | Zen mode |
-| `replay_step` | `r` | Replay last step |
+| `line_start` | `0` | Scroll to the start of the line |
+| `line_end` | `$` | Scroll to the end of the line |
+| `center_active` | `z` | Centre the active change |
+| `toggle_zen` | `Z` | Turn zen mode on or off |
+| `replay_step` | `r` | Replay the last step |
 | `refresh` | `R` | Refresh files |
-| `toggle_file_panel` | `ctrl-f` | Toggle file panel |
-| `toggle_fold_context` | `f` | Toggle context folding |
-| `open_search_or_file_filter` | `/` | Search or filter files |
-| `open_goto` | `:` | Go to line, hunk, or step |
-| `search_next` | `n` | Next match |
-| `search_prev` | `N` | Previous match |
-| `next_conflict` | `c` | Next conflict |
-| `prev_conflict` | `C` | Previous conflict |
-| `line_comment` | `m` | Add or update line comment |
-| `hunk_comment` | `M` | Add or update hunk comment |
+| `toggle_file_panel` | `ctrl-f` | Show or hide the file panel |
+| `toggle_fold_context` | `f` | Fold or unfold context |
+| `open_search_or_file_filter` | `/` | Search the diff, or filter files when the file list is focused |
+| `open_goto` | `:` | Go to a line, hunk or step |
+| `search_next` | `n` | Go to the next match |
+| `search_prev` | `N` | Go to the previous match |
+| `next_conflict` | `c` | Go to the next conflict |
+| `prev_conflict` | `C` | Go to the previous conflict |
+| `line_comment` | `m` | Add or update a line comment |
+| `hunk_comment` | `M` | Add or update a hunk comment |
 | `clear_comments` | `ctrl-x` | Clear all comments |
-| `remove_line_comment` | `x` | Remove line comment |
-| `remove_hunk_comment` | `X` | Remove hunk comment |
-| `toggle_help` | `?` | Toggle help |
-| `open_command_palette` | `ctrl-p` | Command palette in normal mode |
-| `open_file_search` | `ctrl-shift-p` | Quick file search in normal mode |
+| `remove_line_comment` | `x` | Remove a line comment |
+| `remove_hunk_comment` | `X` | Remove a hunk comment |
+| `toggle_help` | `?` | Show or hide help |
+| `open_command_palette` | `ctrl-p` | Open the command palette in normal mode |
+| `open_file_search` | `ctrl-shift-p` | Open quick file search in normal mode |
 
-## `help`
+## Help mode
 
-| Action | Default keys | Description |
+| Action | Default keys | What it does |
 | --- | --- | --- |
 | `close` | `esc`, `q`, `?` | Close help |
 | `scroll_down` | `j`, `down` | Scroll down |
 | `scroll_up` | `k`, `up` | Scroll up |
 
-## `review_editor`
+## Review editor mode
 
-| Action | Default keys | Description |
+| Action | Default keys | What it does |
 | --- | --- | --- |
-| `cancel` | `esc` | Cancel editor |
-| `save` | `ctrl-o` | Save comment |
-| `insert_newline` | `enter` | Insert newline |
-| `accept_mention` | `tab` | Accept mention |
-| `backspace` | `backspace` | Backspace |
-| `delete` | `delete` | Delete |
+| `cancel` | `esc` | Cancel the editor |
+| `save` | `ctrl-o` | Save the comment |
+| `insert_newline` | `enter` | Insert a new line |
+| `accept_mention` | `tab` | Accept the mention |
+| `backspace` | `backspace` | Delete the character before the cursor |
+| `delete` | `delete` | Delete the character under the cursor |
 | `left` | `left` | Move left |
 | `right` | `right` | Move right |
 | `up` | `up` | Move up |
 | `down` | `down` | Move down |
-| `home` | `home` | Move to line start |
-| `end` | `end` | Move to line end |
+| `home` | `home` | Move to the start of the line |
+| `end` | `end` | Move to the end of the line |
 | `clear` | `ctrl-u` | Clear text |
-| `mention_next` | `ctrl-n` | Next mention candidate |
-| `mention_prev` | `ctrl-p` | Previous mention candidate |
+| `mention_next` | `ctrl-n` | Select the next mention candidate |
+| `mention_prev` | `ctrl-p` | Select the previous mention candidate |
 
-## `command_palette`
+## Command palette mode
 
-| Action | Default keys | Description |
+| Action | Default keys | What it does |
 | --- | --- | --- |
 | `cancel` | `esc` | Cancel |
 | `accept` | `enter` | Accept |
-| `backspace` | `backspace` | Backspace |
-| `clear` | `ctrl-u` | Clear query |
-| `select_next` | `down` | Select next |
-| `select_prev` | `up` | Select previous |
+| `backspace` | `backspace` | Delete the previous character |
+| `clear` | `ctrl-u` | Clear the query |
+| `select_next` | `down` | Select the next item |
+| `select_prev` | `up` | Select the previous item |
 
-## `file_search`
+## File search mode
 
-| Action | Default keys | Description |
+| Action | Default keys | What it does |
 | --- | --- | --- |
 | `cancel` | `esc` | Cancel |
 | `accept` | `enter` | Accept |
-| `backspace` | `backspace` | Backspace |
-| `clear` | `ctrl-u` | Clear query |
-| `select_next` | `down` | Select next |
-| `select_prev` | `up` | Select previous |
+| `backspace` | `backspace` | Delete the previous character |
+| `clear` | `ctrl-u` | Clear the query |
+| `select_next` | `down` | Select the next item |
+| `select_prev` | `up` | Select the previous item |
 
-## `file_filter`
+## File filter mode
 
-| Action | Default keys | Description |
+| Action | Default keys | What it does |
 | --- | --- | --- |
-| `close` | `esc`, `enter` | Close filter |
-| `backspace` | `backspace` | Backspace |
-| `clear` | `ctrl-u` | Clear filter |
+| `close` | `esc`, `enter` | Close the filter |
+| `backspace` | `backspace` | Delete the previous character |
+| `clear` | `ctrl-u` | Clear the filter |
 
-## `goto`
+## Go to mode
 
-| Action | Default keys | Description |
-| --- | --- | --- |
-| `cancel` | `esc` | Cancel |
-| `accept` | `enter` | Accept |
-| `backspace` | `backspace` | Backspace |
-| `clear` | `ctrl-u` | Clear query |
-
-## `search`
-
-| Action | Default keys | Description |
+| Action | Default keys | What it does |
 | --- | --- | --- |
 | `cancel` | `esc` | Cancel |
 | `accept` | `enter` | Accept |
-| `backspace` | `backspace` | Backspace |
-| `clear` | `ctrl-u` | Clear query |
+| `backspace` | `backspace` | Delete the previous character |
+| `clear` | `ctrl-u` | Clear the query |
 
-## `selection`
+## Search mode
 
-| Action | Default keys | Description |
+| Action | Default keys | What it does |
+| --- | --- | --- |
+| `cancel` | `esc` | Cancel |
+| `accept` | `enter` | Accept |
+| `backspace` | `backspace` | Delete the previous character |
+| `clear` | `ctrl-u` | Clear the query |
+
+## Selection mode
+
+Use `v`, `V` or `ctrl-v` in normal mode to start selection. Oyo then uses selection mode keybindings until you copy or cancel.
+
+Selection works on visible diff cells. It does not include line numbers, gutters, align-fill characters or UI padding.
+
+| Action | Default keys | What it does |
 | --- | --- | --- |
 | `cancel` | `esc` | Cancel selection |
 | `copy` | `y` | Copy selection |
@@ -234,44 +246,44 @@ Use each mode as `[keybindings.<mode>]`.
 | `right` | `l`, `right` | Extend right |
 | `up` | `k`, `up` | Extend up |
 | `down` | `j`, `down` | Extend down |
-| `reanchor_left` | `H` | Reanchor left |
-| `reanchor_right` | `L` | Reanchor right |
-| `reanchor_up` | `K` | Reanchor up |
-| `reanchor_down` | `J` | Reanchor down |
-| `reanchor_start` | `ctrl-g` | Reanchor to first visible cell |
-| `reanchor_end` | `ctrl-shift-g` | Reanchor to last visible cell |
-| `reanchor_half_page_down` | `ctrl-d` | Reanchor half page down |
-| `goto_start` | `g` | Extend to first visible cell |
-| `goto_end` | `G` | Extend to last visible cell |
-| `goto_half_page_down` | `d` | Extend half page down |
+| `reanchor_left` | `H` | Move the anchor left |
+| `reanchor_right` | `L` | Move the anchor right |
+| `reanchor_up` | `K` | Move the anchor up |
+| `reanchor_down` | `J` | Move the anchor down |
+| `reanchor_start` | `ctrl-g` | Move the anchor to the first visible cell |
+| `reanchor_end` | `ctrl-shift-g` | Move the anchor to the last visible cell |
+| `reanchor_half_page_down` | `ctrl-d` | Move the anchor down half a page |
+| `goto_start` | `g` | Extend to the first visible cell |
+| `goto_end` | `G` | Extend to the last visible cell |
+| `goto_half_page_down` | `d` | Extend down half a page |
 
-## `dashboard`
+## Dashboard mode
 
-| Action | Default keys | Description |
+| Action | Default keys | What it does |
 | --- | --- | --- |
-| `quit` | `esc`, `q` | Quit dashboard |
+| `quit` | `esc`, `q` | Quit the dashboard |
 | `start_filter` | `/` | Filter commits |
-| `clear_pin` | `r` | Clear pinned range start |
-| `toggle_pin` | `space` | Mark range start |
-| `accept` | `enter` | Open selection |
-| `select_next` | `j`, `down` | Select next |
-| `select_prev` | `k`, `up` | Select previous |
+| `clear_pin` | `r` | Clear the pinned range start |
+| `toggle_pin` | `space` | Mark the range start |
+| `accept` | `enter` | Open the selection |
+| `select_next` | `j`, `down` | Select the next commit |
+| `select_prev` | `k`, `up` | Select the previous commit |
 | `page_down` | `pagedown` | Page down |
 | `page_up` | `pageup` | Page up |
-| `select_first` | `g`, `home` | Select first |
-| `select_last` | `G`, `end` | Select last |
+| `select_first` | `g`, `home` | Select the first commit |
+| `select_last` | `G`, `end` | Select the last commit |
 
-## `dashboard_filter`
+## Dashboard filter mode
 
-| Action | Default keys | Description |
+| Action | Default keys | What it does |
 | --- | --- | --- |
-| `cancel` | `esc` | Cancel filter |
-| `accept` | `enter` | Open selection |
-| `clear` | `ctrl-u` | Clear filter |
-| `backspace` | `backspace` | Backspace |
-| `select_next` | `j`, `down` | Select next |
-| `select_prev` | `k`, `up` | Select previous |
+| `cancel` | `esc` | Cancel the filter |
+| `accept` | `enter` | Open the selection |
+| `clear` | `ctrl-u` | Clear the filter |
+| `backspace` | `backspace` | Delete the previous character |
+| `select_next` | `j`, `down` | Select the next commit |
+| `select_prev` | `k`, `up` | Select the previous commit |
 | `page_down` | `pagedown` | Page down |
 | `page_up` | `pageup` | Page up |
-| `select_first` | `g`, `home` | Select first |
-| `select_last` | `G`, `end` | Select last |
+| `select_first` | `g`, `home` | Select the first commit |
+| `select_last` | `G`, `end` | Select the last commit |
