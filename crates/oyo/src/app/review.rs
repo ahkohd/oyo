@@ -1,5 +1,10 @@
 use super::{AnimationFrame, App, ViewMode};
-use crate::config::{MentionFileScope, MentionFinder};
+use crate::config::{
+    MentionFileScope, MentionFinder, ReviewActionConfig, ReviewHookConfig, ReviewHookEvent,
+    ReviewHookStdin,
+};
+use crossterm::event::KeyEvent;
+use keymap::{parser::parse_seq, ToKeyMap};
 use oyo_core::{ChangeKind, LineKind, ViewLine};
 use serde::{Deserialize, Serialize};
 use std::collections::{hash_map::DefaultHasher, BTreeSet};
@@ -7,7 +12,7 @@ use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::process::{Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum ReviewTargetKind {
@@ -76,6 +81,41 @@ struct ReviewSession {
     editor: Option<ReviewEditorState>,
 }
 
+#[derive(Debug, Serialize)]
+struct ReviewExport<'a> {
+    version: u32,
+    event: &'static str,
+    repo_root: String,
+    session_file: Option<String>,
+    diff_fingerprint: String,
+    diff: ReviewExportDiff,
+    review: ReviewExportBody<'a>,
+}
+
+#[derive(Debug, Serialize)]
+struct ReviewExportDiff {
+    branch: Option<String>,
+    range: Option<(String, String)>,
+    files: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ReviewExportBody<'a> {
+    text: &'a str,
+    comments: Vec<ReviewExportComment<'a>>,
+}
+
+#[derive(Debug, Serialize)]
+struct ReviewExportComment<'a> {
+    id: u64,
+    file: &'a str,
+    kind: &'static str,
+    side: Option<&'static str>,
+    old_range: Option<ReviewRange>,
+    new_range: Option<ReviewRange>,
+    body: &'a str,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct ReviewEditorRender {
     pub(crate) title: String,
@@ -134,6 +174,40 @@ fn now_ts() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+fn review_event_name(event: ReviewHookEvent) -> &'static str {
+    event.as_str()
+}
+
+fn hook_label(config: &ReviewHookConfig) -> String {
+    if config.id.trim().is_empty() {
+        config.command.clone()
+    } else {
+        config.id.clone()
+    }
+}
+
+fn action_label(config: &ReviewActionConfig) -> String {
+    if config.label.trim().is_empty() {
+        config.id.clone()
+    } else {
+        config.label.clone()
+    }
+}
+
+fn action_shown(config: &ReviewActionConfig, place: &str) -> bool {
+    config.show.is_empty() || config.show.iter().any(|item| item == place)
+}
+
+fn key_matches_config(key: KeyEvent, binding: &str) -> bool {
+    let Ok(seq) = parse_seq(binding) else {
+        return false;
+    };
+    if seq.len() != 1 {
+        return false;
+    }
+    key.to_keymap().ok().as_ref() == seq.first()
 }
 
 fn hash_hex(value: &str) -> String {
@@ -398,6 +472,47 @@ impl App {
 
     pub fn review_comment_count(&self) -> usize {
         self.review_comments.len()
+    }
+
+    pub fn take_review_hook_warnings(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.review_hook_warnings)
+    }
+
+    pub fn review_action_labels_for_editor(&self) -> Vec<(String, String)> {
+        self.review_actions
+            .iter()
+            .filter(|action| action_shown(action, "review_editor"))
+            .filter_map(|action| {
+                let key = action.key.as_ref()?.trim();
+                (!key.is_empty()).then(|| (key.to_string(), action_label(action)))
+            })
+            .collect()
+    }
+
+    pub fn handle_review_action_key(&mut self, key: KeyEvent) -> bool {
+        let idx = self.review_actions.iter().position(|action| {
+            action_shown(action, "review_editor")
+                && action
+                    .key
+                    .as_deref()
+                    .is_some_and(|binding| key_matches_config(key, binding))
+        });
+        if let Some(idx) = idx {
+            self.run_review_action(idx);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn run_review_action(&mut self, idx: usize) {
+        let Some(action) = self.review_actions.get(idx).cloned() else {
+            return;
+        };
+        if action.save_editor && self.review_editor.is_some() {
+            self.review_save_editor();
+        }
+        self.run_review_action_command(&action);
     }
 
     pub fn review_editor_active(&self) -> bool {
@@ -844,6 +959,7 @@ impl App {
         self.review_next_comment_id = 1;
         self.touch_review_state();
         self.persist_review_session();
+        self.run_review_hooks(ReviewHookEvent::CommentsCleared, None);
         true
     }
 
@@ -1040,9 +1156,13 @@ impl App {
         if body.trim().is_empty() {
             if let Some(idx) = existing_idx {
                 self.review_comments.remove(idx);
+                self.touch_review_state();
+                self.persist_review_session();
+                self.run_review_hooks(ReviewHookEvent::CommentDeleted, None);
+            } else {
+                self.touch_review_state();
+                self.persist_review_session();
             }
-            self.touch_review_state();
-            self.persist_review_session();
             return;
         }
 
@@ -1067,6 +1187,7 @@ impl App {
 
         self.touch_review_state();
         self.persist_review_session();
+        self.run_review_hooks(ReviewHookEvent::CommentSaved, None);
     }
 
     pub fn submit_review_and_quit(&mut self) {
@@ -1075,6 +1196,7 @@ impl App {
         }
         self.review_mention_picker = None;
         let output = self.format_review_output();
+        self.run_review_hooks(ReviewHookEvent::ReviewReady, Some(&output));
         self.review_submission_output = Some(output);
         self.touch_review_state();
         self.persist_review_session();
@@ -1083,6 +1205,184 @@ impl App {
 
     pub fn take_review_submission_output(&mut self) -> Option<String> {
         self.review_submission_output.take()
+    }
+
+    fn run_review_hooks(&mut self, event: ReviewHookEvent, output: Option<&str>) {
+        let hooks: Vec<_> = self
+            .review_hooks
+            .iter()
+            .filter(|hook| hook.on == event)
+            .cloned()
+            .collect();
+        for hook in hooks {
+            self.run_review_hook_command(&hook, event, output);
+        }
+    }
+
+    fn run_review_action_command(&mut self, action: &ReviewActionConfig) {
+        let hook = ReviewHookConfig {
+            id: action.id.clone(),
+            on: action.on,
+            command: action.command.clone(),
+            args: action.args.clone(),
+            stdin: action.stdin,
+            blocking: action.blocking,
+            timeout_ms: action.timeout_ms,
+        };
+        let output = self.format_review_output();
+        self.run_review_hook_command(&hook, action.on, Some(&output));
+    }
+
+    fn run_review_hook_command(
+        &mut self,
+        hook: &ReviewHookConfig,
+        event: ReviewHookEvent,
+        output: Option<&str>,
+    ) {
+        if hook.command.trim().is_empty() {
+            return;
+        }
+        let payload = self.review_export_json(event, output);
+        let mut command = Command::new(&hook.command);
+        command.args(&hook.args);
+        if let Some(root) = self
+            .review_repo_root
+            .as_deref()
+            .filter(|root| !root.is_empty())
+        {
+            command.current_dir(root);
+            command.env("OYO_REPO_ROOT", root);
+        }
+        command.env("OYO_REVIEW_EVENT", review_event_name(event));
+        command.env("OYO_DIFF_FINGERPRINT", &self.review_diff_fingerprint);
+        if let Some(path) = self.review_session_path.as_ref() {
+            command.env("OYO_SESSION_FILE", path);
+        }
+        command.stdout(Stdio::null());
+        command.stderr(Stdio::null());
+        match hook.stdin {
+            ReviewHookStdin::Json => {
+                command.stdin(Stdio::piped());
+            }
+            ReviewHookStdin::None => {
+                command.stdin(Stdio::null());
+            }
+        }
+
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                self.review_hook_warnings.push(format!(
+                    "Review hook '{}' failed to start: {error}",
+                    hook_label(hook)
+                ));
+                return;
+            }
+        };
+
+        if matches!(hook.stdin, ReviewHookStdin::Json) {
+            if let Some(mut stdin) = child.stdin.take() {
+                if let Err(error) = stdin.write_all(payload.as_bytes()) {
+                    self.review_hook_warnings.push(format!(
+                        "Review hook '{}' failed to receive JSON: {error}",
+                        hook_label(hook)
+                    ));
+                }
+            }
+        }
+
+        if !hook.blocking {
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+            return;
+        }
+
+        let timeout = Duration::from_millis(hook.timeout_ms.max(1));
+        let started = Instant::now();
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    if !status.success() {
+                        self.review_hook_warnings.push(format!(
+                            "Review hook '{}' exited with status {status}",
+                            hook_label(hook)
+                        ));
+                    }
+                    return;
+                }
+                Ok(None) if started.elapsed() >= timeout => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    self.review_hook_warnings.push(format!(
+                        "Review hook '{}' timed out after {}ms",
+                        hook_label(hook),
+                        hook.timeout_ms
+                    ));
+                    return;
+                }
+                Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+                Err(error) => {
+                    self.review_hook_warnings.push(format!(
+                        "Review hook '{}' failed while waiting: {error}",
+                        hook_label(hook)
+                    ));
+                    return;
+                }
+            }
+        }
+    }
+
+    fn review_export_json(&self, event: ReviewHookEvent, output: Option<&str>) -> String {
+        let output_owned;
+        let output = match output {
+            Some(output) => output,
+            None => {
+                output_owned = self.format_review_output();
+                &output_owned
+            }
+        };
+        let comments = self
+            .review_comments
+            .iter()
+            .map(|comment| ReviewExportComment {
+                id: comment.id,
+                file: &comment.anchor.file_path,
+                kind: match comment.anchor.kind {
+                    ReviewTargetKind::Line => "line",
+                    ReviewTargetKind::Hunk => "hunk",
+                },
+                side: comment.anchor.side.map(ReviewSide::as_str),
+                old_range: comment.anchor.old_range,
+                new_range: comment.anchor.new_range,
+                body: &comment.body,
+            })
+            .collect();
+        let export = ReviewExport {
+            version: 1,
+            event: review_event_name(event),
+            repo_root: self.review_repo_root.clone().unwrap_or_default(),
+            session_file: self
+                .review_session_path
+                .as_ref()
+                .map(|path| path.to_string_lossy().to_string()),
+            diff_fingerprint: self.review_diff_fingerprint.clone(),
+            diff: ReviewExportDiff {
+                branch: self.git_branch.clone(),
+                range: self.multi_diff.git_range_display(),
+                files: self
+                    .multi_diff
+                    .files
+                    .iter()
+                    .map(|file| file.display_name.clone())
+                    .collect(),
+            },
+            review: ReviewExportBody {
+                text: output,
+                comments,
+            },
+        };
+        serde_json::to_string_pretty(&export).unwrap_or_else(|_| "{}".to_string())
     }
 
     fn touch_review_state(&mut self) {
@@ -1098,6 +1398,7 @@ impl App {
             self.review_comments.remove(idx);
             self.touch_review_state();
             self.persist_review_session();
+            self.run_review_hooks(ReviewHookEvent::CommentDeleted, None);
             true
         } else {
             false
@@ -1976,7 +2277,46 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::preserve_ref_trailing_space;
+    use super::*;
+    use crate::app::ViewMode;
+    use oyo_core::MultiFileDiff;
+    use std::path::Path;
+
+    fn temp_path(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "oyo-review-hook-{name}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    fn write_file(path: &Path, content: &str) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, content).unwrap();
+    }
+
+    fn test_app() -> App {
+        let diff = MultiFileDiff::from_file_pair(
+            "old.txt".into(),
+            "new.txt".into(),
+            "old\n".to_string(),
+            "new\n".to_string(),
+        );
+        let mut app = App::new(
+            diff,
+            ViewMode::UnifiedPane,
+            0,
+            false,
+            Some("branch".to_string()),
+        );
+        app.enable_review_mode();
+        app
+    }
 
     #[test]
     fn preserve_space_for_trailing_line_reference() {
@@ -1997,5 +2337,120 @@ mod tests {
         assert!(!preserve_ref_trailing_space("@ "));
         assert!(!preserve_ref_trailing_space("no trailing space"));
         assert!(!preserve_ref_trailing_space("ends with tab\t"));
+    }
+
+    #[test]
+    fn review_export_json_contains_comments() {
+        let mut app = test_app();
+        app.review_comments.push(ReviewComment {
+            id: 7,
+            anchor: ReviewAnchor {
+                file_index: 0,
+                file_path: "new.txt".to_string(),
+                kind: ReviewTargetKind::Line,
+                side: Some(ReviewSide::New),
+                old_range: None,
+                new_range: Some(ReviewRange { start: 1, end: 1 }),
+                hunk_id: Some(0),
+                display_idx_hint: Some(0),
+                anchor_key: "line|new.txt|new|1".to_string(),
+            },
+            body: "please fix".to_string(),
+            created_at: 1,
+            updated_at: 1,
+        });
+
+        let json = app.review_export_json(ReviewHookEvent::ReviewReady, None);
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["event"], "review_ready");
+        assert_eq!(value["diff"]["branch"], "branch");
+        assert_eq!(value["review"]["comments"][0]["file"], "new.txt");
+        assert_eq!(value["review"]["comments"][0]["body"], "please fix");
+    }
+
+    #[test]
+    fn review_action_key_runs_command_and_shows_label() {
+        let root = temp_path("action");
+        let hook_path = root.join("hook.sh");
+        let out_path = root.join("action.json");
+        write_file(
+            &hook_path,
+            &format!("#!/bin/sh\ncat > '{}'\n", out_path.display()),
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&hook_path).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&hook_path, perms).unwrap();
+        }
+
+        let mut app = test_app();
+        app.review_actions = vec![ReviewActionConfig {
+            id: "capture-action".to_string(),
+            label: "Capture".to_string(),
+            key: Some("ctrl-g".to_string()),
+            on: ReviewHookEvent::ReviewReady,
+            command: hook_path.to_string_lossy().to_string(),
+            args: Vec::new(),
+            stdin: ReviewHookStdin::Json,
+            blocking: true,
+            timeout_ms: 5_000,
+            save_editor: true,
+            show: vec!["review_editor".to_string()],
+        }];
+
+        assert_eq!(
+            app.review_action_labels_for_editor(),
+            vec![("ctrl-g".to_string(), "Capture".to_string())]
+        );
+        assert!(app.handle_review_action_key(KeyEvent::new(
+            crossterm::event::KeyCode::Char('g'),
+            crossterm::event::KeyModifiers::CONTROL,
+        )));
+
+        let payload = std::fs::read_to_string(&out_path).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(value["event"], "review_ready");
+        assert!(app.take_review_hook_warnings().is_empty());
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn review_ready_hook_receives_json() {
+        let root = temp_path("ready");
+        let hook_path = root.join("hook.sh");
+        let out_path = root.join("payload.json");
+        write_file(
+            &hook_path,
+            &format!("#!/bin/sh\ncat > '{}'\n", out_path.display()),
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&hook_path).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&hook_path, perms).unwrap();
+        }
+
+        let mut app = test_app();
+        app.review_hooks = vec![ReviewHookConfig {
+            id: "capture".to_string(),
+            on: ReviewHookEvent::ReviewReady,
+            command: hook_path.to_string_lossy().to_string(),
+            args: Vec::new(),
+            stdin: ReviewHookStdin::Json,
+            blocking: true,
+            timeout_ms: 5_000,
+        }];
+        app.submit_review_and_quit();
+
+        let payload = std::fs::read_to_string(&out_path).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(value["event"], "review_ready");
+        assert!(app.take_review_hook_warnings().is_empty());
+
+        let _ = std::fs::remove_dir_all(root);
     }
 }

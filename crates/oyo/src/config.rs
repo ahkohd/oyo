@@ -57,6 +57,12 @@
 //! file_scope = "repo" # changed | repo
 //! finder = "auto"     # auto | builtin | fzf
 //!
+//! [[review.hooks]]
+//! id = "review-ready"
+//! on = "review_ready"
+//! command = ".oyo/hooks/review-ready"
+//! stdin = "json"
+//!
 //! [editor]
 //! # command = "nvim"
 //! # args = ["+{line}", "{file}"]
@@ -1420,6 +1426,120 @@ pub struct CommentsConfig {
     pub mentions: MentionConfig,
 }
 
+#[derive(Debug, Deserialize, Clone, Copy, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewHookEvent {
+    CommentSaved,
+    CommentDeleted,
+    CommentsCleared,
+    #[default]
+    ReviewReady,
+}
+
+impl ReviewHookEvent {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::CommentSaved => "comment_saved",
+            Self::CommentDeleted => "comment_deleted",
+            Self::CommentsCleared => "comments_cleared",
+            Self::ReviewReady => "review_ready",
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Clone, Copy, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewHookStdin {
+    #[default]
+    Json,
+    None,
+}
+
+fn default_hook_stdin() -> ReviewHookStdin {
+    ReviewHookStdin::Json
+}
+
+fn default_hook_blocking() -> bool {
+    true
+}
+
+fn default_hook_timeout_ms() -> u64 {
+    30_000
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct ReviewHookConfig {
+    pub id: String,
+    pub on: ReviewHookEvent,
+    pub command: String,
+    pub args: Vec<String>,
+    #[serde(default = "default_hook_stdin")]
+    pub stdin: ReviewHookStdin,
+    #[serde(default = "default_hook_blocking")]
+    pub blocking: bool,
+    #[serde(default = "default_hook_timeout_ms")]
+    pub timeout_ms: u64,
+}
+
+impl Default for ReviewHookConfig {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            on: ReviewHookEvent::ReviewReady,
+            command: String::new(),
+            args: Vec::new(),
+            stdin: ReviewHookStdin::Json,
+            blocking: true,
+            timeout_ms: default_hook_timeout_ms(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct ReviewActionConfig {
+    pub id: String,
+    pub label: String,
+    pub key: Option<String>,
+    pub on: ReviewHookEvent,
+    pub command: String,
+    pub args: Vec<String>,
+    #[serde(default = "default_hook_stdin")]
+    pub stdin: ReviewHookStdin,
+    #[serde(default = "default_hook_blocking")]
+    pub blocking: bool,
+    #[serde(default = "default_hook_timeout_ms")]
+    pub timeout_ms: u64,
+    pub save_editor: bool,
+    pub show: Vec<String>,
+}
+
+impl Default for ReviewActionConfig {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            label: String::new(),
+            key: None,
+            on: ReviewHookEvent::ReviewReady,
+            command: String::new(),
+            args: Vec::new(),
+            stdin: ReviewHookStdin::Json,
+            blocking: true,
+            timeout_ms: default_hook_timeout_ms(),
+            save_editor: true,
+            show: vec!["command_palette".to_string(), "review_editor".to_string()],
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+#[serde(default)]
+pub struct ReviewConfig {
+    pub hooks: Vec<ReviewHookConfig>,
+    pub actions: Vec<ReviewActionConfig>,
+}
+
 /// User keybinding overrides grouped by keybinding mode.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct KeybindingsConfig {
@@ -1484,6 +1604,7 @@ pub struct Config {
     pub navigation: NavigationConfig,
     pub no_step: NoStepConfig,
     pub comments: CommentsConfig,
+    pub review: ReviewConfig,
     pub editor: EditorConfig,
     pub keybindings: KeybindingsConfig,
 }

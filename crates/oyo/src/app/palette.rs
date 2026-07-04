@@ -17,6 +17,7 @@ pub(crate) enum PaletteAction {
     Quit,
     RefreshCurrentFile,
     RefreshAllFiles,
+    ReviewAction(usize),
 }
 
 #[derive(Clone, Debug)]
@@ -225,6 +226,26 @@ impl App {
             });
         }
 
+        if self.review_mode {
+            for (idx, action) in self.review_actions.iter().enumerate() {
+                let show = action.show.is_empty()
+                    || action.show.iter().any(|item| item == "command_palette");
+                if show {
+                    let label = if action.label.trim().is_empty() {
+                        action.id.clone()
+                    } else {
+                        action.label.clone()
+                    };
+                    if !label.trim().is_empty() {
+                        entries.push(PaletteEntry {
+                            label: format!("Review: {label}"),
+                            action: PaletteAction::ReviewAction(idx),
+                        });
+                    }
+                }
+            }
+        }
+
         entries.push(PaletteEntry {
             label: "Quit".to_string(),
             action: PaletteAction::Quit,
@@ -261,6 +282,7 @@ impl App {
             PaletteAction::Quit => self.should_quit = true,
             PaletteAction::RefreshCurrentFile => self.refresh_current_file(),
             PaletteAction::RefreshAllFiles => self.refresh_all_files(),
+            PaletteAction::ReviewAction(idx) => self.run_review_action(idx),
         }
     }
 

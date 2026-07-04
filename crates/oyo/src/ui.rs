@@ -1684,6 +1684,24 @@ fn draw_review_editor_overlay(frame: &mut Frame, app: &mut App) {
 
     frame.render_widget(Clear, popup_area);
 
+    let mut footer_parts = vec![
+        format!(
+            "{} save",
+            app.keybindings.review_editor_keys(ReviewEditorAction::Save)
+        ),
+        format!(
+            "{} cancel",
+            app.keybindings
+                .review_editor_keys(ReviewEditorAction::Cancel)
+        ),
+        "@ mention".to_string(),
+    ];
+    footer_parts.extend(
+        app.review_action_labels_for_editor()
+            .into_iter()
+            .map(|(key, label)| format!("{key} {label}")),
+    );
+
     let mut block = Block::default()
         .title(Span::styled(
             editor.title,
@@ -1692,12 +1710,7 @@ fn draw_review_editor_overlay(frame: &mut Frame, app: &mut App) {
                 .add_modifier(Modifier::BOLD),
         ))
         .title_bottom(Span::styled(
-            format!(
-                " {} save • {} cancel • @ mention ",
-                app.keybindings.review_editor_keys(ReviewEditorAction::Save),
-                app.keybindings
-                    .review_editor_keys(ReviewEditorAction::Cancel)
-            ),
+            format!(" {} ", footer_parts.join(" | ")),
             Style::default().fg(app.theme.text_muted),
         ))
         .borders(Borders::ALL)
