@@ -313,6 +313,7 @@ Config is loaded from the first matching file:
 
 Use these docs for full configuration:
 
+- [config reference](./CONFIG.md)
 - [theme configuration](./docs/THEME.md)
 - [keybinding actions](./docs/KEYBINDINGS.md)
 - [review hooks](./docs/REVIEW_HOOKS.md)

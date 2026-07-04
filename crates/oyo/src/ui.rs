@@ -1,6 +1,9 @@
 //! UI rendering for the TUI
 
-use crate::app::{App, ViewMode, DIFF_VIEW_MIN_WIDTH, FILE_PANEL_MIN_WIDTH};
+use crate::app::{
+    diff_scrollbar_thumb, App, FilePanelScrollbarState, TopbarTabHit, ViewMode,
+    DIFF_VIEW_MIN_WIDTH, FILE_PANEL_MIN_WIDTH,
+};
 use crate::color;
 use crate::config::FilePanelPosition;
 use crate::keybindings::{GlobalAction, HelpAction, NormalAction, ReviewEditorAction};
@@ -362,6 +365,9 @@ fn draw_no_changes(frame: &mut Frame, app: &App, area: Rect) {
 /// Main drawing function
 pub fn draw(frame: &mut Frame, app: &mut App) {
     app.clear_review_preview_boxes();
+    app.begin_scrollbar_frame();
+    app.topbar_tab_hits.clear();
+    app.topbar_plus_hit = None;
 
     if app.multi_diff.file_count() == 0 {
         app.clear_diff_selection();
@@ -695,7 +701,6 @@ fn draw_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
 
 fn draw_top_bar(frame: &mut Frame, app: &mut App, area: Rect) {
     let (insertions, deletions) = app.stats();
-    let file = app.multi_diff.current_file();
     let available_width = area.width as usize;
     let diff_pending = matches!(
         app.multi_diff.current_file_diff_status(),
@@ -747,45 +752,9 @@ fn draw_top_bar(frame: &mut Frame, app: &mut App, area: Rect) {
             Span::raw(" "),
         ]
     };
-    let right_width = spans_width(&right_spans);
-    let left_max = available_width.saturating_sub(right_width + 2);
-    let file_changed = app.file_changed_on_disk(app.multi_diff.selected_index);
-    let changed_marker_len = if file_changed { 2 } else { 0 };
-
-    let (name_text, status_style) = if let Some(file) = file {
-        let file_name = file
-            .display_name
-            .rsplit('/')
-            .next()
-            .unwrap_or(&file.display_name);
-        let name =
-            truncate_filename_keep_ext(file_name, left_max.saturating_sub(3 + changed_marker_len));
-        let status_style = match file.status {
-            FileStatus::Added | FileStatus::Untracked => Style::default().fg(app.theme.success),
-            FileStatus::Deleted => Style::default().fg(app.theme.error),
-            FileStatus::Modified => Style::default().fg(app.theme.warning),
-            FileStatus::Renamed => Style::default().fg(app.theme.info),
-        };
-        (name, status_style)
-    } else {
-        (String::new(), Style::default().fg(app.theme.text_muted))
-    };
-
-    let mut left_spans = vec![
-        Span::raw(" "),
-        Span::styled("■", status_style),
-        Span::raw(" "),
-        Span::styled(name_text, Style::default().fg(app.theme.text)),
-    ];
-    if file_changed {
-        left_spans.push(Span::raw(" "));
-        left_spans.push(Span::styled(
-            "*",
-            Style::default()
-                .fg(app.theme.warning)
-                .add_modifier(Modifier::BOLD),
-        ));
-    }
+    let right_width = spans_width(&right_spans).min(available_width);
+    let left_max = available_width.saturating_sub(right_width + 1);
+    let mut left_spans = topbar_tab_spans(app, area, left_max);
     left_spans = clamp_spans_to_width(&left_spans, left_max);
     left_spans = pad_spans_left(left_spans, left_max);
 
@@ -801,6 +770,113 @@ fn draw_top_bar(frame: &mut Frame, app: &mut App, area: Rect) {
         paragraph = paragraph.style(Style::default().bg(bg));
     }
     frame.render_widget(paragraph, area);
+}
+
+fn topbar_tab_spans(app: &mut App, area: Rect, max_width: usize) -> Vec<Span<'static>> {
+    app.ensure_topbar_tabs();
+    app.topbar_tab_hits.clear();
+    app.topbar_plus_hit = None;
+
+    let closeable = app.topbar_tabs.len() > 1;
+    let active = app.multi_diff.selected_index;
+    let drag_target = app
+        .topbar_drag_target
+        .filter(|target| *target <= app.topbar_tabs.len());
+    let mut spans = Vec::new();
+    let mut col = 0usize;
+    for (tab_pos, file_index) in app.topbar_tabs.clone().into_iter().enumerate() {
+        if drag_target == Some(tab_pos) && col < max_width {
+            spans.push(Span::styled(
+                "│",
+                Style::default()
+                    .fg(app.theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            col = col.saturating_add(1);
+        }
+        let Some(file) = app.multi_diff.files.get(file_index) else {
+            continue;
+        };
+        let remaining = max_width.saturating_sub(col);
+        if remaining < 4 {
+            break;
+        }
+        let file_name = file
+            .display_name
+            .rsplit('/')
+            .next()
+            .unwrap_or(&file.display_name);
+        let changed = if app.file_changed_on_disk(file_index) {
+            "*"
+        } else {
+            ""
+        };
+        let show_close = closeable && app.topbar_hover_tab == Some(file_index);
+        let close = if closeable {
+            if show_close {
+                " ×"
+            } else {
+                "  "
+            }
+        } else {
+            ""
+        };
+        let name_width = remaining
+            .saturating_sub(2 + text_width(changed) + text_width(close))
+            .max(1);
+        let name = truncate_filename_keep_ext(file_name, name_width);
+        let tab_text = format!(" {name}{changed}{close} ");
+        let width = text_width(&tab_text);
+        if width > remaining {
+            break;
+        }
+        let start_col = area.x.saturating_add(col as u16);
+        let end_col = start_col.saturating_add(width as u16);
+        app.topbar_tab_hits.push(TopbarTabHit {
+            file_index,
+            row: area.y,
+            start_col,
+            end_col,
+            close_col: closeable.then_some(end_col.saturating_sub(2)),
+        });
+        let style = if file_index == active {
+            Style::default()
+                .fg(app.theme.background.unwrap_or(Color::Black))
+                .bg(app.theme.accent)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(app.theme.text_muted)
+        };
+        spans.push(Span::styled(tab_text, style));
+        col = col.saturating_add(width);
+        if col < max_width {
+            spans.push(Span::raw(" "));
+            col = col.saturating_add(1);
+        }
+    }
+
+    if drag_target == Some(app.topbar_tabs.len()) && col < max_width {
+        spans.push(Span::styled(
+            "│",
+            Style::default()
+                .fg(app.theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ));
+        col = col.saturating_add(1);
+    }
+
+    if col + 1 < max_width {
+        spans.push(Span::raw(" "));
+        let plus_col = area.x.saturating_add(col.saturating_add(1) as u16);
+        app.topbar_plus_hit = Some((plus_col, area.y, 1, 1));
+        spans.push(Span::styled(
+            "+",
+            Style::default()
+                .fg(app.theme.text_muted)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    spans
 }
 
 fn blame_age_legend_spans(app: &App) -> Vec<Span<'static>> {
@@ -921,39 +997,75 @@ fn draw_content(frame: &mut Frame, app: &mut App, area: Rect, show_topbar: bool)
     }
 }
 
-fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
-    let constraints = if app.file_panel_position == FilePanelPosition::Left {
-        [Constraint::Min(0), Constraint::Length(1)]
-    } else {
-        [Constraint::Length(1), Constraint::Min(0)]
-    };
-    let chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints(constraints)
-        .split(area);
-
-    let (content_area, separator_area) = if app.file_panel_position == FilePanelPosition::Left {
-        (chunks[0], chunks[1])
-    } else {
-        (chunks[1], chunks[0])
-    };
-
-    // Border color based on focus
-    let border_fg = if app.file_list_focused {
-        app.theme.border_active
-    } else {
-        app.theme.border_subtle
-    };
-    let panel_bg = app.theme.background_panel.or(app.theme.background);
-
-    // Draw separator - use main background, not panel background
-    let mut separator_style = Style::default().fg(border_fg);
-    if let Some(bg) = app.theme.background {
-        separator_style = separator_style.bg(bg);
+fn reserve_file_scrollbar_lane(area: Rect, visible: bool) -> (Rect, Rect) {
+    if !visible || area.width == 0 {
+        return (
+            area,
+            Rect::new(area.x.saturating_add(area.width), area.y, 0, area.height),
+        );
     }
-    let separator_text = "▏\n".repeat(separator_area.height as usize);
-    let separator = Paragraph::new(separator_text).style(separator_style);
-    frame.render_widget(separator, separator_area);
+    (
+        Rect::new(area.x, area.y, area.width.saturating_sub(1), area.height),
+        Rect::new(
+            area.x.saturating_add(area.width.saturating_sub(1)),
+            area.y,
+            1,
+            area.height,
+        ),
+    )
+}
+
+fn render_file_panel_scrollbar(
+    frame: &mut Frame,
+    app: &mut App,
+    area: Rect,
+    total_items: usize,
+    visible_items: usize,
+) {
+    if area.width == 0 {
+        return;
+    }
+    let track = area.inner(Margin {
+        vertical: 0,
+        horizontal: 0,
+    });
+    let scroll = app.file_list_scroll;
+    let Some((thumb_top, thumb_height)) =
+        diff_scrollbar_thumb(total_items, visible_items, track.height, scroll)
+    else {
+        return;
+    };
+    let x = track.x;
+    app.set_file_panel_scrollbar(FilePanelScrollbarState {
+        x,
+        y: track.y,
+        height: track.height,
+        total_items,
+        visible_items,
+        thumb_top,
+        thumb_height,
+    });
+    let symbol = if app.file_list_focused || app.file_filter_active {
+        "▐"
+    } else {
+        "▕"
+    };
+    let style = Style::default().fg(app.theme.text_muted);
+    let start = track.y.saturating_add(thumb_top);
+    let end = start
+        .saturating_add(thumb_height)
+        .min(track.y.saturating_add(track.height));
+    let buffer = frame.buffer_mut();
+    for row in start..end {
+        if let Some(cell) = buffer.cell_mut((x, row)) {
+            cell.set_symbol(symbol).set_style(style);
+        }
+    }
+}
+
+fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
+    let content_area = area;
+    let panel_bg = app.theme.background_panel.or(app.theme.background);
 
     let show_filter =
         app.file_list_focused || app.file_filter_active || !app.file_filter.is_empty();
@@ -1088,9 +1200,16 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(header, header_area);
 
     let filtered_indices = app.filtered_file_indices();
+    let visible_file_rows = list_area.height.saturating_sub(2) as usize;
+    let show_file_scrollbar = app.scrollbar_visible
+        && filtered_indices.len() > visible_file_rows
+        && visible_file_rows > 0
+        && list_area.width > 1;
+    let (list_content_area, file_scrollbar_area) =
+        reserve_file_scrollbar_lane(list_area, show_file_scrollbar);
     let mut items = Vec::new();
     let mut row_map: Vec<Option<usize>> = Vec::new();
-    let mut remaining = list_area.height.saturating_sub(2) as usize;
+    let mut remaining = visible_file_rows;
     let mut current_group: Option<String> = None;
 
     let mut idx = app.file_list_scroll;
@@ -1111,7 +1230,7 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
                     break;
                 }
             }
-            let header_max = list_area.width.saturating_sub(6).max(1) as usize;
+            let header_max = list_content_area.width.saturating_sub(6).max(1) as usize;
             let header_text = truncate_path(&group, header_max);
             let header_line = Line::from(vec![
                 Span::raw("  "),
@@ -1185,7 +1304,7 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
             .rsplit('/')
             .next()
             .unwrap_or(&file.display_name);
-        let max_name_len = list_area
+        let max_name_len = list_content_area
             .width
             .saturating_sub(8 + signs_len as u16 + changed_marker_len as u16)
             .max(1) as usize;
@@ -1268,10 +1387,22 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let file_list = List::new(items).block(block);
 
-    app.file_list_area = Some((list_area.x, list_area.y, list_area.width, list_area.height));
+    app.file_list_area = Some((
+        list_content_area.x,
+        list_content_area.y,
+        list_content_area.width,
+        list_content_area.height,
+    ));
     app.file_list_rows = row_map;
 
-    frame.render_widget(file_list, list_area);
+    frame.render_widget(file_list, list_content_area);
+    render_file_panel_scrollbar(
+        frame,
+        app,
+        file_scrollbar_area,
+        filtered_indices.len(),
+        visible_file_rows,
+    );
 
     let has_query = !app.file_filter.is_empty();
     let no_results = has_query && filtered_indices.is_empty();
@@ -1285,7 +1416,7 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
         if let Some(bg) = panel_bg {
             empty = empty.style(Style::default().bg(bg));
         }
-        frame.render_widget(empty, list_area);
+        frame.render_widget(empty, list_content_area);
     }
 
     if let Some(filter_area) = filter_area {

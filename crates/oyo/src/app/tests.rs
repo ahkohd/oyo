@@ -9,6 +9,13 @@ use std::time::{Duration, Instant};
 
 static VIEW_DEBUG_ENV_LOCK: Mutex<()> = Mutex::new(());
 
+#[test]
+fn diff_scrollbar_thumb_tracks_scroll_offset() {
+    assert_eq!(diff_scrollbar_thumb(100, 10, 20, 0), Some((0, 2)));
+    assert_eq!(diff_scrollbar_thumb(100, 10, 20, 90), Some((18, 2)));
+    assert_eq!(diff_scrollbar_thumb(10, 10, 20, 0), None);
+}
+
 struct ViewDebugEnvGuard {
     _lock: MutexGuard<'static, ()>,
     old_view: Option<std::ffi::OsString>,
@@ -451,6 +458,104 @@ fn test_no_step_snapshot_restores_cursor_or_jumps() {
         .cursor_change
         .expect("cursor change expected");
     assert!(cursor_id > 0);
+}
+
+#[test]
+fn topbar_close_keeps_last_tab() {
+    let diff = MultiFileDiff::from_file_pairs(vec![
+        (
+            std::path::PathBuf::from("a.txt"),
+            "a\n".to_string(),
+            "aa\n".to_string(),
+        ),
+        (
+            std::path::PathBuf::from("b.txt"),
+            "b\n".to_string(),
+            "bb\n".to_string(),
+        ),
+    ]);
+    let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+    app.select_file(1);
+    app.topbar_tab_hits = vec![TopbarTabHit {
+        file_index: 1,
+        row: 0,
+        start_col: 0,
+        end_col: 7,
+        close_col: Some(5),
+    }];
+
+    assert!(app.handle_topbar_mouse_down(5, 0));
+    assert_eq!(app.topbar_tabs, vec![0]);
+    assert_eq!(app.multi_diff.selected_index, 0);
+
+    app.topbar_tab_hits = vec![TopbarTabHit {
+        file_index: 0,
+        row: 0,
+        start_col: 0,
+        end_col: 7,
+        close_col: Some(5),
+    }];
+    assert!(app.handle_topbar_mouse_down(5, 0));
+    assert_eq!(app.topbar_tabs, vec![0]);
+}
+
+#[test]
+fn topbar_drag_reorders_tabs() {
+    let diff = MultiFileDiff::from_file_pairs(vec![
+        (
+            std::path::PathBuf::from("a.txt"),
+            "a\n".to_string(),
+            "aa\n".to_string(),
+        ),
+        (
+            std::path::PathBuf::from("b.txt"),
+            "b\n".to_string(),
+            "bb\n".to_string(),
+        ),
+        (
+            std::path::PathBuf::from("c.txt"),
+            "c\n".to_string(),
+            "cc\n".to_string(),
+        ),
+    ]);
+    let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+    app.topbar_tabs = vec![0, 1, 2];
+    app.topbar_tab_hits = vec![
+        TopbarTabHit {
+            file_index: 0,
+            row: 0,
+            start_col: 0,
+            end_col: 6,
+            close_col: Some(4),
+        },
+        TopbarTabHit {
+            file_index: 1,
+            row: 0,
+            start_col: 7,
+            end_col: 13,
+            close_col: Some(11),
+        },
+        TopbarTabHit {
+            file_index: 2,
+            row: 0,
+            start_col: 14,
+            end_col: 20,
+            close_col: Some(18),
+        },
+    ];
+
+    assert!(app.handle_topbar_mouse_down(1, 0));
+    assert_eq!(app.topbar_drag_target, None);
+    assert!(app.drag_topbar_tab(1, 0));
+    assert_eq!(app.topbar_drag_target, None);
+    assert!(app.drag_topbar_tab(15, 0));
+    assert_eq!(app.topbar_drag_target, Some(2));
+    app.topbar_tab_hits[2].start_col = 15;
+    app.topbar_tab_hits[2].end_col = 21;
+    assert!(app.drag_topbar_tab(14, 0));
+    assert_eq!(app.topbar_drag_target, Some(2));
+    assert!(app.finish_topbar_drag());
+    assert_eq!(app.topbar_tabs, vec![1, 0, 2]);
 }
 
 #[test]

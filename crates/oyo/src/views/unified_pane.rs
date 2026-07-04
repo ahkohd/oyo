@@ -16,7 +16,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
+    widgets::{Paragraph, Wrap},
     Frame,
 };
 
@@ -1462,6 +1462,7 @@ fn build_unified_render_model(
 }
 
 fn render_unified_pane_cached(frame: &mut Frame, app: &mut App, area: Rect) {
+    let (area, scrollbar_area) = super::reserve_diff_scrollbar_lane(app, area);
     let visible_height = area.height as usize;
     let visible_width = area.width.saturating_sub(GUTTER_WIDTH) as usize;
     if !app.line_wrap {
@@ -1571,6 +1572,14 @@ fn render_unified_pane_cached(frame: &mut Frame, app: &mut App, area: Rect) {
         );
     }
     render_unified_model(frame, app, area, &model, scroll_offset);
+    super::render_diff_scrollbar(
+        frame,
+        app,
+        scrollbar_area,
+        model.display_len,
+        area.height as usize,
+        scroll_offset,
+    );
     app.unified_render_cache = Some(model);
 }
 
@@ -1666,25 +1675,6 @@ fn render_unified_model(
                 );
             }
         }
-
-        if app.scrollbar_visible {
-            let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-                .begin_symbol(Some("↑"))
-                .end_symbol(Some("↓"));
-            let total_lines = model.display_len;
-            let visible_lines = content_area.height as usize;
-            if total_lines > visible_lines {
-                let mut scrollbar_state = ScrollbarState::new(total_lines).position(scroll_offset);
-                frame.render_stateful_widget(
-                    scrollbar,
-                    area.inner(ratatui::layout::Margin {
-                        vertical: 1,
-                        horizontal: 0,
-                    }),
-                    &mut scrollbar_state,
-                );
-            }
-        }
     }
 }
 
@@ -1698,6 +1688,7 @@ pub fn render_unified_pane(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn render_unified_pane_uncached(frame: &mut Frame, app: &mut App, area: Rect) {
+    let (area, scrollbar_area) = super::reserve_diff_scrollbar_lane(app, area);
     let visible_height = area.height as usize;
     let visible_width = area.width.saturating_sub(GUTTER_WIDTH) as usize;
     if !app.line_wrap {
@@ -1794,6 +1785,14 @@ fn render_unified_pane_uncached(frame: &mut Frame, app: &mut App, area: Rect) {
         );
     }
     render_unified_model(frame, app, area, &model, scroll_offset);
+    super::render_diff_scrollbar(
+        frame,
+        app,
+        scrollbar_area,
+        model.display_len,
+        area.height as usize,
+        scroll_offset,
+    );
 }
 
 fn get_span_style(

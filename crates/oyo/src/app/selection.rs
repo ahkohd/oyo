@@ -319,6 +319,11 @@ impl App {
         let Some((_, _, width, _)) = self.diff_view_area else {
             return Vec::new();
         };
+        let width = if self.scrollbar_visible {
+            width.saturating_sub(1)
+        } else {
+            width
+        };
         content_ranges(self.view_mode, width)
     }
 

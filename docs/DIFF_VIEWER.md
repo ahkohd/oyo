@@ -136,6 +136,14 @@ In no-step mode:
 - stepping is disabled
 - hunk preview is disabled
 
+## Scrollbar
+
+Use `ui.scrollbar` to show or hide scrollbars.
+
+The scrollbar is on by default. It appears when the diff or file panel is longer than the visible area.
+
+Set `ui.scrollbar = false` to hide it.
+
 ## Diff foreground
 
 Use `ui.diff.fg` to choose whether diff text uses theme colours or syntax colours.
@@ -216,6 +224,7 @@ When auto-centre is on, Oyo uses wrapped display metrics to keep the active line
 [ui]
 auto_center = true      # keep active change centred while stepping
 overscroll = false      # allow EOF overscroll when centring
+scrollbar = true        # show scrollbars
 
 [ui.diff]
 bg = false

@@ -51,6 +51,23 @@ impl App {
         }
     }
 
+    pub fn scroll_file_panel_up(&mut self) {
+        self.file_list_scroll = self.file_list_scroll.saturating_sub(1);
+    }
+
+    pub fn scroll_file_panel_down(&mut self) {
+        let visible_rows = self
+            .file_list_area
+            .map(|(_, _, _, height)| height.saturating_sub(2) as usize)
+            .unwrap_or(1)
+            .max(1);
+        let max_scroll = self
+            .filtered_file_indices()
+            .len()
+            .saturating_sub(visible_rows);
+        self.file_list_scroll = self.file_list_scroll.saturating_add(1).min(max_scroll);
+    }
+
     pub(super) fn next_file_wrapped(&mut self) -> bool {
         if !self.file_filter.is_empty() {
             let indices = self.filtered_file_indices();
@@ -118,6 +135,7 @@ impl App {
     }
 
     pub fn select_file(&mut self, index: usize) {
+        self.open_topbar_tab(index);
         let old_index = self.multi_diff.selected_index;
         self.clear_step_edge_hint();
         self.clear_hunk_edge_hint();
@@ -137,6 +155,158 @@ impl App {
         self.centered_once = false;
         self.update_file_list_scroll();
         self.handle_file_enter();
+    }
+
+    pub(crate) fn ensure_topbar_tabs(&mut self) {
+        let count = self.multi_diff.file_count();
+        if count == 0 {
+            self.topbar_tabs.clear();
+            self.topbar_drag_target = None;
+            return;
+        }
+        self.topbar_tabs.retain(|idx| *idx < count);
+        if self
+            .topbar_drag_target
+            .is_some_and(|idx| idx > self.topbar_tabs.len())
+        {
+            self.topbar_drag_target = None;
+        }
+        self.open_topbar_tab(self.multi_diff.selected_index);
+    }
+
+    fn open_topbar_tab(&mut self, index: usize) {
+        if index >= self.multi_diff.file_count() {
+            return;
+        }
+        if !self.topbar_tabs.contains(&index) {
+            self.topbar_tabs.push(index);
+        }
+    }
+
+    fn close_topbar_tab(&mut self, index: usize) {
+        if self.topbar_tabs.len() <= 1 {
+            return;
+        }
+        let Some(pos) = self.topbar_tabs.iter().position(|idx| *idx == index) else {
+            return;
+        };
+        self.topbar_tabs.remove(pos);
+        if self.multi_diff.selected_index == index {
+            let next_pos = pos.min(self.topbar_tabs.len().saturating_sub(1));
+            if let Some(next) = self.topbar_tabs.get(next_pos).copied() {
+                self.select_file(next);
+            }
+        }
+    }
+
+    pub(crate) fn handle_topbar_mouse_down(&mut self, column: u16, row: u16) -> bool {
+        self.update_topbar_hover(column, row);
+        if self.topbar_plus_hit.is_some_and(|(x, y, width, height)| {
+            column >= x
+                && column < x.saturating_add(width)
+                && row >= y
+                && row < y.saturating_add(height)
+        }) {
+            self.start_file_search();
+            return true;
+        }
+        let Some(hit) = self.topbar_hit(column, row) else {
+            return false;
+        };
+        if hit.close_col == Some(column) && self.topbar_tabs.len() > 1 {
+            self.close_topbar_tab(hit.file_index);
+            return true;
+        }
+        self.select_file(hit.file_index);
+        self.topbar_drag_tab = Some(hit.file_index);
+        self.topbar_drag_target = None;
+        true
+    }
+
+    pub(crate) fn drag_topbar_tab(&mut self, column: u16, row: u16) -> bool {
+        let Some(dragged) = self.topbar_drag_tab else {
+            return false;
+        };
+        self.topbar_drag_target = self.topbar_drop_target(dragged, column, row);
+        true
+    }
+
+    pub(crate) fn finish_topbar_drag(&mut self) -> bool {
+        let Some(dragged) = self.topbar_drag_tab.take() else {
+            return false;
+        };
+        if let Some(target) = self.topbar_drag_target.take() {
+            self.move_topbar_tab(dragged, target);
+        }
+        true
+    }
+
+    fn move_topbar_tab(&mut self, file_index: usize, target: usize) {
+        let Some(from) = self.topbar_tabs.iter().position(|idx| *idx == file_index) else {
+            return;
+        };
+        let tab = self.topbar_tabs.remove(from);
+        let mut to = target.min(self.topbar_tabs.len() + 1);
+        if to > from {
+            to = to.saturating_sub(1);
+        }
+        self.topbar_tabs.insert(to.min(self.topbar_tabs.len()), tab);
+    }
+
+    pub(crate) fn update_topbar_hover(&mut self, column: u16, row: u16) -> bool {
+        let hover = self.topbar_hit(column, row).map(|hit| hit.file_index);
+        if self.topbar_hover_tab == hover {
+            return false;
+        }
+        self.topbar_hover_tab = hover;
+        true
+    }
+
+    fn topbar_drop_target(&self, file_index: usize, column: u16, row: u16) -> Option<usize> {
+        let from = self.topbar_tabs.iter().position(|idx| *idx == file_index)?;
+        let target = self.topbar_tab_insert_index(column, row)?;
+        if target == from || target == from + 1 {
+            return None;
+        }
+        Some(target)
+    }
+
+    fn topbar_tab_insert_index(&self, column: u16, row: u16) -> Option<usize> {
+        if self.topbar_tab_hits.first()?.row != row {
+            return None;
+        }
+        for hit in &self.topbar_tab_hits {
+            let pos = self
+                .topbar_tabs
+                .iter()
+                .position(|idx| *idx == hit.file_index)?;
+            if column < hit.start_col {
+                return Some(pos);
+            }
+            if column < hit.end_col {
+                let midpoint = hit
+                    .start_col
+                    .saturating_add((hit.end_col - hit.start_col) / 2);
+                return Some(if column < midpoint { pos } else { pos + 1 });
+            }
+        }
+        let last = self.topbar_tab_hits.last()?;
+        let last_pos = self
+            .topbar_tabs
+            .iter()
+            .position(|idx| *idx == last.file_index)?;
+        let end_col = self
+            .topbar_plus_hit
+            .map(|(x, _, _, _)| x)
+            .unwrap_or(last.end_col);
+        (column <= end_col).then_some(last_pos + 1)
+    }
+
+    fn topbar_hit(&self, column: u16, row: u16) -> Option<super::TopbarTabHit> {
+        self.topbar_tab_hits
+            .iter()
+            .copied()
+            .find(|hit| row == hit.row && column >= hit.start_col && column < hit.end_col)
     }
 
     pub fn start_file_filter(&mut self) {

@@ -12,7 +12,7 @@
 //! overscroll = false
 //! view_mode = "unified"
 //! line_wrap = false
-//! scrollbar = false
+//! scrollbar = true
 //! strikethrough_deletions = false
 //! gutter_signs = true
 //! # [ui.split]
@@ -734,7 +734,7 @@ pub struct UiConfig {
     pub line_wrap: bool,
     /// Collapse long unchanged (context) blocks ("off", "on", or "counts")
     pub fold_context: FoldContextMode,
-    /// Show scrollbar (default: false)
+    /// Show diff and file panel scrollbars (default: true)
     pub scrollbar: bool,
     /// Show strikethrough on deleted text
     pub strikethrough_deletions: bool,
@@ -779,7 +779,7 @@ impl Default for UiConfig {
             view_mode: None,
             line_wrap: false,
             fold_context: FoldContextMode::Off,
-            scrollbar: false,
+            scrollbar: true,
             strikethrough_deletions: false,
             gutter_signs: true,
             syntax: SyntaxConfig::default(),
@@ -1742,6 +1742,11 @@ mod tests {
     #[test]
     fn ui_defaults_to_no_step_mode() {
         assert!(!Config::default().ui.stepping);
+    }
+
+    #[test]
+    fn ui_shows_scrollbar_by_default() {
+        assert!(Config::default().ui.scrollbar);
     }
 
     #[test]

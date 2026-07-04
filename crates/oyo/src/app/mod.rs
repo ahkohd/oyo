@@ -60,6 +60,76 @@ type SplitHunkBoundsCache = Option<(
     (Vec<Option<HunkBounds>>, Vec<Option<HunkBounds>>),
 )>;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DiffScrollbarState {
+    pub x: u16,
+    pub y: u16,
+    pub height: u16,
+    pub total_lines: usize,
+    pub visible_lines: usize,
+    pub thumb_top: u16,
+    pub thumb_height: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct FilePanelScrollbarState {
+    pub x: u16,
+    pub y: u16,
+    pub height: u16,
+    pub total_items: usize,
+    pub visible_items: usize,
+    pub thumb_top: u16,
+    pub thumb_height: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TopbarTabHit {
+    pub file_index: usize,
+    pub row: u16,
+    pub start_col: u16,
+    pub end_col: u16,
+    pub close_col: Option<u16>,
+}
+
+pub(crate) fn diff_scrollbar_thumb(
+    total_lines: usize,
+    visible_lines: usize,
+    track_height: u16,
+    scroll_offset: usize,
+) -> Option<(u16, u16)> {
+    if total_lines <= visible_lines || track_height == 0 {
+        return None;
+    }
+    let track_height = track_height as usize;
+    let max_thumb_height = track_height.saturating_sub(1).max(1);
+    let thumb_height = visible_lines
+        .saturating_mul(track_height)
+        .div_ceil(total_lines)
+        .clamp(1, max_thumb_height);
+    let max_scroll = total_lines.saturating_sub(visible_lines);
+    let max_thumb_top = track_height.saturating_sub(thumb_height);
+    let thumb_top = scroll_offset.min(max_scroll).saturating_mul(max_thumb_top) / max_scroll;
+    Some((thumb_top as u16, thumb_height as u16))
+}
+
+fn scrollbar_row_to_offset(
+    row: u16,
+    y: u16,
+    height: u16,
+    thumb_height: u16,
+    max_scroll: usize,
+) -> Option<usize> {
+    if max_scroll == 0 || height == 0 {
+        return None;
+    }
+    let track_bottom = y.saturating_add(height.saturating_sub(1));
+    let track_row = row.clamp(y, track_bottom).saturating_sub(y);
+    let max_thumb_top = height.saturating_sub(thumb_height).max(1);
+    let thumb_mid = thumb_height / 2;
+    let thumb_top = track_row.saturating_sub(thumb_mid).min(max_thumb_top);
+    Some((thumb_top as usize).saturating_mul(max_scroll) / max_thumb_top as usize)
+}
+
 /// The main application state
 pub struct App {
     /// Multi-file diff manager
@@ -196,6 +266,16 @@ pub struct App {
     last_wrap_active_idx: Option<usize>,
     /// Show scrollbar
     pub scrollbar_visible: bool,
+    pub(crate) diff_scrollbar: Option<DiffScrollbarState>,
+    diff_scrollbar_dragging: bool,
+    pub(crate) file_panel_scrollbar: Option<FilePanelScrollbarState>,
+    file_panel_scrollbar_dragging: bool,
+    pub(crate) topbar_tabs: Vec<usize>,
+    pub(crate) topbar_tab_hits: Vec<TopbarTabHit>,
+    pub(crate) topbar_plus_hit: Option<(u16, u16, u16, u16)>,
+    pub(crate) topbar_hover_tab: Option<usize>,
+    pub(crate) topbar_drag_target: Option<usize>,
+    topbar_drag_tab: Option<usize>,
     /// Show strikethrough on deleted text
     pub strikethrough_deletions: bool,
     /// Show +/- sign column in the gutter (unified/evolution)
@@ -595,7 +675,17 @@ impl App {
             fold_context_default: FoldContextMode::Off,
             last_wrap_display_len: None,
             last_wrap_active_idx: None,
-            scrollbar_visible: false,
+            scrollbar_visible: true,
+            diff_scrollbar: None,
+            diff_scrollbar_dragging: false,
+            file_panel_scrollbar: None,
+            file_panel_scrollbar_dragging: false,
+            topbar_tabs: (file_count > 0).then_some(0).into_iter().collect(),
+            topbar_tab_hits: Vec::new(),
+            topbar_plus_hit: None,
+            topbar_hover_tab: None,
+            topbar_drag_target: None,
+            topbar_drag_tab: None,
             strikethrough_deletions: false,
             gutter_signs: true,
             file_panel_manually_set: false,
@@ -802,6 +892,125 @@ impl App {
     pub fn scroll_down(&mut self) {
         self.centered_once = false;
         self.scroll_offset = self.scroll_offset.saturating_add(1);
+    }
+
+    pub(crate) fn begin_scrollbar_frame(&mut self) {
+        self.diff_scrollbar = None;
+        self.file_panel_scrollbar = None;
+    }
+
+    pub(crate) fn set_diff_scrollbar(&mut self, scrollbar: DiffScrollbarState) {
+        self.diff_scrollbar = Some(scrollbar);
+    }
+
+    pub(crate) fn set_file_panel_scrollbar(&mut self, scrollbar: FilePanelScrollbarState) {
+        self.file_panel_scrollbar = Some(scrollbar);
+    }
+
+    pub(crate) fn start_diff_scrollbar_drag(&mut self, column: u16, row: u16) -> bool {
+        let Some(scrollbar) = self.diff_scrollbar else {
+            return false;
+        };
+        if column != scrollbar.x
+            || row < scrollbar.y
+            || row >= scrollbar.y.saturating_add(scrollbar.height)
+        {
+            return false;
+        }
+        self.diff_scrollbar_dragging = true;
+        self.scroll_to_diff_scrollbar_row(row)
+    }
+
+    pub(crate) fn drag_diff_scrollbar(&mut self, row: u16) -> bool {
+        if !self.diff_scrollbar_dragging {
+            return false;
+        }
+        self.scroll_to_diff_scrollbar_row(row)
+    }
+
+    pub(crate) fn finish_diff_scrollbar_drag(&mut self) -> bool {
+        let was_dragging = self.diff_scrollbar_dragging;
+        self.diff_scrollbar_dragging = false;
+        was_dragging
+    }
+
+    fn scroll_to_diff_scrollbar_row(&mut self, row: u16) -> bool {
+        let Some(scrollbar) = self.diff_scrollbar else {
+            self.diff_scrollbar_dragging = false;
+            return false;
+        };
+        let max_scroll = scrollbar
+            .total_lines
+            .saturating_sub(scrollbar.visible_lines);
+        if max_scroll == 0 || scrollbar.height == 0 {
+            return true;
+        }
+        let Some(next_scroll) = scrollbar_row_to_offset(
+            row,
+            scrollbar.y,
+            scrollbar.height,
+            scrollbar.thumb_height,
+            max_scroll,
+        ) else {
+            return true;
+        };
+        self.centered_once = false;
+        self.scroll_offset = next_scroll;
+        self.clear_diff_selection();
+        true
+    }
+
+    pub(crate) fn start_file_panel_scrollbar_drag(&mut self, column: u16, row: u16) -> bool {
+        let Some(scrollbar) = self.file_panel_scrollbar else {
+            return false;
+        };
+        if column != scrollbar.x
+            || row < scrollbar.y
+            || row >= scrollbar.y.saturating_add(scrollbar.height)
+        {
+            return false;
+        }
+        self.file_list_focused = true;
+        self.file_filter_active = false;
+        self.file_panel_scrollbar_dragging = true;
+        self.scroll_to_file_panel_scrollbar_row(row)
+    }
+
+    pub(crate) fn drag_file_panel_scrollbar(&mut self, row: u16) -> bool {
+        if !self.file_panel_scrollbar_dragging {
+            return false;
+        }
+        self.scroll_to_file_panel_scrollbar_row(row)
+    }
+
+    pub(crate) fn finish_file_panel_scrollbar_drag(&mut self) -> bool {
+        let was_dragging = self.file_panel_scrollbar_dragging;
+        self.file_panel_scrollbar_dragging = false;
+        was_dragging
+    }
+
+    fn scroll_to_file_panel_scrollbar_row(&mut self, row: u16) -> bool {
+        let Some(scrollbar) = self.file_panel_scrollbar else {
+            self.file_panel_scrollbar_dragging = false;
+            return false;
+        };
+        let max_scroll = scrollbar
+            .total_items
+            .saturating_sub(scrollbar.visible_items);
+        if max_scroll == 0 || scrollbar.height == 0 {
+            return true;
+        }
+        let Some(next_scroll) = scrollbar_row_to_offset(
+            row,
+            scrollbar.y,
+            scrollbar.height,
+            scrollbar.thumb_height,
+            max_scroll,
+        ) else {
+            return true;
+        };
+        self.file_list_scroll = next_scroll;
+        true
     }
 
     pub fn scroll_half_page_up(&mut self, viewport_height: usize) {
