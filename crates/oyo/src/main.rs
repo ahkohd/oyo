@@ -1,4 +1,4 @@
-//! Oyo CLI - Step-through diff viewer TUI
+//! Oyo CLI - terminal diff viewer TUI
 
 mod app;
 mod blame;
@@ -45,7 +45,7 @@ type TuiTerminal = Terminal<TuiBackend>;
 
 #[derive(Parser, Debug)]
 #[command(name = "oy")]
-#[command(author, version, about = "A step-through diff viewer")]
+#[command(author, version, about = "A terminal diff viewer")]
 #[command(args_conflicts_with_subcommands = true)]
 struct Args {
     #[command(subcommand)]
@@ -89,8 +89,12 @@ struct Args {
     #[arg(long, value_name = "FILE")]
     dump_scopes: Option<PathBuf>,
 
-    /// Disable stepping (no-step diff view)
-    #[arg(long, global = true)]
+    /// Enable step-through diff view
+    #[arg(long, global = true, conflicts_with = "no_step")]
+    step: bool,
+
+    /// Disable stepping (kept for compatibility; now the default)
+    #[arg(long, global = true, conflicts_with = "step")]
     no_step: bool,
 
     /// Show staged changes (index vs HEAD)
@@ -800,7 +804,9 @@ fn apply_config_to_app(app: &mut App, config: &config::Config, args: &Args, ligh
     app.time_format = TimeFormatter::new(&config.ui.time);
     app.theme_is_light = light_mode;
 
-    if args.no_step {
+    if args.step {
+        app.stepping = true;
+    } else if args.no_step {
         app.stepping = false;
     } else {
         app.stepping = config.ui.stepping;

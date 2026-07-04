@@ -754,7 +754,7 @@ pub struct UiConfig {
     pub blame: BlameConfig,
     /// Time display settings
     pub time: TimeConfig,
-    /// Enable stepping (default: true). If false, shows all changes (no-step behavior)
+    /// Enable stepping (default: false). If false, shows all changes (no-step behavior)
     pub stepping: bool,
     /// Marker for primary active line (left pane / unified pane)
     pub primary_marker: String,
@@ -789,7 +789,7 @@ impl Default for UiConfig {
             diff: DiffConfig::default(),
             blame: BlameConfig::default(),
             time: TimeConfig::default(),
-            stepping: true,
+            stepping: false,
             primary_marker: "▶".to_string(),
             primary_marker_right: None,
             extent_marker: "▌".to_string(),
@@ -1738,6 +1738,11 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ui_defaults_to_no_step_mode() {
+        assert!(!Config::default().ui.stepping);
+    }
 
     #[test]
     fn extra_config_merges_tables_and_appends_review_hooks() {
