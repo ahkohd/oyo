@@ -9,13 +9,26 @@ fn point_in_rect(rect: (u16, u16, u16, u16), column: u16, row: u16) -> bool {
 }
 
 impl App {
-    pub fn handle_file_list_click(&mut self, column: u16, row: u16) -> bool {
+    pub fn handle_file_list_click(&mut self, column: u16, row: u16, new_tab: bool) -> bool {
+        if self
+            .file_filter_clear_hit
+            .is_some_and(|(x, y, width, height)| {
+                column >= x
+                    && column < x.saturating_add(width)
+                    && row >= y
+                    && row < y.saturating_add(height)
+            })
+        {
+            self.clear_file_filter();
+            return true;
+        }
+
         if let Some((x, y, width, height)) = self.file_filter_area {
             let end_x = x.saturating_add(width);
             let end_y = y.saturating_add(height);
             if column >= x && column < end_x && row >= y && row < end_y {
                 self.file_list_focused = true;
-                self.start_file_filter();
+                self.focus_file_filter();
                 return true;
             }
         }
@@ -23,9 +36,9 @@ impl App {
         let (x, y, width, height) = match self.file_list_area {
             Some(area) => area,
             None => {
-                if self.file_list_focused {
+                if self.file_list_focused || self.file_filter_active {
                     self.file_list_focused = false;
-                    self.file_filter_active = false;
+                    self.stop_file_filter();
                     return true;
                 }
                 return false;
@@ -34,9 +47,9 @@ impl App {
         let end_x = x.saturating_add(width);
         let end_y = y.saturating_add(height);
         if column < x || column >= end_x || row < y || row >= end_y {
-            if self.file_list_focused {
+            if self.file_list_focused || self.file_filter_active {
                 self.file_list_focused = false;
-                self.file_filter_active = false;
+                self.stop_file_filter();
                 return true;
             }
             return false;
@@ -45,17 +58,24 @@ impl App {
         let item_start = y.saturating_add(1);
         if row < item_start {
             self.file_list_focused = true;
+            self.stop_file_filter();
             return true;
         }
 
         let row_idx = (row - item_start) as usize;
-        if let Some(Some(file_idx)) = self.file_list_rows.get(row_idx) {
+        if let Some(file_idx) = self.file_list_rows.get(row_idx).copied().flatten() {
             self.file_list_focused = true;
-            self.select_file(*file_idx);
+            self.stop_file_filter();
+            if new_tab {
+                self.open_file_in_new_topbar_tab(file_idx);
+            } else {
+                self.select_file(file_idx);
+            }
             return true;
         }
 
         self.file_list_focused = true;
+        self.stop_file_filter();
         true
     }
 
@@ -82,6 +102,9 @@ impl App {
         }
         if !self.file_panel_visible {
             self.file_list_focused = false;
+            self.file_panel_hover = false;
+            self.file_filter_hover = false;
+            self.file_filter_clear_hover = false;
         }
     }
 

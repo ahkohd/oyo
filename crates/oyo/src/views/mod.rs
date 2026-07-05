@@ -693,7 +693,8 @@ pub(crate) fn extent_marker_style(
 }
 
 pub(crate) fn show_extent_marker(app: &App, view_line: &ViewLine) -> bool {
-    if !view_line.show_hunk_extent {
+    let no_step_hunk_line = !app.stepping && view_line.hunk_index.is_some();
+    if !view_line.show_hunk_extent && !no_step_hunk_line {
         return false;
     }
     if app.diff_extent_marker_context {
@@ -703,6 +704,18 @@ pub(crate) fn show_extent_marker(app: &App, view_line: &ViewLine) -> bool {
         return false;
     }
     true
+}
+
+pub(crate) fn extent_marker_text<'a>(
+    marker: &'a str,
+    deleted_marker: &'a str,
+    view_line: &ViewLine,
+) -> &'a str {
+    if matches!(view_line.kind, LineKind::Deleted | LineKind::PendingDelete) {
+        deleted_marker
+    } else {
+        marker
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

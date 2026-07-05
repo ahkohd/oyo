@@ -489,6 +489,258 @@ fn topbar_ids(app: &App) -> Vec<usize> {
 }
 
 #[test]
+fn diff_view_scrolls_horizontally_with_mouse() {
+    let diff = MultiFileDiff::from_file_pair(
+        std::path::PathBuf::from("a.txt"),
+        std::path::PathBuf::from("a.txt"),
+        "short\n".to_string(),
+        "very very very long line\n".to_string(),
+    );
+    let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+    app.diff_view_area = Some((0, 1, 10, 10));
+    app.set_current_max_line_width(40);
+
+    assert!(app.mouse_over_diff_view(5, 5));
+    assert!(app.scroll_diff_horizontally(1));
+    assert_eq!(app.horizontal_scroll, 4);
+    assert!(app.scroll_diff_horizontally(-1));
+    assert_eq!(app.horizontal_scroll, 0);
+
+    app.diff_view_area = Some((0, 1, 200, 10));
+    assert!(app.scroll_diff_horizontally(1));
+    assert_eq!(app.horizontal_scroll, 4);
+}
+
+#[test]
+fn topbar_tabs_scroll_horizontally_without_scrollbar_state() {
+    let diff = MultiFileDiff::from_file_pairs(
+        (0..4)
+            .map(|idx| {
+                (
+                    std::path::PathBuf::from(format!("file-{idx}.txt")),
+                    "old\n".to_string(),
+                    "new\n".to_string(),
+                )
+            })
+            .collect(),
+    );
+    let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+    app.new_topbar_tab();
+    app.new_topbar_tab();
+
+    assert!(app.scroll_topbar_tabs(1));
+    assert_eq!(app.topbar_tab_scroll, 1);
+    assert!(app.scroll_topbar_tabs(-1));
+    assert_eq!(app.topbar_tab_scroll, 0);
+}
+
+#[test]
+fn topbar_overflow_buttons_scroll_tabs() {
+    let diff = MultiFileDiff::from_file_pairs(
+        (0..4)
+            .map(|idx| {
+                (
+                    std::path::PathBuf::from(format!("file-{idx}.txt")),
+                    "old\n".to_string(),
+                    "new\n".to_string(),
+                )
+            })
+            .collect(),
+    );
+    let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+    app.new_topbar_tab();
+    app.new_topbar_tab();
+    app.topbar_scroll_right_hit = Some((10, 0, 1, 1));
+
+    assert!(app.update_topbar_hover(10, 0));
+    assert!(app.topbar_scroll_right_hover);
+    assert!(app.handle_topbar_mouse_down(10, 0));
+    assert_eq!(app.topbar_tab_scroll, 1);
+
+    app.topbar_scroll_left_hit = Some((0, 0, 1, 1));
+    assert!(app.handle_topbar_mouse_down(0, 0));
+    assert_eq!(app.topbar_tab_scroll, 0);
+}
+
+#[test]
+fn status_bar_mode_click_cycles_views() {
+    let diff = MultiFileDiff::from_file_pair(
+        std::path::PathBuf::from("a.txt"),
+        std::path::PathBuf::from("a.txt"),
+        "a\n".to_string(),
+        "aa\n".to_string(),
+    );
+    let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+    app.status_mode_hit = Some((0, 9, 9, 1));
+
+    assert!(app.handle_status_bar_mouse_down(1, 9, false));
+    assert_eq!(app.view_mode, ViewMode::Split);
+    assert!(app.handle_status_bar_mouse_down(1, 9, true));
+    assert_eq!(app.view_mode, ViewMode::UnifiedPane);
+}
+
+#[test]
+fn topbar_preview_toggle_hover_tracks_hitbox() {
+    let diff = MultiFileDiff::from_file_pair(
+        std::path::PathBuf::from("README.md"),
+        std::path::PathBuf::from("README.md"),
+        "old\n".to_string(),
+        "new\n".to_string(),
+    );
+    let mut app = App::new(diff, ViewMode::Preview, 0, false, None);
+    app.preview_toggle_hit = Some((10, 0, 8, 1));
+
+    assert!(app.update_topbar_hover(12, 0));
+    assert!(app.preview_toggle_hover);
+    assert!(app.update_topbar_hover(1, 0));
+    assert!(!app.preview_toggle_hover);
+}
+
+#[test]
+fn file_filter_click_keeps_existing_query() {
+    let diff = MultiFileDiff::from_file_pair(
+        std::path::PathBuf::from("a.txt"),
+        std::path::PathBuf::from("a.txt"),
+        "a\n".to_string(),
+        "aa\n".to_string(),
+    );
+    let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+    app.file_filter = "abc".to_string();
+    app.file_filter_area = Some((0, 0, 20, 3));
+
+    assert!(app.handle_file_list_click(1, 1, false));
+    assert!(app.file_filter_active);
+    assert_eq!(app.file_filter, "abc");
+}
+
+#[test]
+fn file_filter_click_out_blurs_filter() {
+    let diff = MultiFileDiff::from_file_pair(
+        std::path::PathBuf::from("a.txt"),
+        std::path::PathBuf::from("a.txt"),
+        "a\n".to_string(),
+        "aa\n".to_string(),
+    );
+    let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+    app.file_filter_active = true;
+    app.file_list_area = Some((0, 0, 20, 5));
+
+    assert!(app.handle_file_list_click(30, 1, false));
+    assert!(!app.file_filter_active);
+}
+
+#[test]
+fn file_filter_clear_button_clears_filter() {
+    let diff = MultiFileDiff::from_file_pair(
+        std::path::PathBuf::from("a.txt"),
+        std::path::PathBuf::from("a.txt"),
+        "a\n".to_string(),
+        "aa\n".to_string(),
+    );
+    let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+    app.file_filter = "abc".to_string();
+    app.file_filter_clear_hit = Some((10, 2, 1, 1));
+    app.file_panel_rect = Some((0, 0, 20, 10));
+
+    assert!(app.update_topbar_hover(10, 2));
+    assert!(app.file_filter_clear_hover);
+    assert!(app.handle_file_list_click(10, 2, false));
+    assert!(app.file_filter.is_empty());
+}
+
+#[test]
+fn ctrl_click_file_list_opens_new_tab() {
+    let diff = MultiFileDiff::from_file_pairs(vec![
+        (
+            std::path::PathBuf::from("a.txt"),
+            "a\n".to_string(),
+            "aa\n".to_string(),
+        ),
+        (
+            std::path::PathBuf::from("b.txt"),
+            "b\n".to_string(),
+            "bb\n".to_string(),
+        ),
+    ]);
+    let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+    app.file_list_area = Some((0, 0, 20, 5));
+    app.file_list_rows = vec![Some(1)];
+
+    assert!(app.handle_file_list_click(1, 1, true));
+
+    assert_eq!(topbar_files(&app), vec![0, 1]);
+    assert_eq!(app.active_topbar_content(), Some(TopbarTabContent::File(1)));
+}
+
+#[test]
+fn file_list_hover_tracks_row_hitbox() {
+    let diff = MultiFileDiff::from_file_pairs(vec![
+        (
+            std::path::PathBuf::from("a.txt"),
+            "a\n".to_string(),
+            "aa\n".to_string(),
+        ),
+        (
+            std::path::PathBuf::from("b.txt"),
+            "b\n".to_string(),
+            "bb\n".to_string(),
+        ),
+    ]);
+    let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+    app.file_list_area = Some((0, 1, 20, 5));
+    app.file_list_rows = vec![None, Some(1)];
+
+    app.file_panel_rect = Some((0, 0, 20, 10));
+
+    assert!(app.update_topbar_hover(2, 3));
+    assert_eq!(app.file_list_hover, Some(1));
+    assert!(app.file_panel_hover);
+    assert!(app.update_topbar_hover(25, 3));
+    assert_eq!(app.file_list_hover, None);
+    assert!(!app.file_panel_hover);
+}
+
+#[test]
+fn selecting_visible_file_does_not_recentre_sidebar() {
+    let pairs = (0..50)
+        .map(|idx| {
+            (
+                std::path::PathBuf::from(format!("file-{idx}.txt")),
+                "old\n".to_string(),
+                "new\n".to_string(),
+            )
+        })
+        .collect();
+    let diff = MultiFileDiff::from_file_pairs(pairs);
+    let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+    app.file_list_area = Some((0, 0, 30, 43));
+
+    app.select_file(39);
+
+    assert_eq!(app.file_list_scroll, 0);
+}
+
+#[test]
+fn file_list_scroll_counts_group_rows() {
+    let diff = MultiFileDiff::from_file_pairs(vec![
+        (
+            std::path::PathBuf::from("a/one.txt"),
+            "old\n".to_string(),
+            "new\n".to_string(),
+        ),
+        (
+            std::path::PathBuf::from("b/two.txt"),
+            "old\n".to_string(),
+            "new\n".to_string(),
+        ),
+    ]);
+    let app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+    let indices = app.filtered_file_indices();
+
+    assert_eq!(app.file_list_total_rows(&indices), 5);
+}
+
+#[test]
 fn topbar_sidebar_toggle_button_toggles_file_panel() {
     let diff = MultiFileDiff::from_file_pairs(vec![
         (

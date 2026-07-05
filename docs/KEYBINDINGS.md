@@ -59,6 +59,28 @@ In `normal` mode, plain `1` to `9` are reserved for counts. Plain `0` means `lin
 
 `normal.open_command_palette` and `normal.open_file_search` still work in normal mode. Use `global` if you want shortcuts to work while a picker, search box or filter is active.
 
+## Mouse interactions
+
+Mouse actions use built-in behaviour and cannot be changed with keybindings.
+
+| Action | What it does |
+| --- | --- |
+| Drag in the diff | Select text |
+| Click the sidebar toggle | Show or hide the sidebar |
+| Drag the sidebar edge | Resize the sidebar |
+| Scroll the sidebar | Scroll files |
+| Click the sidebar filter | Filter files |
+| Click the filter clear button | Clear the filter |
+| Click a file in the sidebar | Open it in the active tab |
+| Control-click a file in the sidebar | Open it in a new tab |
+| Click the footer mode label | Cycle view mode |
+| Control-click the footer mode label | Cycle view mode backwards |
+| Scroll over the tab bar | Move through tabs |
+| Drag a tab | Reorder tabs |
+| Click a tab overflow control | Move through hidden tabs |
+| Shift and scroll over the diff | Scroll horizontally |
+| Drag a scrollbar | Scroll that panel |
+
 ## Modes
 
 Use each mode as `[keybindings.<mode>]`.

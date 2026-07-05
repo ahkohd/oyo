@@ -52,6 +52,10 @@ fn line_num_style_for_kind(kind: LineKind, app: &App) -> Style {
     }
 }
 
+fn align_fill_color(app: &App) -> Color {
+    color::dim_color(app.theme.text_muted)
+}
+
 fn align_fill_span(app: &App, width: usize) -> Span<'static> {
     if width == 0 || app.split_align_fill.is_empty() {
         return Span::raw("");
@@ -73,13 +77,12 @@ fn align_fill_span(app: &App, width: usize) -> Span<'static> {
             .take(width)
             .collect()
     };
-    let mut fg = color::dim_color(app.theme.text_muted);
-    if let Some(bg) = app.theme.background {
-        if let Some(blended) = color::blend_colors(bg, fg, 0.5) {
-            fg = blended;
-        }
-    }
-    Span::styled(text, Style::default().fg(fg).add_modifier(Modifier::DIM))
+    Span::styled(
+        text,
+        Style::default()
+            .fg(align_fill_color(app))
+            .add_modifier(Modifier::DIM),
+    )
 }
 
 fn align_fill_gutter_span(app: &App, width: usize) -> Span<'static> {
@@ -90,13 +93,12 @@ fn align_fill_gutter_span(app: &App, width: usize) -> Span<'static> {
     for ch in app.split_align_fill.chars().cycle().take(width) {
         out.push(ch);
     }
-    let mut fg = color::dim_color(app.theme.text_muted);
-    if let Some(bg) = app.theme.background {
-        if let Some(blended) = color::blend_colors(bg, fg, 0.5) {
-            fg = blended;
-        }
-    }
-    Span::styled(out, Style::default().fg(fg).add_modifier(Modifier::DIM))
+    Span::styled(
+        out,
+        Style::default()
+            .fg(align_fill_color(app))
+            .add_modifier(Modifier::DIM),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -462,6 +464,7 @@ fn render_old_pane(
     // Clone markers to avoid borrow conflicts
     let primary_marker = app.primary_marker.clone();
     let extent_marker = app.extent_marker.clone();
+    let extent_marker_deleted = app.extent_marker_deleted.clone();
 
     let view_lines = app.current_view_with_frame(AnimationFrame::Idle);
     let visible_height = area.height as usize;
@@ -859,7 +862,11 @@ fn render_old_pane(
                 )
             } else if show_extent {
                 (
-                    extent_marker.as_str(),
+                    super::extent_marker_text(
+                        extent_marker.as_str(),
+                        extent_marker_deleted.as_str(),
+                        view_line,
+                    ),
                     super::extent_marker_style(
                         app,
                         view_line.kind,
@@ -1152,7 +1159,11 @@ fn render_old_pane(
             if app.line_wrap && wrap_count > 1 {
                 let (wrap_marker, wrap_style) = if show_extent {
                     (
-                        extent_marker.as_str(),
+                        super::extent_marker_text(
+                            extent_marker.as_str(),
+                            extent_marker_deleted.as_str(),
+                            view_line,
+                        ),
                         super::extent_marker_style(
                             app,
                             view_line.kind,
@@ -1432,6 +1443,7 @@ fn render_new_pane(
     // Clone markers to avoid borrow conflicts
     let primary_marker_right = app.primary_marker_right.clone();
     let extent_marker_right = app.extent_marker_right.clone();
+    let extent_marker_deleted = app.extent_marker_deleted.clone();
 
     let animation_frame = app.animation_frame();
     let view_lines = app.current_view_with_frame(animation_frame);
@@ -1836,7 +1848,11 @@ fn render_new_pane(
                 )
             } else if show_extent {
                 (
-                    extent_marker_right.as_str(),
+                    super::extent_marker_text(
+                        extent_marker_right.as_str(),
+                        extent_marker_deleted.as_str(),
+                        view_line,
+                    ),
                     super::extent_marker_style(
                         app,
                         view_line.kind,
@@ -2134,7 +2150,11 @@ fn render_new_pane(
             if app.line_wrap && wrap_count > 1 {
                 let (wrap_marker, wrap_style) = if show_extent {
                     (
-                        extent_marker_right.as_str(),
+                        super::extent_marker_text(
+                            extent_marker_right.as_str(),
+                            extent_marker_deleted.as_str(),
+                            view_line,
+                        ),
                         super::extent_marker_style(
                             app,
                             view_line.kind,

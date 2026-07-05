@@ -164,6 +164,7 @@ No-step mode works like a scroll-only diff viewer.
 In no-step mode:
 
 - all changes are applied at once
+- changed lines show extent markers
 - `j` and `k` scroll
 - `h` and `l` jump between hunks
 - stepping is disabled
@@ -229,6 +230,8 @@ Use `ui.diff.idle_ms` to set how long Oyo waits after the last input before back
 
 Extent markers show the current hunk or step area.
 
+In no-step mode, changed lines show extent markers all the time.
+
 Use `ui.diff.extent_marker` to choose marker colour:
 
 | Value | What it does |
@@ -260,15 +263,15 @@ overscroll = false      # allow EOF overscroll when centring
 scrollbar = true        # show scrollbars
 
 [ui.diff]
-bg = false
-fg = "theme"
-highlight = "text"
+bg = true
+fg = "syntax"
+highlight = "word"
 max_bytes = 16777216
 full_context_max_bytes = 2097152
 defer = true
 idle_ms = 250
-extent_marker = "neutral"
-extent_marker_scope = "progress"
+extent_marker = "diff"
+extent_marker_scope = "hunk"
 extent_marker_context = false
 
 [ui.evo]

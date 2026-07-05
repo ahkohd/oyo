@@ -16,12 +16,13 @@
 //! strikethrough_deletions = false
 //! gutter_signs = true
 //! # [ui.split]
-//! # align_lines = false
+//! # align_lines = true
 //! # align_fill = "╱"
 //! primary_marker = "▶"
 //! primary_marker_right = "◀"
-//! extent_marker = "▌"
+//! extent_marker_left = "┃"
 //! extent_marker_right = "▐"
+//! extent_marker_deleted = "╏"
 //! # [navigation.wrap]
 //! # step = "none"
 //! # hunk = "none"
@@ -760,12 +761,24 @@ pub struct UiConfig {
     pub primary_marker: String,
     /// Marker for right pane primary line (defaults to ◀)
     pub primary_marker_right: Option<String>,
-    /// Marker for hunk extent lines (left pane / unified pane)
+    /// Marker for hunk extent lines (legacy name for left pane / unified pane)
     pub extent_marker: String,
+    /// Marker for hunk extent lines (left pane / unified pane)
+    pub extent_marker_left: Option<String>,
     /// Marker for right pane extent lines (defaults to ▐)
     pub extent_marker_right: Option<String>,
+    /// Marker for deleted hunk extent lines
+    pub extent_marker_deleted: String,
     /// Theme configuration
     pub theme: ThemeConfig,
+}
+
+impl UiConfig {
+    pub fn extent_marker_left(&self) -> &str {
+        self.extent_marker_left
+            .as_deref()
+            .unwrap_or(&self.extent_marker)
+    }
 }
 
 impl Default for UiConfig {
@@ -792,8 +805,10 @@ impl Default for UiConfig {
             stepping: false,
             primary_marker: "▶".to_string(),
             primary_marker_right: None,
-            extent_marker: "▌".to_string(),
+            extent_marker: "┃".to_string(),
+            extent_marker_left: None,
             extent_marker_right: None,
+            extent_marker_deleted: "╏".to_string(),
             theme: ThemeConfig::default(),
         }
     }
@@ -847,7 +862,7 @@ pub struct SplitViewConfig {
 impl Default for SplitViewConfig {
     fn default() -> Self {
         Self {
-            align_lines: false,
+            align_lines: true,
             align_fill: "╱".to_string(),
         }
     }
@@ -943,15 +958,15 @@ impl Default for DiffConfig {
 }
 
 fn diff_bg_default() -> bool {
-    false
+    true
 }
 
 fn diff_fg_default() -> DiffForegroundMode {
-    DiffForegroundMode::Theme
+    DiffForegroundMode::Syntax
 }
 
 fn diff_highlight_default() -> DiffHighlightMode {
-    DiffHighlightMode::Text
+    DiffHighlightMode::Word
 }
 
 fn diff_max_bytes_default() -> u64 {
@@ -971,11 +986,11 @@ fn diff_idle_ms_default() -> u64 {
 }
 
 fn diff_extent_marker_default() -> DiffExtentMarkerMode {
-    DiffExtentMarkerMode::Neutral
+    DiffExtentMarkerMode::Diff
 }
 
 fn diff_extent_marker_scope_default() -> DiffExtentMarkerScope {
-    DiffExtentMarkerScope::Progress
+    DiffExtentMarkerScope::Hunk
 }
 
 fn diff_extent_marker_context_default() -> bool {
@@ -1756,6 +1771,33 @@ mod tests {
     #[test]
     fn ui_shows_scrollbar_by_default() {
         assert!(Config::default().ui.scrollbar);
+    }
+
+    #[test]
+    fn extent_marker_left_overrides_legacy_extent_marker() {
+        let config: Config = toml::from_str(
+            r#"
+[ui]
+extent_marker = "A"
+extent_marker_left = "B"
+extent_marker_deleted = "D"
+"#,
+        )
+        .unwrap();
+        assert_eq!(config.ui.extent_marker_left(), "B");
+        assert_eq!(config.ui.extent_marker_deleted, "D");
+    }
+
+    #[test]
+    fn legacy_extent_marker_still_sets_left_marker() {
+        let config: Config = toml::from_str(
+            r#"
+[ui]
+extent_marker = "A"
+"#,
+        )
+        .unwrap();
+        assert_eq!(config.ui.extent_marker_left(), "A");
     }
 
     #[test]

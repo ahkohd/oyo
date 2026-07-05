@@ -123,15 +123,10 @@ impl App {
     }
 
     pub fn scroll_file_panel_down(&mut self) {
-        let visible_rows = self
-            .file_list_area
-            .map(|(_, _, _, height)| height.saturating_sub(2) as usize)
-            .unwrap_or(1)
-            .max(1);
+        let indices = self.filtered_file_indices();
         let max_scroll = self
-            .filtered_file_indices()
-            .len()
-            .saturating_sub(visible_rows);
+            .file_list_total_rows(&indices)
+            .saturating_sub(self.file_list_visible_rows());
         self.file_list_scroll = self.file_list_scroll.saturating_add(1).min(max_scroll);
     }
 
@@ -264,6 +259,14 @@ impl App {
         {
             self.topbar_drag_target = None;
         }
+    }
+
+    pub(crate) fn open_file_in_new_topbar_tab(&mut self, file_index: usize) {
+        if file_index >= self.multi_diff.file_count() {
+            return;
+        }
+        let id = self.add_topbar_tab_for(file_index);
+        self.select_topbar_tab(id);
     }
 
     fn add_topbar_tab_for(&mut self, file_index: usize) -> usize {
@@ -797,6 +800,50 @@ impl App {
         true
     }
 
+    pub(crate) fn mouse_over_topbar(&self, column: u16, row: u16) -> bool {
+        self.topbar_area.is_some_and(|(x, y, width, height)| {
+            column >= x
+                && column < x.saturating_add(width)
+                && row >= y
+                && row < y.saturating_add(height)
+        })
+    }
+
+    pub(crate) fn scroll_topbar_tabs(&mut self, delta: isize) -> bool {
+        let max_scroll = self.topbar_tabs.len().saturating_sub(1);
+        let old = self.topbar_tab_scroll.min(max_scroll);
+        let next = if delta.is_negative() {
+            old.saturating_sub(delta.unsigned_abs())
+        } else {
+            old.saturating_add(delta as usize).min(max_scroll)
+        };
+        self.topbar_tab_scroll = next;
+        old != next
+    }
+
+    pub(crate) fn handle_status_bar_mouse_down(
+        &mut self,
+        column: u16,
+        row: u16,
+        reverse: bool,
+    ) -> bool {
+        let hit = self.status_mode_hit.is_some_and(|(x, y, width, height)| {
+            column >= x
+                && column < x.saturating_add(width)
+                && row >= y
+                && row < y.saturating_add(height)
+        });
+        if !hit {
+            return false;
+        }
+        if reverse {
+            self.toggle_view_mode_reverse();
+        } else {
+            self.toggle_view_mode();
+        }
+        true
+    }
+
     pub(crate) fn handle_topbar_mouse_down(&mut self, column: u16, row: u16) -> bool {
         self.update_topbar_hover(column, row);
         if self
@@ -821,6 +868,30 @@ impl App {
             })
         {
             self.toggle_file_panel();
+            return true;
+        }
+        if self
+            .topbar_scroll_left_hit
+            .is_some_and(|(x, y, width, height)| {
+                column >= x
+                    && column < x.saturating_add(width)
+                    && row >= y
+                    && row < y.saturating_add(height)
+            })
+        {
+            self.scroll_topbar_tabs(-1);
+            return true;
+        }
+        if self
+            .topbar_scroll_right_hit
+            .is_some_and(|(x, y, width, height)| {
+                column >= x
+                    && column < x.saturating_add(width)
+                    && row >= y
+                    && row < y.saturating_add(height)
+            })
+        {
+            self.scroll_topbar_tabs(1);
             return true;
         }
         if self.topbar_plus_hit.is_some_and(|(x, y, width, height)| {
@@ -888,6 +959,30 @@ impl App {
                 && row >= y
                 && row < y.saturating_add(height)
         });
+        let scroll_left_hover = self
+            .topbar_scroll_left_hit
+            .is_some_and(|(x, y, width, height)| {
+                column >= x
+                    && column < x.saturating_add(width)
+                    && row >= y
+                    && row < y.saturating_add(height)
+            });
+        let scroll_right_hover =
+            self.topbar_scroll_right_hit
+                .is_some_and(|(x, y, width, height)| {
+                    column >= x
+                        && column < x.saturating_add(width)
+                        && row >= y
+                        && row < y.saturating_add(height)
+                });
+        let preview_hover = self
+            .preview_toggle_hit
+            .is_some_and(|(x, y, width, height)| {
+                column >= x
+                    && column < x.saturating_add(width)
+                    && row >= y
+                    && row < y.saturating_add(height)
+            });
         let sidebar_hover = self
             .topbar_sidebar_toggle_hit
             .is_some_and(|(x, y, width, height)| {
@@ -896,17 +991,59 @@ impl App {
                     && row >= y
                     && row < y.saturating_add(height)
             });
+        let file_panel_hover = self.mouse_over_file_panel(column, row);
+        let file_filter_hover = self.file_filter_area.is_some_and(|(x, y, width, height)| {
+            column >= x
+                && column < x.saturating_add(width)
+                && row >= y
+                && row < y.saturating_add(height)
+        });
+        let file_filter_clear_hover =
+            self.file_filter_clear_hit
+                .is_some_and(|(x, y, width, height)| {
+                    column >= x
+                        && column < x.saturating_add(width)
+                        && row >= y
+                        && row < y.saturating_add(height)
+                });
+        let file_hover = self.file_list_area.and_then(|(x, y, width, height)| {
+            let in_list = column >= x
+                && column < x.saturating_add(width)
+                && row >= y.saturating_add(1)
+                && row < y.saturating_add(height);
+            if !in_list {
+                return None;
+            }
+            self.file_list_rows
+                .get(row.saturating_sub(y.saturating_add(1)) as usize)
+                .copied()
+                .flatten()
+        });
         if self.topbar_hover_tab == hover
             && self.topbar_hover_close == close_hover
             && self.topbar_plus_hover == plus_hover
+            && self.topbar_scroll_left_hover == scroll_left_hover
+            && self.topbar_scroll_right_hover == scroll_right_hover
+            && self.preview_toggle_hover == preview_hover
             && self.topbar_sidebar_toggle_hover == sidebar_hover
+            && self.file_list_hover == file_hover
+            && self.file_panel_hover == file_panel_hover
+            && self.file_filter_hover == file_filter_hover
+            && self.file_filter_clear_hover == file_filter_clear_hover
         {
             return false;
         }
         self.topbar_hover_tab = hover;
         self.topbar_hover_close = close_hover;
         self.topbar_plus_hover = plus_hover;
+        self.topbar_scroll_left_hover = scroll_left_hover;
+        self.topbar_scroll_right_hover = scroll_right_hover;
+        self.preview_toggle_hover = preview_hover;
         self.topbar_sidebar_toggle_hover = sidebar_hover;
+        self.file_list_hover = file_hover;
+        self.file_panel_hover = file_panel_hover;
+        self.file_filter_hover = file_filter_hover;
+        self.file_filter_clear_hover = file_filter_clear_hover;
         true
     }
 
@@ -958,8 +1095,14 @@ impl App {
     }
 
     pub fn start_file_filter(&mut self) {
-        self.file_filter_active = true;
         self.file_filter.clear();
+        self.focus_file_filter();
+    }
+
+    pub(crate) fn focus_file_filter(&mut self) {
+        self.file_filter_active = true;
+        self.file_filter_cursor_visible = true;
+        self.file_filter_cursor_last_blink = std::time::Instant::now();
         self.file_list_scroll = 0;
         self.ensure_selection_matches_filter();
         self.update_file_list_scroll();
@@ -967,21 +1110,30 @@ impl App {
 
     pub fn stop_file_filter(&mut self) {
         self.file_filter_active = false;
+        self.file_filter_cursor_visible = true;
     }
 
     pub fn push_file_filter_char(&mut self, ch: char) {
         self.file_filter.push(ch);
+        self.reset_file_filter_cursor();
         self.on_filter_changed();
     }
 
     pub fn pop_file_filter_char(&mut self) {
         self.file_filter.pop();
+        self.reset_file_filter_cursor();
         self.on_filter_changed();
     }
 
     pub fn clear_file_filter(&mut self) {
         self.file_filter.clear();
+        self.reset_file_filter_cursor();
         self.on_filter_changed();
+    }
+
+    fn reset_file_filter_cursor(&mut self) {
+        self.file_filter_cursor_visible = true;
+        self.file_filter_cursor_last_blink = std::time::Instant::now();
     }
 
     /// Check if current file would be blank at step 0 (new file: empty old, non-empty new)
@@ -1075,17 +1227,76 @@ impl App {
             return;
         }
 
-        // Keep selected file visible in the file list
+        // Keep selected file visible in the file list.
         let selected = self.multi_diff.selected_index;
-        let selected_pos = indices.iter().position(|&i| i == selected).unwrap_or(0);
-        if selected_pos < self.file_list_scroll {
-            self.file_list_scroll = selected_pos;
+        let selected_row = self.file_list_row_for_file(&indices, selected).unwrap_or(0);
+        if selected_row < self.file_list_scroll {
+            self.file_list_scroll = selected_row;
         }
-        // Assume roughly 20 visible files
-        let visible_files = 20;
-        if selected_pos >= self.file_list_scroll + visible_files {
-            self.file_list_scroll = selected_pos.saturating_sub(visible_files - 1);
+        let visible_rows = self.file_list_visible_rows();
+        if selected_row >= self.file_list_scroll.saturating_add(visible_rows) {
+            self.file_list_scroll = selected_row.saturating_sub(visible_rows - 1);
         }
+        let max_scroll = self
+            .file_list_total_rows(&indices)
+            .saturating_sub(visible_rows);
+        self.file_list_scroll = self.file_list_scroll.min(max_scroll);
+    }
+
+    pub(crate) fn file_list_total_rows(&self, indices: &[usize]) -> usize {
+        let mut rows = 0usize;
+        let mut current_group: Option<String> = None;
+        for &index in indices {
+            let group = self.file_list_group(index);
+            if current_group.as_deref() != Some(group.as_str()) {
+                if current_group.is_some() {
+                    rows += 1;
+                }
+                rows += 1;
+                current_group = Some(group);
+            }
+            rows += 1;
+        }
+        rows
+    }
+
+    fn file_list_row_for_file(&self, indices: &[usize], target: usize) -> Option<usize> {
+        let mut row = 0usize;
+        let mut current_group: Option<String> = None;
+        for &index in indices {
+            let group = self.file_list_group(index);
+            if current_group.as_deref() != Some(group.as_str()) {
+                if current_group.is_some() {
+                    row += 1;
+                }
+                row += 1;
+                current_group = Some(group);
+            }
+            if index == target {
+                return Some(row);
+            }
+            row += 1;
+        }
+        None
+    }
+
+    pub(crate) fn file_list_group(&self, index: usize) -> String {
+        self.multi_diff
+            .files
+            .get(index)
+            .and_then(|file| {
+                file.display_name
+                    .rsplit_once('/')
+                    .map(|(dir, _)| dir.to_string())
+            })
+            .unwrap_or_else(|| "Root Path".to_string())
+    }
+
+    fn file_list_visible_rows(&self) -> usize {
+        self.file_list_area
+            .map(|(_, _, _, height)| height.saturating_sub(2) as usize)
+            .unwrap_or(20)
+            .max(1)
     }
 
     fn on_filter_changed(&mut self) {

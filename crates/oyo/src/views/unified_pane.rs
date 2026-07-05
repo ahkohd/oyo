@@ -331,6 +331,7 @@ fn build_unified_render_model(
 ) -> UnifiedRenderModel {
     let primary_marker = app.primary_marker.clone();
     let extent_marker = app.extent_marker.clone();
+    let extent_marker_deleted = app.extent_marker_deleted.clone();
     let debug_target = app.syntax_scope_target(view_lines);
     let mut bg_lines: Option<Vec<Line<'static>>> = if app.line_wrap && app.diff_bg {
         Some(Vec::new())
@@ -724,7 +725,11 @@ fn build_unified_render_model(
             )
         } else if show_extent {
             (
-                extent_marker.as_str(),
+                super::extent_marker_text(
+                    extent_marker.as_str(),
+                    extent_marker_deleted.as_str(),
+                    view_line,
+                ),
                 super::extent_marker_style(
                     app,
                     view_line.kind,
@@ -1144,7 +1149,11 @@ fn build_unified_render_model(
         if app.line_wrap && wrap_count > 1 {
             let (wrap_marker, wrap_style) = if show_extent {
                 (
-                    extent_marker.as_str(),
+                    super::extent_marker_text(
+                        extent_marker.as_str(),
+                        extent_marker_deleted.as_str(),
+                        view_line,
+                    ),
                     super::extent_marker_style(
                         app,
                         view_line.kind,

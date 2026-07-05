@@ -222,8 +222,22 @@ pub struct App {
     pub file_list_area: Option<(u16, u16, u16, u16)>,
     /// File list row mapping for mouse selection
     pub file_list_rows: Vec<Option<usize>>,
+    /// File list item currently under the mouse.
+    pub(crate) file_list_hover: Option<usize>,
+    /// True when the mouse is over the file panel.
+    pub(crate) file_panel_hover: bool,
     /// File list filter input area (x, y, width, height)
     pub file_filter_area: Option<(u16, u16, u16, u16)>,
+    /// File list filter clear button area (x, y, width, height)
+    pub(crate) file_filter_clear_hit: Option<(u16, u16, u16, u16)>,
+    /// True when the mouse is over the file filter clear button.
+    pub(crate) file_filter_clear_hover: bool,
+    /// True when the mouse is over the file filter input.
+    pub(crate) file_filter_hover: bool,
+    /// Whether the fake file filter cursor is currently visible.
+    pub(crate) file_filter_cursor_visible: bool,
+    /// Last fake file filter cursor blink.
+    file_filter_cursor_last_blink: Instant,
     /// When to show per-file +/- counts in the file panel
     pub file_count_mode: FileCountMode,
     /// File list filter text
@@ -303,13 +317,21 @@ pub struct App {
     pub(crate) topbar_tabs: Vec<TopbarTab>,
     pub(crate) active_topbar_tab: Option<usize>,
     next_topbar_tab_id: usize,
+    pub(crate) topbar_tab_scroll: usize,
     pub(crate) topbar_tab_hits: Vec<TopbarTabHit>,
     pub(crate) topbar_plus_hit: Option<(u16, u16, u16, u16)>,
+    pub(crate) topbar_scroll_left_hit: Option<(u16, u16, u16, u16)>,
+    pub(crate) topbar_scroll_right_hit: Option<(u16, u16, u16, u16)>,
     pub(crate) preview_toggle_hit: Option<(u16, u16, u16, u16)>,
     pub(crate) topbar_sidebar_toggle_hit: Option<(u16, u16, u16, u16)>,
+    pub(crate) status_mode_hit: Option<(u16, u16, u16, u16)>,
+    pub(crate) topbar_area: Option<(u16, u16, u16, u16)>,
     pub(crate) topbar_hover_tab: Option<usize>,
     pub(crate) topbar_hover_close: Option<usize>,
     pub(crate) topbar_plus_hover: bool,
+    pub(crate) topbar_scroll_left_hover: bool,
+    pub(crate) topbar_scroll_right_hover: bool,
+    pub(crate) preview_toggle_hover: bool,
     pub(crate) topbar_sidebar_toggle_hover: bool,
     pub(crate) topbar_drag_target: Option<usize>,
     topbar_drag_tab: Option<usize>,
@@ -343,6 +365,8 @@ pub struct App {
     pub extent_marker: String,
     /// Marker for right pane extent lines
     pub extent_marker_right: String,
+    /// Marker for deleted hunk extent lines
+    pub extent_marker_deleted: String,
     /// Clear active change after next render (for one-frame animation styling)
     pub clear_active_on_next_render: bool,
     /// Resolved theme (colors, gradients)
@@ -684,7 +708,14 @@ impl App {
             file_list_scroll: 0,
             file_list_area: None,
             file_list_rows: Vec::new(),
+            file_list_hover: None,
+            file_panel_hover: false,
             file_filter_area: None,
+            file_filter_clear_hit: None,
+            file_filter_clear_hover: false,
+            file_filter_hover: false,
+            file_filter_cursor_visible: true,
+            file_filter_cursor_last_blink: Instant::now(),
             file_count_mode: FileCountMode::Active,
             file_filter: String::new(),
             file_filter_active: false,
@@ -741,13 +772,21 @@ impl App {
                 .collect(),
             active_topbar_tab: (file_count > 0).then_some(1),
             next_topbar_tab_id: 2,
+            topbar_tab_scroll: 0,
             topbar_tab_hits: Vec::new(),
             topbar_plus_hit: None,
+            topbar_scroll_left_hit: None,
+            topbar_scroll_right_hit: None,
             preview_toggle_hit: None,
             topbar_sidebar_toggle_hit: None,
+            status_mode_hit: None,
+            topbar_area: None,
             topbar_hover_tab: None,
             topbar_hover_close: None,
             topbar_plus_hover: false,
+            topbar_scroll_left_hover: false,
+            topbar_scroll_right_hover: false,
+            preview_toggle_hover: false,
             topbar_sidebar_toggle_hover: false,
             topbar_drag_target: None,
             topbar_drag_tab: None,
@@ -765,8 +804,9 @@ impl App {
             centered_once: false,
             primary_marker: "▶".to_string(),
             primary_marker_right: "◀".to_string(),
-            extent_marker: "▌".to_string(),
+            extent_marker: "┃".to_string(),
             extent_marker_right: "▐".to_string(),
+            extent_marker_deleted: "╏".to_string(),
             clear_active_on_next_render: false,
             theme: ResolvedTheme::default(),
             time_format: TimeFormatter::default(),
@@ -774,11 +814,11 @@ impl App {
             stepping: true,
             hunk_wrap: HunkWrapMode::None,
             step_wrap: StepWrapMode::None,
-            diff_bg: false,
-            diff_fg: DiffForegroundMode::Theme,
-            diff_highlight: DiffHighlightMode::Text,
-            diff_extent_marker: DiffExtentMarkerMode::Neutral,
-            diff_extent_marker_scope: DiffExtentMarkerScope::Progress,
+            diff_bg: true,
+            diff_fg: DiffForegroundMode::Syntax,
+            diff_highlight: DiffHighlightMode::Word,
+            diff_extent_marker: DiffExtentMarkerMode::Diff,
+            diff_extent_marker_scope: DiffExtentMarkerScope::Hunk,
             diff_extent_marker_context: false,
             blame_enabled: false,
             blame_mode: BlameMode::OneShot,
@@ -811,7 +851,7 @@ impl App {
             blame_step_hint: None,
             blame_hunk_hint: None,
             unified_modified_step_mode: ModifiedStepMode::Mixed,
-            split_align_lines: false,
+            split_align_lines: true,
             split_align_fill: "╱".to_string(),
             evo_syntax: crate::config::EvoSyntaxMode::Context,
             syntax_mode: SyntaxMode::On,
@@ -1142,6 +1182,32 @@ impl App {
         if !self.line_wrap {
             self.horizontal_scroll = self.horizontal_scroll.saturating_add(4);
         }
+    }
+
+    pub(crate) fn mouse_over_diff_view(&self, column: u16, row: u16) -> bool {
+        self.diff_view_area.is_some_and(|(x, y, width, height)| {
+            column >= x
+                && column < x.saturating_add(width)
+                && row >= y
+                && row < y.saturating_add(height)
+        })
+    }
+
+    pub(crate) fn scroll_diff_horizontally(&mut self, delta: isize) -> bool {
+        if self.line_wrap || self.view_mode == ViewMode::Preview {
+            return false;
+        }
+        if self.diff_view_area.is_none() {
+            return false;
+        }
+        let old = self.horizontal_scroll;
+        let amount = delta.unsigned_abs().saturating_mul(4);
+        if delta.is_negative() {
+            self.horizontal_scroll = self.horizontal_scroll.saturating_sub(amount);
+        } else {
+            self.horizontal_scroll = self.horizontal_scroll.saturating_add(amount);
+        }
+        old != self.horizontal_scroll
     }
 
     /// Go to start of line (horizontal scroll = 0), like vim's 0
@@ -1979,6 +2045,14 @@ impl App {
                 self.hunk_edge_hint = None;
                 dirty = true;
             }
+        }
+
+        if self.file_filter_active
+            && now.duration_since(self.file_filter_cursor_last_blink) >= Duration::from_millis(500)
+        {
+            self.file_filter_cursor_visible = !self.file_filter_cursor_visible;
+            self.file_filter_cursor_last_blink = now;
+            dirty = true;
         }
 
         dirty |= self.poll_diff_responses();

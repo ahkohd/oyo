@@ -858,12 +858,13 @@ fn apply_config_to_app(app: &mut App, config: &config::Config, args: &Args, ligh
         .primary_marker_right
         .clone()
         .unwrap_or_else(|| "◀".to_string());
-    app.extent_marker = config.ui.extent_marker.clone();
+    app.extent_marker = config.ui.extent_marker_left().to_string();
     app.extent_marker_right = config
         .ui
         .extent_marker_right
         .clone()
         .unwrap_or_else(|| "▐".to_string());
+    app.extent_marker_deleted = config.ui.extent_marker_deleted.clone();
     app.theme = config.ui.theme.resolve(light_mode);
     app.time_format = TimeFormatter::new(&config.ui.time);
     app.theme_is_light = light_mode;
@@ -1556,6 +1557,13 @@ fn run_app(
                     }
                     match me.kind {
                         MouseEventKind::Down(MouseButton::Left) => {
+                            if app.handle_status_bar_mouse_down(
+                                me.column,
+                                me.row,
+                                me.modifiers.contains(KeyModifiers::CONTROL),
+                            ) {
+                                continue;
+                            }
                             if app.handle_topbar_mouse_down(me.column, me.row) {
                                 continue;
                             }
@@ -1580,7 +1588,11 @@ fn run_app(
                             if app.start_diff_selection(me.column, me.row) {
                                 continue;
                             }
-                            if app.handle_file_list_click(me.column, me.row) {
+                            if app.handle_file_list_click(
+                                me.column,
+                                me.row,
+                                me.modifiers.contains(KeyModifiers::CONTROL),
+                            ) {
                                 continue;
                             }
                         }
@@ -1620,6 +1632,38 @@ fn run_app(
                         }
                         MouseEventKind::Moved if !app.update_topbar_hover(me.column, me.row) => {
                             needs_draw = false;
+                        }
+                        MouseEventKind::ScrollLeft | MouseEventKind::ScrollRight
+                            if app.mouse_over_topbar(me.column, me.row) =>
+                        {
+                            let delta = if matches!(me.kind, MouseEventKind::ScrollLeft) {
+                                -1
+                            } else {
+                                1
+                            };
+                            needs_draw = app.scroll_topbar_tabs(delta);
+                        }
+                        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                            if app.mouse_over_topbar(me.column, me.row) =>
+                        {
+                            let delta = if matches!(me.kind, MouseEventKind::ScrollUp) {
+                                -1
+                            } else {
+                                1
+                            };
+                            needs_draw = app.scroll_topbar_tabs(delta);
+                        }
+                        kind if app.mouse_over_diff_view(me.column, me.row)
+                            && mouse_horizontal_scroll_delta(kind, me.modifiers).is_some() =>
+                        {
+                            needs_draw = app.scroll_diff_horizontally(
+                                mouse_horizontal_scroll_delta(kind, me.modifiers).unwrap_or(0),
+                            );
+                        }
+                        MouseEventKind::ScrollLeft | MouseEventKind::ScrollRight => {
+                            let delta =
+                                mouse_horizontal_scroll_delta(me.kind, me.modifiers).unwrap_or(0);
+                            needs_draw = app.scroll_diff_horizontally(delta);
                         }
                         MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
                             let target = if app.mouse_over_file_panel(me.column, me.row) {
@@ -1713,7 +1757,18 @@ fn schedule_mouse_scroll_draw(
 }
 
 fn is_mouse_scroll_event(event: &Event) -> bool {
-    matches!(event, Event::Mouse(mouse) if mouse_scroll_delta(mouse.kind).is_some())
+    matches!(event, Event::Mouse(mouse) if mouse_scroll_delta(mouse.kind).is_some()
+        || mouse_horizontal_scroll_delta(mouse.kind, mouse.modifiers).is_some())
+}
+
+fn mouse_horizontal_scroll_delta(kind: MouseEventKind, modifiers: KeyModifiers) -> Option<isize> {
+    match kind {
+        MouseEventKind::ScrollLeft => Some(-1),
+        MouseEventKind::ScrollRight => Some(1),
+        MouseEventKind::ScrollUp if modifiers.contains(KeyModifiers::SHIFT) => Some(-1),
+        MouseEventKind::ScrollDown if modifiers.contains(KeyModifiers::SHIFT) => Some(1),
+        _ => None,
+    }
 }
 
 fn mouse_scroll_delta(kind: MouseEventKind) -> Option<isize> {
@@ -2081,7 +2136,7 @@ fn run_commit_picker<B: Backend>(
         staged_files: staged_changes.len(),
         theme,
         primary_marker: config.ui.primary_marker.clone(),
-        extent_marker: config.ui.extent_marker.clone(),
+        extent_marker: config.ui.extent_marker_left().to_string(),
         time_format,
         keybindings: Keybindings::from_config(&config.keybindings),
     });
@@ -2100,11 +2155,12 @@ fn run_commit_picker<B: Backend>(
 #[cfg(test)]
 mod tests {
     use super::{
-        blocks_mouse_scroll, config, detect_input_mode, parse_range, push_pending_mouse_scroll,
-        render_editor_args, update_mouse_scroll_block, BlockedMouseScroll, InputMode,
-        MouseScrollTarget, PendingMouseScroll, MAX_DIFF_MOUSE_SCROLL_ACTIONS_PER_FRAME,
-        MAX_DISCRETE_MOUSE_SCROLL_ACTIONS_PER_FRAME,
+        blocks_mouse_scroll, config, detect_input_mode, mouse_horizontal_scroll_delta, parse_range,
+        push_pending_mouse_scroll, render_editor_args, update_mouse_scroll_block,
+        BlockedMouseScroll, InputMode, MouseScrollTarget, PendingMouseScroll,
+        MAX_DIFF_MOUSE_SCROLL_ACTIONS_PER_FRAME, MAX_DISCRETE_MOUSE_SCROLL_ACTIONS_PER_FRAME,
     };
+    use crossterm::event::{KeyModifiers, MouseEventKind};
     use std::path::{Path, PathBuf};
 
     #[test]
@@ -2224,6 +2280,30 @@ mod tests {
         );
         assert!(blocks_mouse_scroll(blocked, MouseScrollTarget::Diff, 1));
         assert!(!blocks_mouse_scroll(blocked, MouseScrollTarget::Diff, -1));
+    }
+
+    #[test]
+    fn horizontal_mouse_scroll_supports_native_and_shift_wheel() {
+        assert_eq!(
+            mouse_horizontal_scroll_delta(MouseEventKind::ScrollLeft, KeyModifiers::empty()),
+            Some(-1)
+        );
+        assert_eq!(
+            mouse_horizontal_scroll_delta(MouseEventKind::ScrollRight, KeyModifiers::empty()),
+            Some(1)
+        );
+        assert_eq!(
+            mouse_horizontal_scroll_delta(MouseEventKind::ScrollUp, KeyModifiers::SHIFT),
+            Some(-1)
+        );
+        assert_eq!(
+            mouse_horizontal_scroll_delta(MouseEventKind::ScrollDown, KeyModifiers::SHIFT),
+            Some(1)
+        );
+        assert_eq!(
+            mouse_horizontal_scroll_delta(MouseEventKind::ScrollDown, KeyModifiers::empty()),
+            None
+        );
     }
 
     #[test]

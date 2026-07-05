@@ -31,9 +31,9 @@ line_wrap = false
 fold_context = "off"
 
 [ui.diff]
-fg = "theme"
-bg = false
-highlight = "text"
+fg = "syntax"
+bg = true
+highlight = "word"
 
 [ui.syntax]
 mode = "on"
@@ -64,8 +64,10 @@ Use `[ui]` for general display and navigation defaults.
 | `stepping` | `true`, `false` | `false` | Starts in step-through mode |
 | `primary_marker` | string | built in | Sets the active-line marker for the left pane or unified view |
 | `primary_marker_right` | string | built in | Sets the active-line marker for the right pane |
-| `extent_marker` | string | built in | Sets the hunk extent marker for the left pane or unified view |
+| `extent_marker_left` | string | built in | Sets the hunk extent marker for the left pane or unified view |
 | `extent_marker_right` | string | built in | Sets the hunk extent marker for the right pane |
+| `extent_marker_deleted` | string | built in | Sets the hunk extent marker for deleted lines |
+| `extent_marker` | string | built in | Legacy name for `extent_marker_left` |
 
 ```toml
 [ui]
@@ -81,6 +83,9 @@ scrollbar = true
 strikethrough_deletions = false
 gutter_signs = true
 stepping = false
+extent_marker_left = "┃"
+extent_marker_right = "▐"
+extent_marker_deleted = "╏"
 ```
 
 ## Diff display
@@ -89,34 +94,34 @@ Use `[ui.diff]` to control diff colours, inline highlights and large-file behavi
 
 | Key | Values | Default | What it does |
 | --- | --- | --- | --- |
-| `bg` | `true`, `false` | `false` | Shows full-line diff backgrounds |
-| `fg` | `theme`, `syntax` | `theme` | Chooses diff text colours |
-| `highlight` | `text`, `word`, `none` | `text` | Controls inline changed-span highlights |
+| `bg` | `true`, `false` | `true` | Shows full-line diff backgrounds |
+| `fg` | `theme`, `syntax` | `syntax` | Chooses diff text colours |
+| `highlight` | `text`, `word`, `none` | `word` | Controls inline changed-span highlights |
 | `max_bytes` | integer | `16777216` | Defers diffing above this file size |
 | `full_context_max_bytes` | integer | `2097152` | Uses full-context rendering up to this file size |
 | `defer` | `true`, `false` | `true` | Computes large diffs in the background |
 | `idle_ms` | integer | `250` | Waits this many milliseconds before background diffing starts |
-| `extent_marker` | `neutral`, `diff` | `neutral` | Chooses hunk extent marker colour |
-| `extent_marker_scope` | `progress`, `hunk` | `progress` | Chooses which lines get diff colours while stepping |
+| `extent_marker` | `neutral`, `diff` | `diff` | Chooses hunk extent marker colour |
+| `extent_marker_scope` | `progress`, `hunk` | `hunk` | Chooses which lines get diff colours while stepping |
 | `extent_marker_context` | `true`, `false` | `false` | Shows extent markers on unchanged context lines |
 | `preview_change_bars` | `true`, `false` | `true` | Shows change bars in source, Markdown, CSV and structured previews |
 
 ```toml
 [ui.diff]
-bg = false
-fg = "theme"
-highlight = "text"
+bg = true
+fg = "syntax"
+highlight = "word"
 max_bytes = 16777216
 full_context_max_bytes = 2097152
 defer = true
 idle_ms = 250
-extent_marker = "neutral"
-extent_marker_scope = "progress"
+extent_marker = "diff"
+extent_marker_scope = "hunk"
 extent_marker_context = false
 preview_change_bars = true
 ```
 
-See [diff behaviour](./docs/DIFF_VIEWER.md) and [diff styling previews](./docs/DIFF_PREVIEWS.md).
+See [diff behaviour](./DIFF_VIEWER.md) and [diff styling previews](./DIFF_PREVIEWS.md).
 
 ## Syntax highlighting
 
@@ -148,7 +153,7 @@ idle_lines = 1000
 debounce_ms = 80
 ```
 
-See [theme configuration](./docs/THEME.md).
+See [theme configuration](./THEME.md).
 
 ## View-specific settings
 
@@ -159,7 +164,7 @@ Use these tables to change one view mode.
 modified_step_mode = "mixed" # "mixed" or "modified"
 
 [ui.split]
-align_lines = false
+align_lines = true
 align_fill = "/"
 
 [ui.evo]
@@ -169,7 +174,7 @@ syntax = "context" # "context" or "full"
 | Table | Key | Values | Default | What it does |
 | --- | --- | --- | --- | --- |
 | `[ui.unified]` | `modified_step_mode` | `mixed`, `modified` | `mixed` | Chooses how modified lines render while stepping |
-| `[ui.split]` | `align_lines` | `true`, `false` | `false` | Inserts blank rows to keep panes aligned |
+| `[ui.split]` | `align_lines` | `true`, `false` | `true` | Inserts blank rows to keep panes aligned |
 | `[ui.split]` | `align_fill` | string | built in | Fills aligned blank rows |
 | `[ui.evo]` | `syntax` | `context`, `full` | `context` | Chooses syntax scope in evolution view |
 
@@ -218,7 +223,7 @@ mode = "dark"
 | `defs` | table | empty | Defines reusable colour names |
 | `theme` | table | built in | Overrides theme tokens |
 
-See [theme configuration](./docs/THEME.md) for built-in themes, custom themes and theme tokens.
+See [theme configuration](./THEME.md) for built-in themes, custom themes and theme tokens.
 
 ## Navigation wrapping
 
@@ -374,7 +379,7 @@ Review events are:
 
 `stdin` can be `json` or `none`.
 
-See [review hooks](./docs/REVIEW_HOOKS.md).
+See [review hooks](./REVIEW_HOOKS.md).
 
 ## Keybindings
 
@@ -408,4 +413,4 @@ clear = ["ctrl-u"]
 
 If you omit an action, Oyo keeps the default keys. Set an action to an empty array to unbind it.
 
-See [keybinding actions](./docs/KEYBINDINGS.md).
+See [keybinding actions](./KEYBINDINGS.md).

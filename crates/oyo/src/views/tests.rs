@@ -5,8 +5,11 @@ use crate::config::{
     DiffForegroundMode, DiffHighlightMode, EvoSyntaxMode, ModifiedStepMode, SyntaxMode,
 };
 use crate::test_utils::TestApp;
-use crate::views::{render_blame, render_evolution, render_split, render_unified_pane};
-use oyo_core::{AnimationFrame, MultiFileDiff};
+use crate::views::{
+    extent_marker_text, render_blame, render_evolution, render_split, render_unified_pane,
+    show_extent_marker,
+};
+use oyo_core::{AnimationFrame, LineKind, MultiFileDiff, ViewLine};
 use ratatui::{backend::TestBackend, buffer::Buffer, Terminal};
 
 fn make_app(old: &str, new: &str, view_mode: ViewMode) -> TestApp {
@@ -81,6 +84,46 @@ fn column_contains(buf: &Buffer, x: u16, needle: &str) -> bool {
         }
     }
     false
+}
+
+fn marker_view_line(kind: LineKind, has_changes: bool) -> ViewLine {
+    ViewLine {
+        content: String::new(),
+        spans: vec![],
+        kind,
+        old_line: Some(1),
+        new_line: Some(1),
+        is_active: false,
+        is_active_change: false,
+        is_primary_active: false,
+        show_hunk_extent: false,
+        change_id: 0,
+        hunk_index: Some(0),
+        has_changes,
+    }
+}
+
+#[test]
+fn deleted_extent_marker_uses_dashed_bar() {
+    let deleted = marker_view_line(LineKind::Deleted, true);
+    let inserted = marker_view_line(LineKind::Inserted, true);
+
+    assert_eq!(extent_marker_text("▌", "D", &deleted), "D");
+    assert_eq!(extent_marker_text("▌", "D", &inserted), "▌");
+}
+
+#[test]
+fn no_step_extent_marker_shows_changed_hunk_lines() {
+    let mut app = make_app("old\n", "new\n", ViewMode::UnifiedPane);
+    app.stepping = false;
+
+    let changed = marker_view_line(LineKind::Modified, true);
+    assert!(show_extent_marker(&app, &changed));
+
+    let context = marker_view_line(LineKind::Context, false);
+    assert!(!show_extent_marker(&app, &context));
+    app.diff_extent_marker_context = true;
+    assert!(show_extent_marker(&app, &context));
 }
 
 #[test]

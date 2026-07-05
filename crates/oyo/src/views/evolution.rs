@@ -71,6 +71,7 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
     // Clone markers to avoid borrow conflicts
     let primary_marker = app.primary_marker.clone();
     let extent_marker = app.extent_marker.clone();
+    let extent_marker_deleted = app.extent_marker_deleted.clone();
 
     if app.line_wrap {
         app.handle_search_scroll_if_needed(visible_height);
@@ -542,7 +543,11 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
             )
         } else if show_extent {
             (
-                extent_marker.as_str(),
+                super::extent_marker_text(
+                    extent_marker.as_str(),
+                    extent_marker_deleted.as_str(),
+                    view_line,
+                ),
                 super::extent_marker_style(
                     app,
                     view_line.kind,

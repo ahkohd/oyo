@@ -339,6 +339,29 @@ fn truncate_text(text: &str, max_width: usize) -> String {
     format!("{acc}…")
 }
 
+fn truncate_text_from_start(text: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    if text_width(text) <= max_width {
+        return text.to_string();
+    }
+    if max_width == 1 {
+        return "…".to_string();
+    }
+    let mut suffix = String::new();
+    let mut width = 0usize;
+    for ch in text.chars().rev() {
+        let ch_width = UnicodeWidthStr::width(ch.to_string().as_str());
+        if width + ch_width > max_width.saturating_sub(1) {
+            break;
+        }
+        suffix.insert(0, ch);
+        width += ch_width;
+    }
+    format!("…{suffix}")
+}
+
 fn no_changes_message(app: &App) -> &str {
     app.no_changes_message
         .as_deref()
@@ -385,8 +408,12 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     app.begin_scrollbar_frame();
     app.topbar_tab_hits.clear();
     app.topbar_plus_hit = None;
+    app.topbar_scroll_left_hit = None;
+    app.topbar_scroll_right_hit = None;
     app.preview_toggle_hit = None;
     app.topbar_sidebar_toggle_hit = None;
+    app.status_mode_hit = None;
+    app.topbar_area = None;
 
     if app.multi_diff.file_count() == 0 {
         app.clear_diff_selection();
@@ -468,7 +495,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
 }
 
-fn draw_preview_status_bar(frame: &mut Frame, app: &App, area: Rect) {
+fn draw_preview_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
     let mode = " PREVIEW ";
     let path = app.current_file_path();
     let state = if preview_can_render_markdown(app)
@@ -483,6 +510,7 @@ fn draw_preview_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     } else {
         "source"
     };
+    app.status_mode_hit = Some((area.x, area.y, text_width(mode) as u16, 1));
     let available_width = area.width as usize;
     let left_width = (available_width * 4) / 10;
     let center_width = (available_width * 2) / 10;
@@ -572,6 +600,7 @@ fn draw_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
         ViewMode::Preview => " PREVIEW ",
     };
 
+    app.status_mode_hit = Some((area.x, area.y, text_width(mode) as u16, 1));
     let file_path = app.current_file_path();
     let available_width = area.width as usize;
 
@@ -785,8 +814,11 @@ fn draw_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn draw_top_bar(frame: &mut Frame, app: &mut App, area: Rect) {
+    app.topbar_area = Some((area.x, area.y, area.width, area.height));
     let available_width = area.width as usize;
     app.preview_toggle_hit = None;
+    app.topbar_scroll_left_hit = None;
+    app.topbar_scroll_right_hit = None;
     app.topbar_sidebar_toggle_hit = None;
     let mut right_spans = if matches!(app.view_mode, ViewMode::Preview) {
         preview_topbar_spans(app)
@@ -944,7 +976,7 @@ fn topbar_sidebar_toggle_spans(app: &App) -> Vec<Span<'static>> {
         style = style.add_modifier(Modifier::BOLD);
     }
     let label = match app.file_panel_position {
-        FilePanelPosition::Left => format!(" {glyph}"),
+        FilePanelPosition::Left => format!(" {glyph}  "),
         FilePanelPosition::Right => format!("{glyph} "),
     };
     vec![Span::styled(label, style)]
@@ -960,7 +992,15 @@ fn preview_topbar_spans(app: &App) -> Vec<Span<'static>> {
         } else {
             " preview "
         };
-        return vec![Span::styled(label, Style::default().fg(app.theme.accent))];
+        let mut style = Style::default().fg(if app.preview_toggle_hover {
+            app.theme.accent
+        } else {
+            app.theme.text_muted
+        });
+        if app.preview_toggle_hover {
+            style = style.add_modifier(Modifier::BOLD);
+        }
+        return vec![Span::styled(label, style)];
     }
     vec![Span::styled(
         " preview ",
@@ -1008,16 +1048,39 @@ fn topbar_tab_spans(app: &mut App, area: Rect, max_width: usize) -> Vec<Span<'st
     app.ensure_topbar_tabs();
     app.topbar_tab_hits.clear();
     app.topbar_plus_hit = None;
+    app.topbar_scroll_left_hit = None;
+    app.topbar_scroll_right_hit = None;
 
     let closeable = app.topbar_tabs.len() > 1;
     let active = app.active_topbar_tab;
     let drag_target = app
         .topbar_drag_target
         .filter(|target| *target <= app.topbar_tabs.len());
+    app.topbar_tab_scroll = app
+        .topbar_tab_scroll
+        .min(app.topbar_tabs.len().saturating_sub(1));
+    let hidden_left = app.topbar_tab_scroll > 0;
+    let reserve_right_indicator = app.topbar_tabs.len().saturating_sub(app.topbar_tab_scroll) > 1;
+    let render_max = max_width.saturating_sub(if reserve_right_indicator { 5 } else { 0 });
     let mut spans = Vec::new();
     let mut col = 0usize;
-    for (tab_pos, tab) in app.topbar_tabs.clone().into_iter().enumerate() {
-        if drag_target == Some(tab_pos) && col < max_width {
+    if hidden_left && max_width >= 2 {
+        app.topbar_scroll_left_hit = Some((area.x, area.y, 2, 1));
+        spans.push(Span::styled(
+            "‹ ",
+            topbar_overflow_style(app, app.topbar_scroll_left_hover),
+        ));
+        col = 2;
+    }
+    let mut rendered_until = app.topbar_tab_scroll;
+    for (tab_pos, tab) in app
+        .topbar_tabs
+        .clone()
+        .into_iter()
+        .enumerate()
+        .skip(app.topbar_tab_scroll)
+    {
+        if drag_target == Some(tab_pos) && col < render_max {
             spans.push(Span::styled(
                 "│",
                 Style::default()
@@ -1026,7 +1089,7 @@ fn topbar_tab_spans(app: &mut App, area: Rect, max_width: usize) -> Vec<Span<'st
             ));
             col = col.saturating_add(1);
         }
-        let remaining = max_width.saturating_sub(col);
+        let remaining = render_max.saturating_sub(col);
         if remaining < 4 {
             break;
         }
@@ -1096,13 +1159,14 @@ fn topbar_tab_spans(app: &mut App, area: Rect, max_width: usize) -> Vec<Span<'st
         }
         spans.push(Span::styled(" ", style));
         col = col.saturating_add(width);
-        if col < max_width {
+        rendered_until = tab_pos.saturating_add(1);
+        if col < render_max {
             spans.push(Span::raw(" "));
             col = col.saturating_add(1);
         }
     }
 
-    if drag_target == Some(app.topbar_tabs.len()) && col < max_width {
+    if drag_target == Some(app.topbar_tabs.len()) && col < render_max {
         spans.push(Span::styled(
             "│",
             Style::default()
@@ -1112,9 +1176,23 @@ fn topbar_tab_spans(app: &mut App, area: Rect, max_width: usize) -> Vec<Span<'st
         col = col.saturating_add(1);
     }
 
-    if col + 1 < max_width {
-        spans.push(Span::raw(" "));
-        let plus_col = area.x.saturating_add(col.saturating_add(1) as u16);
+    let hidden_right = rendered_until < app.topbar_tabs.len();
+    if hidden_right && col < max_width {
+        let label = if col + 2 <= max_width { " ›" } else { "›" };
+        let width = text_width(label);
+        app.topbar_scroll_right_hit =
+            Some((area.x.saturating_add(col as u16), area.y, width as u16, 1));
+        spans.push(Span::styled(
+            label,
+            topbar_overflow_style(app, app.topbar_scroll_right_hover),
+        ));
+        col = col.saturating_add(width);
+    }
+
+    let plus_gap = if hidden_right { 2 } else { 1 };
+    if col + plus_gap < max_width {
+        spans.push(Span::raw(" ".repeat(plus_gap)));
+        let plus_col = area.x.saturating_add(col.saturating_add(plus_gap) as u16);
         app.topbar_plus_hit = Some((plus_col, area.y, 1, 1));
         let plus_style = Style::default()
             .fg(if app.topbar_plus_hover {
@@ -1126,6 +1204,18 @@ fn topbar_tab_spans(app: &mut App, area: Rect, max_width: usize) -> Vec<Span<'st
         spans.push(Span::styled("+", plus_style));
     }
     spans
+}
+
+fn topbar_overflow_style(app: &App, hovered: bool) -> Style {
+    let mut style = Style::default().fg(if hovered {
+        app.theme.accent
+    } else {
+        app.theme.text_muted
+    });
+    if hovered {
+        style = style.add_modifier(Modifier::BOLD);
+    }
+    style
 }
 
 fn topbar_tab_style(app: &App, active: bool, hovered: bool) -> Style {
@@ -1205,10 +1295,10 @@ fn brighten_close_color(color: Color) -> Color {
 fn blame_age_legend_spans(app: &App) -> Vec<Span<'static>> {
     let blocks = 10usize;
     let mut spans = Vec::with_capacity(blocks + 3);
-    spans.push(Span::styled(
-        "Older ",
-        Style::default().fg(app.theme.text_muted),
-    ));
+    let label_style = Style::default()
+        .fg(app.theme.border_subtle)
+        .add_modifier(Modifier::DIM);
+    spans.push(Span::styled("Older ", label_style));
 
     let base = app.theme.warning;
     let steps = blocks.saturating_sub(1).max(1) as f32;
@@ -1220,10 +1310,7 @@ fn blame_age_legend_spans(app: &App) -> Vec<Span<'static>> {
         ));
     }
 
-    spans.push(Span::styled(
-        " Newer",
-        Style::default().fg(app.theme.text_muted),
-    ));
+    spans.push(Span::styled(" Newer", label_style));
     spans.push(Span::raw(" "));
     spans
 }
@@ -1296,7 +1383,12 @@ fn draw_content(frame: &mut Frame, app: &mut App, area: Rect, show_topbar: bool)
         // Single file mode, file panel hidden, or viewport too narrow
         app.file_list_area = None;
         app.file_list_rows.clear();
+        app.file_list_hover = None;
+        app.file_panel_hover = false;
         app.file_filter_area = None;
+        app.file_filter_clear_hit = None;
+        app.file_filter_hover = false;
+        app.file_filter_clear_hover = false;
         app.file_panel_rect = None;
         if show_topbar {
             let diff_chunks = Layout::default()
@@ -1368,11 +1460,11 @@ fn render_file_panel_scrollbar(
         thumb_top,
         thumb_height,
     });
-    let symbol = if app.file_list_focused || app.file_filter_active {
-        "▐"
-    } else {
-        "▕"
-    };
+    let focused = app.file_list_focused || app.file_filter_active;
+    if !focused && !app.file_panel_hover {
+        return;
+    }
+    let symbol = if focused { "▐" } else { "▕" };
     let style = Style::default().fg(app.theme.text_muted);
     let start = track.y.saturating_add(thumb_top);
     let end = start
@@ -1424,8 +1516,7 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
     let content_area = file_panel_content_area(app, area);
     draw_file_panel_divider(frame, app, area, panel_bg);
 
-    let show_filter =
-        app.file_list_focused || app.file_filter_active || !app.file_filter.is_empty();
+    let show_filter = true;
     let panel_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints(if show_filter {
@@ -1511,11 +1602,11 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
         )
     };
 
+    let root_style = Style::default()
+        .fg(app.theme.border_subtle)
+        .add_modifier(Modifier::DIM);
     let header_lines = vec![
-        Line::from(vec![
-            Span::raw(" "),
-            Span::styled(header_text, Style::default().fg(app.theme.text_muted)),
-        ]),
+        Line::from(vec![Span::raw(" "), Span::styled(header_text, root_style)]),
         Line::raw(""),
         Line::from(vec![
             Span::raw(" "),
@@ -1556,33 +1647,39 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(header, header_area);
 
     let filtered_indices = app.filtered_file_indices();
+    let total_file_rows = app.file_list_total_rows(&filtered_indices);
     let visible_file_rows = list_area.height.saturating_sub(2) as usize;
     let show_file_scrollbar = app.scrollbar_visible
-        && filtered_indices.len() > visible_file_rows
+        && total_file_rows > visible_file_rows
         && visible_file_rows > 0
         && list_area.width > 1;
     let (list_content_area, file_scrollbar_area) =
         reserve_file_scrollbar_lane(list_area, show_file_scrollbar);
     let mut items = Vec::new();
     let mut row_map: Vec<Option<usize>> = Vec::new();
-    let mut remaining = visible_file_rows;
+    let mut rendered_rows = 0usize;
+    let mut row_index = 0usize;
+    let row_offset = app
+        .file_list_scroll
+        .min(total_file_rows.saturating_sub(visible_file_rows));
+    app.file_list_scroll = row_offset;
     let mut current_group: Option<String> = None;
 
-    let mut idx = app.file_list_scroll;
-    while idx < filtered_indices.len() && remaining > 0 {
+    let mut idx = 0usize;
+    while idx < filtered_indices.len() && rendered_rows < visible_file_rows {
         let file_idx = filtered_indices[idx];
         let file = &files[file_idx];
-        let group = match file.display_name.rsplit_once('/') {
-            Some((dir, _)) => dir.to_string(),
-            None => "Root Path".to_string(),
-        };
+        let group = app.file_list_group(file_idx);
 
         if current_group.as_deref() != Some(&group) {
-            if current_group.is_some() && remaining > 0 {
-                items.push(ListItem::new(Line::raw("")));
-                row_map.push(None);
-                remaining -= 1;
-                if remaining == 0 {
+            if current_group.is_some() {
+                if row_index >= row_offset {
+                    items.push(ListItem::new(Line::raw("")));
+                    row_map.push(None);
+                    rendered_rows += 1;
+                }
+                row_index += 1;
+                if rendered_rows == visible_file_rows {
                     break;
                 }
             }
@@ -1597,11 +1694,14 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
                         .add_modifier(Modifier::DIM),
                 ),
             ]);
-            items.push(ListItem::new(header_line));
-            row_map.push(None);
+            if row_index >= row_offset {
+                items.push(ListItem::new(header_line));
+                row_map.push(None);
+                rendered_rows += 1;
+            }
+            row_index += 1;
             current_group = Some(group);
-            remaining -= 1;
-            if remaining == 0 {
+            if rendered_rows == visible_file_rows {
                 break;
             }
         }
@@ -1614,6 +1714,7 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
         };
 
         let is_selected = file_idx == app.multi_diff.selected_index;
+        let is_hovered = app.file_list_hover == Some(file_idx);
         let selected_bg = if is_selected {
             if app.file_list_focused {
                 app.theme.background_element.or(app.theme.background_panel)
@@ -1671,15 +1772,19 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
             icon_style = icon_style.bg(bg);
         }
 
-        let mut name_style = Style::default().fg(app.theme.text);
-        if is_selected {
+        let mut name_style = Style::default().fg(if is_selected || is_hovered {
+            app.theme.accent
+        } else {
+            app.theme.text
+        });
+        if is_selected || is_hovered {
             name_style = name_style.add_modifier(Modifier::BOLD);
         }
         if let Some(bg) = selected_bg {
             name_style = name_style.bg(bg);
         }
 
-        let marker_style = if is_selected {
+        let marker_style = if is_selected || is_hovered {
             Style::default()
                 .fg(app.theme.accent)
                 .add_modifier(Modifier::BOLD)
@@ -1730,13 +1835,16 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
 
         let line = Line::from(line_spans);
 
-        items.push(ListItem::new(line));
-        row_map.push(Some(file_idx));
-        remaining -= 1;
+        if row_index >= row_offset {
+            items.push(ListItem::new(line));
+            row_map.push(Some(file_idx));
+            rendered_rows += 1;
+        }
+        row_index += 1;
         idx += 1;
     }
 
-    let mut block = Block::default().padding(ratatui::widgets::Padding::new(1, 1, 1, 0));
+    let mut block = Block::default().padding(ratatui::widgets::Padding::new(1, 0, 1, 0));
     if let Some(bg) = panel_bg {
         block = block.style(Style::default().bg(bg));
     }
@@ -1756,7 +1864,7 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
         frame,
         app,
         file_scrollbar_area,
-        filtered_indices.len(),
+        total_file_rows,
         visible_file_rows,
     );
 
@@ -1787,40 +1895,102 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
             .background_element
             .or(app.theme.background_panel)
             .or(app.theme.background);
-        let filter_text = if app.file_filter_active {
-            if has_query {
-                format!("> {}", app.file_filter)
-            } else {
-                "> Filter file name".to_string()
-            }
-        } else if has_query {
-            app.file_filter.clone()
-        } else {
-            format!(
-                "{} Filter",
-                app.keybindings
-                    .normal_keys(NormalAction::OpenSearchOrFileFilter)
-            )
-        };
-        let filter_style = if app.file_filter_active {
-            Style::default().fg(app.theme.text)
-        } else {
-            Style::default().fg(app.theme.text_muted)
-        };
-        let mut filter = Paragraph::new(Line::from(vec![
-            Span::raw(" "),
-            Span::styled(filter_text, filter_style),
-        ]))
-        .alignment(Alignment::Left);
-        let mut filter_block = Block::default().padding(ratatui::widgets::Padding::new(1, 1, 1, 0));
+        let mut filter = Paragraph::new(file_filter_line(app, has_query, filter_area.width))
+            .alignment(Alignment::Left);
+        let mut filter_block = Block::default().padding(ratatui::widgets::Padding::new(1, 0, 1, 0));
         if let Some(bg) = filter_bg {
             filter_block = filter_block.style(Style::default().bg(bg));
         }
         filter = filter.block(filter_block);
         frame.render_widget(filter, filter_area);
+        if has_query && filter_area.width > 2 {
+            let clear_x = filter_area
+                .x
+                .saturating_add(filter_area.width.saturating_sub(2));
+            let clear_y = filter_area.y.saturating_add(1);
+            app.file_filter_clear_hit = Some((clear_x, clear_y, 1, 1));
+            let clear_style = if app.file_filter_clear_hover {
+                Style::default()
+                    .fg(app.theme.accent)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(app.theme.text_muted)
+            };
+            if let Some(cell) = frame.buffer_mut().cell_mut((clear_x, clear_y)) {
+                cell.set_symbol("×").set_style(clear_style);
+            }
+        } else {
+            app.file_filter_clear_hit = None;
+            app.file_filter_clear_hover = false;
+        }
     } else {
         app.file_filter_area = None;
+        app.file_filter_clear_hit = None;
+        app.file_filter_hover = false;
+        app.file_filter_clear_hover = false;
     }
+}
+
+fn file_filter_line(app: &App, has_query: bool, width: u16) -> Line<'static> {
+    if app.file_filter_active {
+        let prompt_style = Style::default()
+            .fg(app.theme.primary)
+            .add_modifier(Modifier::BOLD);
+        let query_width = if has_query {
+            width.saturating_sub(7)
+        } else {
+            width.saturating_sub(5)
+        };
+        let query = truncate_text_from_start(&app.file_filter, query_width as usize);
+        return Line::from(vec![
+            Span::raw(" "),
+            Span::styled("❯ ", prompt_style),
+            Span::styled(query, Style::default().fg(app.theme.text)),
+            Span::styled(
+                if app.file_filter_cursor_visible {
+                    "│"
+                } else {
+                    " "
+                },
+                prompt_style,
+            ),
+        ]);
+    }
+
+    if has_query {
+        let prompt_style = Style::default()
+            .fg(app.theme.primary)
+            .add_modifier(Modifier::BOLD);
+        let query_style = if app.file_filter_hover {
+            Style::default()
+                .fg(app.theme.accent)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(app.theme.text)
+        };
+        return Line::from(vec![
+            Span::raw(" "),
+            Span::styled("❯ ", prompt_style),
+            Span::styled(
+                truncate_text_from_start(&app.file_filter, width.saturating_sub(6) as usize),
+                query_style,
+            ),
+        ]);
+    }
+
+    let style = if app.file_filter_hover {
+        Style::default()
+            .fg(app.theme.accent)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(app.theme.text_muted)
+    };
+    let text = format!(
+        "{} Filter",
+        app.keybindings
+            .normal_keys(NormalAction::OpenSearchOrFileFilter)
+    );
+    Line::from(vec![Span::raw(" "), Span::styled(text, style)])
 }
 
 #[derive(Clone, Copy)]
@@ -3979,7 +4149,7 @@ fn help_markdown(app: &App) -> String {
     append_embedded_doc(
         &mut out,
         "Configuration reference",
-        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../CONFIG.md")),
+        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/CONFIG.md")),
     );
     append_embedded_doc(
         &mut out,
@@ -5475,6 +5645,7 @@ mod tests {
     use crate::structured_preview::StructuredPreviewKind;
     use crate::syntax::SyntaxSide;
     use oyo_core::MultiFileDiff;
+    use ratatui::layout::Rect;
     use ratatui::style::{Modifier, Style};
     use ratatui::text::Line;
     use std::collections::HashMap;
@@ -5543,6 +5714,141 @@ mod tests {
     }
 
     #[test]
+    fn topbar_tabs_show_overflow_indicators() {
+        let diff = MultiFileDiff::from_file_pairs(
+            (0..6)
+                .map(|idx| {
+                    (
+                        std::path::PathBuf::from(format!("file-{idx}")),
+                        "old\n".to_string(),
+                        "new\n".to_string(),
+                    )
+                })
+                .collect(),
+        );
+        let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+        for _ in 0..4 {
+            app.new_topbar_tab();
+        }
+
+        let text = super::topbar_tab_spans(&mut app, Rect::new(0, 0, 18, 1), 18)
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(text.contains("›  +"));
+        assert!(app.topbar_scroll_right_hit.is_some());
+        assert!(app.topbar_plus_hit.is_some());
+
+        app.topbar_tab_scroll = 1;
+        let text = super::topbar_tab_spans(&mut app, Rect::new(0, 0, 18, 1), 18)
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(text.starts_with("‹ "));
+        assert!(app.topbar_scroll_left_hit.is_some());
+    }
+
+    #[test]
+    fn file_filter_active_text_uses_prompt_and_ibeam() {
+        let multi = MultiFileDiff::from_file_pair(
+            std::path::PathBuf::from("a.txt"),
+            std::path::PathBuf::from("a.txt"),
+            "old".to_string(),
+            "new".to_string(),
+        );
+        let mut app = App::new(multi, ViewMode::UnifiedPane, 50, false, None);
+        app.file_filter_active = true;
+        app.file_filter = "abc".to_string();
+
+        let line = super::file_filter_line(&app, true, 20);
+        let text = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert_eq!(text, " ❯ abc│");
+        assert_eq!(line.spans[1].style.fg, Some(app.theme.primary));
+        assert_eq!(line.spans[3].style.fg, Some(app.theme.primary));
+    }
+
+    #[test]
+    fn file_filter_active_keeps_tail_when_truncated() {
+        let multi = MultiFileDiff::from_file_pair(
+            std::path::PathBuf::from("a.txt"),
+            std::path::PathBuf::from("a.txt"),
+            "old".to_string(),
+            "new".to_string(),
+        );
+        let mut app = App::new(multi, ViewMode::UnifiedPane, 50, false, None);
+        app.file_filter_active = true;
+        app.file_filter = "abcdefghijkl".to_string();
+
+        let text = super::file_filter_line(&app, true, 12)
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert_eq!(text, " ❯ …ijkl│");
+    }
+
+    #[test]
+    fn file_filter_empty_active_has_no_placeholder() {
+        let multi = MultiFileDiff::from_file_pair(
+            std::path::PathBuf::from("a.txt"),
+            std::path::PathBuf::from("a.txt"),
+            "old".to_string(),
+            "new".to_string(),
+        );
+        let mut app = App::new(multi, ViewMode::UnifiedPane, 50, false, None);
+        app.file_filter_active = true;
+
+        let text = super::file_filter_line(&app, false, 20)
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert_eq!(text, " ❯ │");
+    }
+
+    #[test]
+    fn file_filter_blurred_query_keeps_prompt() {
+        let multi = MultiFileDiff::from_file_pair(
+            std::path::PathBuf::from("a.txt"),
+            std::path::PathBuf::from("a.txt"),
+            "old".to_string(),
+            "new".to_string(),
+        );
+        let mut app = App::new(multi, ViewMode::UnifiedPane, 50, false, None);
+        app.file_filter = "abc".to_string();
+
+        let line = super::file_filter_line(&app, true, 20);
+        let text = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert_eq!(text, " ❯ abc");
+        assert_eq!(line.spans[1].style.fg, Some(app.theme.primary));
+    }
+
+    #[test]
+    fn file_filter_hint_uses_hover_style() {
+        let multi = MultiFileDiff::from_file_pair(
+            std::path::PathBuf::from("a.txt"),
+            std::path::PathBuf::from("a.txt"),
+            "old".to_string(),
+            "new".to_string(),
+        );
+        let mut app = App::new(multi, ViewMode::UnifiedPane, 50, false, None);
+        app.file_filter_hover = true;
+
+        let line = super::file_filter_line(&app, false, 20);
+        assert_eq!(line.spans[1].content.as_ref(), "/ Filter");
+        assert_eq!(line.spans[1].style.fg, Some(app.theme.accent));
+        assert!(line.spans[1].style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
     fn search_prompt_is_available_for_preview_status_bar() {
         let multi = MultiFileDiff::from_file_pair(
             std::path::PathBuf::from("README.md"),
@@ -5558,6 +5864,24 @@ mod tests {
             .map(|span| span.content.as_ref())
             .collect();
         assert_eq!(text, "/ Search");
+    }
+
+    #[test]
+    fn blame_age_legend_labels_use_subtle_style() {
+        let multi = MultiFileDiff::from_file_pair(
+            std::path::PathBuf::from("old.txt"),
+            std::path::PathBuf::from("new.txt"),
+            "old".to_string(),
+            "new".to_string(),
+        );
+        let app = App::new(multi, ViewMode::Blame, 50, false, None);
+        let spans = super::blame_age_legend_spans(&app);
+        let older = spans.first().unwrap();
+        let newer = spans.iter().find(|span| span.content == " Newer").unwrap();
+        assert_eq!(older.style.fg, Some(app.theme.border_subtle));
+        assert_eq!(newer.style.fg, Some(app.theme.border_subtle));
+        assert!(older.style.add_modifier.contains(Modifier::DIM));
+        assert!(newer.style.add_modifier.contains(Modifier::DIM));
     }
 
     #[test]

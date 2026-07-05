@@ -50,6 +50,7 @@ You can also press `s` in the TUI, or set `stepping = true` in config.
 - hunk navigation
 - unified, split, evolution, blame and preview views
 - tabs for multiple views
+- mouse support
 - Markdown, JSON, YAML, TOML and CSV previews
 - inline review comments
 - visual text selection with copy to clipboard
@@ -263,7 +264,7 @@ Common defaults:
 | `?` | Show help |
 | `q`, `esc` | Quit |
 
-Full keybinding reference: [keybindings](./docs/KEYBINDINGS.md).
+Full keybinding and mouse reference: [keybindings](./docs/KEYBINDINGS.md).
 
 Selection works with mouse drag or `v`, `V` and `ctrl-v`. Press `y` to copy and `esc` to clear.
 
@@ -294,9 +295,9 @@ line_wrap = false
 fold_context = "off"
 
 [ui.diff]
-fg = "theme"
-bg = false
-highlight = "text"
+fg = "syntax"
+bg = true
+highlight = "word"
 
 [ui.syntax]
 mode = "on"
@@ -315,7 +316,7 @@ Config is loaded from the first matching file:
 
 Use these docs for full configuration:
 
-- [config reference](./CONFIG.md)
+- [config reference](./docs/CONFIG.md)
 - [theme configuration](./docs/THEME.md)
 - [keybinding actions](./docs/KEYBINDINGS.md)
 - [review hooks](./docs/REVIEW_HOOKS.md)
