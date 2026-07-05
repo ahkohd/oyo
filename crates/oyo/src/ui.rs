@@ -1851,7 +1851,7 @@ fn render_preview(frame: &mut Frame, app: &mut App, area: Rect) {
     app.clear_preview_link_boxes();
     // Number of leading lines pinned to the top (CSV header and separator).
     let mut sticky_rows = 0usize;
-    let (lines, links) = if binary {
+    let (mut lines, links) = if binary {
         (
             vec![
                 Line::from(Span::styled(
@@ -1908,11 +1908,12 @@ fn render_preview(frame: &mut Frame, app: &mut App, area: Rect) {
             Vec::new(),
         )
     };
+    app.set_preview_search_lines(preview_search_text_lines(&lines));
+    highlight_preview_search_lines(app, &mut lines);
     let visible_lines = content_area.height as usize;
 
     // Sticky-header path: pin the first `sticky_rows` lines and scroll the body.
     if sticky_rows > 0 && lines.len() > sticky_rows {
-        let mut lines = lines;
         let body = lines.split_off(sticky_rows);
         let header_lines = lines;
         let body_total = body.len();
@@ -1987,6 +1988,25 @@ fn render_preview(frame: &mut Frame, app: &mut App, area: Rect) {
         visible_lines,
         app.scroll_offset,
     );
+}
+
+fn preview_search_text_lines(lines: &[Line<'static>]) -> Vec<String> {
+    lines.iter().map(line_text).collect()
+}
+
+fn highlight_preview_search_lines(app: &App, lines: &mut [Line<'static>]) {
+    for (idx, line) in lines.iter_mut().enumerate() {
+        let text = line_text(line);
+        let spans = std::mem::take(&mut line.spans);
+        line.spans = app.highlight_search_spans(spans, &text, app.search_target() == Some(idx));
+    }
+}
+
+fn line_text(line: &Line<'static>) -> String {
+    line.spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect()
 }
 
 fn preview_document(app: &App) -> (String, String, Option<SyntaxSide>, bool, Option<PathBuf>) {
@@ -5538,6 +5558,24 @@ mod tests {
             .map(|span| span.content.as_ref())
             .collect();
         assert_eq!(text, "/ Search");
+    }
+
+    #[test]
+    fn search_next_uses_rendered_preview_lines() {
+        let multi = MultiFileDiff::from_file_pair(
+            std::path::PathBuf::from("README.md"),
+            std::path::PathBuf::from("README.md"),
+            "old".to_string(),
+            "new".to_string(),
+        );
+        let mut app = App::new(multi, ViewMode::Preview, 50, false, None);
+        app.set_preview_search_lines(vec!["alpha".to_string(), "target".to_string()]);
+        app.start_search();
+        for ch in "target".chars() {
+            app.push_search_char(ch);
+        }
+        app.search_next();
+        assert_eq!(app.search_target(), Some(1));
     }
 
     #[test]

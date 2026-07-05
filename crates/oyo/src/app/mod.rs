@@ -558,6 +558,8 @@ pub struct App {
     search_target: Option<usize>,
     /// Cached search regex (case-insensitive)
     search_regex: Option<Regex>,
+    /// Current preview lines, updated by the renderer for search.
+    preview_search_lines: Vec<String>,
     /// Goto query (":" command)
     goto_query: String,
     /// True when goto input is active
@@ -874,6 +876,7 @@ impl App {
             needs_scroll_to_search: false,
             search_target: None,
             search_regex: None,
+            preview_search_lines: Vec::new(),
             goto_query: String::new(),
             goto_active: false,
             snap_frame: None,

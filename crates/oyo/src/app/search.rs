@@ -118,6 +118,10 @@ impl App {
         self.search_target
     }
 
+    pub(crate) fn set_preview_search_lines(&mut self, lines: Vec<String>) {
+        self.preview_search_lines = lines;
+    }
+
     pub fn search_next(&mut self) {
         let matches = self.collect_search_matches();
         if matches.is_empty() {
@@ -296,7 +300,13 @@ impl App {
                     }
                 }
             }
-            ViewMode::Preview => {}
+            ViewMode::Preview => {
+                for (display_idx, text) in self.preview_search_lines.iter().enumerate() {
+                    if line_has_query(text, &regex) {
+                        matches.push(display_idx);
+                    }
+                }
+            }
         }
 
         matches.sort_unstable();
