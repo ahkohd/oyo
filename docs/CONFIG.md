@@ -10,7 +10,7 @@ You can also pass extra config files. Oyo loads your user config first, then mer
 oy --config /tmp/oyo-plugin.toml
 ```
 
-Extra config files append `review.hooks` and `review.actions`. They merge tables, such as `keybindings.normal`.
+Extra config files append `review.hooks`, `review.actions` and `selection.actions`. They merge tables, such as `keybindings.normal`.
 
 ## Config file locations
 
@@ -394,6 +394,30 @@ Review events are:
 
 See [review hooks](./REVIEW_HOOKS.md).
 
+## Selection actions
+
+Use `[[selection.actions]]` to run commands from the selection toolbar.
+
+```toml
+[[selection.actions]]
+id = "ask-agent"
+label = "Ask agent"
+key = "a"
+message = "Sent to agent"
+failure_message = "Could not send to agent"
+command = "my-agent"
+args = ["review-selection"]
+stdin = "json"
+blocking = true
+timeout_ms = 30000
+```
+
+Oyo sends JSON on standard input by default. The payload includes the selected text, file, repo root, line ranges, view mode, side, scroll offset and selected screen rows.
+
+`stdin` can be `json` or `none`.
+
+If you omit `message` or `failure_message`, Oyo uses `<label> started` and `<label> failed`.
+
 ## Keybindings
 
 Use `[keybindings.<mode>]` tables to override keys.
@@ -417,6 +441,7 @@ save = ["ctrl-o"]
 [keybindings.selection]
 copy = ["y"]
 cancel = ["esc"]
+show_actions = ["enter"]
 
 [keybindings.search]
 cancel = ["esc"]

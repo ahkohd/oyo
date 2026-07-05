@@ -2,7 +2,7 @@ use ratatui::style::Color;
 use ratatui_comfy_toaster::{ToastBorderMode, ToastBuilder, ToastType};
 use std::time::Duration;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ToastEvent {
     CopiedSelection,
     CopiedLine,
@@ -24,47 +24,57 @@ pub(crate) enum ToastEvent {
     CommentDeleted,
     CommentsCleared,
     ReviewSubmitted,
+    SelectionActionStarted(String),
+    SelectionActionFailed(String),
 }
 
 impl ToastEvent {
-    fn message(self) -> &'static str {
+    fn message(&self) -> String {
         match self {
-            Self::CopiedSelection => "Selection copied",
-            Self::CopiedLine => "Line copied",
-            Self::CopiedHunk => "Hunk copied",
-            Self::CopiedPatch => "Patch copied",
-            Self::CopiedToast => "Toast copied",
-            Self::CopyFailed => "Could not copy to clipboard",
-            Self::LineWrap(true) => "Line wrap on",
-            Self::LineWrap(false) => "Line wrap off",
-            Self::Syntax(true) => "Syntax highlighting on",
-            Self::Syntax(false) => "Syntax highlighting off",
-            Self::Zen(true) => "Zen mode on",
-            Self::Zen(false) => "Zen mode off",
-            Self::Sidebar(true) => "Sidebar shown",
-            Self::Sidebar(false) => "Sidebar hidden",
-            Self::Animation(true) => "Animation on",
-            Self::Animation(false) => "Animation off",
-            Self::Stepping(true) => "Step-through mode on",
-            Self::Stepping(false) => "Scroll-only mode on",
-            Self::Strikethrough(true) => "Deleted text strikethrough on",
-            Self::Strikethrough(false) => "Deleted text strikethrough off",
-            Self::FoldContext(true) => "Context folding on",
-            Self::FoldContext(false) => "Context folding off",
-            Self::EvoSyntaxFull(true) => "Full evolution syntax on",
-            Self::EvoSyntaxFull(false) => "Context evolution syntax on",
-            Self::PreviewRendered(true) => "Preview mode",
-            Self::PreviewRendered(false) => "Source mode",
-            Self::CommentSaved => "Comment saved",
-            Self::CommentDeleted => "Comment deleted",
-            Self::CommentsCleared => "Comments cleared",
-            Self::ReviewSubmitted => "Review ready",
+            Self::CopiedSelection => "Selection copied".to_string(),
+            Self::CopiedLine => "Line copied".to_string(),
+            Self::CopiedHunk => "Hunk copied".to_string(),
+            Self::CopiedPatch => "Patch copied".to_string(),
+            Self::CopiedToast => "Toast copied".to_string(),
+            Self::CopyFailed => "Could not copy to clipboard".to_string(),
+            Self::LineWrap(true) => "Line wrap on".to_string(),
+            Self::LineWrap(false) => "Line wrap off".to_string(),
+            Self::Syntax(true) => "Syntax highlighting on".to_string(),
+            Self::Syntax(false) => "Syntax highlighting off".to_string(),
+            Self::Zen(true) => "Zen mode on".to_string(),
+            Self::Zen(false) => "Zen mode off".to_string(),
+            Self::Sidebar(true) => "Sidebar shown".to_string(),
+            Self::Sidebar(false) => "Sidebar hidden".to_string(),
+            Self::Animation(true) => "Animation on".to_string(),
+            Self::Animation(false) => "Animation off".to_string(),
+            Self::Stepping(true) => "Step-through mode on".to_string(),
+            Self::Stepping(false) => "Scroll-only mode on".to_string(),
+            Self::Strikethrough(true) => "Deleted text strikethrough on".to_string(),
+            Self::Strikethrough(false) => "Deleted text strikethrough off".to_string(),
+            Self::FoldContext(true) => "Context folding on".to_string(),
+            Self::FoldContext(false) => "Context folding off".to_string(),
+            Self::EvoSyntaxFull(true) => "Full evolution syntax on".to_string(),
+            Self::EvoSyntaxFull(false) => "Context evolution syntax on".to_string(),
+            Self::PreviewRendered(true) => "Preview mode".to_string(),
+            Self::PreviewRendered(false) => "Source mode".to_string(),
+            Self::CommentSaved => "Comment saved".to_string(),
+            Self::CommentDeleted => "Comment deleted".to_string(),
+            Self::CommentsCleared => "Comments cleared".to_string(),
+            Self::ReviewSubmitted => "Review ready".to_string(),
+            Self::SelectionActionStarted(message) if message.trim().is_empty() => {
+                "Selection action started".to_string()
+            }
+            Self::SelectionActionStarted(message) => message.clone(),
+            Self::SelectionActionFailed(message) if message.trim().is_empty() => {
+                "Selection action failed".to_string()
+            }
+            Self::SelectionActionFailed(message) => message.clone(),
         }
     }
 
-    fn toast_type(self) -> ToastType {
+    fn toast_type(&self) -> ToastType {
         match self {
-            Self::CopyFailed => ToastType::Error,
+            Self::CopyFailed | Self::SelectionActionFailed(_) => ToastType::Error,
             Self::CommentDeleted | Self::CommentsCleared => ToastType::Warning,
             Self::CopiedSelection
             | Self::CopiedLine
@@ -72,7 +82,8 @@ impl ToastEvent {
             | Self::CopiedPatch
             | Self::CopiedToast
             | Self::CommentSaved
-            | Self::ReviewSubmitted => ToastType::Success,
+            | Self::ReviewSubmitted
+            | Self::SelectionActionStarted(_) => ToastType::Success,
             _ => ToastType::Info,
         }
     }

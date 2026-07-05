@@ -1,8 +1,9 @@
 //! UI rendering for the TUI
 
 use crate::app::{
-    diff_scrollbar_thumb, App, FilePanelScrollbarState, TopbarTabContent, TopbarTabHit, ViewMode,
-    DIFF_VIEW_MIN_WIDTH, FILE_PANEL_MIN_WIDTH,
+    diff_scrollbar_thumb, App, FilePanelScrollbarState, SelectionToolbarAction,
+    SelectionToolbarHit, TopbarTabContent, TopbarTabHit, ViewMode, DIFF_VIEW_MIN_WIDTH,
+    FILE_PANEL_MIN_WIDTH,
 };
 use crate::color;
 use crate::config::FilePanelPosition;
@@ -458,6 +459,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     capture_diff_selection_cells(frame, app);
     draw_diff_selection(frame, app);
+    draw_selection_toolbar(frame, app);
 
     // Draw help popover if active
     if app.show_help {
@@ -4497,6 +4499,301 @@ fn draw_diff_selection(frame: &mut Frame, app: &App) {
             }
         }
     }
+}
+
+fn draw_selection_toolbar(frame: &mut Frame, app: &mut App) {
+    if !app.selection_toolbar_visible() {
+        app.set_selection_toolbar_hits(Vec::new());
+        return;
+    }
+    let ranges = app.diff_selection_ranges();
+    if ranges.is_empty() {
+        app.set_selection_toolbar_hits(Vec::new());
+        return;
+    }
+    let Some((view_x, view_y, view_width, view_height)) = app.diff_view_area else {
+        app.set_selection_toolbar_hits(Vec::new());
+        return;
+    };
+    if view_width < 12 || view_height == 0 {
+        app.set_selection_toolbar_hits(Vec::new());
+        return;
+    }
+
+    // Actions as (key, label): the key shows in the accent color, the label in
+    // regular text.
+    let mut items: Vec<(String, String, SelectionToolbarAction)> = vec![(
+        app.keybindings.selection_keys(SelectionAction::Copy),
+        "copy".to_string(),
+        SelectionToolbarAction::Copy,
+    )];
+    if app.review_mode() {
+        items.push((
+            "m".to_string(),
+            "comment".to_string(),
+            SelectionToolbarAction::Comment,
+        ));
+    }
+    items.push((
+        "esc".to_string(),
+        "cancel".to_string(),
+        SelectionToolbarAction::Cancel,
+    ));
+    for (idx, action) in app.selection_actions.iter().enumerate() {
+        let key = action.key.as_deref().unwrap_or_default().trim().to_string();
+        let label = if action.label.trim().is_empty() {
+            action.id.clone()
+        } else {
+            action.label.clone()
+        };
+        if label.is_empty() {
+            continue;
+        }
+        items.push((key, label, SelectionToolbarAction::Custom(idx)));
+    }
+
+    // Item display width: `key label`, or just `label` when there's no key.
+    let item_width = |key: &str, label: &str| {
+        if key.is_empty() {
+            label.chars().count()
+        } else {
+            key.chars().count() + 1 + label.chars().count()
+        }
+    };
+    // Fit items into the view width (2 border + 2 inner padding + optional arrows).
+    const CHROME: usize = 4; // border (2) + inner padding (2)
+    const ARROW: usize = 2;
+    let max_scroll = items.len().saturating_sub(1);
+    app.selection_toolbar_scroll = app.selection_toolbar_scroll.min(max_scroll);
+    let scroll = app.selection_toolbar_scroll;
+    let fit_width = app
+        .selection_toolbar_width
+        .unwrap_or(view_width)
+        .min(view_width) as usize;
+    let fit_items = |reserve_left: bool, reserve_right: bool| {
+        let reserve = usize::from(reserve_left) * ARROW + usize::from(reserve_right) * ARROW;
+        let limit = fit_width.saturating_sub(CHROME + reserve);
+        let mut fitted: Vec<(String, String, SelectionToolbarAction, usize)> = Vec::new();
+        let mut inner = 0usize;
+        for (key, label, action) in items.iter().skip(scroll) {
+            let iw = item_width(key, label);
+            let gap = if fitted.is_empty() { 0 } else { 2 };
+            if inner + gap + iw > limit {
+                break;
+            }
+            inner += gap + iw;
+            fitted.push((key.clone(), label.clone(), *action, iw));
+        }
+        (fitted, inner + reserve)
+    };
+    let hidden_left = scroll > 0;
+    let (mut fitted, mut inner) = fit_items(hidden_left, false);
+    let mut hidden_right = scroll + fitted.len() < items.len();
+    if hidden_right {
+        (fitted, inner) = fit_items(hidden_left, true);
+        hidden_right = scroll + fitted.len() < items.len();
+    }
+    if fitted.is_empty() {
+        app.set_selection_toolbar_hits(Vec::new());
+        return;
+    }
+
+    // Block-quote preview of the selected text, shown above the actions. Up to
+    // four lines, then a fifth row with an ellipsis when more was selected.
+    const MAX_QUOTE_LINES: usize = 4;
+    let preview_raw = app.selected_diff_text();
+    let preview_lines: Vec<String> = preview_raw
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect();
+    let has_quote = !preview_lines.is_empty();
+    let has_more = preview_lines.len() > MAX_QUOTE_LINES;
+    let quote_rows = preview_lines.len().min(MAX_QUOTE_LINES) + usize::from(has_more);
+
+    // The float may grow up to ~50% of the viewport to preview the selection.
+    let max_content = ((view_width as usize) / 2)
+        .saturating_sub(CHROME)
+        .max(inner);
+    let quote_want = if has_quote {
+        2 + preview_lines
+            .iter()
+            .take(MAX_QUOTE_LINES)
+            .map(|l| l.chars().count())
+            .max()
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    let content_inner = inner.max(quote_want).min(max_content);
+    let measured_w = (content_inner + CHROME) as u16;
+    let popup_w = app
+        .selection_toolbar_width
+        .unwrap_or(measured_w)
+        .min(view_width)
+        .max((CHROME + 1) as u16);
+    app.selection_toolbar_width = Some(popup_w);
+    let height: u16 = if has_quote {
+        (quote_rows + 3) as u16
+    } else {
+        3
+    };
+
+    let first_row = ranges.iter().map(|(r, _, _)| *r).min().unwrap_or(view_y);
+    let last_row = ranges.iter().map(|(r, _, _)| *r).max().unwrap_or(view_y);
+    let first_col = ranges
+        .iter()
+        .filter(|(r, _, _)| *r == first_row)
+        .map(|(_, s, _)| *s)
+        .min()
+        .unwrap_or(view_x);
+    let view_bottom = view_y.saturating_add(view_height);
+    // Float above the selection when there's room, otherwise below it.
+    let py = if first_row >= view_y.saturating_add(height) {
+        first_row - height
+    } else {
+        last_row
+            .saturating_add(1)
+            .min(view_bottom.saturating_sub(height))
+    };
+    let px = first_col
+        .saturating_sub(1)
+        .min(view_x.saturating_add(view_width).saturating_sub(popup_w))
+        .max(view_x);
+
+    // Match the app background (transparent when the theme has none), like the
+    // toast. `Clear` erases the content behind the float, so it reads cleanly.
+    let float_bg = app.theme.background.unwrap_or(Color::Reset);
+
+    let popup_area = Rect::new(px, py, popup_w, height);
+    frame.render_widget(Clear, popup_area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(Style::default().fg(app.theme.border_subtle))
+        .style(Style::default().bg(float_bg));
+    let content_area = block.inner(popup_area);
+    frame.render_widget(block, popup_area);
+
+    let hovered = app.selection_toolbar_hover;
+    let key_style = Style::default()
+        .fg(app.theme.accent)
+        .bg(float_bg)
+        .add_modifier(Modifier::BOLD);
+    let label_style = Style::default().fg(app.theme.text).bg(float_bg);
+    let quote_bar = Style::default().fg(app.theme.text_muted).bg(float_bg);
+    let quote_text = quote_bar.add_modifier(Modifier::ITALIC);
+    let dim = Style::default().bg(float_bg);
+    // Hovered action brightens and bolds its label (like the topbar "+").
+    let hover_key = key_style;
+    let hover_label = Style::default()
+        .fg(app.theme.accent)
+        .bg(float_bg)
+        .add_modifier(Modifier::BOLD);
+
+    let one_row = |x: u16, y: u16| Rect::new(x, y, content_area.width, 1);
+    let actions_y = content_area.y + quote_rows as u16;
+
+    if has_quote {
+        // A heavy left bar plus truncated, italic preview lines.
+        let budget = content_inner.saturating_sub(2);
+        for (i, line) in preview_lines.iter().take(MAX_QUOTE_LINES).enumerate() {
+            let shown = if line.chars().count() > budget {
+                let mut s: String = line.chars().take(budget.saturating_sub(1)).collect();
+                s.push('…');
+                s
+            } else {
+                line.clone()
+            };
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled(" ", dim),
+                    Span::styled("┃ ", quote_bar),
+                    Span::styled(shown, quote_text),
+                ])),
+                one_row(content_area.x, content_area.y + i as u16),
+            );
+        }
+        if has_more {
+            // Continuation row: the block bar plus an ellipsis.
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled(" ", dim),
+                    Span::styled("┃ ", quote_bar),
+                    Span::styled("…", quote_bar),
+                ])),
+                one_row(content_area.x, content_area.y + MAX_QUOTE_LINES as u16),
+            );
+        }
+    }
+
+    let mut spans = vec![Span::styled(" ", dim)];
+    let mut hits = Vec::new();
+    let mut col = content_area.x.saturating_add(1); // after the left pad
+    if hidden_left {
+        let action = SelectionToolbarAction::ScrollLeft;
+        let style = topbar_overflow_style(app, hovered == Some(action));
+        hits.push(SelectionToolbarHit {
+            action,
+            x: col,
+            y: actions_y,
+            width: ARROW as u16,
+            height: 1,
+        });
+        spans.push(Span::styled("‹ ", style));
+        col = col.saturating_add(ARROW as u16);
+    }
+    for (idx, (key, label, action, iw)) in fitted.into_iter().enumerate() {
+        if idx > 0 {
+            spans.push(Span::styled("  ", dim));
+            col = col.saturating_add(2);
+        }
+        hits.push(SelectionToolbarHit {
+            action,
+            x: col,
+            y: actions_y,
+            width: iw as u16,
+            height: 1,
+        });
+        let is_hover = hovered == Some(action);
+        let (ks, ls) = if is_hover {
+            (hover_key, hover_label)
+        } else {
+            (key_style, label_style)
+        };
+        if key.is_empty() {
+            spans.push(Span::styled(label, ls));
+        } else {
+            spans.push(Span::styled(key, ks));
+            spans.push(Span::styled(format!(" {label}"), ls));
+        }
+        col = col.saturating_add(iw as u16);
+    }
+    if hidden_right {
+        let action = SelectionToolbarAction::ScrollRight;
+        let style = topbar_overflow_style(app, hovered == Some(action));
+        hits.push(SelectionToolbarHit {
+            action,
+            x: col,
+            y: actions_y,
+            width: ARROW as u16,
+            height: 1,
+        });
+        spans.push(Span::styled(" ›", style));
+    }
+    spans.push(Span::styled(" ", dim));
+    app.set_selection_toolbar_rect(Some((
+        popup_area.x,
+        popup_area.y,
+        popup_area.width,
+        popup_area.height,
+    )));
+    app.set_selection_toolbar_hits(hits);
+    frame.render_widget(
+        Paragraph::new(Line::from(spans)),
+        one_row(content_area.x, actions_y),
+    );
 }
 
 fn draw_review_comment_overlays(frame: &mut Frame, app: &mut App) {

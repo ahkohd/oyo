@@ -163,6 +163,7 @@ pub(crate) enum LineInputAction {
 pub(crate) enum SelectionAction {
     Cancel,
     Copy,
+    ShowActions,
     Left,
     Right,
     Up,
@@ -373,6 +374,7 @@ binding_action!(FileFilterAction, [
 binding_action!(SelectionAction, [
     Cancel => ("cancel", "Cancel selection", ["esc"]),
     Copy => ("copy", "Copy selection", ["y"]),
+    ShowActions => ("show_actions", "Show selection actions", ["enter"]),
     Left => ("left", "Extend left", ["h", "left"]),
     Right => ("right", "Extend right", ["l", "right"]),
     Up => ("up", "Extend up", ["k", "up"]),

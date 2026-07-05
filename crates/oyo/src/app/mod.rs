@@ -5,7 +5,7 @@ use crate::config::{
     BlameMode, DiffExtentMarkerMode, DiffExtentMarkerScope, DiffForegroundMode, DiffHighlightMode,
     FileCountMode, FilePanelPosition, FoldContextMode, HunkWrapMode, MentionFileScope,
     MentionFinder, ModifiedStepMode, ResolvedTheme, ReviewActionConfig, ReviewHookConfig,
-    StepWrapMode, SyntaxMode,
+    SelectionActionConfig, StepWrapMode, SyntaxMode,
 };
 use crate::csv_preview::CsvPreviewState;
 use crate::keybindings::Keybindings;
@@ -125,6 +125,25 @@ pub(crate) struct PreviewLinkBox {
     pub url: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SelectionToolbarAction {
+    Copy,
+    Comment,
+    Cancel,
+    ScrollLeft,
+    ScrollRight,
+    Custom(usize),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SelectionToolbarHit {
+    pub action: SelectionToolbarAction,
+    pub x: u16,
+    pub y: u16,
+    pub width: u16,
+    pub height: u16,
+}
+
 pub(crate) fn diff_scrollbar_thumb(
     total_lines: usize,
     visible_lines: usize,
@@ -216,6 +235,18 @@ pub struct App {
     pub(crate) diff_selection: Option<selection::DiffSelection>,
     /// Cursor used by selection mode when no range is active
     pub(crate) diff_selection_cursor: Option<selection::DiffSelectionCursor>,
+    /// True when selection actions can be shown.
+    pub(crate) selection_toolbar_visible: bool,
+    /// Selection toolbar area.
+    pub(crate) selection_toolbar_rect: Option<(u16, u16, u16, u16)>,
+    /// First action shown in the selection toolbar.
+    pub(crate) selection_toolbar_scroll: usize,
+    /// Preferred selection toolbar width while it stays open.
+    pub(crate) selection_toolbar_width: Option<u16>,
+    /// Selection toolbar hitboxes.
+    pub(crate) selection_toolbar_hits: Vec<SelectionToolbarHit>,
+    /// Action currently hovered in the selection toolbar (for the click affordance).
+    pub(crate) selection_toolbar_hover: Option<SelectionToolbarAction>,
     /// Last rendered diff cells for mouse selection copy
     pub(crate) diff_selection_cells: Vec<Vec<String>>,
     /// True when dragging the file panel separator
@@ -582,6 +613,8 @@ pub struct App {
     pub review_hooks: Vec<ReviewHookConfig>,
     /// User-visible review commands.
     pub review_actions: Vec<ReviewActionConfig>,
+    /// User-visible selection commands.
+    pub selection_actions: Vec<SelectionActionConfig>,
     /// Non-fatal review hook warnings to print after TUI exits.
     review_hook_warnings: Vec<String>,
     /// Last matched display index for search navigation
@@ -713,6 +746,12 @@ impl App {
             diff_view_area: None,
             diff_selection: None,
             diff_selection_cursor: None,
+            selection_toolbar_visible: false,
+            selection_toolbar_rect: None,
+            selection_toolbar_scroll: 0,
+            selection_toolbar_width: None,
+            selection_toolbar_hits: Vec::new(),
+            selection_toolbar_hover: None,
             diff_selection_cells: Vec::new(),
             file_panel_resizing: false,
             file_list_scroll: 0,
@@ -926,6 +965,7 @@ impl App {
             review_revision: 0,
             review_hooks: Vec::new(),
             review_actions: Vec::new(),
+            selection_actions: Vec::new(),
             review_hook_warnings: Vec::new(),
             search_last_target: None,
             needs_scroll_to_search: false,

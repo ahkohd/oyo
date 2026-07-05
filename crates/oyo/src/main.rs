@@ -853,6 +853,7 @@ fn apply_config_to_app(app: &mut App, config: &config::Config, args: &Args, ligh
     app.review_mention_finder = config.comments.mentions.finder;
     app.review_hooks = config.review.hooks.clone();
     app.review_actions = config.review.actions.clone();
+    app.selection_actions = config.selection.actions.clone();
     app.hunk_wrap = config.navigation.wrap.hunk;
     app.step_wrap = config.navigation.wrap.step;
     app.primary_marker = config.ui.primary_marker.clone();
@@ -1565,6 +1566,12 @@ fn run_app(
                     }
                     match me.kind {
                         MouseEventKind::Down(MouseButton::Left) => {
+                            if app.handle_selection_toolbar_click(me.column, me.row) {
+                                continue;
+                            }
+                            if app.dismiss_selection_toolbar_click(me.column, me.row) {
+                                continue;
+                            }
                             if app.handle_status_bar_mouse_down(
                                 me.column,
                                 me.row,
@@ -1640,6 +1647,26 @@ fn run_app(
                         }
                         MouseEventKind::Moved if !app.update_topbar_hover(me.column, me.row) => {
                             needs_draw = false;
+                        }
+                        MouseEventKind::ScrollLeft | MouseEventKind::ScrollRight
+                            if app.mouse_over_selection_toolbar(me.column, me.row) =>
+                        {
+                            let delta = if matches!(me.kind, MouseEventKind::ScrollLeft) {
+                                -1
+                            } else {
+                                1
+                            };
+                            needs_draw = app.scroll_selection_toolbar_actions(delta);
+                        }
+                        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                            if app.mouse_over_selection_toolbar(me.column, me.row) =>
+                        {
+                            let delta = if matches!(me.kind, MouseEventKind::ScrollUp) {
+                                -1
+                            } else {
+                                1
+                            };
+                            needs_draw = app.scroll_selection_toolbar_actions(delta);
                         }
                         MouseEventKind::ScrollLeft | MouseEventKind::ScrollRight
                             if app.mouse_over_topbar(me.column, me.row) =>

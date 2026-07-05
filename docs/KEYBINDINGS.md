@@ -27,6 +27,7 @@ save = ["ctrl-o"]
 [keybindings.selection]
 copy = ["y"]
 cancel = ["esc"]
+show_actions = ["enter"]
 left = ["h", "left"]
 right = ["l", "right"]
 up = ["k", "up"]
@@ -260,10 +261,13 @@ Use `v`, `V` or `ctrl-v` in normal mode to start selection. Oyo then uses select
 
 Selection works on visible diff cells. It does not include line numbers, gutters, align-fill characters or UI padding.
 
+The selection toolbar appears above the selection after you finish a mouse selection. Press `enter` to show it for a keyboard selection. Select `y copy`, `esc cancel`, `m comment` in review mode, or any configured `selection.actions` command.
+
 | Action | Default keys | What it does |
 | --- | --- | --- |
 | `cancel` | `esc` | Cancel selection |
 | `copy` | `y` | Copy selection |
+| `show_actions` | `enter` | Show selection actions |
 | `left` | `h`, `left` | Extend left |
 | `right` | `l`, `right` | Extend right |
 | `up` | `k`, `up` | Extend up |

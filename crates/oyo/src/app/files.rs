@@ -1025,6 +1025,16 @@ impl App {
                 .copied()
                 .flatten()
         });
+        let selection_hover = self
+            .selection_toolbar_hits
+            .iter()
+            .find(|hit| {
+                column >= hit.x
+                    && column < hit.x.saturating_add(hit.width)
+                    && row >= hit.y
+                    && row < hit.y.saturating_add(hit.height)
+            })
+            .map(|hit| hit.action);
         if self.topbar_hover_tab == hover
             && self.topbar_hover_close == close_hover
             && self.topbar_plus_hover == plus_hover
@@ -1036,9 +1046,11 @@ impl App {
             && self.file_panel_hover == file_panel_hover
             && self.file_filter_hover == file_filter_hover
             && self.file_filter_clear_hover == file_filter_clear_hover
+            && self.selection_toolbar_hover == selection_hover
         {
             return false;
         }
+        self.selection_toolbar_hover = selection_hover;
         self.topbar_hover_tab = hover;
         self.topbar_hover_close = close_hover;
         self.topbar_plus_hover = plus_hover;

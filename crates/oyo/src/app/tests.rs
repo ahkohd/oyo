@@ -76,6 +76,76 @@ fn test_allow_overscroll_state() {
 }
 
 #[test]
+fn selection_toolbar_waits_for_mouse_selection_finish() {
+    let diff = MultiFileDiff::from_file_pair(
+        std::path::PathBuf::from("a.txt"),
+        std::path::PathBuf::from("a.txt"),
+        "old\n".to_string(),
+        "new\n".to_string(),
+    );
+    let mut app = App::new(diff, ViewMode::UnifiedPane, 100, false, None);
+    app.diff_view_area = Some((0, 0, 20, 2));
+    let mut row = vec![" ".to_string(); 20];
+    row[8] = "a".to_string();
+    row[9] = "b".to_string();
+    app.set_diff_selection_cells(vec![row.clone(), row]);
+
+    assert!(app.start_diff_selection(8, 0));
+    assert!(!app.selection_toolbar_visible());
+    assert!(app.drag_diff_selection(9, 0));
+    assert!(!app.selection_toolbar_visible());
+    assert!(app.finish_diff_selection(9, 0));
+    assert!(app.selection_toolbar_visible());
+
+    let selection = app.diff_selection;
+    app.set_selection_toolbar_hits(Vec::new());
+    app.set_selection_toolbar_rect(Some((5, 0, 10, 3)));
+    assert!(app.handle_selection_toolbar_click(6, 1));
+    assert_eq!(app.diff_selection, selection);
+    assert!(app.selection_toolbar_visible());
+
+    assert!(app.dismiss_selection_toolbar_click(0, 1));
+    assert!(app.diff_selection.is_none());
+    assert!(!app.selection_toolbar_visible());
+
+    assert!(app.start_diff_selection(8, 0));
+    assert!(app.drag_diff_selection(9, 0));
+    assert!(app.finish_diff_selection(9, 0));
+    app.set_selection_toolbar_rect(Some((5, 0, 10, 3)));
+    app.set_selection_toolbar_hits(vec![SelectionToolbarHit {
+        action: SelectionToolbarAction::Cancel,
+        x: 6,
+        y: 1,
+        width: 10,
+        height: 1,
+    }]);
+    assert!(app.handle_selection_toolbar_click(6, 1));
+    assert!(app.diff_selection.is_none());
+    assert!(!app.selection_toolbar_visible());
+
+    assert!(app.start_diff_selection(8, 0));
+    assert!(app.drag_diff_selection(9, 0));
+    assert!(app.finish_diff_selection(9, 0));
+    app.selection_actions = vec![crate::config::SelectionActionConfig::default()];
+    app.set_selection_toolbar_rect(Some((5, 0, 10, 3)));
+    app.set_selection_toolbar_hits(vec![SelectionToolbarHit {
+        action: SelectionToolbarAction::Custom(0),
+        x: 6,
+        y: 1,
+        width: 10,
+        height: 1,
+    }]);
+    assert!(app.handle_selection_toolbar_click(6, 1));
+    assert!(app.diff_selection.is_none());
+    assert!(!app.selection_toolbar_visible());
+
+    assert!(app.start_keyboard_selection());
+    assert!(!app.selection_toolbar_visible());
+    assert!(app.show_selection_toolbar());
+    assert!(app.selection_toolbar_visible());
+}
+
+#[test]
 fn test_max_scroll_normal() {
     assert_eq!(max_scroll(100, 20, false), 80);
     assert_eq!(max_scroll(50, 10, false), 40);

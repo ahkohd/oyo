@@ -1606,6 +1606,47 @@ pub struct ReviewConfig {
     pub actions: Vec<ReviewActionConfig>,
 }
 
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct SelectionActionConfig {
+    pub id: String,
+    pub label: String,
+    pub key: Option<String>,
+    pub message: Option<String>,
+    pub failure_message: Option<String>,
+    pub command: String,
+    pub args: Vec<String>,
+    #[serde(default = "default_hook_stdin")]
+    pub stdin: ReviewHookStdin,
+    #[serde(default = "default_hook_blocking")]
+    pub blocking: bool,
+    #[serde(default = "default_hook_timeout_ms")]
+    pub timeout_ms: u64,
+}
+
+impl Default for SelectionActionConfig {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            label: String::new(),
+            key: None,
+            message: None,
+            failure_message: None,
+            command: String::new(),
+            args: Vec::new(),
+            stdin: ReviewHookStdin::Json,
+            blocking: true,
+            timeout_ms: default_hook_timeout_ms(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+#[serde(default)]
+pub struct SelectionConfig {
+    pub actions: Vec<SelectionActionConfig>,
+}
+
 /// User keybinding overrides grouped by keybinding mode.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct KeybindingsConfig {
@@ -1671,12 +1712,14 @@ pub struct Config {
     pub no_step: NoStepConfig,
     pub comments: CommentsConfig,
     pub review: ReviewConfig,
+    pub selection: SelectionConfig,
     pub editor: EditorConfig,
     pub keybindings: KeybindingsConfig,
 }
 
 fn append_config_array(path: &[String]) -> bool {
     matches!(path, [review, name] if review == "review" && matches!(name.as_str(), "hooks" | "actions"))
+        || matches!(path, [selection, name] if selection == "selection" && name == "actions")
 }
 
 fn merge_config_value_at(base: &mut toml::Value, overlay: toml::Value, path: &mut Vec<String>) {
@@ -1894,7 +1937,7 @@ preview_change_bars = false
     }
 
     #[test]
-    fn extra_config_merges_tables_and_appends_review_hooks() {
+    fn extra_config_merges_tables_and_appends_actions() {
         let mut base: toml::Value = toml::from_str(
             r#"
 [ui]
@@ -1925,6 +1968,14 @@ command = "extra-hook"
 [[review.actions]]
 id = "send"
 command = "send-hook"
+
+[[selection.actions]]
+id = "ask"
+label = "Ask agent"
+key = "a"
+message = "Sent to agent"
+failure_message = "Could not send to agent"
+command = "ask-hook"
 "#,
         )
         .unwrap();
@@ -1937,6 +1988,17 @@ command = "send-hook"
         assert_eq!(config.review.hooks[0].id, "base");
         assert_eq!(config.review.hooks[1].id, "extra");
         assert_eq!(config.review.actions.len(), 1);
+        assert_eq!(config.selection.actions.len(), 1);
+        assert_eq!(config.selection.actions[0].id, "ask");
+        assert_eq!(config.selection.actions[0].key.as_deref(), Some("a"));
+        assert_eq!(
+            config.selection.actions[0].message.as_deref(),
+            Some("Sent to agent")
+        );
+        assert_eq!(
+            config.selection.actions[0].failure_message.as_deref(),
+            Some("Could not send to agent")
+        );
         assert_eq!(
             config.keybindings.modes["normal"]["step_down"],
             vec!["down".to_string()]

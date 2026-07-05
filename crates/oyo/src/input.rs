@@ -66,6 +66,9 @@ pub(crate) fn handle_app_key(
 }
 
 fn handle_selection_key(app: &mut App, key: KeyEvent) -> bool {
+    if app.selection_toolbar_visible() && app.handle_selection_action_key(key) {
+        return true;
+    }
     match app.keybindings.selection(key) {
         Dispatch::Matched(SelectionAction::Cancel) => {
             app.clear_diff_selection();
@@ -76,6 +79,7 @@ fn handle_selection_key(app: &mut App, key: KeyEvent) -> bool {
             app.clear_diff_selection();
             true
         }
+        Dispatch::Matched(SelectionAction::ShowActions) => app.show_selection_toolbar(),
         Dispatch::Matched(SelectionAction::Left) => app.move_diff_selection(-1, 0),
         Dispatch::Matched(SelectionAction::Right) => app.move_diff_selection(1, 0),
         Dispatch::Matched(SelectionAction::Up) => app.move_diff_selection(0, -1),
