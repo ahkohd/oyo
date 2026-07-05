@@ -7,7 +7,9 @@ use crate::config::{
     MentionFinder, ModifiedStepMode, ResolvedTheme, ReviewActionConfig, ReviewHookConfig,
     StepWrapMode, SyntaxMode,
 };
+use crate::csv_preview::CsvPreviewState;
 use crate::keybindings::Keybindings;
+use crate::structured_preview::StructuredPreviewState;
 use crate::syntax::{SyntaxCache, SyntaxEngine};
 use crate::time_format::TimeFormatter;
 use oyo_core::{
@@ -304,15 +306,21 @@ pub struct App {
     pub(crate) topbar_tab_hits: Vec<TopbarTabHit>,
     pub(crate) topbar_plus_hit: Option<(u16, u16, u16, u16)>,
     pub(crate) preview_toggle_hit: Option<(u16, u16, u16, u16)>,
+    pub(crate) topbar_sidebar_toggle_hit: Option<(u16, u16, u16, u16)>,
     pub(crate) topbar_hover_tab: Option<usize>,
     pub(crate) topbar_hover_close: Option<usize>,
     pub(crate) topbar_plus_hover: bool,
+    pub(crate) topbar_sidebar_toggle_hover: bool,
     pub(crate) topbar_drag_target: Option<usize>,
     topbar_drag_tab: Option<usize>,
+    pub(crate) structured_previews: FxHashMap<usize, StructuredPreviewState>,
+    pub(crate) csv_previews: FxHashMap<usize, CsvPreviewState>,
     /// Show strikethrough on deleted text
     pub strikethrough_deletions: bool,
     /// Show +/- sign column in the gutter (unified/evolution)
     pub gutter_signs: bool,
+    /// Show change bars in previews with source-line mapping.
+    pub preview_change_bars: bool,
     /// Whether user has manually toggled the file panel (overrides auto-hide)
     pub file_panel_manually_set: bool,
     /// Whether to show the file path popup (Ctrl+G)
@@ -734,13 +742,18 @@ impl App {
             topbar_tab_hits: Vec::new(),
             topbar_plus_hit: None,
             preview_toggle_hit: None,
+            topbar_sidebar_toggle_hit: None,
             topbar_hover_tab: None,
             topbar_hover_close: None,
             topbar_plus_hover: false,
+            topbar_sidebar_toggle_hover: false,
             topbar_drag_target: None,
             topbar_drag_tab: None,
+            structured_previews: FxHashMap::default(),
+            csv_previews: FxHashMap::default(),
             strikethrough_deletions: false,
             gutter_signs: true,
+            preview_change_bars: true,
             file_panel_manually_set: false,
             show_path_popup: false,
             file_panel_auto_hidden: false,
@@ -940,11 +953,25 @@ impl App {
 
     pub fn scroll_up(&mut self) {
         self.centered_once = false;
+        if self.view_mode == ViewMode::Preview && self.active_preview_rendered() {
+            if let Some(state) = self.active_structured_preview_mut() {
+                state.scroll_up(1);
+                self.sync_scroll_from_structured_preview();
+                return;
+            }
+        }
         self.scroll_offset = self.scroll_offset.saturating_sub(1);
     }
 
     pub fn scroll_down(&mut self) {
         self.centered_once = false;
+        if self.view_mode == ViewMode::Preview && self.active_preview_rendered() {
+            if let Some(state) = self.active_structured_preview_mut() {
+                state.scroll_down(1);
+                self.sync_scroll_from_structured_preview();
+                return;
+            }
+        }
         self.scroll_offset = self.scroll_offset.saturating_add(1);
     }
 

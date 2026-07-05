@@ -24,12 +24,16 @@ crossterm = { workspace = true, features = ["use-dev-tty"] }
 keymap = { workspace = true, features = ["crossterm"] }
 clap = { workspace = true }
 flate2 = { workspace = true }
+csv = { workspace = true }
 tokio = { workspace = true }
 toml = { workspace = true }
 dirs = { workspace = true }
 syntect = "5.3"
 two-face = "0.5.0-rc1"
 regex = { workspace = true }
+lazy_static = { workspace = true }
+logos = { workspace = true }
+yaml-rust = { workspace = true }
 unicode-width = { workspace = true }
 unicode-segmentation = { workspace = true }
 pulldown-cmark = { workspace = true }

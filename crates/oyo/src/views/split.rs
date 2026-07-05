@@ -16,7 +16,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Paragraph, Wrap},
     Frame,
 };
 
@@ -99,9 +99,11 @@ fn align_fill_gutter_span(app: &App, width: usize) -> Span<'static> {
     Span::styled(out, Style::default().fg(fg).add_modifier(Modifier::DIM))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn push_virtual_line_old(
     text: &str,
     app: &App,
+    line_number_width: u16,
     visible_width: usize,
     max_line_width: &mut usize,
     content_lines: &mut Vec<Line>,
@@ -131,14 +133,10 @@ fn push_virtual_line_old(
         super::push_wrapped_bg_line(bg_lines, visible_width, virtual_wrap, None);
     }
     content_lines.push(Line::from(display_virtual));
-    gutter_lines.push(Line::from(vec![
-        Span::raw(" "),
-        Span::raw("    "),
-        Span::raw(" "),
-    ]));
+    gutter_lines.push(blank_gutter_line(line_number_width));
     if app.line_wrap && virtual_wrap > 1 {
         for _ in 1..virtual_wrap {
-            gutter_lines.push(Line::from(Span::raw(" ")));
+            gutter_lines.push(blank_gutter_line(line_number_width));
         }
     }
     virtual_wrap
@@ -148,6 +146,7 @@ fn push_virtual_line_old(
 fn push_virtual_line_new(
     text: &str,
     app: &App,
+    line_number_width: u16,
     visible_width: usize,
     max_line_width: &mut usize,
     content_lines: &mut Vec<Line>,
@@ -178,22 +177,85 @@ fn push_virtual_line_new(
         super::push_wrapped_bg_line(bg_lines, visible_width, virtual_wrap, None);
     }
     content_lines.push(Line::from(display_virtual));
-    gutter_lines.push(Line::from(vec![Span::raw("    "), Span::raw(" ")]));
+    gutter_lines.push(blank_gutter_line(line_number_width));
     marker_lines.push(Line::from(Span::raw(" ")));
     if app.line_wrap && virtual_wrap > 1 {
         for _ in 1..virtual_wrap {
-            gutter_lines.push(Line::from(vec![Span::raw("    "), Span::raw(" ")]));
+            gutter_lines.push(blank_gutter_line(line_number_width));
             marker_lines.push(Line::from(Span::raw(" ")));
         }
     }
     virtual_wrap
 }
 
-/// Width of the fixed line number gutter
-const GUTTER_WIDTH: u16 = 6; // "▶1234 " or " 1234 "
+const MIN_LINE_NUMBER_WIDTH: u16 = 4;
 const OLD_BORDER_WIDTH: u16 = 1;
-const NEW_GUTTER_WIDTH: u16 = 5; // "1234 "
 const NEW_MARKER_WIDTH: u16 = 1;
+
+fn split_line_number_width(view_lines: &[ViewLine]) -> u16 {
+    let max_line = view_lines
+        .iter()
+        .filter_map(|line| line.old_line.max(line.new_line))
+        .max()
+        .unwrap_or(0);
+    decimal_width(max_line).max(MIN_LINE_NUMBER_WIDTH)
+}
+
+fn decimal_width(value: usize) -> u16 {
+    if value == 0 {
+        1
+    } else {
+        value.ilog10() as u16 + 1
+    }
+}
+
+fn split_gutter_width(line_number_width: u16) -> u16 {
+    line_number_width.saturating_add(2)
+}
+
+fn blank_line_number(line_number_width: u16) -> String {
+    " ".repeat(line_number_width as usize)
+}
+
+fn format_line_number(line_number: usize, line_number_width: u16) -> String {
+    if line_number == 0 {
+        blank_line_number(line_number_width)
+    } else {
+        format!(
+            "{:>width$}",
+            line_number,
+            width = line_number_width as usize
+        )
+    }
+}
+
+fn blank_gutter_line(line_number_width: u16) -> Line<'static> {
+    Line::from(vec![
+        Span::raw(" "),
+        Span::raw(blank_line_number(line_number_width)),
+        Span::raw(" "),
+    ])
+}
+
+fn render_split_divider(frame: &mut Frame, app: &App, area: Rect) {
+    if area.width == 0 {
+        return;
+    }
+    let bg = app.theme.background;
+    let fg = bg
+        .and_then(|bg| color::blend_colors(bg, app.theme.border_subtle, 0.12))
+        .unwrap_or(app.theme.text_muted);
+    let mut style = Style::default().fg(fg).add_modifier(Modifier::DIM);
+    if let Some(bg) = bg {
+        style = style.bg(bg);
+    }
+    let buffer = frame.buffer_mut();
+    for row in area.y..area.y.saturating_add(area.height) {
+        if let Some(cell) = buffer.cell_mut((area.x, row)) {
+            cell.set_symbol("▕").set_style(style);
+        }
+    }
+}
 
 fn add_review_preview_boxes_for_rows(
     app: &mut App,
@@ -248,6 +310,8 @@ pub fn render_split(frame: &mut Frame, app: &mut App, area: Rect) {
         .current_navigator()
         .set_show_hunk_extent_while_stepping(show_extent);
     let view_lines = app.current_view_with_frame(AnimationFrame::Idle);
+    let line_number_width = split_line_number_width(&view_lines);
+    let gutter_width = split_gutter_width(line_number_width);
     let mut scroll_offset = app.render_scroll_offset();
     let step_direction = app.multi_diff.current_step_direction();
     let preview_hunk = app.multi_diff.current_navigator().state().current_hunk;
@@ -265,10 +329,10 @@ pub fn render_split(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let old_width = chunks[0]
         .width
-        .saturating_sub(GUTTER_WIDTH + OLD_BORDER_WIDTH) as usize;
+        .saturating_sub(gutter_width + OLD_BORDER_WIDTH) as usize;
     let new_width = chunks[1]
         .width
-        .saturating_sub(NEW_GUTTER_WIDTH + NEW_MARKER_WIDTH) as usize;
+        .saturating_sub(gutter_width + NEW_MARKER_WIDTH) as usize;
     let debug_extra = if debug_enabled {
         Some(format!(
             "split old_width={} new_width={} align_lines={}",
@@ -352,6 +416,7 @@ pub fn render_split(frame: &mut Frame, app: &mut App, area: Rect) {
         hunk_overflow,
         show_virtual_old,
         scroll_offset,
+        line_number_width,
     );
     render_new_pane(
         frame,
@@ -360,6 +425,7 @@ pub fn render_split(frame: &mut Frame, app: &mut App, area: Rect) {
         hunk_overflow,
         show_virtual_new,
         scroll_offset,
+        line_number_width,
     );
     super::render_diff_scrollbar(
         frame,
@@ -391,6 +457,7 @@ fn render_old_pane(
     hunk_overflow: Option<(bool, bool)>,
     show_virtual_pane: bool,
     scroll_offset: usize,
+    line_number_width: u16,
 ) {
     // Clone markers to avoid borrow conflicts
     let primary_marker = app.primary_marker.clone();
@@ -398,7 +465,8 @@ fn render_old_pane(
 
     let view_lines = app.current_view_with_frame(AnimationFrame::Idle);
     let visible_height = area.height as usize;
-    let visible_width = area.width.saturating_sub(GUTTER_WIDTH + 1) as usize; // +1 for border
+    let gutter_width = split_gutter_width(line_number_width);
+    let visible_width = area.width.saturating_sub(gutter_width + OLD_BORDER_WIDTH) as usize;
     let syntax_window = if app.line_wrap {
         Some(super::syntax_highlight_window(
             scroll_offset,
@@ -541,7 +609,7 @@ fn render_old_pane(
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Length(GUTTER_WIDTH),
+            Constraint::Length(gutter_width),
             Constraint::Min(0),
             Constraint::Length(1), // For border
         ])
@@ -620,6 +688,7 @@ fn render_old_pane(
                 let virtual_rows = push_virtual_line_old(
                     text,
                     app,
+                    line_number_width,
                     visible_width,
                     &mut max_line_width,
                     &mut content_lines,
@@ -658,14 +727,10 @@ fn render_old_pane(
                     super::push_wrapped_bg_line(bg_lines, visible_width, virtual_wrap, None);
                 }
                 content_lines.push(Line::from(display_virtual));
-                gutter_lines.push(Line::from(vec![
-                    Span::raw(" "),
-                    Span::raw("    "),
-                    Span::raw(" "),
-                ]));
+                gutter_lines.push(blank_gutter_line(line_number_width));
                 if app.line_wrap && virtual_wrap > 1 {
                     for _ in 1..virtual_wrap {
-                        gutter_lines.push(Line::from(Span::raw(" ")));
+                        gutter_lines.push(blank_gutter_line(line_number_width));
                     }
                 }
                 review_preview_rows.push((row_idx, virtual_wrap, anchor_key.clone()));
@@ -681,7 +746,7 @@ fn render_old_pane(
             };
             let fill_span = align_fill_span(app, visible_width);
             let marker_fill = Span::raw(" ");
-            let gutter_fill = align_fill_gutter_span(app, 4);
+            let gutter_fill = align_fill_gutter_span(app, line_number_width as usize);
             let sign_fill = align_fill_gutter_span(app, 1);
             gutter_lines.push(Line::from(vec![marker_fill, gutter_fill, sign_fill]));
             if let Some(bg_lines) = bg_lines.as_mut() {
@@ -692,7 +757,7 @@ fn render_old_pane(
             if app.line_wrap && wrap_count > 1 {
                 for _ in 1..wrap_count {
                     let marker_fill = Span::raw(" ");
-                    let gutter_fill = align_fill_gutter_span(app, 4);
+                    let gutter_fill = align_fill_gutter_span(app, line_number_width as usize);
                     let sign_fill = align_fill_gutter_span(app, 1);
                     gutter_lines.push(Line::from(vec![marker_fill, gutter_fill, sign_fill]));
                     if let Some(bg_lines) = bg_lines.as_mut() {
@@ -729,14 +794,10 @@ fn render_old_pane(
                         super::push_wrapped_bg_line(bg_lines, visible_width, virtual_wrap, None);
                     }
                     content_lines.push(Line::from(display_virtual));
-                    gutter_lines.push(Line::from(vec![
-                        Span::raw(" "),
-                        Span::raw("    "),
-                        Span::raw(" "),
-                    ]));
+                    gutter_lines.push(blank_gutter_line(line_number_width));
                     if app.line_wrap && virtual_wrap > 1 {
                         for _ in 1..virtual_wrap {
-                            gutter_lines.push(Line::from(Span::raw(" ")));
+                            gutter_lines.push(blank_gutter_line(line_number_width));
                         }
                     }
                     review_preview_rows.push((row_idx, virtual_wrap, anchor_key.clone()));
@@ -753,6 +814,7 @@ fn render_old_pane(
                     let virtual_rows = push_virtual_line_old(
                         text,
                         app,
+                        line_number_width,
                         visible_width,
                         &mut max_line_width,
                         &mut content_lines,
@@ -774,9 +836,9 @@ fn render_old_pane(
             .or(if fold_line { Some(0) } else { None });
         if let Some(old_line_num) = old_line_num {
             let line_num_str = if old_line_num == 0 {
-                "    ".to_string()
+                blank_line_number(line_number_width)
             } else {
-                format!("{:4}", old_line_num)
+                format_line_number(old_line_num, line_number_width)
             };
             let bg_kind = split_old_bg_kind(view_line.kind);
             let line_num_style = line_num_style_for_kind(bg_kind, app);
@@ -1104,7 +1166,9 @@ fn render_old_pane(
                 };
                 for _ in 1..wrap_count {
                     if let Some(bg) = line_bg_gutter {
-                        let pad = " ".repeat(GUTTER_WIDTH as usize - 1);
+                        let pad = " ".repeat(
+                            split_gutter_width(line_number_width).saturating_sub(1) as usize,
+                        );
                         gutter_lines.push(Line::from(vec![
                             Span::styled(wrap_marker, wrap_style),
                             Span::styled(pad, Style::default().bg(bg)),
@@ -1142,14 +1206,10 @@ fn render_old_pane(
                         super::push_wrapped_bg_line(bg_lines, visible_width, virtual_wrap, None);
                     }
                     content_lines.push(Line::from(display_virtual));
-                    gutter_lines.push(Line::from(vec![
-                        Span::raw(" "),
-                        Span::raw("    "),
-                        Span::raw(" "),
-                    ]));
+                    gutter_lines.push(blank_gutter_line(line_number_width));
                     if app.line_wrap && virtual_wrap > 1 {
                         for _ in 1..virtual_wrap {
-                            gutter_lines.push(Line::from(Span::raw(" ")));
+                            gutter_lines.push(blank_gutter_line(line_number_width));
                         }
                     }
                     review_preview_rows.push((row_idx, virtual_wrap, anchor_key.clone()));
@@ -1166,6 +1226,7 @@ fn render_old_pane(
                     let virtual_rows = push_virtual_line_old(
                         text,
                         app,
+                        line_number_width,
                         visible_width,
                         &mut max_line_width,
                         &mut content_lines,
@@ -1186,6 +1247,7 @@ fn render_old_pane(
                     let virtual_rows = push_virtual_line_old(
                         text,
                         app,
+                        line_number_width,
                         visible_width,
                         &mut max_line_width,
                         &mut content_lines,
@@ -1223,14 +1285,10 @@ fn render_old_pane(
                 }
                 content_lines.push(Line::from(display_virtual));
                 display_row = display_row.saturating_add(virtual_wrap);
-                gutter_lines.push(Line::from(vec![
-                    Span::raw(" "),
-                    Span::raw("    "),
-                    Span::raw(" "),
-                ]));
+                gutter_lines.push(blank_gutter_line(line_number_width));
                 if app.line_wrap && virtual_wrap > 1 {
                     for _ in 1..virtual_wrap {
-                        gutter_lines.push(Line::from(Span::raw(" ")));
+                        gutter_lines.push(blank_gutter_line(line_number_width));
                     }
                 }
             }
@@ -1261,14 +1319,10 @@ fn render_old_pane(
                 }
                 content_lines.push(Line::from(display_virtual));
                 display_row = display_row.saturating_add(virtual_wrap);
-                gutter_lines.push(Line::from(vec![
-                    Span::raw(" "),
-                    Span::raw("    "),
-                    Span::raw(" "),
-                ]));
+                gutter_lines.push(blank_gutter_line(line_number_width));
                 if app.line_wrap && virtual_wrap > 1 {
                     for _ in 1..virtual_wrap {
-                        gutter_lines.push(Line::from(Span::raw(" ")));
+                        gutter_lines.push(blank_gutter_line(line_number_width));
                     }
                 }
             }
@@ -1282,7 +1336,7 @@ fn render_old_pane(
                     } else {
                         1
                     };
-                    gutter_lines.push(Line::from(Span::raw(" ")));
+                    gutter_lines.push(blank_gutter_line(line_number_width));
                     if let Some(bg_lines) = bg_lines.as_mut() {
                         super::push_wrapped_bg_line(bg_lines, visible_width, debug_wrap, None);
                     }
@@ -1290,7 +1344,7 @@ fn render_old_pane(
                     display_row = display_row.saturating_add(debug_wrap);
                     if app.line_wrap && debug_wrap > 1 {
                         for _ in 1..debug_wrap {
-                            gutter_lines.push(Line::from(Span::raw(" ")));
+                            gutter_lines.push(blank_gutter_line(line_number_width));
                         }
                     }
                 }
@@ -1361,14 +1415,7 @@ fn render_old_pane(
         add_review_preview_boxes_for_rows(app, content_area, scroll_offset, &review_preview_rows);
     }
 
-    // Render border
-    let mut border = Block::default()
-        .borders(Borders::RIGHT)
-        .border_style(Style::default().fg(app.theme.border_subtle));
-    if let Some(style) = bg_style {
-        border = border.style(style);
-    }
-    frame.render_widget(border, border_area);
+    render_split_divider(frame, app, border_area);
 
     app.update_current_max_line_width(max_line_width);
 }
@@ -1380,6 +1427,7 @@ fn render_new_pane(
     hunk_overflow: Option<(bool, bool)>,
     show_virtual_pane: bool,
     scroll_offset: usize,
+    line_number_width: u16,
 ) {
     // Clone markers to avoid borrow conflicts
     let primary_marker_right = app.primary_marker_right.clone();
@@ -1530,7 +1578,7 @@ fn render_new_pane(
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Length(5), // "1234 "
+            Constraint::Length(split_gutter_width(line_number_width)),
             Constraint::Min(0),
             Constraint::Length(1), // For active marker
         ])
@@ -1611,6 +1659,7 @@ fn render_new_pane(
                 let virtual_rows = push_virtual_line_new(
                     text,
                     app,
+                    line_number_width,
                     visible_width,
                     &mut max_line_width,
                     &mut content_lines,
@@ -1650,11 +1699,11 @@ fn render_new_pane(
                     super::push_wrapped_bg_line(bg_lines, visible_width, virtual_wrap, None);
                 }
                 content_lines.push(Line::from(display_virtual));
-                gutter_lines.push(Line::from(vec![Span::raw("    "), Span::raw(" ")]));
+                gutter_lines.push(blank_gutter_line(line_number_width));
                 marker_lines.push(Line::from(Span::raw(" ")));
                 if app.line_wrap && virtual_wrap > 1 {
                     for _ in 1..virtual_wrap {
-                        gutter_lines.push(Line::from(Span::raw(" ")));
+                        gutter_lines.push(blank_gutter_line(line_number_width));
                         marker_lines.push(Line::from(Span::raw(" ")));
                     }
                 }
@@ -1670,9 +1719,9 @@ fn render_new_pane(
                 1
             };
             let fill_span = align_fill_span(app, visible_width);
-            let gutter_fill = align_fill_gutter_span(app, 4);
+            let gutter_fill = align_fill_gutter_span(app, line_number_width as usize);
             let sign_fill = align_fill_gutter_span(app, 1);
-            gutter_lines.push(Line::from(vec![gutter_fill, sign_fill]));
+            gutter_lines.push(Line::from(vec![Span::raw(" "), gutter_fill, sign_fill]));
             if let Some(bg_lines) = bg_lines.as_mut() {
                 super::push_wrapped_bg_line(bg_lines, visible_width, 1, None);
             }
@@ -1681,9 +1730,9 @@ fn render_new_pane(
             marker_lines.push(Line::from(Span::raw(" ")));
             if app.line_wrap && wrap_count > 1 {
                 for _ in 1..wrap_count {
-                    let gutter_fill = align_fill_gutter_span(app, 4);
+                    let gutter_fill = align_fill_gutter_span(app, line_number_width as usize);
                     let sign_fill = align_fill_gutter_span(app, 1);
-                    gutter_lines.push(Line::from(vec![gutter_fill, sign_fill]));
+                    gutter_lines.push(Line::from(vec![Span::raw(" "), gutter_fill, sign_fill]));
                     if let Some(bg_lines) = bg_lines.as_mut() {
                         super::push_wrapped_bg_line(bg_lines, visible_width, 1, None);
                     }
@@ -1719,11 +1768,11 @@ fn render_new_pane(
                         super::push_wrapped_bg_line(bg_lines, visible_width, virtual_wrap, None);
                     }
                     content_lines.push(Line::from(display_virtual));
-                    gutter_lines.push(Line::from(vec![Span::raw("    "), Span::raw(" ")]));
+                    gutter_lines.push(blank_gutter_line(line_number_width));
                     marker_lines.push(Line::from(Span::raw(" ")));
                     if app.line_wrap && virtual_wrap > 1 {
                         for _ in 1..virtual_wrap {
-                            gutter_lines.push(Line::from(Span::raw(" ")));
+                            gutter_lines.push(blank_gutter_line(line_number_width));
                             marker_lines.push(Line::from(Span::raw(" ")));
                         }
                     }
@@ -1741,6 +1790,7 @@ fn render_new_pane(
                     let virtual_rows = push_virtual_line_new(
                         text,
                         app,
+                        line_number_width,
                         visible_width,
                         &mut max_line_width,
                         &mut content_lines,
@@ -1763,9 +1813,9 @@ fn render_new_pane(
             .or(if fold_line { Some(0) } else { None });
         if let Some(new_line_num) = new_line_num {
             let line_num_str = if new_line_num == 0 {
-                "    ".to_string()
+                blank_line_number(line_number_width)
             } else {
-                format!("{:4}", new_line_num)
+                format_line_number(new_line_num, line_number_width)
             };
             let bg_kind = split_new_bg_kind(view_line.kind);
             let line_num_style = line_num_style_for_kind(bg_kind, app);
@@ -1801,6 +1851,7 @@ fn render_new_pane(
 
             // Build gutter line
             let mut gutter_spans = vec![
+                Span::styled(" ", Style::default()),
                 Span::styled(line_num_str, line_num_style),
                 Span::styled(" ", Style::default()),
             ];
@@ -2098,11 +2149,11 @@ fn render_new_pane(
                 for _ in 1..wrap_count {
                     if let Some(bg) = line_bg_gutter {
                         gutter_lines.push(Line::from(Span::styled(
-                            " ".repeat(NEW_GUTTER_WIDTH as usize),
+                            " ".repeat(split_gutter_width(line_number_width) as usize),
                             Style::default().bg(bg),
                         )));
                     } else {
-                        gutter_lines.push(Line::from(Span::raw(" ")));
+                        gutter_lines.push(blank_gutter_line(line_number_width));
                     }
                     marker_lines.push(Line::from(Span::styled(wrap_marker, wrap_style)));
                 }
@@ -2135,11 +2186,11 @@ fn render_new_pane(
                         super::push_wrapped_bg_line(bg_lines, visible_width, virtual_wrap, None);
                     }
                     content_lines.push(Line::from(display_virtual));
-                    gutter_lines.push(Line::from(vec![Span::raw("    "), Span::raw(" ")]));
+                    gutter_lines.push(blank_gutter_line(line_number_width));
                     marker_lines.push(Line::from(Span::raw(" ")));
                     if app.line_wrap && virtual_wrap > 1 {
                         for _ in 1..virtual_wrap {
-                            gutter_lines.push(Line::from(Span::raw(" ")));
+                            gutter_lines.push(blank_gutter_line(line_number_width));
                             marker_lines.push(Line::from(Span::raw(" ")));
                         }
                     }
@@ -2157,6 +2208,7 @@ fn render_new_pane(
                     let virtual_rows = push_virtual_line_new(
                         text,
                         app,
+                        line_number_width,
                         visible_width,
                         &mut max_line_width,
                         &mut content_lines,
@@ -2178,6 +2230,7 @@ fn render_new_pane(
                     let virtual_rows = push_virtual_line_new(
                         text,
                         app,
+                        line_number_width,
                         visible_width,
                         &mut max_line_width,
                         &mut content_lines,
@@ -2216,11 +2269,11 @@ fn render_new_pane(
                 }
                 content_lines.push(Line::from(display_virtual));
                 display_row = display_row.saturating_add(virtual_wrap);
-                gutter_lines.push(Line::from(vec![Span::raw("    "), Span::raw(" ")]));
+                gutter_lines.push(blank_gutter_line(line_number_width));
                 marker_lines.push(Line::from(Span::raw(" ")));
                 if app.line_wrap && virtual_wrap > 1 {
                     for _ in 1..virtual_wrap {
-                        gutter_lines.push(Line::from(Span::raw(" ")));
+                        gutter_lines.push(blank_gutter_line(line_number_width));
                         marker_lines.push(Line::from(Span::raw(" ")));
                     }
                 }
@@ -2252,11 +2305,11 @@ fn render_new_pane(
                 }
                 content_lines.push(Line::from(display_virtual));
                 display_row = display_row.saturating_add(virtual_wrap);
-                gutter_lines.push(Line::from(vec![Span::raw("    "), Span::raw(" ")]));
+                gutter_lines.push(blank_gutter_line(line_number_width));
                 marker_lines.push(Line::from(Span::raw(" ")));
                 if app.line_wrap && virtual_wrap > 1 {
                     for _ in 1..virtual_wrap {
-                        gutter_lines.push(Line::from(Span::raw(" ")));
+                        gutter_lines.push(blank_gutter_line(line_number_width));
                         marker_lines.push(Line::from(Span::raw(" ")));
                     }
                 }
@@ -2274,7 +2327,7 @@ fn render_new_pane(
                     } else {
                         1
                     };
-                    gutter_lines.push(Line::from(Span::raw(" ")));
+                    gutter_lines.push(blank_gutter_line(line_number_width));
                     if let Some(bg_lines) = bg_lines.as_mut() {
                         super::push_wrapped_bg_line(bg_lines, visible_width, debug_wrap, None);
                     }
@@ -2283,7 +2336,7 @@ fn render_new_pane(
                     marker_lines.push(Line::from(Span::raw(" ")));
                     if app.line_wrap && debug_wrap > 1 {
                         for _ in 1..debug_wrap {
-                            gutter_lines.push(Line::from(Span::raw(" ")));
+                            gutter_lines.push(blank_gutter_line(line_number_width));
                             marker_lines.push(Line::from(Span::raw(" ")));
                         }
                     }
@@ -2744,5 +2797,37 @@ fn get_new_span_style(
             }
             style
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{format_line_number, split_gutter_width, split_line_number_width};
+    use oyo_core::{LineKind, ViewLine};
+
+    fn view_line(old_line: Option<usize>, new_line: Option<usize>) -> ViewLine {
+        ViewLine {
+            content: String::new(),
+            spans: Vec::new(),
+            kind: LineKind::Context,
+            old_line,
+            new_line,
+            is_active: false,
+            is_active_change: false,
+            is_primary_active: false,
+            show_hunk_extent: false,
+            change_id: 0,
+            hunk_index: None,
+            has_changes: false,
+        }
+    }
+
+    #[test]
+    fn split_line_number_width_grows_for_large_files() {
+        let lines = [view_line(Some(9), Some(103474))];
+        assert_eq!(split_line_number_width(&lines), 6);
+        assert_eq!(split_gutter_width(6), 8);
+        assert_eq!(format_line_number(2039, 6), "  2039");
+        assert_eq!(format_line_number(103474, 6), "103474");
     }
 }

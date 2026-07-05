@@ -919,6 +919,9 @@ pub struct DiffConfig {
     /// Show extent markers on unchanged context lines within a hunk
     #[serde(default = "diff_extent_marker_context_default")]
     pub extent_marker_context: bool,
+    /// Show change bars in source, Markdown, CSV and structured previews
+    #[serde(default = "diff_preview_change_bars_default")]
+    pub preview_change_bars: bool,
 }
 
 impl Default for DiffConfig {
@@ -934,6 +937,7 @@ impl Default for DiffConfig {
             extent_marker: diff_extent_marker_default(),
             extent_marker_scope: diff_extent_marker_scope_default(),
             extent_marker_context: diff_extent_marker_context_default(),
+            preview_change_bars: diff_preview_change_bars_default(),
         }
     }
 }
@@ -976,6 +980,10 @@ fn diff_extent_marker_scope_default() -> DiffExtentMarkerScope {
 
 fn diff_extent_marker_context_default() -> bool {
     false
+}
+
+fn diff_preview_change_bars_default() -> bool {
+    true
 }
 
 /// Context folding display mode
@@ -1748,6 +1756,23 @@ mod tests {
     #[test]
     fn ui_shows_scrollbar_by_default() {
         assert!(Config::default().ui.scrollbar);
+    }
+
+    #[test]
+    fn preview_change_bars_are_on_by_default() {
+        assert!(Config::default().ui.diff.preview_change_bars);
+    }
+
+    #[test]
+    fn preview_change_bars_can_be_disabled() {
+        let config: Config = toml::from_str(
+            r#"
+[ui.diff]
+preview_change_bars = false
+"#,
+        )
+        .unwrap();
+        assert!(!config.ui.diff.preview_change_bars);
     }
 
     #[test]

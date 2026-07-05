@@ -49,6 +49,8 @@ You can also press `s` in the TUI, or set `stepping = true` in config.
 - step-through navigation
 - hunk navigation
 - unified, split, evolution, blame and preview views
+- tabs for multiple views
+- Markdown, JSON, YAML, TOML and CSV previews
 - inline review comments
 - visual text selection with copy to clipboard
 - word-level diffing

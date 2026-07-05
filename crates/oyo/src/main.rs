@@ -4,9 +4,12 @@ mod app;
 mod blame;
 mod color;
 mod config;
+mod csv_preview;
 mod dashboard;
 mod input;
+mod jless;
 mod keybindings;
+mod structured_preview;
 mod syntax;
 #[cfg(test)]
 mod test_utils;
@@ -817,6 +820,7 @@ fn apply_config_to_app(app: &mut App, config: &config::Config, args: &Args, ligh
     app.scrollbar_visible = config.ui.scrollbar;
     app.strikethrough_deletions = config.ui.strikethrough_deletions;
     app.gutter_signs = config.ui.gutter_signs;
+    app.preview_change_bars = config.ui.diff.preview_change_bars;
     app.diff_bg = config.ui.diff.bg;
     app.diff_fg = config.ui.diff.fg;
     app.diff_highlight = config.ui.diff.highlight;
@@ -1568,6 +1572,9 @@ fn run_app(
                                 continue;
                             }
                             if app.handle_preview_link_click(me.column, me.row) {
+                                continue;
+                            }
+                            if app.handle_structured_preview_click(me.column, me.row) {
                                 continue;
                             }
                             if app.start_diff_selection(me.column, me.row) {

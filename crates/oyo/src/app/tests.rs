@@ -489,6 +489,31 @@ fn topbar_ids(app: &App) -> Vec<usize> {
 }
 
 #[test]
+fn topbar_sidebar_toggle_button_toggles_file_panel() {
+    let diff = MultiFileDiff::from_file_pairs(vec![
+        (
+            std::path::PathBuf::from("a.txt"),
+            "a\n".to_string(),
+            "aa\n".to_string(),
+        ),
+        (
+            std::path::PathBuf::from("b.txt"),
+            "b\n".to_string(),
+            "bb\n".to_string(),
+        ),
+    ]);
+    let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+    app.topbar_sidebar_toggle_hit = Some((0, 0, 3, 1));
+
+    assert!(app.update_topbar_hover(1, 0));
+    assert!(app.topbar_sidebar_toggle_hover);
+    assert!(app.handle_topbar_mouse_down(1, 0));
+    assert!(!app.file_panel_visible);
+    assert!(app.handle_topbar_mouse_down(1, 0));
+    assert!(app.file_panel_visible);
+}
+
+#[test]
 fn topbar_close_keeps_last_tab() {
     let diff = MultiFileDiff::from_file_pairs(vec![
         (

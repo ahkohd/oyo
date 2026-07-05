@@ -1,6 +1,8 @@
 use super::{
     AnimationPhase, App, FileDiskStamp, PreviewLinkBox, TopbarTab, TopbarTabContent, ViewMode,
 };
+use crate::csv_preview::{CsvPreviewSignature, CsvPreviewState};
+use crate::structured_preview::{StructuredPreviewSignature, StructuredPreviewState};
 use oyo_core::multi::FileSide;
 use std::time::{Duration, Instant};
 
@@ -242,6 +244,11 @@ impl App {
             TopbarTabContent::File(index) => index < count,
             TopbarTabContent::Help => true,
         });
+        let live_ids: Vec<usize> = self.topbar_tabs.iter().map(|tab| tab.id).collect();
+        self.structured_previews
+            .retain(|id, _| live_ids.iter().any(|live| live == id));
+        self.csv_previews
+            .retain(|id, _| live_ids.iter().any(|live| live == id));
         if self.topbar_tabs.is_empty() {
             self.add_topbar_tab_for(self.multi_diff.selected_index.min(count.saturating_sub(1)));
         }
@@ -286,6 +293,8 @@ impl App {
             return;
         };
         if tab.content != TopbarTabContent::File(index) {
+            self.structured_previews.remove(&active);
+            self.csv_previews.remove(&active);
             tab.content = TopbarTabContent::File(index);
             tab.navigator_state = None;
             tab.scroll_offset = 0;
@@ -372,6 +381,8 @@ impl App {
         let Some(pos) = self.topbar_tabs.iter().position(|tab| tab.id == tab_id) else {
             return;
         };
+        self.structured_previews.remove(&tab_id);
+        self.csv_previews.remove(&tab_id);
         self.topbar_tabs.remove(pos);
         if self.active_topbar_tab == Some(tab_id) {
             let next_pos = pos.min(self.topbar_tabs.len().saturating_sub(1));
@@ -504,6 +515,288 @@ impl App {
         }
     }
 
+    pub(crate) fn ensure_csv_preview(
+        &mut self,
+        signature: CsvPreviewSignature,
+        text: &str,
+    ) -> Result<&mut CsvPreviewState, String> {
+        let Some(tab_id) = self.active_topbar_tab else {
+            return Err("No active tab".to_string());
+        };
+        let rebuild = self
+            .csv_previews
+            .get(&tab_id)
+            .is_none_or(|state| state.signature() != &signature);
+        if rebuild {
+            match CsvPreviewState::new(signature, text) {
+                Ok(state) => {
+                    self.csv_previews.insert(tab_id, state);
+                }
+                Err(error) => {
+                    self.csv_previews.remove(&tab_id);
+                    return Err(error);
+                }
+            }
+        }
+        self.csv_previews
+            .get_mut(&tab_id)
+            .ok_or_else(|| "No CSV preview".to_string())
+    }
+
+    pub(crate) fn active_csv_preview_mut(&mut self) -> Option<&mut CsvPreviewState> {
+        if self.view_mode != ViewMode::Preview || !self.active_preview_rendered() {
+            return None;
+        }
+        let tab_id = self.active_topbar_tab?;
+        self.csv_previews.get_mut(&tab_id)
+    }
+
+    pub(crate) fn sync_scroll_from_csv_preview(&mut self) {
+        // Three rows (top padding, header, and separator) stay pinned, so the
+        // scrollable body is shorter than the viewport.
+        let viewport_height = self.last_viewport_height.saturating_sub(3).max(1);
+        if let Some(state) = self.active_csv_preview_mut() {
+            let line = state.selected_visual_line();
+            if line < self.scroll_offset {
+                self.scroll_offset = line;
+            } else if line >= self.scroll_offset.saturating_add(viewport_height) {
+                self.scroll_offset = line.saturating_sub(viewport_height.saturating_sub(1));
+            }
+        }
+    }
+
+    pub(crate) fn csv_preview_move_down(&mut self, count: usize) -> bool {
+        let Some(state) = self.active_csv_preview_mut().filter(|_| count > 0) else {
+            return false;
+        };
+        state.move_down(count);
+        self.sync_scroll_from_csv_preview();
+        true
+    }
+
+    pub(crate) fn csv_preview_move_up(&mut self, count: usize) -> bool {
+        let Some(state) = self.active_csv_preview_mut().filter(|_| count > 0) else {
+            return false;
+        };
+        state.move_up(count);
+        self.sync_scroll_from_csv_preview();
+        true
+    }
+
+    pub(crate) fn csv_preview_move_left(&mut self, count: usize) -> bool {
+        let Some(state) = self.active_csv_preview_mut().filter(|_| count > 0) else {
+            return false;
+        };
+        state.move_left(count);
+        true
+    }
+
+    pub(crate) fn csv_preview_move_right(&mut self, count: usize) -> bool {
+        let Some(state) = self.active_csv_preview_mut().filter(|_| count > 0) else {
+            return false;
+        };
+        state.move_right(count);
+        true
+    }
+
+    pub(crate) fn csv_preview_focus_top(&mut self) -> bool {
+        let Some(state) = self.active_csv_preview_mut() else {
+            return false;
+        };
+        state.focus_top();
+        self.sync_scroll_from_csv_preview();
+        true
+    }
+
+    pub(crate) fn csv_preview_focus_bottom(&mut self) -> bool {
+        let Some(state) = self.active_csv_preview_mut() else {
+            return false;
+        };
+        state.focus_bottom();
+        self.sync_scroll_from_csv_preview();
+        true
+    }
+
+    pub(crate) fn ensure_structured_preview(
+        &mut self,
+        signature: StructuredPreviewSignature,
+        text: &str,
+    ) -> Result<&mut StructuredPreviewState, String> {
+        let Some(tab_id) = self.active_topbar_tab else {
+            return Err("No active tab".to_string());
+        };
+        let rebuild = self
+            .structured_previews
+            .get(&tab_id)
+            .is_none_or(|state| state.signature() != &signature);
+        if rebuild {
+            match StructuredPreviewState::new(signature, text) {
+                Ok(state) => {
+                    self.structured_previews.insert(tab_id, state);
+                }
+                Err(error) => {
+                    self.structured_previews.remove(&tab_id);
+                    return Err(error);
+                }
+            }
+        }
+        self.structured_previews
+            .get_mut(&tab_id)
+            .ok_or_else(|| "No structured preview".to_string())
+    }
+
+    pub(crate) fn active_structured_preview_mut(&mut self) -> Option<&mut StructuredPreviewState> {
+        if self.view_mode != ViewMode::Preview || !self.active_preview_rendered() {
+            return None;
+        }
+        let tab_id = self.active_topbar_tab?;
+        self.structured_previews.get_mut(&tab_id)
+    }
+
+    pub(crate) fn sync_scroll_from_structured_preview(&mut self) {
+        if let Some(state) = self.active_structured_preview_mut() {
+            self.scroll_offset = state.top_visible_offset();
+        }
+    }
+
+    pub(crate) fn structured_preview_move_down(&mut self, count: usize) -> bool {
+        let Some(state) = self.active_structured_preview_mut().filter(|_| count > 0) else {
+            return false;
+        };
+        state.move_down(count);
+        self.sync_scroll_from_structured_preview();
+        true
+    }
+
+    pub(crate) fn structured_preview_move_up(&mut self, count: usize) -> bool {
+        let Some(state) = self.active_structured_preview_mut().filter(|_| count > 0) else {
+            return false;
+        };
+        state.move_up(count);
+        self.sync_scroll_from_structured_preview();
+        true
+    }
+
+    pub(crate) fn structured_preview_move_left(&mut self) -> bool {
+        let Some(state) = self.active_structured_preview_mut() else {
+            return false;
+        };
+        state.move_left();
+        self.sync_scroll_from_structured_preview();
+        true
+    }
+
+    pub(crate) fn structured_preview_move_right(&mut self) -> bool {
+        let Some(state) = self.active_structured_preview_mut() else {
+            return false;
+        };
+        state.move_right();
+        self.sync_scroll_from_structured_preview();
+        true
+    }
+
+    pub(crate) fn structured_preview_focus_top(&mut self) -> bool {
+        let Some(state) = self.active_structured_preview_mut() else {
+            return false;
+        };
+        state.focus_top();
+        self.sync_scroll_from_structured_preview();
+        true
+    }
+
+    pub(crate) fn structured_preview_focus_bottom(&mut self) -> bool {
+        let Some(state) = self.active_structured_preview_mut() else {
+            return false;
+        };
+        state.focus_bottom();
+        self.sync_scroll_from_structured_preview();
+        true
+    }
+
+    pub(crate) fn structured_preview_jump_up(&mut self, count: Option<usize>) -> bool {
+        let Some(state) = self.active_structured_preview_mut() else {
+            return false;
+        };
+        state.jump_up(count);
+        self.sync_scroll_from_structured_preview();
+        true
+    }
+
+    pub(crate) fn structured_preview_jump_down(&mut self, count: Option<usize>) -> bool {
+        let Some(state) = self.active_structured_preview_mut() else {
+            return false;
+        };
+        state.jump_down(count);
+        self.sync_scroll_from_structured_preview();
+        true
+    }
+
+    pub(crate) fn structured_preview_toggle_collapsed(&mut self) -> bool {
+        let Some(state) = self.active_structured_preview_mut() else {
+            return false;
+        };
+        state.toggle_collapsed();
+        self.sync_scroll_from_structured_preview();
+        true
+    }
+
+    pub(crate) fn structured_preview_collapse_node_and_siblings(&mut self, deep: bool) -> bool {
+        let Some(state) = self.active_structured_preview_mut() else {
+            return false;
+        };
+        if deep {
+            state.deep_collapse_node_and_siblings();
+        } else {
+            state.collapse_node_and_siblings();
+        }
+        self.sync_scroll_from_structured_preview();
+        true
+    }
+
+    pub(crate) fn structured_preview_expand_node_and_siblings(&mut self, deep: bool) -> bool {
+        let Some(state) = self.active_structured_preview_mut() else {
+            return false;
+        };
+        if deep {
+            state.deep_expand_node_and_siblings();
+        } else {
+            state.expand_node_and_siblings();
+        }
+        self.sync_scroll_from_structured_preview();
+        true
+    }
+
+    pub(crate) fn structured_preview_toggle_mode(&mut self) -> bool {
+        let Some(state) = self.active_structured_preview_mut() else {
+            return false;
+        };
+        state.toggle_mode();
+        self.sync_scroll_from_structured_preview();
+        true
+    }
+
+    pub(crate) fn handle_structured_preview_click(&mut self, column: u16, row: u16) -> bool {
+        if self.view_mode != ViewMode::Preview || !self.active_preview_rendered() {
+            return false;
+        }
+        let Some((x, y, width, height)) = self.diff_view_area else {
+            return false;
+        };
+        if column < x
+            || column >= x.saturating_add(width)
+            || row < y
+            || row >= y.saturating_add(height)
+        {
+            return false;
+        }
+        let Some(state) = self.active_structured_preview_mut() else {
+            return false;
+        };
+        state.click(row.saturating_sub(y).saturating_add(1));
+        self.sync_scroll_from_structured_preview();
+        true
+    }
+
     pub(crate) fn handle_topbar_mouse_down(&mut self, column: u16, row: u16) -> bool {
         self.update_topbar_hover(column, row);
         if self
@@ -516,6 +809,18 @@ impl App {
             })
         {
             self.toggle_preview_rendered();
+            return true;
+        }
+        if self
+            .topbar_sidebar_toggle_hit
+            .is_some_and(|(x, y, width, height)| {
+                column >= x
+                    && column < x.saturating_add(width)
+                    && row >= y
+                    && row < y.saturating_add(height)
+            })
+        {
+            self.toggle_file_panel();
             return true;
         }
         if self.topbar_plus_hit.is_some_and(|(x, y, width, height)| {
@@ -583,15 +888,25 @@ impl App {
                 && row >= y
                 && row < y.saturating_add(height)
         });
+        let sidebar_hover = self
+            .topbar_sidebar_toggle_hit
+            .is_some_and(|(x, y, width, height)| {
+                column >= x
+                    && column < x.saturating_add(width)
+                    && row >= y
+                    && row < y.saturating_add(height)
+            });
         if self.topbar_hover_tab == hover
             && self.topbar_hover_close == close_hover
             && self.topbar_plus_hover == plus_hover
+            && self.topbar_sidebar_toggle_hover == sidebar_hover
         {
             return false;
         }
         self.topbar_hover_tab = hover;
         self.topbar_hover_close = close_hover;
         self.topbar_plus_hover = plus_hover;
+        self.topbar_sidebar_toggle_hover = sidebar_hover;
         true
     }
 

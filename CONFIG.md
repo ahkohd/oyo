@@ -99,6 +99,7 @@ Use `[ui.diff]` to control diff colours, inline highlights and large-file behavi
 | `extent_marker` | `neutral`, `diff` | `neutral` | Chooses hunk extent marker colour |
 | `extent_marker_scope` | `progress`, `hunk` | `progress` | Chooses which lines get diff colours while stepping |
 | `extent_marker_context` | `true`, `false` | `false` | Shows extent markers on unchanged context lines |
+| `preview_change_bars` | `true`, `false` | `true` | Shows change bars in source, Markdown, CSV and structured previews |
 
 ```toml
 [ui.diff]
@@ -112,6 +113,7 @@ idle_ms = 250
 extent_marker = "neutral"
 extent_marker_scope = "progress"
 extent_marker_context = false
+preview_change_bars = true
 ```
 
 See [diff behaviour](./docs/DIFF_VIEWER.md) and [diff styling previews](./docs/DIFF_PREVIEWS.md).

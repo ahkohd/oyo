@@ -411,6 +411,11 @@ fn dispatch_normal_action(
         }
         NormalAction::StepDown => {
             let count = repeat_count(app, key, pending_event, true)?;
+            if !app.file_list_focused
+                && (app.csv_preview_move_down(count) || app.structured_preview_move_down(count))
+            {
+                return Ok(());
+            }
             for _ in 0..count {
                 if app.file_list_focused {
                     app.next_file();
@@ -423,6 +428,11 @@ fn dispatch_normal_action(
         }
         NormalAction::StepUp => {
             let count = repeat_count(app, key, pending_event, true)?;
+            if !app.file_list_focused
+                && (app.csv_preview_move_up(count) || app.structured_preview_move_up(count))
+            {
+                return Ok(());
+            }
             for _ in 0..count {
                 if app.file_list_focused {
                     app.prev_file();
@@ -435,6 +445,16 @@ fn dispatch_normal_action(
         }
         NormalAction::NextHunk => {
             let count = repeat_count(app, key, pending_event, true)?;
+            if !app.file_list_focused {
+                let mut handled = false;
+                handled |= app.csv_preview_move_right(count);
+                for _ in 0..count {
+                    handled |= app.structured_preview_move_right();
+                }
+                if handled {
+                    return Ok(());
+                }
+            }
             app.defer_view_build_for_jump();
             for _ in 0..count {
                 if app.stepping {
@@ -446,6 +466,16 @@ fn dispatch_normal_action(
         }
         NormalAction::PrevHunk => {
             let count = repeat_count(app, key, pending_event, true)?;
+            if !app.file_list_focused {
+                let mut handled = false;
+                handled |= app.csv_preview_move_left(count);
+                for _ in 0..count {
+                    handled |= app.structured_preview_move_left();
+                }
+                if handled {
+                    return Ok(());
+                }
+            }
             app.defer_view_build_for_jump();
             for _ in 0..count {
                 if app.stepping {
@@ -466,6 +496,9 @@ fn dispatch_normal_action(
         }
         NormalAction::HunkEnd => {
             app.reset_count();
+            if app.structured_preview_expand_node_and_siblings(false) {
+                return Ok(());
+            }
             app.defer_view_build_for_jump();
             if app.stepping {
                 app.goto_hunk_end();
@@ -534,11 +567,17 @@ fn dispatch_normal_action(
         }
         NormalAction::GotoStart => {
             app.reset_count();
+            if app.csv_preview_focus_top() || app.structured_preview_focus_top() {
+                return Ok(());
+            }
             app.defer_view_build_for_jump();
             app.goto_start();
         }
         NormalAction::GotoEnd => {
             app.reset_count();
+            if app.csv_preview_focus_bottom() || app.structured_preview_focus_bottom() {
+                return Ok(());
+            }
             app.defer_view_build_for_jump();
             app.goto_end();
         }
@@ -574,6 +613,9 @@ fn dispatch_normal_action(
         }
         NormalAction::ToggleAutoplay => {
             app.reset_count();
+            if app.structured_preview_toggle_collapsed() {
+                return Ok(());
+            }
             if app.stepping {
                 app.toggle_autoplay();
             }
@@ -606,12 +648,18 @@ fn dispatch_normal_action(
         }
         NormalAction::HalfPageUp => {
             app.reset_count();
+            if app.structured_preview_jump_up(None) {
+                return Ok(());
+            }
             if let Ok((_, rows)) = terminal::size() {
                 app.scroll_half_page_up(rows.saturating_sub(6) as usize);
             }
         }
         NormalAction::HalfPageDown => {
             app.reset_count();
+            if app.structured_preview_jump_down(None) {
+                return Ok(());
+            }
             if let Ok((_, rows)) = terminal::size() {
                 app.scroll_half_page_down(rows.saturating_sub(6) as usize);
             }
@@ -659,6 +707,9 @@ fn dispatch_normal_action(
         }
         NormalAction::ToggleEvoSyntax => {
             app.reset_count();
+            if app.structured_preview_expand_node_and_siblings(true) {
+                return Ok(());
+            }
             if app.view_mode == ViewMode::Evolution {
                 app.toggle_evo_syntax();
             }
@@ -744,14 +795,23 @@ fn dispatch_normal_action(
         }
         NormalAction::NextConflict => {
             app.reset_count();
+            if app.structured_preview_collapse_node_and_siblings(false) {
+                return Ok(());
+            }
             app.next_conflict();
         }
         NormalAction::PrevConflict => {
             app.reset_count();
+            if app.structured_preview_collapse_node_and_siblings(true) {
+                return Ok(());
+            }
             app.prev_conflict();
         }
         NormalAction::LineComment => {
             app.reset_count();
+            if app.structured_preview_toggle_mode() {
+                return Ok(());
+            }
             app.start_line_comment();
         }
         NormalAction::HunkComment => {

@@ -6,9 +6,13 @@ use crate::app::{
 };
 use crate::color;
 use crate::config::FilePanelPosition;
+use crate::csv_preview::{CsvPreviewSignature, CsvPreviewState};
 use crate::keybindings::{
     BindingAction, DashboardAction, DashboardFilterAction, FileFilterAction, GlobalAction,
     HelpAction, LineInputAction, NormalAction, PickerAction, ReviewEditorAction, SelectionAction,
+};
+use crate::structured_preview::{
+    StructuredPreviewChangeBars, StructuredPreviewKind, StructuredPreviewSignature,
 };
 use crate::syntax::SyntaxSide;
 use crate::views::{
@@ -16,7 +20,7 @@ use crate::views::{
     reserve_diff_scrollbar_lane,
 };
 use image::GenericImageView;
-use oyo_core::{multi::DiffStatus, multi::FileSide, FileStatus};
+use oyo_core::{multi::DiffStatus, multi::FileSide, ChangeKind, FileStatus, LineKind};
 use pulldown_cmark::{BlockQuoteKind, CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Margin, Rect},
@@ -28,7 +32,10 @@ use ratatui::{
     },
     Frame,
 };
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 fn truncate_filename_keep_ext(name: &str, max_width: usize) -> String {
@@ -379,6 +386,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     app.topbar_tab_hits.clear();
     app.topbar_plus_hit = None;
     app.preview_toggle_hit = None;
+    app.topbar_sidebar_toggle_hit = None;
 
     if app.multi_diff.file_count() == 0 {
         app.clear_diff_selection();
@@ -463,7 +471,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 fn draw_preview_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     let mode = " PREVIEW ";
     let path = app.current_file_path();
-    let state = if preview_can_render_markdown(app) {
+    let state = if preview_can_render_markdown(app)
+        || preview_structured_kind(app).is_some()
+        || preview_can_render_csv(app)
+    {
         if app.active_preview_rendered() {
             "preview"
         } else {
@@ -473,8 +484,9 @@ fn draw_preview_status_bar(frame: &mut Frame, app: &App, area: Rect) {
         "source"
     };
     let available_width = area.width as usize;
-    let left_width = (available_width * 6) / 10;
-    let right_width = available_width.saturating_sub(left_width);
+    let left_width = (available_width * 4) / 10;
+    let center_width = (available_width * 2) / 10;
+    let right_width = available_width.saturating_sub(left_width + center_width);
     let mut left_spans = vec![
         Span::styled(
             mode,
@@ -490,6 +502,13 @@ fn draw_preview_status_bar(frame: &mut Frame, app: &App, area: Rect) {
         ),
     ];
     left_spans = pad_spans_left(clamp_spans_to_width(&left_spans, left_width), left_width);
+    let center_spans = pad_spans_center(
+        clamp_spans_to_width(
+            &line_input_status_spans(app).unwrap_or_default(),
+            center_width,
+        ),
+        center_width,
+    );
     let right_spans = pad_spans_right(
         vec![Span::styled(
             state,
@@ -499,12 +518,41 @@ fn draw_preview_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     );
     let mut spans = Vec::new();
     spans.extend(left_spans);
+    spans.extend(center_spans);
     spans.extend(right_spans);
     let mut paragraph = Paragraph::new(Line::from(spans));
     if let Some(bg) = app.theme.background {
         paragraph = paragraph.style(Style::default().bg(bg));
     }
     frame.render_widget(paragraph, area);
+}
+
+fn line_input_status_spans(app: &App) -> Option<Vec<Span<'static>>> {
+    let (prefix, query, placeholder) = if app.goto_active() {
+        (":", app.goto_query(), "Go to")
+    } else if app.search_active() {
+        ("/", app.search_query(), "Search")
+    } else {
+        return None;
+    };
+    let query_text = if query.is_empty() {
+        placeholder.to_string()
+    } else {
+        query.to_string()
+    };
+    let query_style = if query.is_empty() {
+        Style::default().fg(app.theme.text_muted)
+    } else {
+        Style::default().fg(app.theme.text)
+    };
+    Some(vec![
+        Span::styled(
+            prefix.to_string(),
+            Style::default().fg(app.theme.text_muted),
+        ),
+        Span::raw(" "),
+        Span::styled(query_text, query_style),
+    ])
 }
 
 fn draw_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -596,38 +644,8 @@ fn draw_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
 
     // Build CENTER section: goto/search prompt or step counter
     let mut center_spans = Vec::new();
-    let show_goto = app.goto_active();
-    let show_search = app.search_active();
-    if show_goto {
-        center_spans.push(Span::styled(":", Style::default().fg(app.theme.text_muted)));
-        center_spans.push(Span::raw(" "));
-        let query = app.goto_query();
-        let query_text = if app.goto_active() && query.is_empty() {
-            "Go to".to_string()
-        } else {
-            query.to_string()
-        };
-        let query_style = if app.goto_active() && query.is_empty() {
-            Style::default().fg(app.theme.text_muted)
-        } else {
-            Style::default().fg(app.theme.text)
-        };
-        center_spans.push(Span::styled(query_text, query_style));
-    } else if show_search {
-        center_spans.push(Span::styled("/", Style::default().fg(app.theme.text_muted)));
-        center_spans.push(Span::raw(" "));
-        let query = app.search_query();
-        let query_text = if app.search_active() && query.is_empty() {
-            "Search".to_string()
-        } else {
-            query.to_string()
-        };
-        let query_style = if app.search_active() && query.is_empty() {
-            Style::default().fg(app.theme.text_muted)
-        } else {
-            Style::default().fg(app.theme.text)
-        };
-        center_spans.push(Span::styled(query_text, query_style));
+    if let Some(input_spans) = line_input_status_spans(app) {
+        center_spans = input_spans;
     } else if app.stepping {
         let autoplay_marker = if app.autoplay {
             if app.autoplay_reverse {
@@ -769,6 +787,7 @@ fn draw_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
 fn draw_top_bar(frame: &mut Frame, app: &mut App, area: Rect) {
     let available_width = area.width as usize;
     app.preview_toggle_hit = None;
+    app.topbar_sidebar_toggle_hit = None;
     let mut right_spans = if matches!(app.view_mode, ViewMode::Preview) {
         preview_topbar_spans(app)
     } else {
@@ -824,23 +843,75 @@ fn draw_top_bar(frame: &mut Frame, app: &mut App, area: Rect) {
             ]
         }
     };
-    let right_width = spans_width(&right_spans).min(available_width);
-    if matches!(app.view_mode, ViewMode::Preview)
-        && preview_can_render_markdown(app)
-        && right_width > 0
+    let preview_width = if matches!(app.view_mode, ViewMode::Preview)
+        && (preview_can_render_markdown(app)
+            || preview_structured_kind(app).is_some()
+            || preview_can_render_csv(app))
     {
+        spans_width(&right_spans).min(available_width)
+    } else {
+        0
+    };
+
+    let sidebar_toggle = app
+        .is_multi_file()
+        .then(|| topbar_sidebar_toggle_spans(app));
+    let sidebar_toggle_width = sidebar_toggle
+        .as_ref()
+        .map(|spans| spans_width(spans))
+        .unwrap_or(0);
+    let sidebar_on_left = app.file_panel_position == FilePanelPosition::Left;
+    if !sidebar_on_left {
+        if let Some(spans) = sidebar_toggle.as_ref() {
+            right_spans.extend(spans.clone());
+        }
+    }
+
+    let right_width = spans_width(&right_spans).min(available_width);
+    if preview_width > 0 {
         app.preview_toggle_hit = Some((
             area.x
                 .saturating_add(available_width.saturating_sub(right_width) as u16),
             area.y,
-            right_width as u16,
+            preview_width as u16,
             1,
         ));
     }
+    if !sidebar_on_left && sidebar_toggle.is_some() && available_width >= sidebar_toggle_width {
+        app.topbar_sidebar_toggle_hit = Some((
+            area.x
+                .saturating_add(available_width.saturating_sub(sidebar_toggle_width) as u16),
+            area.y,
+            sidebar_toggle_width as u16,
+            1,
+        ));
+    }
+
     let left_max = available_width.saturating_sub(right_width + 1);
-    let mut left_spans = topbar_tab_spans(app, area, left_max);
-    left_spans = clamp_spans_to_width(&left_spans, left_max);
-    left_spans = pad_spans_left(left_spans, left_max);
+    let left_toggle_width =
+        if sidebar_on_left && sidebar_toggle.is_some() && left_max >= sidebar_toggle_width {
+            app.topbar_sidebar_toggle_hit = Some((area.x, area.y, sidebar_toggle_width as u16, 1));
+            sidebar_toggle_width
+        } else {
+            0
+        };
+    let tabs_max = left_max.saturating_sub(left_toggle_width);
+    let tab_area = Rect::new(
+        area.x.saturating_add(left_toggle_width as u16),
+        area.y,
+        area.width.saturating_sub(left_toggle_width as u16),
+        area.height,
+    );
+    let mut left_spans = Vec::new();
+    if left_toggle_width > 0 {
+        if let Some(spans) = sidebar_toggle.as_ref() {
+            left_spans.extend(spans.clone());
+        }
+    }
+    let mut tab_spans = topbar_tab_spans(app, tab_area, tabs_max);
+    tab_spans = clamp_spans_to_width(&tab_spans, tabs_max);
+    tab_spans = pad_spans_left(tab_spans, tabs_max);
+    left_spans.extend(tab_spans);
 
     right_spans = clamp_spans_to_width(&right_spans, right_width + 1);
     let right_spans = pad_spans_right(right_spans, right_width + 1);
@@ -856,8 +927,34 @@ fn draw_top_bar(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(paragraph, area);
 }
 
+fn topbar_sidebar_toggle_spans(app: &App) -> Vec<Span<'static>> {
+    let panel_visible = app.file_panel_visible && !app.file_panel_auto_hidden;
+    let glyph = match (app.file_panel_position, panel_visible) {
+        (FilePanelPosition::Left, true) => "«",
+        (FilePanelPosition::Left, false) => "»",
+        (FilePanelPosition::Right, true) => "»",
+        (FilePanelPosition::Right, false) => "«",
+    };
+    let mut style = Style::default().fg(if app.topbar_sidebar_toggle_hover {
+        app.theme.accent
+    } else {
+        app.theme.text_muted
+    });
+    if app.topbar_sidebar_toggle_hover {
+        style = style.add_modifier(Modifier::BOLD);
+    }
+    let label = match app.file_panel_position {
+        FilePanelPosition::Left => format!(" {glyph}"),
+        FilePanelPosition::Right => format!("{glyph} "),
+    };
+    vec![Span::styled(label, style)]
+}
+
 fn preview_topbar_spans(app: &App) -> Vec<Span<'static>> {
-    if preview_can_render_markdown(app) {
+    if preview_can_render_markdown(app)
+        || preview_structured_kind(app).is_some()
+        || preview_can_render_csv(app)
+    {
         let label = if app.active_preview_rendered() {
             " source "
         } else {
@@ -869,6 +966,29 @@ fn preview_topbar_spans(app: &App) -> Vec<Span<'static>> {
         " preview ",
         Style::default().fg(app.theme.text_muted),
     )]
+}
+
+fn preview_structured_kind(app: &App) -> Option<StructuredPreviewKind> {
+    match app.active_topbar_content() {
+        Some(TopbarTabContent::File(index)) => app
+            .multi_diff
+            .files
+            .get(index)
+            .and_then(|file| StructuredPreviewKind::from_file_name(&file.display_name)),
+        _ => None,
+    }
+}
+
+fn preview_can_render_csv(app: &App) -> bool {
+    match app.active_topbar_content() {
+        Some(TopbarTabContent::File(index)) => app
+            .multi_diff
+            .files
+            .get(index)
+            .map(|file| is_csv_name(&file.display_name))
+            .unwrap_or(false),
+        _ => false,
+    }
 }
 
 fn preview_can_render_markdown(app: &App) -> bool {
@@ -959,22 +1079,16 @@ fn topbar_tab_spans(app: &mut App, area: Rect, max_width: usize) -> Vec<Span<'st
             close_col: closeable.then_some(end_col.saturating_sub(2)),
         });
         let active_tab = Some(tab.id) == active;
-        let style = if active_tab {
-            Style::default()
-                .fg(app.theme.background.unwrap_or(Color::Black))
-                .bg(app.theme.accent)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(app.theme.text_muted)
-        };
+        let style = topbar_tab_style(app, active_tab, app.topbar_hover_tab == Some(tab.id));
         spans.push(Span::styled(format!(" {name}{changed}"), style));
         if closeable {
             spans.push(Span::styled(" ", style));
-            let close_style = if app.topbar_hover_close == Some(tab.id) {
-                brighten_close_style(style)
-            } else {
-                style
-            };
+            let close_style = topbar_close_style(
+                app,
+                active_tab,
+                app.topbar_hover_tab == Some(tab.id),
+                app.topbar_hover_close == Some(tab.id),
+            );
             spans.push(Span::styled(
                 if show_close { "×" } else { " " },
                 close_style,
@@ -1014,6 +1128,51 @@ fn topbar_tab_spans(app: &mut App, area: Rect, max_width: usize) -> Vec<Span<'st
     spans
 }
 
+fn topbar_tab_style(app: &App, active: bool, hovered: bool) -> Style {
+    if active {
+        return Style::default()
+            .fg(app.theme.background.unwrap_or(Color::Black))
+            .bg(app.theme.accent)
+            .add_modifier(Modifier::BOLD);
+    }
+    let bg = topbar_inactive_tab_bg(app, hovered);
+    let mut style = Style::default().fg(if hovered {
+        app.theme.accent
+    } else {
+        app.theme.text_muted
+    });
+    if let Some(bg) = bg {
+        style = style.bg(bg);
+    }
+    style
+}
+
+fn topbar_close_style(app: &App, active: bool, hovered: bool, close_hovered: bool) -> Style {
+    let mut style = if active {
+        Style::default()
+            .fg(app.theme.background.unwrap_or(Color::Black))
+            .bg(app.theme.accent)
+    } else {
+        let mut style = Style::default().fg(if hovered {
+            app.theme.accent
+        } else {
+            app.theme.text_muted
+        });
+        if let Some(bg) = topbar_inactive_tab_bg(app, hovered) {
+            style = style.bg(bg);
+        }
+        style
+    };
+    if close_hovered {
+        style = brighten_close_style(style);
+    }
+    style
+}
+
+fn topbar_inactive_tab_bg(app: &App, _hovered: bool) -> Option<Color> {
+    app.theme.background_panel.or(app.theme.background)
+}
+
 fn brighten_close_style(style: Style) -> Style {
     let style = style.add_modifier(Modifier::BOLD);
     match style.fg {
@@ -1025,7 +1184,8 @@ fn brighten_close_style(style: Style) -> Style {
 fn brighten_close_color(color: Color) -> Color {
     match color {
         Color::Black => Color::DarkGray,
-        Color::DarkGray | Color::Gray | Color::White => color,
+        Color::DarkGray => Color::Gray,
+        Color::Gray | Color::White => color,
         Color::Red => Color::LightRed,
         Color::Green => Color::LightGreen,
         Color::Yellow => Color::LightYellow,
@@ -1226,9 +1386,43 @@ fn render_file_panel_scrollbar(
     }
 }
 
+fn file_panel_content_area(app: &App, area: Rect) -> Rect {
+    if area.width <= 1 {
+        return area;
+    }
+    match app.file_panel_position {
+        FilePanelPosition::Left => Rect::new(area.x, area.y, area.width - 1, area.height),
+        FilePanelPosition::Right => Rect::new(area.x + 1, area.y, area.width - 1, area.height),
+    }
+}
+
+fn draw_file_panel_divider(frame: &mut Frame, app: &App, area: Rect, panel_bg: Option<Color>) {
+    if area.width == 0 {
+        return;
+    }
+    let (x, symbol) = match app.file_panel_position {
+        FilePanelPosition::Left => (area.x.saturating_add(area.width.saturating_sub(1)), "▕"),
+        FilePanelPosition::Right => (area.x, "▏"),
+    };
+    let fg = panel_bg
+        .and_then(|bg| color::blend_colors(bg, app.theme.border_subtle, 0.12))
+        .unwrap_or(app.theme.border_subtle);
+    let mut style = Style::default().fg(fg).add_modifier(Modifier::DIM);
+    if let Some(bg) = panel_bg {
+        style = style.bg(bg);
+    }
+    let buffer = frame.buffer_mut();
+    for row in area.y..area.y.saturating_add(area.height) {
+        if let Some(cell) = buffer.cell_mut((x, row)) {
+            cell.set_symbol(symbol).set_style(style);
+        }
+    }
+}
+
 fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
-    let content_area = area;
     let panel_bg = app.theme.background_panel.or(app.theme.background);
+    let content_area = file_panel_content_area(app, area);
+    draw_file_panel_divider(frame, app, area, panel_bg);
 
     let show_filter =
         app.file_list_focused || app.file_filter_active || !app.file_filter.is_empty();
@@ -1236,13 +1430,13 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
         .direction(Direction::Vertical)
         .constraints(if show_filter {
             vec![
-                Constraint::Length(5), // Header
+                Constraint::Length(4), // Header
                 Constraint::Min(0),    // List
                 Constraint::Length(3), // Filter
             ]
         } else {
             vec![
-                Constraint::Length(5), // Header
+                Constraint::Length(4), // Header
                 Constraint::Min(0),    // List
             ]
         })
@@ -1318,7 +1512,6 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
     };
 
     let header_lines = vec![
-        Line::raw(""),
         Line::from(vec![
             Span::raw(" "),
             Span::styled(header_text, Style::default().fg(app.theme.text_muted)),
@@ -1630,6 +1823,25 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
+#[derive(Clone, Copy)]
+struct PreviewChangeBar {
+    kind: LineKind,
+    old_line: Option<usize>,
+    new_line: Option<usize>,
+}
+
+struct PreviewChangeBars {
+    marker: String,
+    marker_width: usize,
+    styles: HashMap<usize, Style>,
+}
+
+impl PreviewChangeBars {
+    fn gutter_width(&self) -> usize {
+        self.marker_width + 1
+    }
+}
+
 fn render_preview(frame: &mut Frame, app: &mut App, area: Rect) {
     if let Some(bg) = app.theme.background {
         frame.render_widget(Block::default().style(Style::default().bg(bg)), area);
@@ -1637,6 +1849,8 @@ fn render_preview(frame: &mut Frame, app: &mut App, area: Rect) {
     let (content_area, scrollbar_area) = reserve_diff_scrollbar_lane(app, area);
     let (title, text, side, binary, base_dir) = preview_document(app);
     app.clear_preview_link_boxes();
+    // Number of leading lines pinned to the top (CSV header and separator).
+    let mut sticky_rows = 0usize;
     let (lines, links) = if binary {
         (
             vec![
@@ -1654,13 +1868,91 @@ fn render_preview(frame: &mut Frame, app: &mut App, area: Rect) {
             ],
             Vec::new(),
         )
+    } else if let Some(kind) =
+        preview_structured_kind(app).filter(|_| app.active_preview_rendered())
+    {
+        let change_bars = structured_preview_change_bars(app, kind, side);
+        structured_preview_lines(
+            &title,
+            &text,
+            app,
+            content_area.width as usize,
+            content_area.height as usize,
+            kind,
+            change_bars.as_ref(),
+        )
+    } else if preview_can_render_csv(app) && app.active_preview_rendered() {
+        // Pin the top padding, header, and separator to the top.
+        sticky_rows = 3;
+        let change_bars = preview_change_bars(app, side);
+        csv_preview_lines(
+            &title,
+            &text,
+            app,
+            content_area.width as usize,
+            change_bars.as_ref(),
+        )
     } else if preview_can_render_markdown(app) && app.active_preview_rendered() {
-        markdown_preview_lines(&text, app, content_area.width as usize, base_dir.as_deref())
+        let change_bars = preview_change_bars(app, side);
+        markdown_preview_lines(
+            &text,
+            app,
+            content_area.width as usize,
+            base_dir.as_deref(),
+            change_bars.as_ref(),
+        )
     } else {
-        (source_preview_lines(app, &title, &text, side), Vec::new())
+        let change_bars = preview_change_bars(app, side);
+        (
+            source_preview_lines(app, &title, &text, side, change_bars.as_ref()),
+            Vec::new(),
+        )
     };
-    let total_lines = lines.len().max(1);
     let visible_lines = content_area.height as usize;
+
+    // Sticky-header path: pin the first `sticky_rows` lines and scroll the body.
+    if sticky_rows > 0 && lines.len() > sticky_rows {
+        let mut lines = lines;
+        let body = lines.split_off(sticky_rows);
+        let header_lines = lines;
+        let body_total = body.len();
+        let body_h = visible_lines.saturating_sub(sticky_rows).max(1);
+        app.clamp_scroll(body_total, body_h, false);
+        let scroll = app.scroll_offset.min(body_total.saturating_sub(1));
+        let header_area = Rect {
+            height: sticky_rows as u16,
+            ..content_area
+        };
+        let body_area = Rect {
+            y: content_area.y + sticky_rows as u16,
+            height: content_area.height.saturating_sub(sticky_rows as u16),
+            ..content_area
+        };
+        let body_visible = body
+            .into_iter()
+            .skip(scroll)
+            .take(body_h)
+            .collect::<Vec<_>>();
+        let mut header_par = Paragraph::new(header_lines);
+        let mut body_par = Paragraph::new(body_visible);
+        if let Some(bg) = app.theme.background {
+            header_par = header_par.style(Style::default().bg(bg));
+            body_par = body_par.style(Style::default().bg(bg));
+        }
+        frame.render_widget(header_par, header_area);
+        frame.render_widget(body_par, body_area);
+        render_diff_scrollbar(
+            frame,
+            app,
+            scrollbar_area,
+            body_total,
+            body_h,
+            app.scroll_offset,
+        );
+        return;
+    }
+
+    let total_lines = lines.len().max(1);
     app.clamp_scroll(total_lines, visible_lines, false);
     let scroll = app.scroll_offset.min(total_lines.saturating_sub(1));
 
@@ -1740,11 +2032,621 @@ fn preview_document(app: &App) -> (String, String, Option<SyntaxSide>, bool, Opt
     }
 }
 
+fn preview_change_bars(app: &mut App, side: Option<SyntaxSide>) -> Option<PreviewChangeBars> {
+    if !app.preview_change_bars {
+        return None;
+    }
+    let side = side?;
+    let mut raw = HashMap::<usize, PreviewChangeBar>::new();
+    {
+        let diff = app.multi_diff.current_navigator().diff();
+        for change_id in &diff.significant_changes {
+            let Some(change) = diff
+                .changes
+                .get(*change_id)
+                .filter(|change| change.id == *change_id)
+                .or_else(|| diff.changes.iter().find(|change| change.id == *change_id))
+            else {
+                continue;
+            };
+            for span in change.changes() {
+                let Some((line, bar)) = preview_change_bar_for_span(side, span) else {
+                    continue;
+                };
+                raw.entry(line)
+                    .and_modify(|old| *old = merge_preview_change_bars(*old, bar))
+                    .or_insert(bar);
+            }
+        }
+    }
+    if raw.is_empty() {
+        return None;
+    }
+    let marker = app.extent_marker.clone();
+    let marker_width = text_width(&marker).max(1);
+    let styles = raw
+        .into_iter()
+        .map(|(line, bar)| {
+            (
+                line,
+                crate::views::extent_marker_style(app, bar.kind, true, bar.old_line, bar.new_line),
+            )
+        })
+        .collect();
+    Some(PreviewChangeBars {
+        marker,
+        marker_width,
+        styles,
+    })
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StructuredDiffKind {
+    Added,
+    Deleted,
+    Modified,
+}
+
+fn structured_preview_change_bars(
+    app: &App,
+    kind: StructuredPreviewKind,
+    side: Option<SyntaxSide>,
+) -> Option<StructuredPreviewChangeBars> {
+    if !app.preview_change_bars {
+        return None;
+    }
+    let side = side?;
+    let index = match app.active_topbar_content()? {
+        TopbarTabContent::File(index) => index,
+        TopbarTabContent::Help => return None,
+    };
+    let (old, new) = app.multi_diff.file_contents(index)?;
+    let old = parse_structured_change_value(kind, old).ok()?;
+    let new = parse_structured_change_value(kind, new).ok()?;
+    let mut changed = HashMap::new();
+    diff_structured_values("", old.as_ref(), new.as_ref(), &mut changed);
+
+    let styles = changed
+        .into_iter()
+        .filter_map(|(path, kind)| {
+            if !structured_diff_kind_visible(side, kind) {
+                return None;
+            }
+            Some((path, structured_diff_style(app, kind)))
+        })
+        .collect::<HashMap<_, _>>();
+    if styles.is_empty() {
+        return None;
+    }
+    let marker = app.extent_marker.clone();
+    Some(StructuredPreviewChangeBars {
+        marker_width: text_width(&marker).max(1),
+        marker,
+        styles,
+    })
+}
+
+fn parse_structured_change_value(
+    kind: StructuredPreviewKind,
+    text: &str,
+) -> Result<Option<serde_json::Value>, String> {
+    if text.trim().is_empty() {
+        return Ok(None);
+    }
+    let value = match kind {
+        StructuredPreviewKind::Json => {
+            serde_json::from_str(text).map_err(|error| error.to_string())?
+        }
+        StructuredPreviewKind::Yaml => parse_yaml_change_value(text)?,
+        StructuredPreviewKind::Toml => {
+            let value = toml::from_str::<toml::Value>(text).map_err(|error| error.to_string())?;
+            serde_json::to_value(value).map_err(|error| error.to_string())?
+        }
+    };
+    Ok(Some(value))
+}
+
+fn parse_yaml_change_value(text: &str) -> Result<serde_json::Value, String> {
+    let docs = yaml_rust::YamlLoader::load_from_str(text).map_err(|error| error.to_string())?;
+    let values = docs
+        .into_iter()
+        .map(yaml_change_value)
+        .collect::<Result<Vec<_>, _>>()?;
+    if values.len() == 1 {
+        Ok(values.into_iter().next().unwrap())
+    } else {
+        Ok(serde_json::Value::Array(values))
+    }
+}
+
+fn yaml_change_value(value: yaml_rust::Yaml) -> Result<serde_json::Value, String> {
+    Ok(match value {
+        yaml_rust::Yaml::Real(value) => value
+            .parse::<f64>()
+            .ok()
+            .and_then(serde_json::Number::from_f64)
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::String(value)),
+        yaml_rust::Yaml::Integer(value) => serde_json::Value::Number(value.into()),
+        yaml_rust::Yaml::String(value) => serde_json::Value::String(value),
+        yaml_rust::Yaml::Boolean(value) => serde_json::Value::Bool(value),
+        yaml_rust::Yaml::Array(values) => serde_json::Value::Array(
+            values
+                .into_iter()
+                .map(yaml_change_value)
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
+        yaml_rust::Yaml::Hash(values) => {
+            let mut out = serde_json::Map::new();
+            for (key, value) in values {
+                let yaml_rust::Yaml::String(key) = key else {
+                    return Err("YAML preview change bars need string keys".to_string());
+                };
+                out.insert(key, yaml_change_value(value)?);
+            }
+            serde_json::Value::Object(out)
+        }
+        yaml_rust::Yaml::Null => serde_json::Value::Null,
+        yaml_rust::Yaml::BadValue => return Err("YAML parser returned a bad value".to_string()),
+        yaml_rust::Yaml::Alias(_) => {
+            return Err("YAML aliases are not supported in preview change bars".to_string())
+        }
+    })
+}
+
+fn diff_structured_values(
+    path: &str,
+    old: Option<&serde_json::Value>,
+    new: Option<&serde_json::Value>,
+    changed: &mut HashMap<String, StructuredDiffKind>,
+) {
+    match (old, new) {
+        (None, None) => {}
+        (None, Some(value)) => {
+            collect_structured_paths(path, value, StructuredDiffKind::Added, changed)
+        }
+        (Some(value), None) => {
+            collect_structured_paths(path, value, StructuredDiffKind::Deleted, changed)
+        }
+        (Some(old), Some(new)) if old == new => {}
+        (Some(serde_json::Value::Object(old)), Some(serde_json::Value::Object(new))) => {
+            for key in old.keys().chain(new.keys()) {
+                let child = structured_child_key(path, key);
+                diff_structured_values(&child, old.get(key), new.get(key), changed);
+            }
+        }
+        (Some(serde_json::Value::Array(old)), Some(serde_json::Value::Array(new))) => {
+            for index in 0..old.len().max(new.len()) {
+                let child = format!("{path}[{index}]");
+                diff_structured_values(&child, old.get(index), new.get(index), changed);
+            }
+        }
+        (Some(_), Some(_)) => {
+            changed.insert(path.to_string(), StructuredDiffKind::Modified);
+        }
+    }
+}
+
+fn collect_structured_paths(
+    path: &str,
+    value: &serde_json::Value,
+    kind: StructuredDiffKind,
+    changed: &mut HashMap<String, StructuredDiffKind>,
+) {
+    changed
+        .entry(path.to_string())
+        .and_modify(|old| *old = merge_structured_diff_kind(*old, kind))
+        .or_insert(kind);
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, value) in map {
+                collect_structured_paths(&structured_child_key(path, key), value, kind, changed);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for (index, value) in values.iter().enumerate() {
+                collect_structured_paths(&format!("{path}[{index}]"), value, kind, changed);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn structured_child_key(parent: &str, key: &str) -> String {
+    if crate::jless::lineprinter::JS_IDENTIFIER.is_match(key) {
+        format!("{parent}.{key}")
+    } else {
+        format!(
+            "{parent}[{}]",
+            serde_json::to_string(key).unwrap_or_default()
+        )
+    }
+}
+
+fn merge_structured_diff_kind(
+    old: StructuredDiffKind,
+    new: StructuredDiffKind,
+) -> StructuredDiffKind {
+    if old == new {
+        old
+    } else {
+        StructuredDiffKind::Modified
+    }
+}
+
+fn structured_diff_kind_visible(side: SyntaxSide, kind: StructuredDiffKind) -> bool {
+    matches!(
+        (side, kind),
+        (
+            SyntaxSide::New,
+            StructuredDiffKind::Added | StructuredDiffKind::Modified
+        ) | (
+            SyntaxSide::Old,
+            StructuredDiffKind::Deleted | StructuredDiffKind::Modified
+        )
+    )
+}
+
+fn structured_diff_style(app: &App, kind: StructuredDiffKind) -> Style {
+    match kind {
+        StructuredDiffKind::Added => {
+            crate::views::extent_marker_style(app, LineKind::Inserted, true, None, Some(1))
+        }
+        StructuredDiffKind::Deleted => {
+            crate::views::extent_marker_style(app, LineKind::Deleted, true, Some(1), None)
+        }
+        StructuredDiffKind::Modified => {
+            crate::views::extent_marker_style(app, LineKind::Modified, true, Some(1), Some(1))
+        }
+    }
+}
+
+fn preview_change_bar_for_span(
+    side: SyntaxSide,
+    span: &oyo_core::ChangeSpan,
+) -> Option<(usize, PreviewChangeBar)> {
+    match (side, span.kind) {
+        (SyntaxSide::New, ChangeKind::Insert) => span.new_line.map(|line| {
+            (
+                line,
+                PreviewChangeBar {
+                    kind: LineKind::Inserted,
+                    old_line: None,
+                    new_line: Some(line),
+                },
+            )
+        }),
+        (SyntaxSide::Old, ChangeKind::Delete) => span.old_line.map(|line| {
+            (
+                line,
+                PreviewChangeBar {
+                    kind: LineKind::Deleted,
+                    old_line: Some(line),
+                    new_line: None,
+                },
+            )
+        }),
+        (SyntaxSide::New, ChangeKind::Replace) => span.new_line.map(|line| {
+            (
+                line,
+                PreviewChangeBar {
+                    kind: LineKind::Modified,
+                    old_line: span.old_line,
+                    new_line: Some(line),
+                },
+            )
+        }),
+        (SyntaxSide::Old, ChangeKind::Replace) => span.old_line.map(|line| {
+            (
+                line,
+                PreviewChangeBar {
+                    kind: LineKind::Modified,
+                    old_line: Some(line),
+                    new_line: span.new_line,
+                },
+            )
+        }),
+        _ => None,
+    }
+}
+
+fn merge_preview_change_bars(old: PreviewChangeBar, new: PreviewChangeBar) -> PreviewChangeBar {
+    if old.kind == new.kind {
+        return old;
+    }
+    PreviewChangeBar {
+        kind: LineKind::Modified,
+        old_line: old.old_line.or(new.old_line),
+        new_line: old.new_line.or(new.new_line),
+    }
+}
+
+fn push_preview_change_gutter(
+    spans: &mut Vec<Span<'static>>,
+    bars: Option<&PreviewChangeBars>,
+    source_line: Option<usize>,
+    bg: Option<Color>,
+) {
+    let Some(bars) = bars else {
+        return;
+    };
+    let style = source_line.and_then(|line| bars.styles.get(&line)).copied();
+    let marker = match style {
+        Some(style) => Span::styled(bars.marker.clone(), style.bg_opt(bg)),
+        None => Span::styled(" ".repeat(bars.marker_width), Style::default().bg_opt(bg)),
+    };
+    spans.push(marker);
+    spans.push(Span::styled(" ".to_string(), Style::default().bg_opt(bg)));
+}
+
+fn preview_change_gutter_width(bars: Option<&PreviewChangeBars>) -> usize {
+    bars.map(|bars| bars.marker_width + 1).unwrap_or(0)
+}
+
+fn structured_preview_lines(
+    title: &str,
+    text: &str,
+    app: &mut App,
+    width: usize,
+    height: usize,
+    kind: StructuredPreviewKind,
+    change_bars: Option<&StructuredPreviewChangeBars>,
+) -> (Vec<Line<'static>>, Vec<PreviewLink>) {
+    let signature = StructuredPreviewSignature::new(kind, title, text);
+    let theme = app.theme.clone();
+    let scroll_offset = app.scroll_offset;
+    match app.ensure_structured_preview(signature, text) {
+        Ok(state) => {
+            let viewer_width = width
+                .saturating_sub(
+                    change_bars
+                        .map(StructuredPreviewChangeBars::gutter_width)
+                        .unwrap_or(0),
+                )
+                .max(1);
+            state.set_dimensions(viewer_width as u16, height as u16);
+            state.set_top_visible_offset(scroll_offset);
+            let lines = state.lines(&theme, width, change_bars);
+            app.sync_scroll_from_structured_preview();
+            (lines, Vec::new())
+        }
+        Err(error) => {
+            let label = match kind {
+                StructuredPreviewKind::Json => "JSON",
+                StructuredPreviewKind::Yaml => "YAML",
+                StructuredPreviewKind::Toml => "TOML",
+            };
+            (
+                vec![
+                    Line::from(Span::styled(
+                        format!("Could not parse {label} preview."),
+                        Style::default().fg(app.theme.warning),
+                    )),
+                    Line::from(Span::styled(
+                        error,
+                        Style::default().fg(app.theme.text_muted),
+                    )),
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        "Use source view to read the file as text.",
+                        Style::default().fg(app.theme.text_muted),
+                    )),
+                ],
+                Vec::new(),
+            )
+        }
+    }
+}
+
+fn csv_preview_lines(
+    title: &str,
+    text: &str,
+    app: &mut App,
+    width: usize,
+    change_bars: Option<&PreviewChangeBars>,
+) -> (Vec<Line<'static>>, Vec<PreviewLink>) {
+    let signature = CsvPreviewSignature::new(title, text);
+    let theme = app.theme.clone();
+    match app.ensure_csv_preview(signature, text) {
+        Ok(state) => (
+            csv_table_lines(state, &theme, width, change_bars),
+            Vec::new(),
+        ),
+        Err(error) => (
+            vec![
+                Line::from(Span::styled(
+                    "Could not parse CSV preview.",
+                    Style::default().fg(app.theme.warning),
+                )),
+                Line::from(Span::styled(
+                    error,
+                    Style::default().fg(app.theme.text_muted),
+                )),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "Use source view to read the file as text.",
+                    Style::default().fg(app.theme.text_muted),
+                )),
+            ],
+            Vec::new(),
+        ),
+    }
+}
+
+fn csv_table_lines(
+    state: &mut CsvPreviewState,
+    theme: &crate::config::ResolvedTheme,
+    width: usize,
+    change_bars: Option<&PreviewChangeBars>,
+) -> Vec<Line<'static>> {
+    if state.rows().is_empty() {
+        return vec![Line::from("")];
+    }
+    let cols = state.rows().iter().map(Vec::len).max().unwrap_or(0);
+    if cols == 0 {
+        return vec![Line::from("")];
+    }
+
+    // A row-number gutter on the left, sized to the largest data row number
+    // (the header row is not counted). Data area gets the remaining width.
+    let table_width = width
+        .saturating_sub(preview_change_gutter_width(change_bars))
+        .max(1);
+    let data_rows = state.rows().len().saturating_sub(1);
+    let gutter_w = data_rows.to_string().len().max(2);
+    let prefix_w = gutter_w + 3; // "{n:>gw} │ "
+    let data_width = table_width.saturating_sub(prefix_w).max(1);
+
+    // Columns are sized to their full content (no truncation); horizontal
+    // scrolling handles anything wider than the viewport.
+    let all_widths = csv_column_widths(state.rows(), cols);
+    let (visible_cols, widths) = csv_visible_columns(state, &all_widths, data_width);
+    let rows = state.rows();
+    if visible_cols.is_empty() {
+        return vec![Line::from("")];
+    }
+
+    let header_style = Style::default().fg(theme.text).add_modifier(Modifier::BOLD);
+    let cell_style = Style::default().fg(theme.text);
+    let num_style = Style::default().fg(theme.text_muted);
+    let rule_style = Style::default().fg(theme.border_subtle);
+    // Zebra-stripe background for alternating rows, blended so it also shows on
+    // transparent themes (None on ANSI/named-color themes → no stripe).
+    let surface = theme
+        .background
+        .or(theme.background_panel)
+        .or(theme.background_element)
+        .unwrap_or(Color::Rgb(0x1b, 0x1d, 0x22));
+    let stripe_bg = crate::color::blend_colors(surface, theme.text, 0.06);
+    let bar = || Span::styled(" │ ".to_string(), rule_style);
+
+    // A blank top-padding line above the (pinned) header.
+    let mut top_spans = Vec::new();
+    push_preview_change_gutter(&mut top_spans, change_bars, None, None);
+    let mut lines = vec![Line::from(top_spans)];
+
+    // Header row (blank row-number gutter).
+    let mut hspans = Vec::new();
+    push_preview_change_gutter(&mut hspans, change_bars, Some(1), None);
+    hspans.extend([Span::styled(" ".repeat(gutter_w), num_style), bar()]);
+    csv_push_row_cells(&mut hspans, &rows[0], &visible_cols, &widths, header_style);
+    lines.push(Line::from(hspans));
+
+    // Separator line, crossing the gutter divider.
+    let mut separator = Vec::new();
+    push_preview_change_gutter(&mut separator, change_bars, None, None);
+    separator.push(Span::styled(
+        format!(
+            "{}┼{}",
+            "─".repeat(gutter_w + 1),
+            "─".repeat(table_width.saturating_sub(gutter_w + 2)),
+        ),
+        rule_style,
+    ));
+    lines.push(Line::from(separator));
+
+    // Data rows with zebra striping on alternating rows.
+    for (row_idx, row) in rows.iter().enumerate().skip(1) {
+        let bg = if row_idx % 2 == 0 { stripe_bg } else { None };
+        let num = Span::styled(format!("{row_idx:>gutter_w$}"), num_style.bg_opt(bg));
+        let bar_span = Span::styled(" │ ".to_string(), rule_style.bg_opt(bg));
+        let base = cell_style.bg_opt(bg);
+        let mut data_spans = Vec::new();
+        csv_push_row_cells(&mut data_spans, row, &visible_cols, &widths, base);
+        if let Some(bg) = bg {
+            // Extend the stripe across the full data width.
+            let used: usize = data_spans.iter().map(|s| text_width(&s.content)).sum();
+            if used < data_width {
+                data_spans.push(Span::styled(
+                    " ".repeat(data_width - used),
+                    Style::default().bg(bg),
+                ));
+            }
+        }
+        let mut spans = Vec::new();
+        // ponytail: assumes one CSV record per source line; use CSV byte positions if multiline records matter.
+        push_preview_change_gutter(&mut spans, change_bars, Some(row_idx + 1), bg);
+        spans.extend([num, bar_span]);
+        spans.extend(data_spans);
+        lines.push(Line::from(spans));
+    }
+    lines
+}
+
+/// Append a table row's cells (left-aligned, 2-space gaps, no truncation) to
+/// `spans`, all sharing the `base` style.
+fn csv_push_row_cells(
+    spans: &mut Vec<Span<'static>>,
+    row: &[String],
+    visible_cols: &[usize],
+    widths: &[usize],
+    base: Style,
+) {
+    for (visible_idx, col) in visible_cols.iter().copied().enumerate() {
+        let cw = widths[visible_idx];
+        let cell = row.get(col).map(String::as_str).unwrap_or("");
+        let pad = cw.saturating_sub(text_width(cell));
+        spans.push(Span::styled(cell.to_string(), base));
+        spans.push(Span::styled(format!("{}  ", " ".repeat(pad)), base));
+    }
+}
+
+fn csv_column_widths(rows: &[Vec<String>], cols: usize) -> Vec<usize> {
+    let mut widths = vec![1usize; cols];
+    for row in rows {
+        for (idx, cell) in row.iter().enumerate() {
+            widths[idx] = widths[idx].max(text_width(cell));
+        }
+    }
+    widths
+}
+
+fn csv_visible_columns(
+    state: &mut CsvPreviewState,
+    widths: &[usize],
+    total_width: usize,
+) -> (Vec<usize>, Vec<usize>) {
+    let mut offset = state.col_offset().min(widths.len().saturating_sub(1));
+    if state.selected_col() < offset {
+        offset = state.selected_col();
+    }
+    loop {
+        let cols = csv_columns_from(offset, widths, total_width);
+        if cols.contains(&state.selected_col()) || offset == state.selected_col() {
+            state.set_col_offset(offset);
+            let visible_widths = cols.iter().map(|col| widths[*col]).collect();
+            return (cols, visible_widths);
+        }
+        offset = offset.saturating_add(1).min(state.selected_col());
+    }
+}
+
+fn csv_columns_from(offset: usize, widths: &[usize], total_width: usize) -> Vec<usize> {
+    let mut cols = Vec::new();
+    let mut used = 0usize;
+    for (col, width) in widths.iter().enumerate().skip(offset) {
+        let next = width.saturating_add(2);
+        if !cols.is_empty() && used.saturating_add(next) > total_width {
+            break;
+        }
+        cols.push(col);
+        used = used.saturating_add(next);
+        if used >= total_width {
+            break;
+        }
+    }
+    if cols.is_empty() && offset < widths.len() {
+        cols.push(offset);
+    }
+    cols
+}
+
 fn source_preview_lines(
     app: &mut App,
     file_name: &str,
     text: &str,
     side: Option<SyntaxSide>,
+    change_bars: Option<&PreviewChangeBars>,
 ) -> Vec<Line<'static>> {
     let text_style = Style::default().fg(app.theme.text);
     let highlighted = if side.is_none() {
@@ -1754,21 +2656,27 @@ fn source_preview_lines(
     };
     let mut lines = Vec::new();
     for (idx, line) in text.lines().enumerate() {
+        let source_line = idx + 1;
+        let mut row_spans = Vec::new();
+        push_preview_change_gutter(&mut row_spans, change_bars, Some(source_line), None);
         if let Some(spans) = highlighted
             .as_ref()
             .and_then(|lines| lines.get(idx))
             .cloned()
         {
-            lines.push(Line::from(spans));
+            row_spans.extend(spans);
+            lines.push(Line::from(row_spans));
             continue;
         }
         if let Some(side) = side {
-            if let Some(spans) = app.syntax_spans_for_line(side, Some(idx + 1)) {
-                lines.push(Line::from(spans));
+            if let Some(spans) = app.syntax_spans_for_line(side, Some(source_line)) {
+                row_spans.extend(spans);
+                lines.push(Line::from(row_spans));
                 continue;
             }
         }
-        lines.push(Line::from(Span::styled(line.to_string(), text_style)));
+        row_spans.push(Span::styled(line.to_string(), text_style));
+        lines.push(Line::from(row_spans));
     }
     if lines.is_empty() {
         lines.push(Line::from(""));
@@ -1958,11 +2866,22 @@ fn markdown_preview_lines(
     app: &mut App,
     width: usize,
     base_dir: Option<&Path>,
+    change_bars: Option<&PreviewChangeBars>,
 ) -> (Vec<Line<'static>>, Vec<PreviewLink>) {
     let styles = MarkdownStyles::from_theme(&app.theme);
     let theme = app.theme.clone();
     let mut highlight = |lang: Option<&str>, code: &str| app.highlight_code_block(lang, code);
-    let mut renderer = MarkdownRenderer::new(&styles, &theme, width, base_dir, &mut highlight);
+    let content_width = width
+        .saturating_sub(preview_change_gutter_width(change_bars))
+        .max(1);
+    let mut renderer = MarkdownRenderer::new(
+        &styles,
+        &theme,
+        content_width,
+        base_dir,
+        &mut highlight,
+        change_bars,
+    );
     renderer.run(text);
     renderer.finish()
 }
@@ -1989,6 +2908,9 @@ struct MarkdownRenderer<'a> {
     links: Vec<PreviewLink>,
     /// (index into `current`, url) for link spans on the line being built.
     current_link_marks: Vec<(usize, String)>,
+    change_bars: Option<&'a PreviewChangeBars>,
+    line_change_styles: Vec<Option<Style>>,
+    current_change_style: Option<Style>,
 }
 
 impl<'a> MarkdownRenderer<'a> {
@@ -1998,6 +2920,7 @@ impl<'a> MarkdownRenderer<'a> {
         width: usize,
         base_dir: Option<&Path>,
         highlight: &'a mut CodeHighlighter<'a>,
+        change_bars: Option<&'a PreviewChangeBars>,
     ) -> Self {
         MarkdownRenderer {
             styles,
@@ -2018,6 +2941,9 @@ impl<'a> MarkdownRenderer<'a> {
             done_task: false,
             links: Vec::new(),
             current_link_marks: Vec::new(),
+            change_bars,
+            line_change_styles: Vec::new(),
+            current_change_style: None,
         }
     }
 
@@ -2033,8 +2959,10 @@ impl<'a> MarkdownRenderer<'a> {
 
         // The current heading level while inside a heading (for band + level style).
         let mut heading_level: Option<u8> = None;
+        let line_starts = markdown_line_starts(text);
 
-        for event in Parser::new_ext(text, options) {
+        for (event, range) in Parser::new_ext(text, options).into_offset_iter() {
+            self.note_change_range(&line_starts, range);
             match event {
                 Event::Start(tag) => match tag {
                     Tag::Paragraph => {}
@@ -2175,6 +3103,7 @@ impl<'a> MarkdownRenderer<'a> {
                         // separator left after the quote's last content line.
                         if self.lines.last().is_some_and(markdown_line_is_quote_border) {
                             self.lines.pop();
+                            self.line_change_styles.pop();
                         }
                         self.quotes.pop();
                         self.blank();
@@ -2285,7 +3214,7 @@ impl<'a> MarkdownRenderer<'a> {
                     let mid = self.width / 2;
                     let left = "─".repeat(mid);
                     let right = "─".repeat(self.width.saturating_sub(mid + 1));
-                    self.lines.push(Line::from(Span::styled(
+                    self.push_current_line(Line::from(Span::styled(
                         format!("{left}◇{right}"),
                         self.styles.rule,
                     )));
@@ -2316,15 +3245,63 @@ impl<'a> MarkdownRenderer<'a> {
         self.flush();
         while self.lines.last().is_some_and(markdown_line_is_blank) {
             self.lines.pop();
+            self.line_change_styles.pop();
         }
         if self.lines.is_empty() {
-            self.lines.push(Line::from(""));
+            self.push_line(Line::from(""), None);
         }
+        self.add_change_gutters();
         (self.lines, self.links)
     }
 
     fn top_style(&self) -> Style {
         self.style_stack.last().copied().unwrap_or_default()
+    }
+
+    fn note_change_range(&mut self, line_starts: &[usize], range: std::ops::Range<usize>) {
+        let Some(change_bars) = self.change_bars else {
+            return;
+        };
+        if range.is_empty() {
+            return;
+        }
+        let start = markdown_line_for_byte(line_starts, range.start);
+        let end = markdown_line_for_byte(line_starts, range.end.saturating_sub(1));
+        for line in start..=end {
+            if let Some(style) = change_bars.styles.get(&line) {
+                self.current_change_style.get_or_insert(*style);
+            }
+        }
+    }
+
+    fn push_line(&mut self, line: Line<'static>, style: Option<Style>) {
+        self.lines.push(line);
+        self.line_change_styles.push(style);
+    }
+
+    fn push_current_line(&mut self, line: Line<'static>) {
+        let style = self.current_change_style.take();
+        self.push_line(line, style);
+    }
+
+    fn add_change_gutters(&mut self) {
+        let Some(change_bars) = self.change_bars else {
+            return;
+        };
+        for (idx, line) in self.lines.iter_mut().enumerate() {
+            let style = self.line_change_styles.get(idx).copied().flatten();
+            let marker = match style {
+                Some(style) => Span::styled(change_bars.marker.clone(), style),
+                None => Span::raw(" ".repeat(change_bars.marker_width)),
+            };
+            let mut spans = vec![marker, Span::raw(" ")];
+            spans.extend(std::mem::take(&mut line.spans));
+            line.spans = spans;
+        }
+        let gutter = change_bars.gutter_width();
+        for link in &mut self.links {
+            link.col = link.col.saturating_add(gutter);
+        }
     }
 
     /// Leading spans repeated at the start of every visual line: block-quote
@@ -2395,13 +3372,13 @@ impl<'a> MarkdownRenderer<'a> {
         }
         let mut line = prefix;
         line.append(&mut self.current);
-        self.lines.push(Line::from(line));
+        self.push_current_line(Line::from(line));
     }
 
-    fn push_prefixed_line(&mut self, spans: &mut Vec<Span<'static>>) {
+    fn push_prefixed_line(&mut self, spans: &mut Vec<Span<'static>>, style: Option<Style>) {
         let mut line = self.line_prefix();
         line.append(spans);
-        self.lines.push(Line::from(line));
+        self.push_line(Line::from(line), style);
     }
 
     /// Emit the current heading line on a full-width band tinted with the
@@ -2427,13 +3404,13 @@ impl<'a> MarkdownRenderer<'a> {
                 ));
             }
         }
-        self.lines.push(Line::from(spans));
+        self.push_current_line(Line::from(spans));
     }
 
     fn blank(&mut self) {
         if self.quotes.is_empty() {
             if !self.lines.last().is_some_and(markdown_line_is_blank) {
-                self.lines.push(Line::from(""));
+                self.push_line(Line::from(""), None);
             }
         } else {
             // Continue the quote border through the blank separator line.
@@ -2442,7 +3419,7 @@ impl<'a> MarkdownRenderer<'a> {
                 .iter()
                 .map(|q| Span::styled("▎".to_string(), q.border))
                 .collect();
-            self.lines.push(Line::from(prefix));
+            self.push_line(Line::from(prefix), None);
         }
     }
 
@@ -2519,11 +3496,9 @@ impl<'a> MarkdownRenderer<'a> {
             .max(PAD + text_width(label) + PAD)
             .max(min_width)
             .min(self.width);
+        let change_style = self.current_change_style.take();
         let pad_style = Style::default().bg_opt(bg);
         let pad = |n: usize| Span::styled(" ".repeat(n), pad_style);
-        let blank_row = |lines: &mut Vec<Line<'static>>| {
-            lines.push(Line::from(Span::styled(" ".repeat(width), pad_style)));
-        };
 
         // Header row: language label near the right edge, with a one-column
         // trailing space before the panel border.
@@ -2531,7 +3506,7 @@ impl<'a> MarkdownRenderer<'a> {
             pad(width.saturating_sub(text_width(label) + 1)),
             Span::styled(format!("{label} "), self.styles.code_lang),
         ];
-        self.lines.push(Line::from(header));
+        self.push_line(Line::from(header), change_style);
 
         for (idx, raw) in code_lines.iter().enumerate() {
             let mut spans = vec![pad(PAD)];
@@ -2554,9 +3529,12 @@ impl<'a> MarkdownRenderer<'a> {
                 }
             }
             pad_row(&mut spans, width, bg);
-            self.lines.push(Line::from(spans));
+            self.push_line(Line::from(spans), change_style);
         }
-        blank_row(&mut self.lines);
+        self.push_line(
+            Line::from(Span::styled(" ".repeat(width), pad_style)),
+            change_style,
+        );
     }
 
     fn render_image(&mut self, image: MarkdownImage) {
@@ -2566,12 +3544,13 @@ impl<'a> MarkdownRenderer<'a> {
             return;
         }
         self.flush();
+        let change_style = self.current_change_style.take();
         let Some(path) = self.local_image_path(&image.dest_url) else {
             let mut line = vec![Span::styled(
                 image_fallback_label(&image.alt, &image.dest_url),
                 self.styles.muted,
             )];
-            self.push_prefixed_line(&mut line);
+            self.push_prefixed_line(&mut line, change_style);
             return;
         };
         let bg = self
@@ -2584,17 +3563,17 @@ impl<'a> MarkdownRenderer<'a> {
                 image_fallback_label(&image.alt, &image.dest_url),
                 self.styles.muted,
             )];
-            self.push_prefixed_line(&mut line);
+            self.push_prefixed_line(&mut line, change_style);
             return;
         };
         let alt = image.alt.trim();
         if !alt.is_empty() {
             let mut caption = vec![Span::styled(format!("image: {alt}"), self.styles.muted)];
-            self.push_prefixed_line(&mut caption);
+            self.push_prefixed_line(&mut caption, change_style);
         }
         for line in image_lines {
             let mut spans = line.spans;
-            self.push_prefixed_line(&mut spans);
+            self.push_prefixed_line(&mut spans, change_style);
         }
         self.blank();
     }
@@ -2618,6 +3597,7 @@ impl<'a> MarkdownRenderer<'a> {
     }
 
     fn render_table(&mut self, table: MarkdownTable) {
+        let change_style = self.current_change_style.take();
         let cols = table.rows.iter().map(Vec::len).max().unwrap_or(0);
         if cols == 0 {
             return;
@@ -2634,10 +3614,10 @@ impl<'a> MarkdownRenderer<'a> {
 
         let border = self.styles.table_border;
         let empty: TableCell = Vec::new();
-        self.lines.push(Line::from(Span::styled(
-            table_border("╭", "┬", "╮", &widths),
-            border,
-        )));
+        self.push_line(
+            Line::from(Span::styled(table_border("╭", "┬", "╮", &widths), border)),
+            change_style,
+        );
         for (row_idx, row) in table.rows.iter().enumerate() {
             let is_head = row_idx == 0;
             let mut spans = vec![Span::styled("│".to_string(), border)];
@@ -2655,18 +3635,18 @@ impl<'a> MarkdownRenderer<'a> {
                 ));
                 spans.push(Span::styled("│".to_string(), border));
             }
-            self.lines.push(Line::from(spans));
+            self.push_line(Line::from(spans), change_style);
             if is_head && table.rows.len() > 1 {
-                self.lines.push(Line::from(Span::styled(
-                    table_border("├", "┼", "┤", &widths),
-                    border,
-                )));
+                self.push_line(
+                    Line::from(Span::styled(table_border("├", "┼", "┤", &widths), border)),
+                    change_style,
+                );
             }
         }
-        self.lines.push(Line::from(Span::styled(
-            table_border("╰", "┴", "╯", &widths),
-            border,
-        )));
+        self.push_line(
+            Line::from(Span::styled(table_border("╰", "┴", "╯", &widths), border)),
+            change_style,
+        );
     }
 
     /// Style a table cell span. Header cells make plain body text accent-bold
@@ -2681,6 +3661,23 @@ impl<'a> MarkdownRenderer<'a> {
         } else {
             span.add_modifier(Modifier::BOLD)
         }
+    }
+}
+
+fn markdown_line_starts(text: &str) -> Vec<usize> {
+    let mut starts = vec![0];
+    for (idx, byte) in text.bytes().enumerate() {
+        if byte == b'\n' {
+            starts.push(idx + 1);
+        }
+    }
+    starts
+}
+
+fn markdown_line_for_byte(starts: &[usize], byte: usize) -> usize {
+    match starts.binary_search(&byte) {
+        Ok(index) => index + 1,
+        Err(index) => index.max(1),
     }
 }
 
@@ -2880,6 +3877,10 @@ impl StyleBgOpt for Style {
 fn is_markdown_name(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     lower.ends_with(".md") || lower.ends_with(".markdown") || lower.ends_with(".mdx")
+}
+
+fn is_csv_name(name: &str) -> bool {
+    name.to_ascii_lowercase().ends_with(".csv")
 }
 
 fn help_markdown(app: &App) -> String {
@@ -4449,9 +5450,14 @@ fn draw_file_search_popover(frame: &mut Frame, app: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::{counted_binding_label, MarkdownRenderer, MarkdownStyles};
+    use crate::app::{App, ViewMode};
     use crate::config::ResolvedTheme;
-    use ratatui::style::Modifier;
+    use crate::structured_preview::StructuredPreviewKind;
+    use crate::syntax::SyntaxSide;
+    use oyo_core::MultiFileDiff;
+    use ratatui::style::{Modifier, Style};
     use ratatui::text::Line;
+    use std::collections::HashMap;
 
     /// Render Markdown through the real preview renderer without needing an
     /// `App`, using the default theme and no syntax highlighting.
@@ -4470,7 +5476,8 @@ mod tests {
     ) -> (Vec<Line<'static>>, Vec<super::PreviewLink>) {
         let styles = MarkdownStyles::from_theme(&theme);
         let mut highlight = |_lang: Option<&str>, _code: &str| None;
-        let mut renderer = MarkdownRenderer::new(&styles, &theme, width, None, &mut highlight);
+        let mut renderer =
+            MarkdownRenderer::new(&styles, &theme, width, None, &mut highlight, None);
         renderer.run(md);
         renderer.finish()
     }
@@ -4513,6 +5520,24 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn search_prompt_is_available_for_preview_status_bar() {
+        let multi = MultiFileDiff::from_file_pair(
+            std::path::PathBuf::from("README.md"),
+            std::path::PathBuf::from("README.md"),
+            "old".to_string(),
+            "new".to_string(),
+        );
+        let mut app = App::new(multi, ViewMode::Preview, 50, false, None);
+        app.start_search();
+        let text: String = super::line_input_status_spans(&app)
+            .unwrap()
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert_eq!(text, "/ Search");
     }
 
     #[test]
@@ -4567,12 +5592,155 @@ mod tests {
     }
 
     #[test]
+    fn markdown_preview_can_show_change_bars() {
+        let theme = rgb_theme();
+        let styles = MarkdownStyles::from_theme(&theme);
+        let bars = super::PreviewChangeBars {
+            marker: "|".to_string(),
+            marker_width: 1,
+            styles: HashMap::from([(1, Style::default().fg(theme.accent))]),
+        };
+        let mut highlight = |_lang: Option<&str>, _code: &str| None;
+        let mut renderer =
+            MarkdownRenderer::new(&styles, &theme, 80, None, &mut highlight, Some(&bars));
+        renderer.run("# Changed\n\nPlain\n");
+        let (lines, _) = renderer.finish();
+        let changed = flatten(&lines)
+            .lines()
+            .find(|line| line.contains("Changed"))
+            .unwrap()
+            .to_string();
+        assert!(changed.starts_with("| "), "change bar: {changed:?}");
+    }
+
+    #[test]
     fn markdown_table_uses_rounded_borders() {
         let lines = render_md("| key | value |\n| --- | --- |\n| a | 1 |\n", 80);
         let text = flatten(&lines);
         assert!(text.contains("╭"), "rounded top-left corner: {text}");
         assert!(text.contains("│ key │ value │"), "header row: {text}");
         assert!(text.contains("╰"), "rounded bottom-left corner: {text}");
+    }
+
+    #[test]
+    fn csv_preview_shows_cells() {
+        let sig = crate::csv_preview::CsvPreviewSignature::new("data.csv", "name,age\nOyo,1\n");
+        let mut state = crate::csv_preview::CsvPreviewState::new(sig, "name,age\nOyo,1\n").unwrap();
+        let lines = super::csv_table_lines(&mut state, &rgb_theme(), 80, None);
+        let flat: Vec<String> = lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+        // Borderless csvlens layout: top padding, header, separator, rows.
+        assert!(flat[0].trim().is_empty(), "top padding line: {flat:?}");
+        assert!(
+            flat[1].contains("name") && flat[1].contains("age"),
+            "header: {flat:?}"
+        );
+        assert!(flat[2].contains('┼'), "gutter separator: {flat:?}");
+        assert!(
+            !flat.iter().any(|l| l.contains('╭')),
+            "no box borders: {flat:?}"
+        );
+        // Row 1 has a gutter number, a divider, then the cells.
+        let row = flat.iter().find(|l| l.contains("Oyo")).unwrap();
+        assert!(
+            row.trim_start().starts_with("1 │"),
+            "row-number gutter: {row:?}"
+        );
+        assert!(row.contains("Oyo") && row.contains('1'), "cells: {row:?}");
+    }
+
+    #[test]
+    fn csv_preview_can_show_change_bars() {
+        let theme = rgb_theme();
+        let sig = crate::csv_preview::CsvPreviewSignature::new("data.csv", "name,age\nOyo,1\n");
+        let mut state = crate::csv_preview::CsvPreviewState::new(sig, "name,age\nOyo,1\n").unwrap();
+        let bars = super::PreviewChangeBars {
+            marker: "|".to_string(),
+            marker_width: 1,
+            styles: HashMap::from([(2, Style::default().fg(theme.accent))]),
+        };
+        let lines = super::csv_table_lines(&mut state, &theme, 80, Some(&bars));
+        let flat: Vec<String> = lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+        let row = flat.iter().find(|l| l.contains("Oyo")).unwrap();
+        assert!(row.starts_with("|  1 │"), "change bar before row: {row:?}");
+    }
+
+    #[test]
+    fn preview_change_bars_mark_new_source_lines_and_can_be_disabled() {
+        let multi = MultiFileDiff::from_file_pair(
+            std::path::PathBuf::from("data.txt"),
+            std::path::PathBuf::from("data.txt"),
+            "a\nb\n".to_string(),
+            "a\nB\nc\n".to_string(),
+        );
+        let mut app = App::new(multi, ViewMode::Preview, 50, false, None);
+
+        let bars = super::preview_change_bars(&mut app, Some(SyntaxSide::New)).unwrap();
+        assert!(bars.styles.contains_key(&2), "modified line is marked");
+        assert!(bars.styles.contains_key(&3), "inserted line is marked");
+        assert!(
+            !bars.styles.contains_key(&1),
+            "unchanged line is not marked"
+        );
+
+        app.preview_change_bars = false;
+        assert!(super::preview_change_bars(&mut app, Some(SyntaxSide::New)).is_none());
+    }
+
+    #[test]
+    fn structured_preview_change_bars_mark_json_yaml_and_toml_paths() {
+        let cases = [
+            (
+                StructuredPreviewKind::Json,
+                "data.json",
+                r#"{"a":1,"b":2}"#,
+                r#"{"a":1,"b":3,"c":4}"#,
+                ".b",
+                ".c",
+            ),
+            (
+                StructuredPreviewKind::Yaml,
+                "data.yaml",
+                "a: 1\nb: 2\n",
+                "a: 1\nb: 3\nc: 4\n",
+                ".b",
+                ".c",
+            ),
+            (
+                StructuredPreviewKind::Toml,
+                "data.toml",
+                "a = 1\n[server]\nport = 1\n",
+                "a = 1\n[server]\nport = 2\nname = 'Oyo'\n",
+                ".server.port",
+                ".server.name",
+            ),
+        ];
+
+        for (kind, name, old, new, modified, added) in cases {
+            let multi = MultiFileDiff::from_file_pair(
+                std::path::PathBuf::from(name),
+                std::path::PathBuf::from(name),
+                old.to_string(),
+                new.to_string(),
+            );
+            let app = App::new(multi, ViewMode::Preview, 50, false, None);
+            let bars = super::structured_preview_change_bars(&app, kind, Some(SyntaxSide::New))
+                .expect("structured bars");
+            assert!(
+                bars.styles.contains_key(modified),
+                "modified path {modified} for {name}"
+            );
+            assert!(
+                bars.styles.contains_key(added),
+                "added path {added} for {name}"
+            );
+            assert!(!bars.styles.contains_key(".a"), "unchanged path for {name}");
+        }
     }
 
     #[test]

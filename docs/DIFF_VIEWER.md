@@ -131,10 +131,31 @@ Preview view shows the file content instead of the diff.
 In preview view:
 
 - Markdown files render as Markdown
+- JSON, YAML and TOML files show an interactive tree
+- CSV files show a table
 - other text files show source text with syntax highlighting when syntax is on
+- source, Markdown, CSV and structured previews show change bars when `ui.diff.preview_change_bars` is on
 - deleted files preview the old side
 - other files preview the new side
-- the top-right toggle switches Markdown between rendered and source
+- the top-right toggle switches rendered files between preview and source
+
+In JSON, YAML and TOML preview:
+
+- `j` and `k` move between values
+- `h` collapses a value or moves to its parent
+- `l` expands a value or moves to its first child
+- `space` toggles the current value
+- `c` and `C` collapse sibling values
+- `e` and `E` expand sibling values
+- `m` switches between data view and line view
+- `gg` and `G` move to the start and end
+- `ctrl-u` and `ctrl-d` jump half a page
+
+In CSV preview:
+
+- `j` and `k` move between rows
+- `h` and `l` move between cells
+- `gg` and `G` move to the start and end
 
 ## No-step mode
 
