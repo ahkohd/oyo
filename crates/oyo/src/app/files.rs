@@ -3,6 +3,7 @@ use super::{
 };
 use crate::csv_preview::{CsvPreviewSignature, CsvPreviewState};
 use crate::structured_preview::{StructuredPreviewSignature, StructuredPreviewState};
+use crate::toasts::ToastEvent;
 use oyo_core::multi::FileSide;
 use std::time::{Duration, Instant};
 
@@ -511,10 +512,15 @@ impl App {
     }
 
     pub(crate) fn toggle_preview_rendered(&mut self) {
+        let mut rendered = None;
         if let Some(active) = self.active_topbar_tab {
             if let Some(tab) = self.topbar_tabs.iter_mut().find(|tab| tab.id == active) {
                 tab.preview_rendered = !tab.preview_rendered;
+                rendered = Some(tab.preview_rendered);
             }
+        }
+        if let Some(rendered) = rendered {
+            self.notify(ToastEvent::PreviewRendered(rendered));
         }
     }
 

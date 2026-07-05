@@ -489,6 +489,22 @@ fn topbar_ids(app: &App) -> Vec<usize> {
 }
 
 #[test]
+fn disabled_toasts_do_not_enqueue_notifications() {
+    let diff = MultiFileDiff::from_file_pair(
+        std::path::PathBuf::from("a.txt"),
+        std::path::PathBuf::from("a.txt"),
+        "a\n".to_string(),
+        "aa\n".to_string(),
+    );
+    let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+    app.toasts_enabled = false;
+
+    app.toggle_line_wrap();
+
+    assert_eq!(app.toast_engine.queue_len(), 0);
+}
+
+#[test]
 fn diff_view_scrolls_horizontally_with_mouse() {
     let diff = MultiFileDiff::from_file_pair(
         std::path::PathBuf::from("a.txt"),

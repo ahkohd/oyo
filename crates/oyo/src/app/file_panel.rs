@@ -1,5 +1,6 @@
 use super::{App, DIFF_VIEW_MIN_WIDTH, FILE_PANEL_MIN_WIDTH};
 use crate::config::FilePanelPosition;
+use crate::toasts::ToastEvent;
 
 fn point_in_rect(rect: (u16, u16, u16, u16), column: u16, row: u16) -> bool {
     let (x, y, width, height) = rect;
@@ -106,6 +107,7 @@ impl App {
             self.file_filter_hover = false;
             self.file_filter_clear_hover = false;
         }
+        self.notify(ToastEvent::Sidebar(self.file_panel_visible));
     }
 
     pub fn clamp_file_panel_width(&self, viewport_width: u16) -> u16 {

@@ -12,10 +12,14 @@ use crate::keybindings::Keybindings;
 use crate::structured_preview::StructuredPreviewState;
 use crate::syntax::{SyntaxCache, SyntaxEngine};
 use crate::time_format::TimeFormatter;
+use crate::toasts::{toast_builder, ToastEvent};
 use oyo_core::{
     multi::DiffStatus, AnimationFrame, LineKind, MultiFileDiff, StepDirection, StepState, ViewLine,
 };
 use ratatui::style::Color;
+use ratatui_comfy_toaster::{
+    ToastEngine, ToastEngineBuilder, ToastInteraction, ToastMouseButton, ToastPosition,
+};
 use regex::Regex;
 use rustc_hash::FxHashMap;
 use std::collections::VecDeque;
@@ -46,7 +50,7 @@ use types::{
     BlameStepHint, DiffRequest, DiffResponse, HunkBounds, HunkEdge, HunkEdgeHint, HunkStart,
     NoStepState, StepEdge, StepEdgeHint, SyntaxScopeCache,
 };
-use utils::{allow_overscroll_state, max_scroll};
+use utils::{allow_overscroll_state, copy_to_clipboard, max_scroll};
 pub(crate) use utils::{display_metrics, is_conflict_marker, is_fold_line};
 
 type UnifiedHunkCacheKey = (usize, ViewMode, FoldContextMode, bool, usize, usize, usize);
@@ -341,6 +345,12 @@ pub struct App {
     pub strikethrough_deletions: bool,
     /// Show +/- sign column in the gutter (unified/evolution)
     pub gutter_signs: bool,
+    /// Show toast notifications.
+    pub toasts_enabled: bool,
+    /// Toast notification engine.
+    pub(crate) toast_engine: ToastEngine<()>,
+    /// Toast screen position.
+    pub(crate) toast_position: ToastPosition,
     /// Show change bars in previews with source-line mapping.
     pub preview_change_bars: bool,
     /// Whether user has manually toggled the file panel (overrides auto-hide)
@@ -794,6 +804,11 @@ impl App {
             csv_previews: FxHashMap::default(),
             strikethrough_deletions: false,
             gutter_signs: true,
+            toasts_enabled: true,
+            toast_engine: ToastEngineBuilder::new(ratatui::layout::Rect::default())
+                .max_queue_depth(3)
+                .build(),
+            toast_position: ToastPosition::BottomRight,
             preview_change_bars: true,
             file_panel_manually_set: false,
             show_path_popup: false,
@@ -953,6 +968,58 @@ impl App {
         self.pending_count = None;
     }
 
+    pub(crate) fn notify(&mut self, event: ToastEvent) {
+        if self.toasts_enabled {
+            let bg = self.toast_bg();
+            self.toast_engine
+                .show_toast(toast_builder(event, bg).position(self.toast_position));
+        }
+    }
+
+    /// Toast body background — the app/diff-viewer background so the toast reads
+    /// as part of the window. When the theme is transparent (no background), a
+    /// dark surface is derived from the theme's own text color so it harmonizes
+    /// with the palette instead of using an unrelated hardcoded color. The crate
+    /// draws the message in white, so light themes fall back to dark.
+    pub(crate) fn toast_bg(&self) -> Color {
+        if self.theme_is_light {
+            return Color::Rgb(0x26, 0x28, 0x2c);
+        }
+        self.theme
+            .background
+            .or(self.theme.background_panel)
+            .or(self.theme.background_element)
+            .or_else(|| crate::color::blend_colors(Color::Rgb(0, 0, 0), self.theme.text, 0.10))
+            .unwrap_or(Color::Rgb(0x1b, 0x1c, 0x1e))
+    }
+
+    pub(crate) fn toast_tick(&mut self) -> bool {
+        self.toasts_enabled && self.toast_engine.tick()
+    }
+
+    pub(crate) fn handle_toast_click(
+        &mut self,
+        column: u16,
+        row: u16,
+        button: ToastMouseButton,
+    ) -> bool {
+        if !self.toasts_enabled {
+            return false;
+        }
+        match self.toast_engine.handle_click(column, row, button) {
+            ToastInteraction::Dismissed => true,
+            ToastInteraction::CopyRequested(text) => {
+                if copy_to_clipboard(&text) {
+                    self.notify(ToastEvent::CopiedToast);
+                } else {
+                    self.notify(ToastEvent::CopyFailed);
+                }
+                true
+            }
+            ToastInteraction::None => false,
+        }
+    }
+
     pub fn toggle_help(&mut self) {
         self.show_help = !self.show_help;
         if self.show_help {
@@ -974,6 +1041,7 @@ impl App {
 
     pub fn toggle_zen(&mut self) {
         self.zen_mode = !self.zen_mode;
+        self.notify(ToastEvent::Zen(self.zen_mode));
     }
 
     pub fn toggle_syntax(&mut self) {
@@ -981,6 +1049,10 @@ impl App {
             SyntaxMode::On => SyntaxMode::Off,
             SyntaxMode::Off => SyntaxMode::On,
         };
+        self.notify(ToastEvent::Syntax(matches!(
+            self.syntax_mode,
+            SyntaxMode::On
+        )));
         if matches!(self.syntax_mode, SyntaxMode::Off) {
             self.syntax_engine = None;
             self.syntax_caches = vec![None; self.multi_diff.file_count()];
@@ -992,6 +1064,10 @@ impl App {
             crate::config::EvoSyntaxMode::Context => crate::config::EvoSyntaxMode::Full,
             crate::config::EvoSyntaxMode::Full => crate::config::EvoSyntaxMode::Context,
         };
+        self.notify(ToastEvent::EvoSyntaxFull(matches!(
+            self.evo_syntax,
+            crate::config::EvoSyntaxMode::Full
+        )));
     }
 
     pub fn scroll_up(&mut self) {
@@ -1287,6 +1363,7 @@ impl App {
 
     pub fn toggle_line_wrap(&mut self) {
         self.line_wrap = !self.line_wrap;
+        self.notify(ToastEvent::LineWrap(self.line_wrap));
         // Reset horizontal scroll when enabling wrap
         if self.line_wrap {
             self.horizontal_scroll = 0;
@@ -1310,6 +1387,7 @@ impl App {
         self.needs_scroll_to_active = true;
         self.centered_once = false;
         self.blame_render_cache = None;
+        self.notify(ToastEvent::FoldContext(self.fold_context.is_enabled()));
     }
 
     pub fn set_fold_context_mode(&mut self, mode: FoldContextMode) {
@@ -1319,6 +1397,7 @@ impl App {
 
     pub fn toggle_strikethrough_deletions(&mut self) {
         self.strikethrough_deletions = !self.strikethrough_deletions;
+        self.notify(ToastEvent::Strikethrough(self.strikethrough_deletions));
     }
 
     fn wrap_to_file_hunk(&mut self, forward: bool, stepping: bool) -> bool {
@@ -2055,6 +2134,7 @@ impl App {
             dirty = true;
         }
 
+        dirty |= self.toast_tick();
         dirty |= self.poll_diff_responses();
         dirty |= self.maybe_queue_idle_diff();
         dirty |= self.maybe_check_file_changes();

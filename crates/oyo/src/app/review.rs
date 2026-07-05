@@ -3,6 +3,7 @@ use crate::config::{
     MentionFileScope, MentionFinder, ReviewActionConfig, ReviewHookConfig, ReviewHookEvent,
     ReviewHookStdin,
 };
+use crate::toasts::ToastEvent;
 use crossterm::event::KeyEvent;
 use keymap::{parser::parse_seq, ToKeyMap};
 use oyo_core::{ChangeKind, LineKind, ViewLine};
@@ -960,6 +961,7 @@ impl App {
         self.touch_review_state();
         self.persist_review_session();
         self.run_review_hooks(ReviewHookEvent::CommentsCleared, None);
+        self.notify(ToastEvent::CommentsCleared);
         true
     }
 
@@ -1159,6 +1161,7 @@ impl App {
                 self.touch_review_state();
                 self.persist_review_session();
                 self.run_review_hooks(ReviewHookEvent::CommentDeleted, None);
+                self.notify(ToastEvent::CommentDeleted);
             } else {
                 self.touch_review_state();
                 self.persist_review_session();
@@ -1188,6 +1191,7 @@ impl App {
         self.touch_review_state();
         self.persist_review_session();
         self.run_review_hooks(ReviewHookEvent::CommentSaved, None);
+        self.notify(ToastEvent::CommentSaved);
     }
 
     pub fn submit_review_and_quit(&mut self) {
@@ -1200,6 +1204,7 @@ impl App {
         self.review_submission_output = Some(output);
         self.touch_review_state();
         self.persist_review_session();
+        self.notify(ToastEvent::ReviewSubmitted);
         self.should_quit = true;
     }
 
@@ -1399,6 +1404,7 @@ impl App {
             self.touch_review_state();
             self.persist_review_session();
             self.run_review_hooks(ReviewHookEvent::CommentDeleted, None);
+            self.notify(ToastEvent::CommentDeleted);
             true
         } else {
             false

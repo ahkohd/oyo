@@ -14,6 +14,7 @@ mod syntax;
 #[cfg(test)]
 mod test_utils;
 mod time_format;
+mod toasts;
 mod ui;
 mod views;
 
@@ -820,6 +821,8 @@ fn apply_config_to_app(app: &mut App, config: &config::Config, args: &Args, ligh
     app.scrollbar_visible = config.ui.scrollbar;
     app.strikethrough_deletions = config.ui.strikethrough_deletions;
     app.gutter_signs = config.ui.gutter_signs;
+    app.toasts_enabled = config.ui.toasts.enabled;
+    app.toast_position = config.ui.toasts.position.toast_position();
     app.preview_change_bars = config.ui.diff.preview_change_bars;
     app.diff_bg = config.ui.diff.bg;
     app.diff_fg = config.ui.diff.fg;
@@ -1497,6 +1500,11 @@ fn run_app(
                         continue;
                     }
                     app.reset_count();
+                    if let Some(button) = toast_mouse_button(me.kind) {
+                        if app.handle_toast_click(me.column, me.row, button) {
+                            continue;
+                        }
+                    }
                     if app.command_palette_active() {
                         match me.kind {
                             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
@@ -1745,6 +1753,18 @@ fn coalesce_key_repeats(
         }
     }
     Ok(count)
+}
+
+fn toast_mouse_button(kind: MouseEventKind) -> Option<ratatui_comfy_toaster::ToastMouseButton> {
+    match kind {
+        MouseEventKind::Down(MouseButton::Left) => {
+            Some(ratatui_comfy_toaster::ToastMouseButton::Left)
+        }
+        MouseEventKind::Down(MouseButton::Right) => {
+            Some(ratatui_comfy_toaster::ToastMouseButton::Right)
+        }
+        _ => None,
+    }
 }
 
 fn schedule_mouse_scroll_draw(

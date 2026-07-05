@@ -1,5 +1,6 @@
 use super::{App, ViewMode};
 use crate::app::utils::copy_to_clipboard;
+use crate::toasts::ToastEvent;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -260,9 +261,15 @@ impl App {
         true
     }
 
-    pub(crate) fn copy_diff_selection(&self) -> bool {
+    pub(crate) fn copy_diff_selection(&mut self) -> bool {
         let text = selected_text(&self.diff_selection_cells, &self.diff_selection_segments());
-        copy_to_clipboard(&text)
+        let copied = copy_to_clipboard(&text);
+        if copied {
+            self.notify(ToastEvent::CopiedSelection);
+        } else {
+            self.notify(ToastEvent::CopyFailed);
+        }
+        copied
     }
 
     pub(crate) fn diff_selection_active(&self) -> bool {

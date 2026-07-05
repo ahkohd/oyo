@@ -1,4 +1,5 @@
 use super::{AnimationPhase, App};
+use crate::toasts::ToastEvent;
 use std::time::Instant;
 
 impl App {
@@ -25,6 +26,7 @@ impl App {
 
     pub fn toggle_animation(&mut self) {
         self.animation_enabled = !self.animation_enabled;
+        self.notify(ToastEvent::Animation(self.animation_enabled));
         if !self.animation_enabled {
             self.animation_phase = AnimationPhase::Idle;
             self.animation_progress = 1.0;

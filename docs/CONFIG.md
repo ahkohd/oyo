@@ -86,7 +86,20 @@ stepping = false
 extent_marker_left = "┃"
 extent_marker_right = "▐"
 extent_marker_deleted = "╏"
+
+[ui.toasts]
+enabled = true
+position = "bottom_right"
 ```
+
+### Toasts
+
+Use `[ui.toasts]` to turn toast notifications on or off and choose where they appear.
+
+| Key | Values | Default | What it does |
+| --- | --- | --- | --- |
+| `enabled` | `true`, `false` | `true` | Shows short notifications for actions such as copy and toggles |
+| `position` | `top_left`, `top_right`, `bottom_left`, `bottom_right`, `center` | `bottom_right` | Sets where toast notifications appear |
 
 ## Diff display
 

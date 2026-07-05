@@ -755,6 +755,8 @@ pub struct UiConfig {
     pub blame: BlameConfig,
     /// Time display settings
     pub time: TimeConfig,
+    /// Toast notification settings
+    pub toasts: ToastConfig,
     /// Enable stepping (default: false). If false, shows all changes (no-step behavior)
     pub stepping: bool,
     /// Marker for primary active line (left pane / unified pane)
@@ -802,6 +804,7 @@ impl Default for UiConfig {
             diff: DiffConfig::default(),
             blame: BlameConfig::default(),
             time: TimeConfig::default(),
+            toasts: ToastConfig::default(),
             stepping: false,
             primary_marker: "▶".to_string(),
             primary_marker_right: None,
@@ -810,6 +813,46 @@ impl Default for UiConfig {
             extent_marker_right: None,
             extent_marker_deleted: "╏".to_string(),
             theme: ThemeConfig::default(),
+        }
+    }
+}
+
+/// Toast notification configuration.
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(default)]
+pub struct ToastConfig {
+    pub enabled: bool,
+    pub position: ToastPositionConfig,
+}
+
+impl Default for ToastConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            position: ToastPositionConfig::BottomRight,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ToastPositionConfig {
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    #[default]
+    BottomRight,
+    Center,
+}
+
+impl ToastPositionConfig {
+    pub fn toast_position(self) -> ratatui_comfy_toaster::ToastPosition {
+        match self {
+            Self::TopLeft => ratatui_comfy_toaster::ToastPosition::TopLeft,
+            Self::TopRight => ratatui_comfy_toaster::ToastPosition::TopRight,
+            Self::BottomLeft => ratatui_comfy_toaster::ToastPosition::BottomLeft,
+            Self::BottomRight => ratatui_comfy_toaster::ToastPosition::BottomRight,
+            Self::Center => ratatui_comfy_toaster::ToastPosition::Center,
         }
     }
 }
@@ -1803,6 +1846,39 @@ extent_marker = "A"
     #[test]
     fn preview_change_bars_are_on_by_default() {
         assert!(Config::default().ui.diff.preview_change_bars);
+    }
+
+    #[test]
+    fn toasts_are_on_by_default() {
+        assert!(Config::default().ui.toasts.enabled);
+        assert_eq!(
+            Config::default().ui.toasts.position,
+            ToastPositionConfig::BottomRight
+        );
+    }
+
+    #[test]
+    fn toast_position_can_be_changed() {
+        let config: Config = toml::from_str(
+            r#"
+[ui.toasts]
+position = "top_left"
+"#,
+        )
+        .unwrap();
+        assert_eq!(config.ui.toasts.position, ToastPositionConfig::TopLeft);
+    }
+
+    #[test]
+    fn toasts_can_be_disabled() {
+        let config: Config = toml::from_str(
+            r#"
+[ui.toasts]
+enabled = false
+"#,
+        )
+        .unwrap();
+        assert!(!config.ui.toasts.enabled);
     }
 
     #[test]

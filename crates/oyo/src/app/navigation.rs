@@ -7,6 +7,7 @@ use super::{
     PeekScope, PeekState, StepEdge, StepEdgeHint, ViewMode,
 };
 use crate::config::{FoldContextMode, HunkWrapMode, ModifiedStepMode, StepWrapMode};
+use crate::toasts::ToastEvent;
 use oyo_core::{
     git::FileStatus, AnimationFrame, ChangeKind, DiffNavigator, LineKind, StepState, ViewLine,
 };
@@ -204,7 +205,11 @@ impl App {
             return;
         };
         if let Some(text) = self.text_for_yank(line) {
-            copy_to_clipboard(&text);
+            if copy_to_clipboard(&text) {
+                self.notify(ToastEvent::CopiedLine);
+            } else {
+                self.notify(ToastEvent::CopyFailed);
+            }
         }
     }
 
@@ -224,7 +229,11 @@ impl App {
         if lines.is_empty() {
             return;
         }
-        copy_to_clipboard(&lines.join("\n"));
+        if copy_to_clipboard(&lines.join("\n")) {
+            self.notify(ToastEvent::CopiedHunk);
+        } else {
+            self.notify(ToastEvent::CopyFailed);
+        }
     }
 
     pub fn yank_current_change_patch(&mut self) {
@@ -234,13 +243,21 @@ impl App {
             return;
         };
         if let Some(text) = self.patch_for_hunk(Some(line.change_id)) {
-            copy_to_clipboard(&text);
+            if copy_to_clipboard(&text) {
+                self.notify(ToastEvent::CopiedPatch);
+            } else {
+                self.notify(ToastEvent::CopyFailed);
+            }
         }
     }
 
     pub fn yank_current_hunk_patch(&mut self) {
         if let Some(text) = self.patch_for_hunk(None) {
-            copy_to_clipboard(&text);
+            if copy_to_clipboard(&text) {
+                self.notify(ToastEvent::CopiedPatch);
+            } else {
+                self.notify(ToastEvent::CopyFailed);
+            }
         }
     }
 
@@ -2093,6 +2110,7 @@ impl App {
         }
         if self.view_mode == ViewMode::Preview {
             self.stepping = !self.stepping;
+            self.notify(ToastEvent::Stepping(self.stepping));
             return;
         }
         let current_index = self.multi_diff.selected_index;
@@ -2132,6 +2150,7 @@ impl App {
             self.animation_progress = 1.0;
             self.needs_scroll_to_active = false;
         }
+        self.notify(ToastEvent::Stepping(self.stepping));
     }
 
     pub fn goto_start(&mut self) {
