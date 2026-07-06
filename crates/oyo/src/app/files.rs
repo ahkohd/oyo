@@ -848,6 +848,21 @@ impl App {
         old != next
     }
 
+    pub(crate) fn handle_no_changes_quit_click(&mut self, column: u16, row: u16) -> bool {
+        let hit = self
+            .no_changes_quit_hit
+            .is_some_and(|(x, y, width, height)| {
+                column >= x
+                    && column < x.saturating_add(width)
+                    && row >= y
+                    && row < y.saturating_add(height)
+            });
+        if hit {
+            self.should_quit = true;
+        }
+        hit
+    }
+
     pub(crate) fn handle_status_bar_mouse_down(
         &mut self,
         column: u16,
@@ -1057,9 +1072,25 @@ impl App {
                     && row >= y
                     && row < y.saturating_add(height)
             });
+        let no_changes_quit_hover =
+            self.no_changes_quit_hit
+                .is_some_and(|(x, y, width, height)| {
+                    column >= x
+                        && column < x.saturating_add(width)
+                        && row >= y
+                        && row < y.saturating_add(height)
+                });
         let file_panel_hover = self.mouse_over_file_panel(column, row);
         let file_panel_mode_toggle_hover =
             self.file_panel_mode_toggle_hit
+                .is_some_and(|(x, y, width, height)| {
+                    column >= x
+                        && column < x.saturating_add(width)
+                        && row >= y
+                        && row < y.saturating_add(height)
+                });
+        let file_panel_root_hover =
+            self.file_panel_root_hit
                 .is_some_and(|(x, y, width, height)| {
                     column >= x
                         && column < x.saturating_add(width)
@@ -1136,9 +1167,11 @@ impl App {
             && self.status_comments_hover == status_comments_hover
             && self.status_file_hover == status_file_hover
             && self.binary_preview_hover == binary_preview_hover
+            && self.no_changes_quit_hover == no_changes_quit_hover
             && self.file_list_hover == file_hover
             && self.file_panel_hover == file_panel_hover
             && self.file_panel_mode_toggle_hover == file_panel_mode_toggle_hover
+            && self.file_panel_root_hover == file_panel_root_hover
             && self.file_filter_hover == file_filter_hover
             && self.file_filter_clear_hover == file_filter_clear_hover
             && self.selection_toolbar_hover == selection_hover
@@ -1166,9 +1199,11 @@ impl App {
         self.status_comments_hover = status_comments_hover;
         self.status_file_hover = status_file_hover;
         self.binary_preview_hover = binary_preview_hover;
+        self.no_changes_quit_hover = no_changes_quit_hover;
         self.file_list_hover = file_hover;
         self.file_panel_hover = file_panel_hover;
         self.file_panel_mode_toggle_hover = file_panel_mode_toggle_hover;
+        self.file_panel_root_hover = file_panel_root_hover;
         self.file_filter_hover = file_filter_hover;
         self.file_filter_clear_hover = file_filter_clear_hover;
         true

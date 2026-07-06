@@ -82,6 +82,9 @@ Mouse actions use built-in behaviour and cannot be changed with keybindings.
 | Click a file in the sidebar | Open it in the active tab |
 | Control-click a file in the sidebar | Open it in a new tab |
 | Click a comment in the sidebar | Open it for editing |
+| Click an item in `oy view` | Open it |
+| Control-click an item in `oy view` | Mark the range start |
+| Click an action in the `oy view` footer | Open, pin or quit |
 | Click the sidebar header mode label | Switch between files and comments |
 | Click the footer mode label | Cycle view mode |
 | Control-click the footer mode label | Cycle view mode backwards |
@@ -123,7 +126,7 @@ Use each mode as `[keybindings.<mode>]`.
 
 | Action | Default keys | What it does |
 | --- | --- | --- |
-| `quit` | `q`, `esc` | Quit and print comments if any |
+| `quit` | `q`, `esc` | Quit, or return to `oy view` when started from `oy view` |
 | `step_down` | `j`, `down` | Step forward |
 | `step_up` | `k`, `up` | Step backward |
 | `next_hunk` | `l`, `right` | Go to the next hunk |
@@ -152,6 +155,7 @@ Use each mode as `[keybindings.<mode>]`.
 | `toggle_autoplay_reverse` | `B` | Start or stop reverse autoplay |
 | `toggle_view_mode` | `tab` | Cycle view mode |
 | `toggle_view_mode_reverse` | `backtab` | Cycle view mode in reverse |
+| `open_dashboard` | `ctrl-r` | Open `oy view` |
 | `scroll_up` | `K` | Scroll up |
 | `scroll_down` | `J` | Scroll down |
 | `half_page_up` | `ctrl-u` | Scroll up half a page |
@@ -302,6 +306,7 @@ The selection toolbar appears above the selection after you finish a mouse selec
 | `start_filter` | `/` | Filter commits |
 | `clear_pin` | `r` | Clear the pinned range start |
 | `toggle_pin` | `space` | Mark the range start |
+| `select_hovered` | `e` | Mark the range end |
 | `accept` | `enter` | Open the selection |
 | `select_next` | `j`, `down` | Select the next commit |
 | `select_prev` | `k`, `up` | Select the previous commit |

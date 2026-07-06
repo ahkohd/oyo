@@ -12,6 +12,7 @@ use ratatui::{
     Frame,
 };
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 use time::OffsetDateTime;
 use unicode_width::UnicodeWidthStr;
 
@@ -23,7 +24,7 @@ const HEAD_REF: &str = "HEAD";
 const INDEX_REF: &str = "INDEX";
 const EMPTY_TREE_HASH: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DashboardSelection {
     Uncommitted,
     Staged,
@@ -53,6 +54,15 @@ struct DashboardEntry {
     kind: EntryKind,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct DashboardFooterHit {
+    action: DashboardAction,
+    x: u16,
+    y: u16,
+    width: u16,
+    height: u16,
+}
+
 #[derive(Debug)]
 pub struct Dashboard {
     repo_root: PathBuf,
@@ -64,6 +74,15 @@ pub struct Dashboard {
     scroll: usize,
     filter: String,
     filter_active: bool,
+    filter_cursor_visible: bool,
+    filter_cursor_last_blink: Instant,
+    filter_area: Option<(u16, u16, u16, u16)>,
+    filter_hover: bool,
+    filter_clear_hit: Option<(u16, u16, u16, u16)>,
+    filter_clear_hover: bool,
+    footer_action_hits: Vec<DashboardFooterHit>,
+    footer_action_hover: Option<DashboardAction>,
+    hovered: Option<usize>,
     pinned_from: Option<String>,
     theme: ResolvedTheme,
     primary_marker: String,
@@ -91,6 +110,7 @@ struct RenderLineContext<'a> {
     width: usize,
     stats_width: usize,
     detail: bool,
+    hovered: bool,
     range_marker: Option<RangeMarker>,
     marker_width: usize,
     theme: &'a ResolvedTheme,
@@ -138,6 +158,15 @@ impl Dashboard {
             scroll: 0,
             filter: String::new(),
             filter_active: false,
+            filter_cursor_visible: true,
+            filter_cursor_last_blink: Instant::now(),
+            filter_area: None,
+            filter_hover: false,
+            filter_clear_hit: None,
+            filter_clear_hover: false,
+            footer_action_hits: Vec::new(),
+            footer_action_hover: None,
+            hovered: None,
             pinned_from: None,
             theme: config.theme,
             primary_marker: config.primary_marker,
@@ -157,28 +186,93 @@ impl Dashboard {
     }
 
     pub fn start_filter(&mut self) {
-        self.filter_active = true;
         self.filter.clear();
+        self.focus_filter();
         self.refresh_filter();
+    }
+
+    pub fn focus_filter(&mut self) {
+        self.filter_active = true;
+        self.reset_filter_cursor();
     }
 
     pub fn stop_filter(&mut self) {
         self.filter_active = false;
+        self.filter_cursor_visible = true;
     }
 
     pub fn push_filter_char(&mut self, ch: char) {
         self.filter.push(ch);
+        self.reset_filter_cursor();
         self.refresh_filter();
     }
 
     pub fn pop_filter_char(&mut self) {
         self.filter.pop();
+        self.reset_filter_cursor();
         self.refresh_filter();
     }
 
     pub fn clear_filter(&mut self) {
         self.filter.clear();
+        self.reset_filter_cursor();
         self.refresh_filter();
+    }
+
+    pub fn tick(&mut self) -> bool {
+        if !self.filter_active {
+            return false;
+        }
+        let now = Instant::now();
+        if now.duration_since(self.filter_cursor_last_blink) < Duration::from_millis(500) {
+            return false;
+        }
+        self.filter_cursor_visible = !self.filter_cursor_visible;
+        self.filter_cursor_last_blink = now;
+        true
+    }
+
+    fn reset_filter_cursor(&mut self) {
+        self.filter_cursor_visible = true;
+        self.filter_cursor_last_blink = Instant::now();
+    }
+
+    pub fn select_selection(&mut self, selection: &DashboardSelection) {
+        let selected = match selection {
+            DashboardSelection::Uncommitted => {
+                self.entry_position(|entry| matches!(entry.kind, EntryKind::WorkingTree { .. }))
+            }
+            DashboardSelection::Staged => {
+                self.entry_position(|entry| matches!(entry.kind, EntryKind::Staged { .. }))
+            }
+            DashboardSelection::Range { from: _, to } if to == HEAD_REF => {
+                self.entry_position(|entry| matches!(entry.kind, EntryKind::WorkingTree { .. }))
+            }
+            DashboardSelection::Range { from: _, to } if to == INDEX_REF => {
+                self.entry_position(|entry| matches!(entry.kind, EntryKind::Staged { .. }))
+            }
+            DashboardSelection::Range { from: _, to } => {
+                self.entry_position(|entry| match &entry.kind {
+                    EntryKind::Commit(commit) => commit.id == *to || commit.short_id == *to,
+                    _ => false,
+                })
+            }
+        };
+        let Some(selected) = selected else {
+            return;
+        };
+        self.selected = selected;
+        self.scroll = 0;
+        self.pinned_from = match selection {
+            DashboardSelection::Range { from, .. } => Some(from.clone()),
+            _ => None,
+        };
+    }
+
+    fn entry_position(&self, matches: impl Fn(&DashboardEntry) -> bool) -> Option<usize> {
+        self.filtered
+            .iter()
+            .position(|entry_idx| self.entries.get(*entry_idx).is_some_and(&matches))
     }
 
     pub fn move_selection(&mut self, delta: isize, view_height: usize) {
@@ -217,31 +311,32 @@ impl Dashboard {
     }
 
     pub fn toggle_pin(&mut self) {
-        let Some(entry) = self.current_entry() else {
+        self.toggle_pin_for_idx(self.selected);
+    }
+
+    pub fn toggle_hovered_pin(&mut self) {
+        if let Some(hovered) = self.hovered {
+            self.toggle_pin_for_idx(hovered);
+        } else {
+            self.toggle_pin();
+        }
+    }
+
+    fn toggle_pin_for_idx(&mut self, filtered_idx: usize) {
+        let Some(entry_idx) = self.filtered.get(filtered_idx) else {
             return;
         };
-        match &entry.kind {
-            EntryKind::Commit(commit) => {
-                if self.pinned_from.as_deref() == Some(commit.id.as_str()) {
-                    self.pinned_from = None;
-                } else {
-                    self.pinned_from = Some(commit.id.clone());
-                }
-            }
-            EntryKind::WorkingTree { .. } => {
-                if self.pinned_from.as_deref() == Some(HEAD_REF) {
-                    self.pinned_from = None;
-                } else {
-                    self.pinned_from = Some(HEAD_REF.to_string());
-                }
-            }
-            EntryKind::Staged { .. } => {
-                if self.pinned_from.as_deref() == Some(INDEX_REF) {
-                    self.pinned_from = None;
-                } else {
-                    self.pinned_from = Some(INDEX_REF.to_string());
-                }
-            }
+        let Some(pin_id) = self.entries.get(*entry_idx).map(|entry| match &entry.kind {
+            EntryKind::Commit(commit) => commit.id.clone(),
+            EntryKind::WorkingTree { .. } => HEAD_REF.to_string(),
+            EntryKind::Staged { .. } => INDEX_REF.to_string(),
+        }) else {
+            return;
+        };
+        if self.pinned_from.as_deref() == Some(pin_id.as_str()) {
+            self.pinned_from = None;
+        } else {
+            self.pinned_from = Some(pin_id);
         }
     }
 
@@ -328,6 +423,7 @@ impl Dashboard {
             ])
             .split(content);
 
+        self.ensure_visible(chunks[1].height as usize);
         self.draw_header(frame, chunks[0]);
         self.draw_list(frame, chunks[1]);
         self.draw_footer(frame, chunks[2]);
@@ -402,6 +498,7 @@ impl Dashboard {
             self.selected = 0;
             self.scroll = 0;
         }
+        self.hovered = None;
     }
 
     fn ensure_visible(&mut self, view_height: usize) {
@@ -478,7 +575,9 @@ impl Dashboard {
             };
             lines.push(Line::from(Span::styled(
                 truncate_text(&range, area.width.saturating_sub(2) as usize),
-                Style::default().fg(self.theme.text),
+                Style::default()
+                    .fg(self.theme.text_muted)
+                    .add_modifier(Modifier::DIM),
             )));
         } else {
             let hint = format!(
@@ -501,51 +600,189 @@ impl Dashboard {
         frame.render_widget(header, area);
     }
 
-    fn draw_footer(&self, frame: &mut Frame, area: Rect) {
-        let filter_line = if self.filter_active {
-            if self.filter.is_empty() {
-                "> Filter commits".to_string()
-            } else {
-                format!("> {}", self.filter)
-            }
-        } else if self.filter.is_empty() {
-            format!(
-                "{} Filter",
-                self.keybindings
-                    .dashboard_keys(DashboardAction::StartFilter)
-            )
-        } else {
-            self.filter.clone()
+    fn draw_footer(&mut self, frame: &mut Frame, area: Rect) {
+        let mut block = Block::default();
+        if let Some(bg) = self.theme.background {
+            block = block.style(Style::default().bg(bg));
+        }
+        frame.render_widget(block, area);
+        self.footer_action_hits.clear();
+        if area.height < 2 {
+            self.filter_area = None;
+            self.filter_clear_hit = None;
+            return;
+        }
+
+        let filter_area = Rect {
+            x: area.x,
+            y: area.y.saturating_add(1),
+            width: area.width,
+            height: 1,
         };
-        let filter_style = if self.filter_active {
-            Style::default().fg(self.theme.text)
+        self.filter_area = Some((
+            filter_area.x,
+            filter_area.y,
+            filter_area.width,
+            filter_area.height,
+        ));
+        let mut filter = Paragraph::new(self.filter_line(filter_area.width));
+        if let Some(bg) = self
+            .theme
+            .background_element
+            .or(self.theme.background_panel)
+            .or(self.theme.background)
+        {
+            filter = filter.style(Style::default().bg(bg));
+        }
+        frame.render_widget(filter, filter_area);
+        if !self.filter.is_empty() && filter_area.width > 2 {
+            let clear_x = filter_area
+                .x
+                .saturating_add(filter_area.width.saturating_sub(2));
+            let clear_y = filter_area.y;
+            self.filter_clear_hit = Some((clear_x, clear_y, 1, 1));
+            let clear_style = if self.filter_clear_hover {
+                Style::default()
+                    .fg(self.theme.accent)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(self.theme.text_muted)
+            };
+            if let Some(cell) = frame.buffer_mut().cell_mut((clear_x, clear_y)) {
+                cell.set_symbol("×").set_style(clear_style);
+            }
+        } else {
+            self.filter_clear_hit = None;
+            self.filter_clear_hover = false;
+        }
+
+        if area.height < 3 {
+            return;
+        }
+        let hint_area = Rect {
+            x: area.x,
+            y: area.y.saturating_add(2),
+            width: area.width,
+            height: 1,
+        };
+        let mut spans = vec![Span::raw(" ")];
+        let mut col = hint_area.x.saturating_add(1);
+        let key_style = Style::default()
+            .fg(self.theme.accent)
+            .add_modifier(Modifier::BOLD);
+        let label_style = Style::default()
+            .fg(self.theme.text_muted)
+            .add_modifier(Modifier::DIM);
+        let hover_label_style = Style::default()
+            .fg(self.theme.accent)
+            .add_modifier(Modifier::BOLD);
+        let actions = [
+            (DashboardAction::Accept, "open"),
+            (DashboardAction::TogglePin, "start"),
+            (DashboardAction::SelectHovered, "end"),
+            (DashboardAction::Quit, "quit"),
+        ];
+        for (idx, (action, label)) in actions.into_iter().enumerate() {
+            if idx > 0 {
+                spans.push(Span::raw("  "));
+                col = col.saturating_add(2);
+            }
+            let key = self.dashboard_footer_key(action);
+            let width = text_width(&format!("{key} {label}")) as u16;
+            self.footer_action_hits.push(DashboardFooterHit {
+                action,
+                x: col,
+                y: hint_area.y,
+                width,
+                height: 1,
+            });
+            let is_hover = self.footer_action_hover == Some(action);
+            spans.push(Span::styled(key, key_style));
+            spans.push(Span::styled(
+                format!(" {label}"),
+                if is_hover {
+                    hover_label_style
+                } else {
+                    label_style
+                },
+            ));
+            col = col.saturating_add(width);
+        }
+        spans.push(Span::raw(" "));
+        frame.render_widget(Paragraph::new(Line::from(spans)), hint_area);
+    }
+
+    fn dashboard_footer_key(&self, action: DashboardAction) -> String {
+        let keys = self.keybindings.dashboard_keys(action);
+        if action == DashboardAction::Quit && keys.split(" / ").any(|key| key == "q") {
+            "q".to_string()
+        } else {
+            keys
+        }
+    }
+
+    fn filter_line(&self, width: u16) -> Line<'static> {
+        if self.filter_active {
+            let prompt_style = Style::default()
+                .fg(self.theme.primary)
+                .add_modifier(Modifier::BOLD);
+            let query_width = if self.filter.is_empty() {
+                width.saturating_sub(5)
+            } else {
+                width.saturating_sub(7)
+            };
+            return Line::from(vec![
+                Span::raw(" "),
+                Span::styled("❯ ", prompt_style),
+                Span::styled(
+                    truncate_text_from_start(&self.filter, query_width as usize),
+                    Style::default().fg(self.theme.text),
+                ),
+                Span::styled(
+                    if self.filter_cursor_visible {
+                        "│"
+                    } else {
+                        " "
+                    },
+                    prompt_style,
+                ),
+            ]);
+        }
+
+        if !self.filter.is_empty() {
+            let prompt_style = Style::default()
+                .fg(self.theme.primary)
+                .add_modifier(Modifier::BOLD);
+            let query_style = if self.filter_hover {
+                Style::default()
+                    .fg(self.theme.accent)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(self.theme.text)
+            };
+            return Line::from(vec![
+                Span::raw(" "),
+                Span::styled("❯ ", prompt_style),
+                Span::styled(
+                    truncate_text_from_start(&self.filter, width.saturating_sub(6) as usize),
+                    query_style,
+                ),
+            ]);
+        }
+
+        let style = if self.filter_hover {
+            Style::default()
+                .fg(self.theme.accent)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(self.theme.text_muted)
         };
-        let hint_text = format!(
-            "{} open • {} pin • {} quit",
-            self.keybindings.dashboard_keys(DashboardAction::Accept),
-            self.keybindings.dashboard_keys(DashboardAction::TogglePin),
-            self.keybindings.dashboard_keys(DashboardAction::Quit)
+        let text = format!(
+            "{} Filter",
+            self.keybindings
+                .dashboard_keys(DashboardAction::StartFilter)
         );
-        let lines = vec![
-            Line::raw(""),
-            Line::from(Span::styled(
-                truncate_text(&filter_line, area.width as usize),
-                filter_style,
-            )),
-            Line::from(Span::styled(
-                truncate_text(&hint_text, area.width as usize),
-                Style::default()
-                    .fg(self.theme.text_muted)
-                    .add_modifier(Modifier::DIM),
-            )),
-        ];
-        let mut footer = Paragraph::new(lines);
-        if let Some(bg) = self.theme.background {
-            footer = footer.style(Style::default().bg(bg));
-        }
-        frame.render_widget(footer, area);
+        Line::from(vec![Span::raw(" "), Span::styled(text, style)])
     }
 
     fn draw_list(&mut self, frame: &mut Frame, area: Rect) {
@@ -562,7 +799,12 @@ impl Dashboard {
         if self.filtered.is_empty() {
             let mut lines = vec![Line::raw(""); height];
             if height > 0 {
-                let msg = truncate_text("No results", content_width);
+                let text = if self.filter.is_empty() {
+                    "No commits"
+                } else {
+                    "No Filter Results"
+                };
+                let msg = truncate_text(text, content_width);
                 lines[height / 2] = Line::from(Span::styled(
                     msg,
                     Style::default()
@@ -630,6 +872,7 @@ impl Dashboard {
             } = *row;
             let entry_idx = self.filtered[filtered_idx];
             let entry = &self.entries[entry_idx];
+            let hovered = self.hovered == Some(filtered_idx);
             let range_marker = range_marker_for_row(
                 row_idx,
                 selected_display_idx,
@@ -643,6 +886,7 @@ impl Dashboard {
                 width: content_width,
                 stats_width,
                 detail,
+                hovered,
                 range_marker,
                 marker_width,
                 theme: &self.theme,
@@ -666,21 +910,94 @@ impl Dashboard {
         frame.render_widget(list, area);
     }
 
-    pub fn select_at_mouse(&mut self, y: u16) -> bool {
-        let area = self.last_list_area;
-        if area.height == 0 || y < area.y || y >= area.y + area.height {
+    pub fn handle_filter_mouse_down(&mut self, x: u16, y: u16) -> bool {
+        if self.hit(self.filter_clear_hit, x, y) {
+            self.clear_filter();
+            self.focus_filter();
+            return true;
+        }
+        if self.hit(self.filter_area, x, y) {
+            self.focus_filter();
+            return true;
+        }
+        false
+    }
+
+    pub fn update_hover(&mut self, x: u16, y: u16) -> bool {
+        let filter_hover = self.hit(self.filter_area, x, y);
+        let filter_clear_hover = self.hit(self.filter_clear_hit, x, y);
+        let footer_action_hover = self.footer_action_at(x, y);
+        let hovered = self.hovered_at(x, y);
+        if self.filter_hover == filter_hover
+            && self.filter_clear_hover == filter_clear_hover
+            && self.footer_action_hover == footer_action_hover
+            && self.hovered == hovered
+        {
             return false;
+        }
+        self.filter_hover = filter_hover;
+        self.filter_clear_hover = filter_clear_hover;
+        self.footer_action_hover = footer_action_hover;
+        self.hovered = hovered;
+        true
+    }
+
+    pub fn footer_action_at(&self, x: u16, y: u16) -> Option<DashboardAction> {
+        self.footer_action_hits
+            .iter()
+            .find(|hit| self.hit(Some((hit.x, hit.y, hit.width, hit.height)), x, y))
+            .map(|hit| hit.action)
+    }
+
+    pub fn select_at_mouse(&mut self, x: u16, y: u16) -> Option<bool> {
+        let idx = self.hovered_at(x, y)?;
+        let changed = self.selected != idx;
+        self.selected = idx;
+        self.ensure_visible(self.last_list_area.height as usize);
+        Some(changed)
+    }
+
+    pub fn select_hovered(&mut self) -> bool {
+        let Some(hovered) = self.hovered else {
+            return false;
+        };
+        let changed = self.selected != hovered;
+        self.selected = hovered;
+        self.ensure_visible(self.last_list_area.height as usize);
+        changed
+    }
+
+    pub fn toggle_pin_at_mouse(&mut self, x: u16, y: u16) -> bool {
+        let Some(idx) = self.hovered_at(x, y) else {
+            return false;
+        };
+        self.toggle_pin_for_idx(idx);
+        true
+    }
+
+    fn hovered_at(&self, x: u16, y: u16) -> Option<usize> {
+        let area = self.last_list_area;
+        if area.height == 0
+            || x < area.x
+            || x >= area.x.saturating_add(area.width)
+            || y < area.y
+            || y >= area.y.saturating_add(area.height)
+        {
+            return None;
         }
         let rows = self.display_rows();
         let row_idx = (y - area.y) as usize + self.scroll;
-        if row_idx >= rows.len() {
-            return false;
-        }
-        let DisplayRow::Entry { idx, .. } = rows[row_idx];
-        let changed = self.selected != idx;
-        self.selected = idx;
-        self.ensure_visible(area.height as usize);
-        changed
+        let DisplayRow::Entry { idx, .. } = *rows.get(row_idx)?;
+        Some(idx)
+    }
+
+    fn hit(&self, hit: Option<(u16, u16, u16, u16)>, x: u16, y: u16) -> bool {
+        hit.is_some_and(|(hit_x, hit_y, width, height)| {
+            x >= hit_x
+                && x < hit_x.saturating_add(width)
+                && y >= hit_y
+                && y < hit_y.saturating_add(height)
+        })
     }
 }
 
@@ -702,7 +1019,10 @@ impl DashboardEntry {
     fn render_line(&self, ctx: RenderLineContext<'_>) -> Line<'static> {
         let mut spans = Vec::new();
 
-        spans.extend(range_marker_spans(ctx.range_marker, ctx.marker_width));
+        spans.extend(range_marker_spans(
+            ctx.range_marker.clone(),
+            ctx.marker_width,
+        ));
 
         match &self.kind {
             EntryKind::WorkingTree { files } => {
@@ -724,7 +1044,7 @@ impl DashboardEntry {
                             .fg(ctx.theme.text_muted)
                             .add_modifier(Modifier::DIM),
                     ));
-                    return Line::from(spans);
+                    return line_with_hover(spans, &ctx);
                 }
                 let label = if *files == 0 {
                     "Working tree (clean)".to_string()
@@ -757,7 +1077,7 @@ impl DashboardEntry {
                             .fg(ctx.theme.text_muted)
                             .add_modifier(Modifier::DIM),
                     ));
-                    return Line::from(spans);
+                    return line_with_hover(spans, &ctx);
                 }
                 let label = if *files == 0 {
                     "Staged (clean)".to_string()
@@ -824,8 +1144,28 @@ impl DashboardEntry {
             }
         }
 
-        Line::from(spans)
+        line_with_hover(spans, &ctx)
     }
+}
+
+fn line_with_hover(mut spans: Vec<Span<'static>>, ctx: &RenderLineContext<'_>) -> Line<'static> {
+    if ctx.hovered {
+        let bg = ctx.theme.background_element.or(ctx.theme.background_panel);
+        for span in spans.iter_mut().skip(2) {
+            span.style = span
+                .style
+                .fg(if ctx.detail {
+                    ctx.theme.text
+                } else {
+                    ctx.theme.accent
+                })
+                .add_modifier(Modifier::BOLD);
+            if let Some(bg) = bg {
+                span.style = span.style.bg(bg);
+            }
+        }
+    }
+    Line::from(spans)
 }
 
 fn truncate_text(text: &str, max_width: usize) -> String {
@@ -850,6 +1190,31 @@ fn truncate_text(text: &str, max_width: usize) -> String {
         width += ch_width;
     }
     format!("{acc}…")
+}
+
+fn truncate_text_from_start(text: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    if text_width(text) <= max_width {
+        return text.to_string();
+    }
+    if max_width <= 3 {
+        return ".".repeat(max_width);
+    }
+    let suffix_width = max_width.saturating_sub(3);
+    let mut acc = String::new();
+    let mut width = 0usize;
+    for ch in text.chars().rev() {
+        let ch_width = UnicodeWidthStr::width(ch.to_string().as_str());
+        if width + ch_width > suffix_width {
+            break;
+        }
+        acc.push(ch);
+        width += ch_width;
+    }
+    let suffix: String = acc.chars().rev().collect();
+    format!("...{suffix}")
 }
 
 fn shorten_hash(hash: &str) -> String {
@@ -1015,4 +1380,173 @@ fn marker_width(primary: &str, extent: &str) -> usize {
     let primary_width = text_width(primary);
     let extent_width = text_width(extent);
     primary_width.max(extent_width).max(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::ResolvedTheme;
+    use oyo_core::git::CommitEntry;
+
+    fn commit(id: &str, parent: &str) -> CommitEntry {
+        CommitEntry {
+            id: id.to_string(),
+            short_id: id.chars().take(7).collect(),
+            parents: vec![parent.to_string()],
+            author: "a".to_string(),
+            author_time: None,
+            summary: "s".to_string(),
+            stats: None,
+        }
+    }
+
+    fn dashboard() -> Dashboard {
+        Dashboard::new(DashboardConfig {
+            repo_root: PathBuf::from("/tmp/oyo"),
+            branch: Some("main".to_string()),
+            commits: vec![
+                commit("bbbbbbbb", "aaaaaaaa"),
+                commit("aaaaaaaa", EMPTY_TREE_HASH),
+            ],
+            working_files: 1,
+            staged_files: 1,
+            theme: ResolvedTheme::default(),
+            primary_marker: ">".to_string(),
+            extent_marker: "|".to_string(),
+            time_format: TimeFormatter::default(),
+            keybindings: Keybindings::default(),
+        })
+    }
+
+    #[test]
+    fn select_selection_restores_range() {
+        let mut dashboard = dashboard();
+        let selection = DashboardSelection::Range {
+            from: "aaaaaaaa".to_string(),
+            to: "bbbbbbbb".to_string(),
+        };
+
+        dashboard.select_selection(&selection);
+
+        assert_eq!(dashboard.selection(), Some(selection));
+    }
+
+    #[test]
+    fn select_selection_restores_staged() {
+        let mut dashboard = dashboard();
+
+        dashboard.select_selection(&DashboardSelection::Staged);
+
+        assert_eq!(dashboard.selection(), Some(DashboardSelection::Staged));
+    }
+
+    #[test]
+    fn hover_tracks_visible_dashboard_rows() {
+        let mut dashboard = dashboard();
+        dashboard.last_list_area = Rect::new(10, 5, 40, 4);
+
+        assert!(dashboard.update_hover(12, 5));
+        assert_eq!(dashboard.hovered, Some(0));
+        assert!(dashboard.update_hover(12, 7));
+        assert_eq!(dashboard.hovered, Some(1));
+        assert!(dashboard.update_hover(2, 7));
+        assert_eq!(dashboard.hovered, None);
+    }
+
+    #[test]
+    fn ctrl_click_toggles_range_start_without_selecting() {
+        let mut dashboard = dashboard();
+        dashboard.last_list_area = Rect::new(10, 5, 40, 6);
+
+        assert!(dashboard.toggle_pin_at_mouse(12, 9));
+        assert_eq!(dashboard.selected, 0);
+        assert_eq!(dashboard.pinned_from.as_deref(), Some("bbbbbbbb"));
+
+        assert!(dashboard.toggle_pin_at_mouse(12, 9));
+        assert_eq!(dashboard.pinned_from, None);
+    }
+
+    #[test]
+    fn space_toggles_hovered_range_start() {
+        let mut dashboard = dashboard();
+        dashboard.last_list_area = Rect::new(10, 5, 40, 6);
+        dashboard.update_hover(12, 9);
+
+        dashboard.toggle_hovered_pin();
+
+        assert_eq!(dashboard.selected, 0);
+        assert_eq!(dashboard.pinned_from.as_deref(), Some("bbbbbbbb"));
+    }
+
+    #[test]
+    fn shift_space_selects_hovered_range_end() {
+        let mut dashboard = dashboard();
+        dashboard.last_list_area = Rect::new(10, 5, 40, 6);
+        dashboard.update_hover(12, 9);
+
+        assert!(dashboard.select_hovered());
+
+        assert_eq!(dashboard.selected, 2);
+        assert_eq!(dashboard.pinned_from, None);
+    }
+
+    #[test]
+    fn hover_keeps_range_marker_style() {
+        let theme = ResolvedTheme::default();
+        let entry = DashboardEntry {
+            kind: EntryKind::Commit(commit("bbbbbbbb", "aaaaaaaa")),
+        };
+        let line = entry.render_line(RenderLineContext {
+            width: 40,
+            stats_width: 0,
+            detail: false,
+            hovered: true,
+            range_marker: Some(RangeMarker {
+                symbol: "|".to_string(),
+                style: Style::default().fg(theme.diff_ext_marker),
+            }),
+            marker_width: 1,
+            theme: &theme,
+            head_meta: None,
+            time_format: &TimeFormatter::default(),
+            now: 0,
+        });
+
+        assert_eq!(line.spans[0].style.fg, Some(theme.diff_ext_marker));
+    }
+
+    #[test]
+    fn footer_actions_are_hoverable() {
+        let mut dashboard = dashboard();
+        dashboard.footer_action_hits.push(DashboardFooterHit {
+            action: DashboardAction::Accept,
+            x: 1,
+            y: 2,
+            width: 10,
+            height: 1,
+        });
+
+        assert!(dashboard.update_hover(5, 2));
+        assert_eq!(dashboard.footer_action_hover, Some(DashboardAction::Accept));
+        assert_eq!(
+            dashboard.footer_action_at(5, 2),
+            Some(DashboardAction::Accept)
+        );
+    }
+
+    #[test]
+    fn filter_clicks_focus_and_clear_like_sidebar() {
+        let mut dashboard = dashboard();
+        dashboard.filter_area = Some((0, 10, 20, 1));
+        dashboard.filter_clear_hit = Some((18, 10, 1, 1));
+        dashboard.filter = "abc".to_string();
+
+        assert!(dashboard.handle_filter_mouse_down(1, 10));
+        assert!(dashboard.filter_active());
+        assert_eq!(dashboard.filter, "abc");
+
+        assert!(dashboard.handle_filter_mouse_down(18, 10));
+        assert!(dashboard.filter_active());
+        assert!(dashboard.filter.is_empty());
+    }
 }

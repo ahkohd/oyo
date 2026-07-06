@@ -933,6 +933,32 @@ fn file_list_hover_tracks_row_hitbox() {
 }
 
 #[test]
+fn file_panel_root_hover_and_click_open_oy_view() {
+    let diff = MultiFileDiff::from_file_pairs(vec![
+        (
+            std::path::PathBuf::from("a.txt"),
+            "a\n".to_string(),
+            "aa\n".to_string(),
+        ),
+        (
+            std::path::PathBuf::from("b.txt"),
+            "b\n".to_string(),
+            "bb\n".to_string(),
+        ),
+    ]);
+    let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+    app.file_panel_mode = FilePanelMode::Comments;
+    app.file_panel_root_hit = Some((1, 0, 8, 1));
+    app.file_panel_rect = Some((0, 0, 20, 10));
+
+    assert!(app.update_topbar_hover(2, 0));
+    assert!(app.file_panel_root_hover);
+    assert!(app.handle_file_list_click(2, 0, false));
+    assert!(app.open_dashboard);
+    assert_eq!(app.file_panel_mode, FilePanelMode::Comments);
+}
+
+#[test]
 fn selecting_visible_file_does_not_recentre_sidebar() {
     let pairs = (0..50)
         .map(|idx| {

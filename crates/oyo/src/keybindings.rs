@@ -76,6 +76,7 @@ pub(crate) enum NormalAction {
     ToggleAutoplayReverse,
     ToggleViewMode,
     ToggleViewModeReverse,
+    OpenDashboard,
     ScrollUp,
     ScrollDown,
     HalfPageUp,
@@ -193,6 +194,7 @@ pub(crate) enum DashboardAction {
     StartFilter,
     ClearPin,
     TogglePin,
+    SelectHovered,
     Accept,
     SelectNext,
     SelectPrev,
@@ -286,6 +288,7 @@ binding_action!(NormalAction, [
     ToggleAutoplayReverse => ("toggle_autoplay_reverse", "Autoplay reverse", ["B"]),
     ToggleViewMode => ("toggle_view_mode", "Cycle view mode", ["tab"]),
     ToggleViewModeReverse => ("toggle_view_mode_reverse", "Cycle view mode reverse", ["backtab"]),
+    OpenDashboard => ("open_dashboard", "Open oy view", ["ctrl-r"]),
     ScrollUp => ("scroll_up", "Scroll up", ["K"]),
     ScrollDown => ("scroll_down", "Scroll down", ["J"]),
     HalfPageUp => ("half_page_up", "Scroll half-page up", ["ctrl-u"]),
@@ -396,6 +399,7 @@ binding_action!(DashboardAction, [
     StartFilter => ("start_filter", "Filter commits", ["/"]),
     ClearPin => ("clear_pin", "Clear pinned range start", ["r"]),
     TogglePin => ("toggle_pin", "Mark range start", ["space"]),
+    SelectHovered => ("select_hovered", "Move range end to hovered item", ["e"]),
     Accept => ("accept", "Open selection", ["enter"]),
     SelectNext => ("select_next", "Select next", ["j", "down"]),
     SelectPrev => ("select_prev", "Select previous", ["k", "up"]),
@@ -966,6 +970,26 @@ mod tests {
             bindings.normal(key('q')),
             Dispatch::Matched(NormalAction::Quit),
             "omitted actions should keep their default bindings"
+        );
+    }
+
+    #[test]
+    fn dashboard_e_selects_hovered() {
+        let mut bindings = Keybindings::default();
+
+        assert_eq!(
+            bindings.dashboard(key('e')),
+            Dispatch::Matched(DashboardAction::SelectHovered)
+        );
+    }
+
+    #[test]
+    fn ctrl_r_opens_dashboard() {
+        let mut bindings = Keybindings::default();
+
+        assert_eq!(
+            bindings.normal(ctrl('r')),
+            Dispatch::Matched(NormalAction::OpenDashboard)
         );
     }
 

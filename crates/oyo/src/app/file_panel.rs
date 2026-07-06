@@ -83,6 +83,19 @@ impl App {
         }
 
         if self
+            .file_panel_root_hit
+            .is_some_and(|(x, y, width, height)| {
+                column >= x
+                    && column < x.saturating_add(width)
+                    && row >= y
+                    && row < y.saturating_add(height)
+            })
+        {
+            self.open_dashboard = true;
+            return true;
+        }
+
+        if self
             .file_filter_clear_hit
             .is_some_and(|(x, y, width, height)| {
                 column >= x

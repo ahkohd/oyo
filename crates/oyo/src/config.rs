@@ -77,6 +77,7 @@
 //! # Unmodified 1-9 are reserved for counts.
 //! step_down = ["j", "down"]
 //! step_up = ["k", "up"]
+//! open_dashboard = ["ctrl-r"]
 //! goto_start = ["g g", "home"]
 //! start_selection = ["v"]
 //! start_line_selection = ["V"]

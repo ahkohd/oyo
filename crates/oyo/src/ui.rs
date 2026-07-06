@@ -369,38 +369,77 @@ fn no_changes_message(app: &App) -> &str {
         .unwrap_or("No changes found.")
 }
 
-fn no_changes_hint(app: &App) -> &str {
-    if app.watch {
-        "Watching for changes. Press q to quit."
+fn no_changes_hint_line(app: &App) -> Line<'static> {
+    let text_style = Style::default().fg(app.theme.text_muted);
+    let key_style = Style::default()
+        .fg(app.theme.accent)
+        .add_modifier(Modifier::BOLD);
+    let action_style = if app.no_changes_quit_hover {
+        Style::default()
+            .fg(app.theme.accent)
+            .add_modifier(Modifier::BOLD)
     } else {
-        "Press R to refresh or q to quit."
+        Style::default()
+            .fg(app.theme.text_muted)
+            .add_modifier(Modifier::DIM)
+    };
+    if app.watch {
+        Line::from(vec![
+            Span::styled("Watching for changes. Press ", text_style),
+            Span::styled("q", key_style),
+            Span::styled(" to quit.", action_style),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled("Press ", text_style),
+            Span::styled("R", key_style),
+            Span::styled(" to refresh or ", text_style),
+            Span::styled("q", key_style),
+            Span::styled(" to quit.", action_style),
+        ])
     }
 }
 
-fn draw_no_changes(frame: &mut Frame, app: &App, area: Rect) {
+fn no_changes_quit_hit(app: &App, area: Rect, hint_y: u16) -> (u16, u16, u16, u16) {
+    let (prefix, action) = if app.watch {
+        ("Watching for changes. Press ", "q to quit.")
+    } else {
+        ("Press R to refresh or ", "q to quit.")
+    };
+    let full_width = text_width(&format!("{prefix}{action}")) as u16;
+    let x = area
+        .x
+        .saturating_add(area.width.saturating_sub(full_width) / 2)
+        .saturating_add(text_width(prefix) as u16);
+    (x, hint_y, text_width(action) as u16, 1)
+}
+
+fn draw_no_changes(frame: &mut Frame, app: &mut App, area: Rect) {
     if let Some(bg) = app.theme.background {
         frame.render_widget(Block::default().style(Style::default().bg(bg)), area);
     }
-    let text = vec![
-        Line::from(Span::styled(
-            no_changes_message(app),
-            Style::default()
-                .fg(app.theme.text)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(""),
-        Line::from(Span::styled(
-            no_changes_hint(app),
-            Style::default().fg(app.theme.text_muted),
-        )),
-    ];
     let height = 3.min(area.height);
     let y = area.y + area.height.saturating_sub(height) / 2;
-    let mut paragraph = Paragraph::new(text).alignment(Alignment::Center);
+    let hint_y = y.saturating_add(2);
+    app.no_changes_quit_hit = (height > 2).then(|| no_changes_quit_hit(app, area, hint_y));
+
+    let mut message = Paragraph::new(Line::from(Span::styled(
+        no_changes_message(app),
+        Style::default()
+            .fg(app.theme.text)
+            .add_modifier(Modifier::BOLD),
+    )))
+    .alignment(Alignment::Center);
+    let mut hint = Paragraph::new(no_changes_hint_line(app)).alignment(Alignment::Center);
     if let Some(bg) = app.theme.background {
-        paragraph = paragraph.style(Style::default().bg(bg));
+        let style = Style::default().bg(bg);
+        message = message.style(style);
+        hint = hint.style(style);
     }
-    frame.render_widget(paragraph, Rect::new(area.x, y, area.width, height));
+    frame.render_widget(message, Rect::new(area.x, y, area.width, 1));
+    if height > 2 {
+        frame.render_widget(hint, Rect::new(area.x, hint_y, area.width, 1));
+    }
 }
 
 /// Main drawing function
@@ -415,6 +454,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     app.topbar_sidebar_toggle_hit = None;
     app.status_mode_hit = None;
     app.binary_preview_hit = None;
+    app.file_panel_root_hit = None;
+    app.no_changes_quit_hit = None;
     app.topbar_area = None;
 
     if app.multi_diff.file_count() == 0 {
@@ -1645,6 +1686,8 @@ fn draw_content(frame: &mut Frame, app: &mut App, area: Rect, show_topbar: bool)
         app.file_filter_clear_hit = None;
         app.file_panel_mode_toggle_hit = None;
         app.file_panel_mode_toggle_hover = false;
+        app.file_panel_root_hit = None;
+        app.file_panel_root_hover = false;
         app.file_filter_hover = false;
         app.file_filter_clear_hover = false;
         app.file_panel_rect = None;
@@ -1771,6 +1814,7 @@ fn draw_file_panel_divider(frame: &mut Frame, app: &App, area: Rect, panel_bg: O
 
 fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
     app.file_panel_mode_toggle_hit = None;
+    app.file_panel_root_hit = None;
     let panel_bg = app.theme.background_panel.or(app.theme.background);
     let content_area = file_panel_content_area(app, area);
     draw_file_panel_divider(frame, app, area, panel_bg);
@@ -1868,9 +1912,25 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
         )
     };
 
-    let root_style = Style::default()
-        .fg(app.theme.border_subtle)
-        .add_modifier(Modifier::DIM);
+    let root_text_width =
+        text_width(&header_text).min(header_area.width.saturating_sub(1) as usize);
+    if root_text_width > 0 {
+        app.file_panel_root_hit = Some((
+            header_area.x.saturating_add(1),
+            header_area.y,
+            root_text_width as u16,
+            1,
+        ));
+    }
+    let root_style = if app.file_panel_root_hover {
+        Style::default()
+            .fg(app.theme.accent)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+            .fg(app.theme.border_subtle)
+            .add_modifier(Modifier::DIM)
+    };
     let header_lines = if app.file_panel_mode == FilePanelMode::Comments {
         let comment_count = app.review_comment_count();
         let comments_label = match comment_count {
@@ -6652,6 +6712,25 @@ mod tests {
             .collect::<String>();
         assert!(text.starts_with("‹ "));
         assert!(app.topbar_scroll_left_hit.is_some());
+    }
+
+    #[test]
+    fn no_changes_quit_hint_styles_hotkey_and_hover() {
+        let multi = MultiFileDiff::from_file_pair(
+            std::path::PathBuf::from("a.txt"),
+            std::path::PathBuf::from("a.txt"),
+            "old".to_string(),
+            "new".to_string(),
+        );
+        let mut app = App::new(multi, ViewMode::UnifiedPane, 50, false, None);
+        app.watch = true;
+        app.no_changes_quit_hover = true;
+
+        let line = super::no_changes_hint_line(&app);
+
+        assert_eq!(line.spans[1].content.as_ref(), "q");
+        assert_eq!(line.spans[1].style.fg, Some(app.theme.accent));
+        assert_eq!(line.spans[2].style.fg, Some(app.theme.accent));
     }
 
     #[test]

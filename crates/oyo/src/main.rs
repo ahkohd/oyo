@@ -1236,13 +1236,14 @@ fn main() -> Result<()> {
 
     if let Some(limit) = view_limit {
         let mut terminal = setup_terminal()?;
-        let mut input_mode = match run_commit_picker(&mut terminal, &config, light_mode, limit)? {
-            Some(mode) => mode,
-            None => {
-                restore_terminal(&mut terminal)?;
-                return Ok(());
-            }
-        };
+        let mut input_mode =
+            match run_commit_picker(&mut terminal, &config, light_mode, limit, None)? {
+                Some(mode) => mode,
+                None => {
+                    restore_terminal(&mut terminal)?;
+                    return Ok(());
+                }
+            };
 
         let mut exit_message: Option<String> = None;
         let mut review_output: Option<String> = None;
@@ -1287,9 +1288,14 @@ fn main() -> Result<()> {
             }
             review_hook_warnings.extend(app.take_review_hook_warnings());
             match exit {
-                AppExit::Quit => break,
-                AppExit::OpenDashboard => {
-                    let Some(mode) = run_commit_picker(&mut terminal, &config, light_mode, limit)?
+                AppExit::Quit | AppExit::OpenDashboard => {
+                    let Some(mode) = run_commit_picker(
+                        &mut terminal,
+                        &config,
+                        light_mode,
+                        limit,
+                        Some(&input_mode),
+                    )?
                     else {
                         break;
                     };
@@ -1399,8 +1405,13 @@ fn main() -> Result<()> {
         match exit {
             AppExit::Quit => break,
             AppExit::OpenDashboard => {
-                let Some(mode) =
-                    run_commit_picker(&mut terminal, &config, light_mode, dashboard_limit)?
+                let Some(mode) = run_commit_picker(
+                    &mut terminal,
+                    &config,
+                    light_mode,
+                    dashboard_limit,
+                    Some(&input_mode),
+                )?
                 else {
                     break;
                 };
@@ -1566,6 +1577,9 @@ fn run_app(
                     }
                     match me.kind {
                         MouseEventKind::Down(MouseButton::Left) => {
+                            if app.handle_no_changes_quit_click(me.column, me.row) {
+                                continue;
+                            }
                             if app.handle_selection_toolbar_click(me.column, me.row) {
                                 continue;
                             }
@@ -2062,115 +2076,147 @@ fn run_dashboard<B: Backend>(
             needs_draw = false;
         }
 
-        if event::poll(tick_rate)? {
-            needs_draw = true;
-            match event::read()? {
-                Event::Key(key) if key.kind == KeyEventKind::Press => {
-                    let list_height =
-                        dashboard.list_height(terminal.size().map_err(|e| anyhow!("{e}"))?.height);
-                    if dashboard.filter_active() {
-                        match dashboard.keybindings_mut().dashboard_filter(key) {
-                            Dispatch::Matched(DashboardFilterAction::Cancel) => {
-                                dashboard.stop_filter();
-                            }
-                            Dispatch::Matched(DashboardFilterAction::Accept) => {
-                                if let Some(selection) = dashboard.selection() {
-                                    return Ok(Some(selection));
-                                }
-                            }
-                            Dispatch::Matched(DashboardFilterAction::Clear) => {
-                                dashboard.clear_filter();
-                            }
-                            Dispatch::Matched(DashboardFilterAction::Backspace) => {
-                                dashboard.pop_filter_char();
-                            }
-                            Dispatch::Matched(DashboardFilterAction::SelectNext) => {
-                                dashboard.move_selection(1, list_height);
-                            }
-                            Dispatch::Matched(DashboardFilterAction::SelectPrev) => {
-                                dashboard.move_selection(-1, list_height);
-                            }
-                            Dispatch::Matched(DashboardFilterAction::PageDown) => {
-                                dashboard.page_down(list_height);
-                            }
-                            Dispatch::Matched(DashboardFilterAction::PageUp) => {
-                                dashboard.page_up(list_height);
-                            }
-                            Dispatch::Matched(DashboardFilterAction::SelectFirst) => {
-                                dashboard.select_first(list_height);
-                            }
-                            Dispatch::Matched(DashboardFilterAction::SelectLast) => {
-                                dashboard.select_last(list_height);
-                            }
-                            Dispatch::Pending => {}
-                            Dispatch::Unmatched => {
-                                if let Some(ch) = printable_dashboard_char(key) {
-                                    dashboard.push_filter_char(ch);
-                                }
-                            }
+        if !event::poll(tick_rate)? {
+            needs_draw |= dashboard.tick();
+            continue;
+        }
+
+        needs_draw = true;
+        match event::read()? {
+            Event::Key(key) if key.kind == KeyEventKind::Press => {
+                let list_height =
+                    dashboard.list_height(terminal.size().map_err(|e| anyhow!("{e}"))?.height);
+                if dashboard.filter_active() {
+                    match dashboard.keybindings_mut().dashboard_filter(key) {
+                        Dispatch::Matched(DashboardFilterAction::Cancel) => {
+                            dashboard.stop_filter();
                         }
-                        continue;
-                    }
-                    match dashboard.keybindings_mut().dashboard(key) {
-                        Dispatch::Matched(DashboardAction::Quit) => return Ok(None),
-                        Dispatch::Matched(DashboardAction::StartFilter) => {
-                            dashboard.start_filter();
-                        }
-                        Dispatch::Matched(DashboardAction::ClearPin) => {
-                            dashboard.clear_pin();
-                        }
-                        Dispatch::Matched(DashboardAction::TogglePin) => {
-                            dashboard.toggle_pin();
-                        }
-                        Dispatch::Matched(DashboardAction::Accept) => {
+                        Dispatch::Matched(DashboardFilterAction::Accept) => {
                             if let Some(selection) = dashboard.selection() {
                                 return Ok(Some(selection));
                             }
                         }
-                        Dispatch::Matched(DashboardAction::SelectNext) => {
+                        Dispatch::Matched(DashboardFilterAction::Clear) => {
+                            dashboard.clear_filter();
+                        }
+                        Dispatch::Matched(DashboardFilterAction::Backspace) => {
+                            dashboard.pop_filter_char();
+                        }
+                        Dispatch::Matched(DashboardFilterAction::SelectNext) => {
                             dashboard.move_selection(1, list_height);
                         }
-                        Dispatch::Matched(DashboardAction::SelectPrev) => {
+                        Dispatch::Matched(DashboardFilterAction::SelectPrev) => {
                             dashboard.move_selection(-1, list_height);
                         }
-                        Dispatch::Matched(DashboardAction::PageDown) => {
+                        Dispatch::Matched(DashboardFilterAction::PageDown) => {
                             dashboard.page_down(list_height);
                         }
-                        Dispatch::Matched(DashboardAction::PageUp) => {
+                        Dispatch::Matched(DashboardFilterAction::PageUp) => {
                             dashboard.page_up(list_height);
                         }
-                        Dispatch::Matched(DashboardAction::SelectFirst) => {
+                        Dispatch::Matched(DashboardFilterAction::SelectFirst) => {
                             dashboard.select_first(list_height);
                         }
-                        Dispatch::Matched(DashboardAction::SelectLast) => {
+                        Dispatch::Matched(DashboardFilterAction::SelectLast) => {
                             dashboard.select_last(list_height);
                         }
-                        Dispatch::Pending | Dispatch::Unmatched => {}
-                    }
-                }
-                Event::Mouse(mouse) => {
-                    let list_height =
-                        dashboard.list_height(terminal.size().map_err(|e| anyhow!("{e}"))?.height);
-                    match mouse.kind {
-                        MouseEventKind::ScrollUp => {
-                            dashboard.move_selection(-3, list_height);
-                        }
-                        MouseEventKind::ScrollDown => {
-                            dashboard.move_selection(3, list_height);
-                        }
-                        MouseEventKind::Down(MouseButton::Left) => {
-                            let changed = dashboard.select_at_mouse(mouse.row);
-                            if !changed {
-                                if let Some(selection) = dashboard.selection() {
-                                    return Ok(Some(selection));
-                                }
+                        Dispatch::Pending => {}
+                        Dispatch::Unmatched => {
+                            if let Some(ch) = printable_dashboard_char(key) {
+                                dashboard.push_filter_char(ch);
                             }
                         }
-                        _ => {}
                     }
+                    continue;
                 }
-                _ => {}
+                match dashboard.keybindings_mut().dashboard(key) {
+                    Dispatch::Matched(DashboardAction::Quit) => return Ok(None),
+                    Dispatch::Matched(DashboardAction::StartFilter) => {
+                        dashboard.start_filter();
+                    }
+                    Dispatch::Matched(DashboardAction::ClearPin) => {
+                        dashboard.clear_pin();
+                    }
+                    Dispatch::Matched(DashboardAction::TogglePin) => {
+                        dashboard.toggle_hovered_pin();
+                    }
+                    Dispatch::Matched(DashboardAction::SelectHovered) => {
+                        dashboard.select_hovered();
+                    }
+                    Dispatch::Matched(DashboardAction::Accept) => {
+                        if let Some(selection) = dashboard.selection() {
+                            return Ok(Some(selection));
+                        }
+                    }
+                    Dispatch::Matched(DashboardAction::SelectNext) => {
+                        dashboard.move_selection(1, list_height);
+                    }
+                    Dispatch::Matched(DashboardAction::SelectPrev) => {
+                        dashboard.move_selection(-1, list_height);
+                    }
+                    Dispatch::Matched(DashboardAction::PageDown) => {
+                        dashboard.page_down(list_height);
+                    }
+                    Dispatch::Matched(DashboardAction::PageUp) => {
+                        dashboard.page_up(list_height);
+                    }
+                    Dispatch::Matched(DashboardAction::SelectFirst) => {
+                        dashboard.select_first(list_height);
+                    }
+                    Dispatch::Matched(DashboardAction::SelectLast) => {
+                        dashboard.select_last(list_height);
+                    }
+                    Dispatch::Pending | Dispatch::Unmatched => {}
+                }
             }
+            Event::Mouse(mouse) => {
+                dashboard.update_hover(mouse.column, mouse.row);
+                let list_height =
+                    dashboard.list_height(terminal.size().map_err(|e| anyhow!("{e}"))?.height);
+                match mouse.kind {
+                    MouseEventKind::ScrollUp => {
+                        dashboard.move_selection(-3, list_height);
+                        dashboard.update_hover(mouse.column, mouse.row);
+                    }
+                    MouseEventKind::ScrollDown => {
+                        dashboard.move_selection(3, list_height);
+                        dashboard.update_hover(mouse.column, mouse.row);
+                    }
+                    MouseEventKind::Down(MouseButton::Left) => {
+                        if dashboard.handle_filter_mouse_down(mouse.column, mouse.row) {
+                            continue;
+                        }
+                        if let Some(action) = dashboard.footer_action_at(mouse.column, mouse.row) {
+                            match action {
+                                DashboardAction::Quit => return Ok(None),
+                                DashboardAction::Accept => {
+                                    if let Some(selection) = dashboard.selection() {
+                                        return Ok(Some(selection));
+                                    }
+                                }
+                                DashboardAction::TogglePin => dashboard.toggle_hovered_pin(),
+                                DashboardAction::SelectHovered => {
+                                    dashboard.select_hovered();
+                                }
+                                _ => {}
+                            }
+                            continue;
+                        }
+                        if mouse.modifiers.contains(KeyModifiers::CONTROL) {
+                            dashboard.toggle_pin_at_mouse(mouse.column, mouse.row);
+                            continue;
+                        }
+                        if dashboard.select_at_mouse(mouse.column, mouse.row).is_some() {
+                            if let Some(selection) = dashboard.selection() {
+                                return Ok(Some(selection));
+                            }
+                        }
+                    }
+                    MouseEventKind::Moved | MouseEventKind::Drag(MouseButton::Left) => {}
+                    _ => {}
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -2187,11 +2233,24 @@ fn printable_dashboard_char(key: KeyEvent) -> Option<char> {
     }
 }
 
+fn dashboard_selection_for_input(input_mode: &InputMode) -> Option<DashboardSelection> {
+    match input_mode {
+        InputMode::GitUncommitted => Some(DashboardSelection::Uncommitted),
+        InputMode::GitStaged => Some(DashboardSelection::Staged),
+        InputMode::GitRange { from, to } => Some(DashboardSelection::Range {
+            from: from.clone(),
+            to: to.clone(),
+        }),
+        _ => None,
+    }
+}
+
 fn run_commit_picker<B: Backend>(
     terminal: &mut Terminal<B>,
     config: &config::Config,
     light_mode: bool,
     limit: usize,
+    initial: Option<&InputMode>,
 ) -> Result<Option<InputMode>> {
     let cwd = std::env::current_dir().unwrap_or_default();
     if !oyo_core::git::is_git_repo(&cwd) {
@@ -2222,6 +2281,9 @@ fn run_commit_picker<B: Backend>(
         time_format,
         keybindings: Keybindings::from_config(&config.keybindings),
     });
+    if let Some(selection) = initial.and_then(dashboard_selection_for_input) {
+        dashboard.select_selection(&selection);
+    }
 
     let selection = run_dashboard(terminal, &mut dashboard)?;
     let input_mode = match selection {

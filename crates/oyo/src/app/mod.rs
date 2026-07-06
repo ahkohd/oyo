@@ -264,6 +264,8 @@ pub struct App {
     pub(crate) file_panel_mode: FilePanelMode,
     pub(crate) file_panel_mode_toggle_hit: Option<(u16, u16, u16, u16)>,
     pub(crate) file_panel_mode_toggle_hover: bool,
+    pub(crate) file_panel_root_hit: Option<(u16, u16, u16, u16)>,
+    pub(crate) file_panel_root_hover: bool,
     /// File panel full area (x, y, width, height)
     pub file_panel_rect: Option<(u16, u16, u16, u16)>,
     /// Diff content area (x, y, width, height)
@@ -356,6 +358,10 @@ pub struct App {
     git_index_baseline: FileDiskStamp,
     /// Message shown when a git diff currently has no files
     pub no_changes_message: Option<String>,
+    /// Quit action area on the no changes screen.
+    pub(crate) no_changes_quit_hit: Option<(u16, u16, u16, u16)>,
+    /// True when the no changes quit action is hovered.
+    pub(crate) no_changes_quit_hover: bool,
     /// Defer heavy view rebuild by one frame (for large-file jumps)
     view_build_defer: bool,
     /// True while a deferred view rebuild is pending
@@ -806,6 +812,8 @@ impl App {
             file_panel_mode: FilePanelMode::Files,
             file_panel_mode_toggle_hit: None,
             file_panel_mode_toggle_hover: false,
+            file_panel_root_hit: None,
+            file_panel_root_hover: false,
             file_panel_rect: None,
             diff_view_area: None,
             diff_selection: None,
@@ -852,6 +860,8 @@ impl App {
             last_git_watch_check: Instant::now(),
             git_index_baseline: FileDiskStamp::default(),
             no_changes_message: None,
+            no_changes_quit_hit: None,
+            no_changes_quit_hover: false,
             view_build_defer: false,
             view_build_pending: false,
             horizontal_scroll: 0,
