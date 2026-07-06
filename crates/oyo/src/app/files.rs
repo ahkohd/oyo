@@ -1378,8 +1378,8 @@ impl App {
         }
     }
 
-    pub fn is_multi_file(&self) -> bool {
-        self.multi_diff.is_multi_file()
+    pub fn can_show_file_panel(&self) -> bool {
+        self.multi_diff.file_count() > 0
     }
 
     fn update_file_list_scroll(&mut self) {

@@ -999,6 +999,22 @@ fn file_list_scroll_counts_group_rows() {
 }
 
 #[test]
+fn single_file_can_show_sidebar() {
+    let diff = MultiFileDiff::from_file_pair(
+        std::path::PathBuf::from("a.txt"),
+        std::path::PathBuf::from("a.txt"),
+        "a\n".to_string(),
+        "aa\n".to_string(),
+    );
+    let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+    app.file_panel_visible = false;
+
+    assert!(app.show_files_sidebar());
+    assert!(app.file_panel_visible);
+    assert_eq!(app.file_panel_mode, FilePanelMode::Files);
+}
+
+#[test]
 fn topbar_sidebar_toggle_button_toggles_file_panel() {
     let diff = MultiFileDiff::from_file_pairs(vec![
         (

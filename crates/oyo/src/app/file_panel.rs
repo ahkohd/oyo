@@ -20,7 +20,7 @@ impl App {
     }
 
     pub fn show_files_sidebar(&mut self) -> bool {
-        if !self.is_multi_file() {
+        if !self.can_show_file_panel() {
             return false;
         }
         self.file_panel_mode = FilePanelMode::Files;

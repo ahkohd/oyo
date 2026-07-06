@@ -198,7 +198,7 @@ impl App {
             },
         ]);
 
-        if self.is_multi_file() {
+        if self.can_show_file_panel() {
             entries.push(PaletteEntry {
                 label: "Toggle file panel".to_string(),
                 action: PaletteAction::ToggleFilePanel,

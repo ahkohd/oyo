@@ -376,12 +376,10 @@ fn no_changes_hint_line(app: &App) -> Line<'static> {
         .add_modifier(Modifier::BOLD);
     let action_style = if app.no_changes_quit_hover {
         Style::default()
-            .fg(app.theme.accent)
+            .fg(app.theme.text_muted)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default()
-            .fg(app.theme.text_muted)
-            .add_modifier(Modifier::DIM)
+        Style::default().fg(app.theme.text_muted)
     };
     if app.watch {
         Line::from(vec![
@@ -1168,7 +1166,7 @@ fn draw_top_bar(frame: &mut Frame, app: &mut App, area: Rect) {
     };
 
     let sidebar_toggle = app
-        .is_multi_file()
+        .can_show_file_panel()
         .then(|| topbar_sidebar_toggle_spans(app));
     let sidebar_toggle_width = sidebar_toggle
         .as_ref()
@@ -1615,7 +1613,7 @@ fn draw_content(frame: &mut Frame, app: &mut App, area: Rect, show_topbar: bool)
     // But respect user's manual toggle preference
     let min_width_for_panel = FILE_PANEL_MIN_WIDTH + DIFF_VIEW_MIN_WIDTH;
 
-    let panel_allowed = app.is_multi_file() || app.file_panel_mode == FilePanelMode::Comments;
+    let panel_allowed = app.can_show_file_panel();
 
     // Track if panel would be auto-hidden (for toggle behavior)
     app.file_panel_auto_hidden = panel_allowed
@@ -5875,7 +5873,7 @@ fn draw_help_popover(frame: &mut Frame, app: &mut App) {
         help(HelpAction::Close),
         normal(NormalAction::Quit),
     ];
-    if app.is_multi_file() {
+    if app.can_show_file_panel() {
         help_keys.extend([
             paired(&normal, NormalAction::PrevFile, NormalAction::NextFile),
             normal(NormalAction::ToggleFilePanel),
@@ -6244,7 +6242,7 @@ fn draw_help_popover(frame: &mut Frame, app: &mut App) {
         "Refresh all files",
     );
 
-    if app.is_multi_file() {
+    if app.can_show_file_panel() {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(" Files", section_style)));
         push_help_line(
@@ -6285,7 +6283,7 @@ fn draw_help_popover(frame: &mut Frame, app: &mut App) {
         Span::styled(quit_label, label_style),
     ]));
 
-    let base_height = if app.is_multi_file() { 31 } else { 26 };
+    let base_height = if app.can_show_file_panel() { 31 } else { 26 };
     let min_height = (base_height as u16).min(area.height.saturating_sub(4));
     let needed_height = (lines.len() as u16).saturating_add(2);
     let popup_height = needed_height
@@ -6730,7 +6728,8 @@ mod tests {
 
         assert_eq!(line.spans[1].content.as_ref(), "q");
         assert_eq!(line.spans[1].style.fg, Some(app.theme.accent));
-        assert_eq!(line.spans[2].style.fg, Some(app.theme.accent));
+        assert_eq!(line.spans[2].style.fg, Some(app.theme.text_muted));
+        assert!(line.spans[2].style.add_modifier.contains(Modifier::BOLD));
     }
 
     #[test]

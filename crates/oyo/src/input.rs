@@ -674,7 +674,7 @@ fn dispatch_normal_action(
         }
         NormalAction::ToggleFileListFocus => {
             app.reset_count();
-            if app.is_multi_file() {
+            if app.can_show_file_panel() {
                 app.file_list_focused = !app.file_list_focused;
                 if !app.file_list_focused {
                     app.stop_file_filter();
@@ -683,7 +683,7 @@ fn dispatch_normal_action(
         }
         NormalAction::IncreaseSpeed => {
             app.reset_count();
-            if app.is_multi_file() && app.file_list_focused {
+            if app.can_show_file_panel() && app.file_list_focused {
                 if let Ok((cols, _)) = terminal::size() {
                     app.resize_file_panel(2, cols);
                 }
@@ -693,7 +693,7 @@ fn dispatch_normal_action(
         }
         NormalAction::DecreaseSpeed => {
             app.reset_count();
-            if app.is_multi_file() && app.file_list_focused {
+            if app.can_show_file_panel() && app.file_list_focused {
                 if let Ok((cols, _)) = terminal::size() {
                     app.resize_file_panel(-2, cols);
                 }
@@ -771,7 +771,7 @@ fn dispatch_normal_action(
         }
         NormalAction::ToggleFilePanel => {
             app.reset_count();
-            if app.is_multi_file() {
+            if app.can_show_file_panel() {
                 app.toggle_file_panel();
             }
         }
