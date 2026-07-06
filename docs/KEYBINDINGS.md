@@ -67,15 +67,26 @@ Mouse actions use built-in behaviour and cannot be changed with keybindings.
 | Action | What it does |
 | --- | --- |
 | Drag in the diff | Select text |
+| Click a selection action | Copy, comment, cancel or run a configured command |
+| Scroll a selection action row | Move through hidden selection actions |
+| Click ` + ` on a diff line | Add or update a line comment |
+| Click a comment card | Edit that comment |
+| Click `x delete` on a comment card | Delete that comment |
+| Click a comment editor action | Save, cancel, mention or run a configured command |
+| Scroll a comment editor action row | Move through hidden comment actions |
 | Click the sidebar toggle | Show or hide the sidebar |
 | Drag the sidebar edge | Resize the sidebar |
-| Scroll the sidebar | Scroll files |
-| Click the sidebar filter | Filter files |
+| Scroll the sidebar | Scroll files or comments |
+| Click the sidebar filter | Filter files or comments |
 | Click the filter clear button | Clear the filter |
 | Click a file in the sidebar | Open it in the active tab |
 | Control-click a file in the sidebar | Open it in a new tab |
+| Click a comment in the sidebar | Open it for editing |
+| Click the sidebar header mode label | Switch between files and comments |
 | Click the footer mode label | Cycle view mode |
 | Control-click the footer mode label | Cycle view mode backwards |
+| Click the footer file count | Open the sidebar in files mode |
+| Click the footer comment count | Open the sidebar in comments mode |
 | Scroll over the tab bar | Move through tabs |
 | Drag a tab | Reorder tabs |
 | Click a tab overflow control | Move through hidden tabs |
