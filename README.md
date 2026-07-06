@@ -53,7 +53,7 @@ You can also press `s` in the TUI, or set `stepping = true` in config.
 - mouse support
 - Markdown, JSON, YAML, TOML and CSV previews
 - inline review comments
-- visual text selection with copy to clipboard
+- visual text selection with copy, comments and command actions
 - word-level diffing
 - multi-file navigation
 - watch mode that refreshes changed files on disk
