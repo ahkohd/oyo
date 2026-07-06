@@ -1569,7 +1569,16 @@ fn run_app(
                             if app.handle_selection_toolbar_click(me.column, me.row) {
                                 continue;
                             }
+                            if app.handle_review_editor_toolbar_click(me.column, me.row) {
+                                continue;
+                            }
                             if app.dismiss_selection_toolbar_click(me.column, me.row) {
+                                continue;
+                            }
+                            if app.handle_status_comments_mouse_down(me.column, me.row) {
+                                continue;
+                            }
+                            if app.handle_status_file_mouse_down(me.column, me.row) {
                                 continue;
                             }
                             if app.handle_status_bar_mouse_down(
@@ -1589,6 +1598,9 @@ fn run_app(
                                 continue;
                             }
                             if app.start_diff_scrollbar_drag(me.column, me.row) {
+                                continue;
+                            }
+                            if app.handle_review_line_add_click(me.column, me.row) {
                                 continue;
                             }
                             if app.handle_review_preview_click(me.column, me.row) {
@@ -1667,6 +1679,26 @@ fn run_app(
                                 1
                             };
                             needs_draw = app.scroll_selection_toolbar_actions(delta);
+                        }
+                        MouseEventKind::ScrollLeft | MouseEventKind::ScrollRight
+                            if app.mouse_over_review_editor_toolbar(me.column, me.row) =>
+                        {
+                            let delta = if matches!(me.kind, MouseEventKind::ScrollLeft) {
+                                -1
+                            } else {
+                                1
+                            };
+                            needs_draw = app.scroll_review_editor_toolbar(delta);
+                        }
+                        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                            if app.mouse_over_review_editor_toolbar(me.column, me.row) =>
+                        {
+                            let delta = if matches!(me.kind, MouseEventKind::ScrollUp) {
+                                -1
+                            } else {
+                                1
+                            };
+                            needs_draw = app.scroll_review_editor_toolbar(delta);
                         }
                         MouseEventKind::ScrollLeft | MouseEventKind::ScrollRight
                             if app.mouse_over_topbar(me.column, me.row) =>

@@ -22,7 +22,7 @@ start_line_selection = ["V"]
 start_block_selection = ["ctrl-v"]
 
 [keybindings.review_editor]
-save = ["ctrl-o"]
+save = ["ctrl-s"]
 
 [keybindings.selection]
 copy = ["y"]
@@ -192,7 +192,7 @@ Use each mode as `[keybindings.<mode>]`.
 | Action | Default keys | What it does |
 | --- | --- | --- |
 | `cancel` | `esc` | Cancel the editor |
-| `save` | `ctrl-o` | Save the comment |
+| `save` | `ctrl-s` | Save the comment |
 | `insert_newline` | `enter` | Insert a new line |
 | `accept_mention` | `tab` | Accept the mention |
 | `backspace` | `backspace` | Delete the character before the cursor |
@@ -203,7 +203,7 @@ Use each mode as `[keybindings.<mode>]`.
 | `down` | `down` | Move down |
 | `home` | `home` | Move to the start of the line |
 | `end` | `end` | Move to the end of the line |
-| `clear` | `ctrl-u` | Clear text |
+| `clear` | `ctrl-u`, `ctrl-c` | Clear text |
 | `mention_next` | `ctrl-n` | Select the next mention candidate |
 | `mention_prev` | `ctrl-p` | Select the previous mention candidate |
 

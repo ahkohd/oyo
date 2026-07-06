@@ -146,6 +146,138 @@ fn selection_toolbar_waits_for_mouse_selection_finish() {
 }
 
 #[test]
+fn split_selection_comment_uses_selected_side() {
+    let diff = MultiFileDiff::from_file_pair(
+        std::path::PathBuf::from("a.txt"),
+        std::path::PathBuf::from("a.txt"),
+        "one\ntwo\nthree\n".to_string(),
+        "one\nTWO\nthree\n".to_string(),
+    );
+    let mut app = App::new(diff, ViewMode::Split, 100, false, None);
+    app.review_mode = true;
+    app.diff_view_area = Some((0, 0, 100, 6));
+    app.set_diff_selection_cells(vec![vec!["x".to_string(); 100]; 6]);
+
+    assert!(app.start_diff_selection(60, 1));
+    assert!(app.finish_diff_selection(61, 1));
+    app.set_selection_toolbar_rect(Some((0, 0, 1, 1)));
+    app.set_selection_toolbar_hits(vec![SelectionToolbarHit {
+        action: SelectionToolbarAction::Comment,
+        x: 0,
+        y: 0,
+        width: 1,
+        height: 1,
+    }]);
+
+    assert!(app.handle_selection_toolbar_click(0, 0));
+
+    let editor = app.review_editor.as_ref().expect("editor");
+    assert_eq!(editor.anchor.side, Some(review::ReviewSide::New));
+    assert_eq!(
+        editor.anchor.new_range,
+        Some(review::ReviewRange { start: 2, end: 2 })
+    );
+}
+
+#[test]
+fn selecting_file_discards_review_editor() {
+    let diff = MultiFileDiff::from_file_pairs(vec![
+        (
+            std::path::PathBuf::from("a.txt"),
+            "old\n".to_string(),
+            "new\n".to_string(),
+        ),
+        (
+            std::path::PathBuf::from("b.txt"),
+            "old\n".to_string(),
+            "new\n".to_string(),
+        ),
+    ]);
+    let mut app = App::new(diff, ViewMode::UnifiedPane, 100, false, None);
+    app.review_mode = true;
+    app.review_editor = Some(review::ReviewEditorState {
+        anchor: review::ReviewAnchor {
+            file_index: 0,
+            file_path: "a.txt".to_string(),
+            kind: review::ReviewTargetKind::Line,
+            side: Some(review::ReviewSide::New),
+            old_range: Some(review::ReviewRange { start: 1, end: 1 }),
+            new_range: Some(review::ReviewRange { start: 1, end: 1 }),
+            hunk_id: None,
+            display_idx_hint: Some(0),
+            anchor_key: "line|a.txt|new|1".to_string(),
+        },
+        text: "draft".to_string(),
+        cursor: 5,
+    });
+
+    app.select_file(1);
+
+    assert!(!app.review_editor_active());
+}
+
+#[test]
+fn review_line_add_rows_skip_reserved_comment_notes() {
+    let diff = MultiFileDiff::from_file_pair(
+        std::path::PathBuf::from("a.txt"),
+        std::path::PathBuf::from("a.txt"),
+        "old\n".to_string(),
+        "new\n".to_string(),
+    );
+    let mut app = App::new(diff, ViewMode::UnifiedPane, 100, false, None);
+    app.review_mode = true;
+    app.diff_view_area = Some((0, 10, 40, 20));
+    app.set_diff_selection_cells(vec![vec!["x".to_string(); 40]; 20]);
+    app.add_review_preview_box(0, 12, 37, 3, "note".to_string());
+
+    assert_eq!(app.review_display_idx_for_screen_row(11), Some(1));
+    assert_eq!(app.review_display_idx_for_screen_row(12), None);
+    assert_eq!(app.review_display_idx_for_screen_row(15), Some(2));
+    assert_eq!(app.review_line_add_hover_at(38, 12), (None, false));
+    assert_eq!(app.review_line_add_hover_at(38, 15), (Some(15), true));
+}
+
+#[test]
+fn review_line_add_click_opens_line_comment() {
+    let diff = MultiFileDiff::from_file_pair(
+        std::path::PathBuf::from("a.txt"),
+        std::path::PathBuf::from("a.txt"),
+        "old\n".to_string(),
+        "new\n".to_string(),
+    );
+    let mut app = App::new(diff, ViewMode::UnifiedPane, 100, false, None);
+    app.review_mode = true;
+    app.diff_view_area = Some((0, 0, 40, 4));
+    app.set_diff_selection_cells(vec![vec!["x".to_string(); 40]]);
+
+    let (row, hover) = app.review_line_add_hover_at(38, 0);
+    assert_eq!(row, Some(0));
+    assert!(hover);
+
+    app.review_line_add_hit = Some(ReviewLineAddHit {
+        x: 37,
+        y: 0,
+        width: 3,
+        height: 1,
+        row: 0,
+    });
+    assert!(app.start_diff_selection(8, 0));
+    assert!(app.finish_diff_selection(9, 0));
+    assert!(app.selection_toolbar_visible());
+    assert!(app.handle_review_line_add_click(38, 0));
+    assert!(app.review_editor_active());
+    assert!(app.diff_selection.is_none());
+    assert!(!app.selection_toolbar_visible());
+
+    app.review_insert_char('a');
+    app.review_save_editor();
+    assert_eq!(app.review_comment_count(), 1);
+    app.review_preview_hover = Some(app.review_comments[0].anchor.anchor_key.clone());
+    assert!(app.remove_hovered_review_comment());
+    assert_eq!(app.review_comment_count(), 0);
+}
+
+#[test]
 fn test_max_scroll_normal() {
     assert_eq!(max_scroll(100, 20, false), 80);
     assert_eq!(max_scroll(50, 10, false), 40);

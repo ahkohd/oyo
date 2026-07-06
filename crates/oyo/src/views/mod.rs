@@ -26,12 +26,69 @@ use crate::app::{diff_scrollbar_thumb, App, DiffScrollbarState};
 use oyo_core::{LineKind, ViewLine, ViewSpan};
 use ratatui::{
     layout::{Margin, Rect},
-    style::Style,
+    style::{Modifier, Style},
     text::Span,
     Frame,
 };
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
+
+pub(crate) fn review_note_line_spans(
+    app: &App,
+    anchor_key: &str,
+    line: &str,
+) -> Vec<Span<'static>> {
+    let hovered = app.review_preview_hover.as_deref() == Some(anchor_key);
+    let delete_hovered = app.review_preview_delete_hover.as_deref() == Some(anchor_key);
+    let border = Style::default().fg(if hovered {
+        app.theme.accent
+    } else {
+        app.theme.warning
+    });
+    let title = Style::default()
+        .fg(app.theme.warning)
+        .add_modifier(Modifier::BOLD);
+    let text = Style::default().fg(app.theme.text);
+    let key = Style::default()
+        .fg(app.theme.accent)
+        .add_modifier(Modifier::BOLD);
+    let delete = if delete_hovered {
+        Style::default()
+            .fg(app.theme.accent)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        text
+    };
+
+    if let Some(rest) = line.strip_prefix("╭ Comment") {
+        let (label, rule) = rest.rsplit_once(' ').unwrap_or((rest, ""));
+        return vec![
+            Span::styled("╭ ".to_string(), border),
+            Span::styled("Comment".to_string(), title),
+            Span::styled(label.to_string(), Style::default().fg(app.theme.warning)),
+            Span::styled(format!(" {rule}"), border),
+        ];
+    }
+    if let Some(rest) = line.strip_prefix("╰ x delete") {
+        return vec![
+            Span::styled("╰ ".to_string(), border),
+            Span::styled("x".to_string(), key),
+            Span::styled(" delete".to_string(), delete),
+            Span::styled(rest.to_string(), border),
+        ];
+    }
+    if let Some(body) = line
+        .strip_prefix("│ ")
+        .and_then(|line| line.strip_suffix(" │"))
+    {
+        return vec![
+            Span::styled("│ ".to_string(), border),
+            Span::styled(body.to_string(), text),
+            Span::styled(" │".to_string(), border),
+        ];
+    }
+    vec![Span::styled(line.to_string(), text)]
+}
 
 pub(crate) fn spans_to_text(spans: &[Span]) -> String {
     let mut out = String::new();
@@ -653,12 +710,7 @@ pub(crate) fn truncate_text(text: &str, max_width: usize) -> String {
 use crate::app::{AnimationPhase, ViewMode};
 use crate::color;
 use crate::config::{DiffExtentMarkerMode, DiffExtentMarkerScope, ResolvedTheme};
-use ratatui::{
-    layout::Alignment,
-    style::{Color, Modifier},
-    text::Line,
-    widgets::Paragraph,
-};
+use ratatui::{layout::Alignment, style::Color, text::Line, widgets::Paragraph};
 
 pub(crate) fn extent_marker_style(
     app: &App,

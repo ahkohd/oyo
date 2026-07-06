@@ -34,6 +34,10 @@ pub(crate) fn copy_to_clipboard(text: &str) -> bool {
     if text.is_empty() {
         return false;
     }
+    platform_clipboard(text) || write_osc52_clipboard(text)
+}
+
+fn platform_clipboard(text: &str) -> bool {
     #[cfg(target_os = "macos")]
     {
         write_to_clipboard_cmd("pbcopy", &[], text)
@@ -68,7 +72,50 @@ fn write_to_clipboard_cmd(cmd: &str, args: &[&str], text: &str) -> bool {
             return false;
         }
     }
-    child.wait().is_ok()
+    child.wait().is_ok_and(|status| status.success())
+}
+
+fn write_osc52_clipboard(text: &str) -> bool {
+    let sequence = osc52_clipboard_sequence(text);
+    std::io::stdout()
+        .write_all(sequence.as_bytes())
+        .and_then(|_| std::io::stdout().flush())
+        .is_ok()
+}
+
+fn osc52_clipboard_sequence(text: &str) -> String {
+    let payload = base64_encode(text.as_bytes());
+    let osc = format!("\x1b]52;c;{payload}\x07");
+    if std::env::var_os("TMUX").is_some() {
+        return format!("\x1bPtmux;\x1b{osc}\x1b\\");
+    }
+    if std::env::var_os("STY").is_some() {
+        return format!("\x1bP{osc}\x1b\\");
+    }
+    osc
+}
+
+fn base64_encode(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0];
+        let b1 = chunk.get(1).copied().unwrap_or(0);
+        let b2 = chunk.get(2).copied().unwrap_or(0);
+        out.push(TABLE[(b0 >> 2) as usize] as char);
+        out.push(TABLE[(((b0 & 0b0000_0011) << 4) | (b1 >> 4)) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(TABLE[(((b1 & 0b0000_1111) << 2) | (b2 >> 6)) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(TABLE[(b2 & 0b0011_1111) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
 }
 
 pub(crate) fn old_text_for_change(change: &Change) -> String {
@@ -419,4 +466,18 @@ pub(crate) fn split_display_metrics(
     };
 
     (display_len, active_idx)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::base64_encode;
+
+    #[test]
+    fn base64_encode_pads_short_chunks() {
+        assert_eq!(base64_encode(b""), "");
+        assert_eq!(base64_encode(b"f"), "Zg==");
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
+        assert_eq!(base64_encode(b"foo"), "Zm9v");
+        assert_eq!(base64_encode(b"hello world"), "aGVsbG8gd29ybGQ=");
+    }
 }

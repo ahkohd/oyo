@@ -333,7 +333,7 @@ binding_action!(HelpAction, [
 
 binding_action!(ReviewEditorAction, [
     Cancel => ("cancel", "Cancel editor", ["esc"]),
-    Save => ("save", "Save comment", ["ctrl-o"]),
+    Save => ("save", "Save comment", ["ctrl-s"]),
     InsertNewline => ("insert_newline", "Insert newline", ["enter"]),
     AcceptMention => ("accept_mention", "Accept mention", ["tab"]),
     Backspace => ("backspace", "Backspace", ["backspace"]),
@@ -344,7 +344,7 @@ binding_action!(ReviewEditorAction, [
     Down => ("down", "Move down", ["down"]),
     Home => ("home", "Move to line start", ["home"]),
     End => ("end", "Move to line end", ["end"]),
-    Clear => ("clear", "Clear text", ["ctrl-u"]),
+    Clear => ("clear", "Clear text", ["ctrl-u", "ctrl-c"]),
     MentionNext => ("mention_next", "Next mention candidate", ["ctrl-n"]),
     MentionPrev => ("mention_prev", "Previous mention candidate", ["ctrl-p"]),
 ]);

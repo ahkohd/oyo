@@ -436,7 +436,8 @@ start_block_selection = ["ctrl-v"]
 toggle_help = ["?"]
 
 [keybindings.review_editor]
-save = ["ctrl-o"]
+save = ["ctrl-s"]
+clear = ["ctrl-u", "ctrl-c"]
 
 [keybindings.selection]
 copy = ["y"]

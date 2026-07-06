@@ -1,4 +1,4 @@
-use super::{App, SelectionToolbarAction, SelectionToolbarHit, ViewMode};
+use super::{review::ReviewSide, App, SelectionToolbarAction, SelectionToolbarHit, ViewMode};
 use crate::app::utils::copy_to_clipboard;
 use crate::config::{ReviewHookStdin, SelectionActionConfig};
 use crate::toasts::ToastEvent;
@@ -87,7 +87,7 @@ impl App {
     }
 
     pub(crate) fn show_selection_toolbar(&mut self) -> bool {
-        if self.diff_selection_segments().is_empty() {
+        if self.review_editor_active() || self.diff_selection_segments().is_empty() {
             return false;
         }
         self.selection_toolbar_visible = true;
@@ -95,6 +95,9 @@ impl App {
     }
 
     pub(crate) fn start_diff_selection(&mut self, column: u16, row: u16) -> bool {
+        if self.review_editor_active() {
+            return false;
+        }
         if self.selection_toolbar_visible {
             self.clear_diff_selection();
             return true;
@@ -131,6 +134,9 @@ impl App {
     }
 
     pub(crate) fn drag_diff_selection(&mut self, column: u16, row: u16) -> bool {
+        if self.review_editor_active() {
+            return false;
+        }
         if self.selection_toolbar_visible {
             return true;
         }
@@ -317,6 +323,9 @@ impl App {
     }
 
     pub(crate) fn finish_diff_selection(&mut self, column: u16, row: u16) -> bool {
+        if self.review_editor_active() {
+            return false;
+        }
         if self.selection_toolbar_visible {
             return true;
         }
@@ -426,7 +435,9 @@ impl App {
                 true
             }
             SelectionToolbarAction::Comment => {
-                self.start_line_comment();
+                if !self.start_line_comment_for_selection() {
+                    self.start_line_comment();
+                }
                 self.clear_diff_selection();
                 true
             }
@@ -447,6 +458,54 @@ impl App {
                 self.clear_diff_selection();
                 true
             }
+        }
+    }
+
+    fn start_line_comment_for_selection(&mut self) -> bool {
+        let Some(row) = self
+            .diff_selection_segments()
+            .into_iter()
+            .map(|(row, _, _)| row)
+            .min()
+        else {
+            return false;
+        };
+        let Some((_, y, _, _)) = self.diff_view_area else {
+            return false;
+        };
+        self.start_line_comment_at_screen_row_on_side(
+            y.saturating_add(row),
+            self.diff_selection_review_side(),
+        )
+    }
+
+    fn diff_selection_review_side(&self) -> Option<ReviewSide> {
+        if self.view_mode != ViewMode::Split {
+            return None;
+        }
+        let selection = self.diff_selection.or_else(|| {
+            self.diff_selection_cursor.map(|cursor| DiffSelection {
+                start: cursor.point,
+                end: cursor.point,
+                col_start: cursor.col_start,
+                col_end: cursor.col_end,
+                mode: DiffSelectionMode::Char,
+                dragged: true,
+            })
+        })?;
+        let ranges = self.diff_selection_content_ranges();
+        let [left, right] = ranges.as_slice() else {
+            return None;
+        };
+        let mid = selection
+            .col_start
+            .saturating_add(selection.col_end.saturating_sub(selection.col_start) / 2);
+        if mid >= right.0 && mid < right.1 {
+            Some(ReviewSide::New)
+        } else if mid >= left.0 && mid < left.1 {
+            Some(ReviewSide::Old)
+        } else {
+            None
         }
     }
 

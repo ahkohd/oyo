@@ -258,7 +258,7 @@ Common defaults:
 | `s` | Toggle stepping |
 | `m` | Add or update a line comment |
 | `M` | Add or update a hunk comment |
-| `ctrl-o` | Save an inline comment |
+| `ctrl-s` | Save an inline comment |
 | `ctrl-p` | Open the command palette |
 | `R` | Refresh files |
 | `?` | Show help |

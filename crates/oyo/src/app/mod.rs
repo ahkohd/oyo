@@ -78,6 +78,12 @@ pub(crate) struct DiffScrollbarState {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FilePanelMode {
+    Files,
+    Comments,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct FilePanelScrollbarState {
     pub x: u16,
     pub y: u16,
@@ -123,6 +129,34 @@ pub(crate) struct PreviewLinkBox {
     pub y: u16,
     pub width: u16,
     pub url: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ReviewLineAddHit {
+    pub x: u16,
+    pub y: u16,
+    pub width: u16,
+    pub height: u16,
+    pub row: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReviewEditorToolbarAction {
+    Save,
+    Cancel,
+    Mention,
+    ScrollLeft,
+    ScrollRight,
+    Custom(usize),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ReviewEditorToolbarHit {
+    pub action: ReviewEditorToolbarAction,
+    pub x: u16,
+    pub y: u16,
+    pub width: u16,
+    pub height: u16,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -227,6 +261,9 @@ pub struct App {
     pub file_panel_width: u16,
     /// File panel position
     pub file_panel_position: FilePanelPosition,
+    pub(crate) file_panel_mode: FilePanelMode,
+    pub(crate) file_panel_mode_toggle_hit: Option<(u16, u16, u16, u16)>,
+    pub(crate) file_panel_mode_toggle_hover: bool,
     /// File panel full area (x, y, width, height)
     pub file_panel_rect: Option<(u16, u16, u16, u16)>,
     /// Diff content area (x, y, width, height)
@@ -360,6 +397,8 @@ pub struct App {
     pub(crate) preview_toggle_hit: Option<(u16, u16, u16, u16)>,
     pub(crate) topbar_sidebar_toggle_hit: Option<(u16, u16, u16, u16)>,
     pub(crate) status_mode_hit: Option<(u16, u16, u16, u16)>,
+    pub(crate) status_comments_hit: Option<(u16, u16, u16, u16)>,
+    pub(crate) status_file_hit: Option<(u16, u16, u16, u16)>,
     pub(crate) topbar_area: Option<(u16, u16, u16, u16)>,
     pub(crate) topbar_hover_tab: Option<usize>,
     pub(crate) topbar_hover_close: Option<usize>,
@@ -368,6 +407,8 @@ pub struct App {
     pub(crate) topbar_scroll_right_hover: bool,
     pub(crate) preview_toggle_hover: bool,
     pub(crate) topbar_sidebar_toggle_hover: bool,
+    pub(crate) status_comments_hover: bool,
+    pub(crate) status_file_hover: bool,
     pub(crate) topbar_drag_target: Option<usize>,
     topbar_drag_tab: Option<usize>,
     pub(crate) structured_previews: FxHashMap<usize, StructuredPreviewState>,
@@ -595,6 +636,24 @@ pub struct App {
     review_submission_output: Option<String>,
     /// Click hitboxes for rendered review comment previews
     review_preview_boxes: Vec<review::ReviewPreviewBox>,
+    /// Hovered rendered review comment preview.
+    pub(crate) review_preview_hover: Option<String>,
+    /// Hovered delete action on a rendered review comment preview.
+    pub(crate) review_preview_delete_hover: Option<String>,
+    /// Click hitboxes for review editor actions.
+    pub(crate) review_editor_toolbar_hits: Vec<ReviewEditorToolbarHit>,
+    /// Review editor action area.
+    pub(crate) review_editor_toolbar_rect: Option<(u16, u16, u16, u16)>,
+    /// First action shown in the review editor toolbar.
+    pub(crate) review_editor_toolbar_scroll: usize,
+    /// Action currently hovered in the review editor toolbar.
+    pub(crate) review_editor_toolbar_hover: Option<ReviewEditorToolbarAction>,
+    /// Hovered row for the add-comment button.
+    pub(crate) review_line_add_row: Option<u16>,
+    /// Click hitbox for the add-comment button.
+    pub(crate) review_line_add_hit: Option<ReviewLineAddHit>,
+    /// True when the add-comment button is hovered.
+    pub(crate) review_line_add_hover: bool,
     /// Click hitboxes for hyperlinks in the markdown preview
     preview_link_boxes: Vec<PreviewLinkBox>,
     /// Active inline mention picker state for comment editor
@@ -742,6 +801,9 @@ impl App {
             file_panel_visible: true,
             file_panel_width: 30,
             file_panel_position: FilePanelPosition::Left,
+            file_panel_mode: FilePanelMode::Files,
+            file_panel_mode_toggle_hit: None,
+            file_panel_mode_toggle_hover: false,
             file_panel_rect: None,
             diff_view_area: None,
             diff_selection: None,
@@ -829,6 +891,8 @@ impl App {
             preview_toggle_hit: None,
             topbar_sidebar_toggle_hit: None,
             status_mode_hit: None,
+            status_comments_hit: None,
+            status_file_hit: None,
             topbar_area: None,
             topbar_hover_tab: None,
             topbar_hover_close: None,
@@ -837,6 +901,8 @@ impl App {
             topbar_scroll_right_hover: false,
             preview_toggle_hover: false,
             topbar_sidebar_toggle_hover: false,
+            status_comments_hover: false,
+            status_file_hover: false,
             topbar_drag_target: None,
             topbar_drag_tab: None,
             structured_previews: FxHashMap::default(),
@@ -956,6 +1022,15 @@ impl App {
             review_next_comment_id: 1,
             review_submission_output: None,
             review_preview_boxes: Vec::new(),
+            review_preview_hover: None,
+            review_preview_delete_hover: None,
+            review_editor_toolbar_hits: Vec::new(),
+            review_editor_toolbar_rect: None,
+            review_editor_toolbar_scroll: 0,
+            review_editor_toolbar_hover: None,
+            review_line_add_row: None,
+            review_line_add_hit: None,
+            review_line_add_hover: false,
             preview_link_boxes: Vec::new(),
             review_mention_picker: None,
             review_mention_file_scope: MentionFileScope::default(),

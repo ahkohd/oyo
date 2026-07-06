@@ -1,4 +1,4 @@
-use super::{AnimationFrame, App, ViewMode};
+use super::{AnimationFrame, App, ReviewEditorToolbarAction, ReviewEditorToolbarHit, ViewMode};
 use crate::config::{
     MentionFileScope, MentionFinder, ReviewActionConfig, ReviewHookConfig, ReviewHookEvent,
     ReviewHookStdin,
@@ -120,7 +120,6 @@ struct ReviewExportComment<'a> {
 #[derive(Debug, Clone)]
 pub(crate) struct ReviewEditorRender {
     pub(crate) title: String,
-    pub(crate) anchor_label: String,
     pub(crate) lines: Vec<String>,
     pub(crate) cursor_row: usize,
     pub(crate) cursor_col: usize,
@@ -134,6 +133,8 @@ pub(crate) struct ReviewEditorRender {
 pub(crate) struct ReviewCommentOverlay {
     pub(crate) display_idx: usize,
     pub(crate) preview: String,
+    pub(crate) body: String,
+    pub(crate) title: String,
     pub(crate) anchor_key: String,
     pub(crate) prefer_right: bool,
     pub(crate) is_hunk: bool,
@@ -146,6 +147,7 @@ pub(crate) struct ReviewPreviewBox {
     pub(crate) width: u16,
     pub(crate) height: u16,
     pub(crate) anchor_key: String,
+    pub(crate) delete: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -230,6 +232,177 @@ fn format_opt_range_display(range: Option<ReviewRange>) -> String {
         Some(range) => format!("{}-{}", range.start, range.end),
         None => "-".to_string(),
     }
+}
+
+fn review_side_label(side: ReviewSide, range: Option<ReviewRange>) -> String {
+    let prefix = match side {
+        ReviewSide::Old => "L",
+        ReviewSide::New => "R",
+    };
+    format!("{prefix}{}", format_opt_range_display(range))
+}
+
+fn review_both_sides_label(
+    old_range: Option<ReviewRange>,
+    new_range: Option<ReviewRange>,
+) -> String {
+    match (old_range, new_range) {
+        (Some(old), Some(new)) => format!(
+            "{}/{}",
+            review_side_label(ReviewSide::Old, Some(old)),
+            review_side_label(ReviewSide::New, Some(new))
+        ),
+        (Some(old), None) => review_side_label(ReviewSide::Old, Some(old)),
+        (None, Some(new)) => review_side_label(ReviewSide::New, Some(new)),
+        (None, None) => "-".to_string(),
+    }
+}
+
+fn review_anchor_location_label(anchor: &ReviewAnchor) -> String {
+    match anchor.kind {
+        ReviewTargetKind::Line => match anchor.side {
+            Some(ReviewSide::Old) => review_side_label(ReviewSide::Old, anchor.old_range),
+            Some(ReviewSide::New) => review_side_label(ReviewSide::New, anchor.new_range),
+            None => review_both_sides_label(anchor.old_range, anchor.new_range),
+        },
+        ReviewTargetKind::Hunk => review_both_sides_label(anchor.old_range, anchor.new_range),
+    }
+}
+
+fn range_contains_line(range: Option<ReviewRange>, line: Option<usize>) -> bool {
+    match (range, line) {
+        (Some(range), Some(line)) => line >= range.start && line <= range.end,
+        _ => false,
+    }
+}
+
+fn line_anchor_matches(anchor: &ReviewAnchor, line: &ViewLine) -> bool {
+    match anchor.side {
+        Some(ReviewSide::Old) => range_contains_line(anchor.old_range, line.old_line),
+        Some(ReviewSide::New) => range_contains_line(anchor.new_range, line.new_line),
+        None => {
+            range_contains_line(anchor.old_range, line.old_line)
+                || range_contains_line(anchor.new_range, line.new_line)
+        }
+    }
+}
+
+fn review_comment_title(anchor: &ReviewAnchor) -> String {
+    format!(
+        "Comment • {} {}",
+        anchor.file_path,
+        review_anchor_location_label(anchor)
+    )
+}
+
+fn truncate_middle_chars(text: &str, max_chars: usize) -> String {
+    let len = text.chars().count();
+    if len <= max_chars {
+        return text.to_string();
+    }
+    if max_chars <= 3 {
+        return ".".repeat(max_chars);
+    }
+    let keep = max_chars.saturating_sub(3);
+    let head = keep / 2;
+    let tail = keep.saturating_sub(head);
+    let start = text.chars().take(head).collect::<String>();
+    let end = text
+        .chars()
+        .rev()
+        .take(tail)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<String>();
+    format!("{start}...{end}")
+}
+
+fn wrap_note_line(line: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![String::new()];
+    }
+    let mut out = Vec::new();
+    let mut chunk = String::new();
+    for ch in line.chars() {
+        chunk.push(ch);
+        if chunk.chars().count() == width {
+            out.push(std::mem::take(&mut chunk));
+        }
+    }
+    if !chunk.is_empty() || out.is_empty() {
+        out.push(chunk);
+    }
+    out
+}
+
+fn line_review_anchor_from_view_line(
+    file_index: usize,
+    file_path: String,
+    display_idx: usize,
+    line: &ViewLine,
+) -> Option<ReviewAnchor> {
+    line_review_anchor_from_view_line_with_side(file_index, file_path, display_idx, line, None)
+}
+
+fn line_review_anchor_from_view_line_with_side(
+    file_index: usize,
+    file_path: String,
+    display_idx: usize,
+    line: &ViewLine,
+    preferred_side: Option<ReviewSide>,
+) -> Option<ReviewAnchor> {
+    let mut side = preferred_side.or(match line.kind {
+        LineKind::Deleted | LineKind::PendingDelete => Some(ReviewSide::Old),
+        LineKind::Inserted | LineKind::PendingInsert => Some(ReviewSide::New),
+        LineKind::Context if line.old_line.is_some() && line.new_line.is_some() => {
+            Some(ReviewSide::New)
+        }
+        _ => {
+            if line.new_line.is_some() {
+                Some(ReviewSide::New)
+            } else {
+                Some(ReviewSide::Old)
+            }
+        }
+    });
+
+    if side == Some(ReviewSide::Old) && line.old_line.is_none() && line.new_line.is_some() {
+        side = Some(ReviewSide::New);
+    }
+    if side == Some(ReviewSide::New) && line.new_line.is_none() && line.old_line.is_some() {
+        side = Some(ReviewSide::Old);
+    }
+
+    let old_range = line.old_line.map(|n| ReviewRange { start: n, end: n });
+    let new_range = line.new_line.map(|n| ReviewRange { start: n, end: n });
+    let line_no = match side {
+        Some(ReviewSide::Old) => old_range.map(|r| r.start),
+        Some(ReviewSide::New) => new_range.map(|r| r.start),
+        None => old_range.or(new_range).map(|r| r.start),
+    }?;
+
+    let anchor_key = match side {
+        Some(side) => format!("line|{}|{}|{}", file_path, side.as_str(), line_no),
+        None => format!(
+            "line|{}|both|{}|{}",
+            file_path,
+            format_opt_range(old_range),
+            format_opt_range(new_range)
+        ),
+    };
+
+    Some(ReviewAnchor {
+        file_index,
+        file_path,
+        kind: ReviewTargetKind::Line,
+        side,
+        old_range,
+        new_range,
+        hunk_id: line.hunk_index,
+        display_idx_hint: Some(display_idx),
+        anchor_key,
+    })
 }
 
 fn truncate_preview_chars(text: &str, max_chars: usize) -> (String, bool) {
@@ -413,15 +586,21 @@ fn push_numeric_line_mention_item(
 
     let (label, insert_text) = match side {
         Some(side) => {
-            let side_label = side.as_str();
+            let location = review_side_label(
+                side,
+                Some(ReviewRange {
+                    start: line_no,
+                    end: line_no,
+                }),
+            );
             (
-                format!("line  {}:{}:{}", current_file, side_label, line_no),
-                format!("@{}:{}:{}", current_file, side_label, line_no),
+                format!("line  {current_file} {location}"),
+                format!("@{current_file}:{location}"),
             )
         }
         None => (
-            format!("line  {}:{}", current_file, line_no),
-            format!("@{}:{}", current_file, line_no),
+            format!("line  {current_file} {line_no}"),
+            format!("@{current_file}:{line_no}"),
         ),
     };
 
@@ -475,19 +654,160 @@ impl App {
         self.review_comments.len()
     }
 
+    pub(crate) fn review_comment_count_for_file(&self, file_index: usize) -> usize {
+        self.review_comments
+            .iter()
+            .filter(|comment| comment.anchor.file_index == file_index)
+            .count()
+    }
+
+    pub(crate) fn filtered_review_comment_indices(&self) -> Vec<usize> {
+        let query = self.file_filter.trim().to_ascii_lowercase();
+        self.review_comments
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, comment)| {
+                if query.is_empty() {
+                    return Some(idx);
+                }
+                let location = review_anchor_location_label(&comment.anchor);
+                let haystack =
+                    format!("{} {} {}", comment.anchor.file_path, location, comment.body)
+                        .to_ascii_lowercase();
+                haystack.contains(&query).then_some(idx)
+            })
+            .collect()
+    }
+
+    pub(crate) fn review_comment_is_active(&self, index: usize) -> bool {
+        let Some(editor) = self.review_editor.as_ref() else {
+            return false;
+        };
+        self.review_comments
+            .get(index)
+            .is_some_and(|comment| comment.anchor.anchor_key == editor.anchor.anchor_key)
+    }
+
+    pub(crate) fn review_comment_sidebar_item(
+        &self,
+        index: usize,
+    ) -> Option<(usize, String, String, String)> {
+        let comment = self.review_comments.get(index)?;
+        let first_line = comment.body.lines().next().unwrap_or_default().trim();
+        let preview = if first_line.is_empty() {
+            "(empty)".to_string()
+        } else {
+            first_line.to_string()
+        };
+        Some((
+            comment.anchor.file_index,
+            comment.anchor.file_path.clone(),
+            review_anchor_location_label(&comment.anchor),
+            preview,
+        ))
+    }
+
+    pub fn open_review_comment(&mut self, index: usize) -> bool {
+        let Some(anchor) = self
+            .review_comments
+            .get(index)
+            .map(|comment| comment.anchor.clone())
+        else {
+            return false;
+        };
+        self.select_file(anchor.file_index);
+        self.open_review_editor(anchor);
+        true
+    }
+
     pub fn take_review_hook_warnings(&mut self) -> Vec<String> {
         std::mem::take(&mut self.review_hook_warnings)
     }
 
-    pub fn review_action_labels_for_editor(&self) -> Vec<(String, String)> {
+    pub(crate) fn review_action_entries_for_editor(&self) -> Vec<(usize, String, String)> {
         self.review_actions
             .iter()
-            .filter(|action| action_shown(action, "review_editor"))
-            .filter_map(|action| {
-                let key = action.key.as_ref()?.trim();
-                (!key.is_empty()).then(|| (key.to_string(), action_label(action)))
+            .enumerate()
+            .filter(|(_, action)| action_shown(action, "review_editor"))
+            .filter_map(|(idx, action)| {
+                let label = action_label(action);
+                (!label.trim().is_empty())
+                    .then(|| (idx, action.key.clone().unwrap_or_default(), label))
             })
             .collect()
+    }
+
+    pub(crate) fn set_review_editor_toolbar_hits(
+        &mut self,
+        rect: Option<(u16, u16, u16, u16)>,
+        hits: Vec<ReviewEditorToolbarHit>,
+    ) {
+        if hits.is_empty() {
+            self.review_editor_toolbar_hover = None;
+        }
+        self.review_editor_toolbar_rect = rect;
+        self.review_editor_toolbar_hits = hits;
+    }
+
+    pub(crate) fn clear_review_editor_toolbar(&mut self) {
+        self.review_editor_toolbar_hits.clear();
+        self.review_editor_toolbar_rect = None;
+        self.review_editor_toolbar_scroll = 0;
+        self.review_editor_toolbar_hover = None;
+    }
+
+    pub(crate) fn mouse_over_review_editor_toolbar(&self, column: u16, row: u16) -> bool {
+        self.review_editor_toolbar_rect
+            .is_some_and(|(x, y, width, height)| {
+                column >= x
+                    && column < x.saturating_add(width)
+                    && row >= y
+                    && row < y.saturating_add(height)
+            })
+    }
+
+    pub(crate) fn scroll_review_editor_toolbar(&mut self, delta: isize) -> bool {
+        let action_count = self
+            .review_action_entries_for_editor()
+            .len()
+            .saturating_add(3);
+        let max_scroll = action_count.saturating_sub(1);
+        let old = self.review_editor_toolbar_scroll.min(max_scroll);
+        let next = if delta.is_negative() {
+            old.saturating_sub(delta.unsigned_abs())
+        } else {
+            old.saturating_add(delta as usize).min(max_scroll)
+        };
+        self.review_editor_toolbar_scroll = next;
+        old != next
+    }
+
+    pub(crate) fn handle_review_editor_toolbar_click(&mut self, column: u16, row: u16) -> bool {
+        if !self.mouse_over_review_editor_toolbar(column, row) {
+            return false;
+        }
+        let Some(action) = self.review_editor_toolbar_hits.iter().find_map(|hit| {
+            (column >= hit.x
+                && column < hit.x.saturating_add(hit.width)
+                && row >= hit.y
+                && row < hit.y.saturating_add(hit.height))
+            .then_some(hit.action)
+        }) else {
+            return true;
+        };
+        match action {
+            ReviewEditorToolbarAction::Save => self.review_save_editor(),
+            ReviewEditorToolbarAction::Cancel => self.review_cancel_editor(),
+            ReviewEditorToolbarAction::Mention => self.review_insert_char('@'),
+            ReviewEditorToolbarAction::ScrollLeft => {
+                self.scroll_review_editor_toolbar(-1);
+            }
+            ReviewEditorToolbarAction::ScrollRight => {
+                self.scroll_review_editor_toolbar(1);
+            }
+            ReviewEditorToolbarAction::Custom(idx) => self.run_review_action(idx),
+        }
+        true
     }
 
     pub fn handle_review_action_key(&mut self, key: KeyEvent) -> bool {
@@ -554,8 +874,46 @@ impl App {
         )
     }
 
+    pub(crate) fn review_preview_note_lines(
+        &self,
+        overlay: &ReviewCommentOverlay,
+        visible_width: usize,
+    ) -> Vec<String> {
+        let max_width = visible_width.max(12);
+        let content_width = max_width.saturating_sub(4).max(1);
+        let body_lines = if overlay.body.is_empty() {
+            vec!["(empty)".to_string()]
+        } else {
+            overlay
+                .body
+                .lines()
+                .flat_map(|line| wrap_note_line(line, content_width))
+                .collect::<Vec<_>>()
+        };
+        let title = truncate_middle_chars(&overlay.title, max_width.saturating_sub(4));
+        let rule = "─".repeat(max_width.saturating_sub(title.chars().count().saturating_add(4)));
+        let bottom_rule =
+            "─".repeat(max_width.saturating_sub("x delete".chars().count().saturating_add(4)));
+        let mut lines = Vec::with_capacity(body_lines.len().saturating_add(2));
+        lines.push(format!("╭ {title} {rule}╮"));
+        for line in body_lines {
+            let padding = " ".repeat(content_width.saturating_sub(line.chars().count()));
+            lines.push(format!("│ {line}{padding} │"));
+        }
+        lines.push(format!("╰ x delete {bottom_rule}╯"));
+        lines
+    }
+
     pub fn clear_review_preview_boxes(&mut self) {
         self.review_preview_boxes.clear();
+    }
+
+    pub fn remove_hovered_review_comment(&mut self) -> bool {
+        let Some(anchor_key) = self.review_preview_hover.clone() else {
+            return false;
+        };
+        self.review_preview_hover = None;
+        self.remove_comment_for_anchor_key(&anchor_key)
     }
 
     pub fn add_review_preview_box(
@@ -572,7 +930,122 @@ impl App {
             width,
             height,
             anchor_key,
+            delete: false,
         });
+    }
+
+    pub fn add_review_preview_delete_box(
+        &mut self,
+        x: u16,
+        y: u16,
+        width: u16,
+        height: u16,
+        anchor_key: String,
+    ) {
+        self.review_preview_boxes.push(ReviewPreviewBox {
+            x,
+            y,
+            width,
+            height,
+            anchor_key,
+            delete: true,
+        });
+    }
+
+    pub(crate) fn clear_review_line_add_hit(&mut self) {
+        self.review_line_add_hit = None;
+    }
+
+    pub(crate) fn review_line_add_button_x(&self) -> Option<u16> {
+        let (x, _, width, _) = self.diff_view_area?;
+        let right = x
+            .saturating_add(width)
+            .saturating_sub(u16::from(self.scrollbar_visible));
+        Some(right.saturating_sub(3))
+    }
+
+    pub(crate) fn review_display_idx_for_screen_row(&self, row: u16) -> Option<usize> {
+        let (_, y, _, height) = self.diff_view_area?;
+        if row < y || row >= y.saturating_add(height) {
+            return None;
+        }
+        let note_boxes = self.review_preview_boxes.iter().filter(|hit| !hit.delete);
+        if note_boxes.clone().any(|hit| {
+            let end = hit.y.saturating_add(hit.height);
+            row >= hit.y && row < end
+        }) {
+            return None;
+        }
+        let mut ranges = note_boxes
+            .filter_map(|hit| {
+                let end = hit.y.saturating_add(hit.height);
+                (row > hit.y).then_some((hit.y, row.min(end)))
+            })
+            .collect::<Vec<_>>();
+        ranges.sort_unstable();
+        let mut reserved_rows = 0usize;
+        let mut merged_end = 0u16;
+        for (start, end) in ranges {
+            if end <= merged_end {
+                continue;
+            }
+            let start = start.max(merged_end);
+            reserved_rows = reserved_rows.saturating_add(end.saturating_sub(start) as usize);
+            merged_end = end;
+        }
+        Some(
+            self.render_scroll_offset()
+                .saturating_add((row.saturating_sub(y) as usize).saturating_sub(reserved_rows)),
+        )
+    }
+
+    pub(crate) fn review_line_add_hover_at(&self, column: u16, row: u16) -> (Option<u16>, bool) {
+        if !self.review_mode || self.review_editor.is_some() || self.selection_toolbar_visible() {
+            return (None, false);
+        }
+        let Some((x, y, width, height)) = self.diff_view_area else {
+            return (None, false);
+        };
+        if column < x
+            || column >= x.saturating_add(width)
+            || row < y
+            || row >= y.saturating_add(height)
+        {
+            return (None, false);
+        }
+        let local_row = row.saturating_sub(y) as usize;
+        if self
+            .diff_selection_cells
+            .get(local_row)
+            .is_none_or(|cells| cells.iter().all(|cell| cell.trim().is_empty()))
+        {
+            return (None, false);
+        }
+        if self.review_display_idx_for_screen_row(row).is_none() {
+            return (None, false);
+        }
+        let Some(hit_x) = self.review_line_add_button_x() else {
+            return (Some(row), false);
+        };
+        let hover = column >= hit_x && column < hit_x.saturating_add(3);
+        (Some(row), hover)
+    }
+
+    pub fn handle_review_line_add_click(&mut self, column: u16, row: u16) -> bool {
+        if !self.review_mode || self.review_editor.is_some() {
+            return false;
+        }
+        let Some(hit) = self.review_line_add_hit else {
+            return false;
+        };
+        if column < hit.x
+            || column >= hit.x.saturating_add(hit.width)
+            || row < hit.y
+            || row >= hit.y.saturating_add(hit.height)
+        {
+            return false;
+        }
+        self.start_line_comment_at_screen_row(hit.row)
     }
 
     pub fn handle_review_preview_click(&mut self, column: u16, row: u16) -> bool {
@@ -580,16 +1053,19 @@ impl App {
             return false;
         }
 
-        let anchor_key = self.review_preview_boxes.iter().rev().find_map(|hit| {
+        let hit = self.review_preview_boxes.iter().rev().find_map(|hit| {
             let end_x = hit.x.saturating_add(hit.width);
             let end_y = hit.y.saturating_add(hit.height);
             (column >= hit.x && column < end_x && row >= hit.y && row < end_y)
-                .then_some(hit.anchor_key.clone())
+                .then(|| (hit.anchor_key.clone(), hit.delete))
         });
 
-        let Some(anchor_key) = anchor_key else {
+        let Some((anchor_key, delete)) = hit else {
             return false;
         };
+        if delete {
+            return self.remove_comment_for_anchor_key(&anchor_key);
+        }
 
         let anchor = self
             .review_comments
@@ -612,27 +1088,10 @@ impl App {
         }
 
         let span = match anchor.kind {
-            ReviewTargetKind::Line => {
-                let side = anchor.side.unwrap_or(ReviewSide::New);
-                let target_line = match side {
-                    ReviewSide::Old => anchor.old_range.map(|r| r.start),
-                    ReviewSide::New => anchor.new_range.map(|r| r.start),
-                };
-                let Some(target_line) = target_line else {
-                    return anchor.display_idx_hint.map(|idx| (idx, idx));
-                };
-
-                visible
-                    .iter()
-                    .find_map(|(idx, line)| {
-                        let line_no = match side {
-                            ReviewSide::Old => line.old_line,
-                            ReviewSide::New => line.new_line,
-                        };
-                        (line_no == Some(target_line)).then_some(*idx)
-                    })
-                    .map(|idx| (idx, idx))
-            }
+            ReviewTargetKind::Line => visible
+                .iter()
+                .find_map(|(idx, line)| line_anchor_matches(anchor, line).then_some(*idx))
+                .map(|idx| (idx, idx)),
             ReviewTargetKind::Hunk => {
                 let mut start: Option<usize> = None;
                 let mut end: Option<usize> = None;
@@ -688,25 +1147,12 @@ impl App {
             lines.push(String::new());
         }
 
-        let title = " Comment ".to_string();
-
-        let anchor_label = match editor.anchor.kind {
-            ReviewTargetKind::Line => {
-                let side = editor.anchor.side.map(|s| s.as_str()).unwrap_or("new");
-                let range = match editor.anchor.side {
-                    Some(ReviewSide::Old) => editor.anchor.old_range,
-                    Some(ReviewSide::New) | None => editor.anchor.new_range,
-                };
-                let range = format_opt_range_display(range);
-                format!("{} {}:{}", editor.anchor.file_path, side, range)
-            }
-            ReviewTargetKind::Hunk => format!(
-                "{} old:{} new:{}",
-                editor.anchor.file_path,
-                format_opt_range_display(editor.anchor.old_range),
-                format_opt_range_display(editor.anchor.new_range)
-            ),
-        };
+        let anchor_label = format!(
+            "{} {}",
+            editor.anchor.file_path,
+            review_anchor_location_label(&editor.anchor)
+        );
+        let title = format!(" Comment • {anchor_label} ");
 
         let anchor_display_span = self.review_anchor_display_span(&editor.anchor);
 
@@ -720,7 +1166,6 @@ impl App {
 
         Some(ReviewEditorRender {
             title,
-            anchor_label,
             lines,
             cursor_row,
             cursor_col,
@@ -746,31 +1191,21 @@ impl App {
             return Vec::new();
         }
 
+        let active_anchor_key = self
+            .review_editor
+            .as_ref()
+            .map(|editor| editor.anchor.anchor_key.as_str());
         let mut overlays = Vec::new();
         for comment in self
             .review_comments
             .iter()
             .filter(|comment| comment.anchor.file_path == file_path)
+            .filter(|comment| active_anchor_key != Some(comment.anchor.anchor_key.as_str()))
         {
             let display_idx = match comment.anchor.kind {
-                ReviewTargetKind::Line => {
-                    let side = comment.anchor.side.unwrap_or(ReviewSide::New);
-                    let target_line = match side {
-                        ReviewSide::Old => comment.anchor.old_range.map(|r| r.start),
-                        ReviewSide::New => comment.anchor.new_range.map(|r| r.start),
-                    };
-                    let Some(target_line) = target_line else {
-                        continue;
-                    };
-                    visible.iter().find_map(|(idx, line)| {
-                        line.hunk_index?;
-                        let line_no = match side {
-                            ReviewSide::Old => line.old_line,
-                            ReviewSide::New => line.new_line,
-                        };
-                        (line_no == Some(target_line)).then_some(*idx)
-                    })
-                }
+                ReviewTargetKind::Line => visible.iter().find_map(|(idx, line)| {
+                    line_anchor_matches(&comment.anchor, line).then_some(*idx)
+                }),
                 ReviewTargetKind::Hunk => {
                     if let Some(hunk_id) = comment.anchor.hunk_id {
                         visible.iter().find_map(|(idx, line)| {
@@ -823,6 +1258,8 @@ impl App {
             overlays.push(ReviewCommentOverlay {
                 display_idx,
                 preview,
+                body: comment.body.clone(),
+                title: review_comment_title(&comment.anchor),
                 anchor_key: comment.anchor.anchor_key.clone(),
                 prefer_right,
                 is_hunk: matches!(comment.anchor.kind, ReviewTargetKind::Hunk),
@@ -918,6 +1355,36 @@ impl App {
             return;
         };
         self.open_review_editor(anchor);
+    }
+
+    pub fn start_line_comment_at_screen_row(&mut self, row: u16) -> bool {
+        self.start_line_comment_at_screen_row_on_side(row, None)
+    }
+
+    pub(crate) fn start_line_comment_at_screen_row_on_side(
+        &mut self,
+        row: u16,
+        preferred_side: Option<ReviewSide>,
+    ) -> bool {
+        if !self.review_mode {
+            return false;
+        }
+        let Some((_, y, _, height)) = self.diff_view_area else {
+            return false;
+        };
+        if row < y || row >= y.saturating_add(height) {
+            return false;
+        }
+        let Some(display_idx) = self.review_display_idx_for_screen_row(row) else {
+            return false;
+        };
+        let Some(anchor) =
+            self.resolve_line_review_anchor_at_display_idx_on_side(display_idx, preferred_side)
+        else {
+            return false;
+        };
+        self.open_review_editor(anchor);
+        true
     }
 
     pub fn start_hunk_comment(&mut self) {
@@ -1134,12 +1601,14 @@ impl App {
     pub fn review_cancel_editor(&mut self) {
         self.review_editor = None;
         self.review_mention_picker = None;
+        self.clear_review_editor_toolbar();
         self.touch_review_state();
         self.persist_review_session();
     }
 
     pub fn review_save_editor(&mut self) {
         self.review_mention_picker = None;
+        self.clear_review_editor_toolbar();
         let Some(editor) = self.review_editor.take() else {
             return;
         };
@@ -1412,6 +1881,7 @@ impl App {
     }
 
     fn open_review_editor(&mut self, anchor: ReviewAnchor) {
+        self.clear_diff_selection();
         let text = self
             .review_comments
             .iter()
@@ -1664,7 +2134,7 @@ impl App {
                     &mut items,
                     current_file,
                     query,
-                    None,
+                    Some(ReviewSide::New),
                     line_no,
                     limit,
                 );
@@ -1845,20 +2315,34 @@ impl App {
                     }
 
                     if let Some(line_no) = line.new_line {
-                        let mention = format!("@{}:new:{}", current_file, line_no);
+                        let location = review_side_label(
+                            ReviewSide::New,
+                            Some(ReviewRange {
+                                start: line_no,
+                                end: line_no,
+                            }),
+                        );
+                        let mention = format!("@{current_file}:{location}");
                         if ref_count < MAX_REF_ITEMS && seen.insert(mention.clone()) {
                             items.push(ReviewMentionItem {
-                                label: format!("line  {}:new:{}", current_file, line_no),
+                                label: format!("line  {current_file} {location}"),
                                 insert_text: mention,
                             });
                             ref_count += 1;
                         }
                     }
                     if let Some(line_no) = line.old_line {
-                        let mention = format!("@{}:old:{}", current_file, line_no);
+                        let location = review_side_label(
+                            ReviewSide::Old,
+                            Some(ReviewRange {
+                                start: line_no,
+                                end: line_no,
+                            }),
+                        );
+                        let mention = format!("@{current_file}:{location}");
                         if ref_count < MAX_REF_ITEMS && seen.insert(mention.clone()) {
                             items.push(ReviewMentionItem {
-                                label: format!("line  {}:old:{}", current_file, line_no),
+                                label: format!("line  {current_file} {location}"),
                                 insert_text: mention,
                             });
                             ref_count += 1;
@@ -1918,26 +2402,40 @@ impl App {
             }
 
             if let Some(line_no) = line.new_line {
-                let mention = format!("@{}:new:{}", current_file, line_no);
+                let location = review_side_label(
+                    ReviewSide::New,
+                    Some(ReviewRange {
+                        start: line_no,
+                        end: line_no,
+                    }),
+                );
+                let mention = format!("@{current_file}:{location}");
                 if ref_count < MAX_REF_ITEMS
                     && seen.insert(mention.clone())
                     && matches_query(&mention)
                 {
                     items.push(ReviewMentionItem {
-                        label: format!("line  {}:new:{}", current_file, line_no),
+                        label: format!("line  {current_file} {location}"),
                         insert_text: mention,
                     });
                     ref_count += 1;
                 }
             }
             if let Some(line_no) = line.old_line {
-                let mention = format!("@{}:old:{}", current_file, line_no);
+                let location = review_side_label(
+                    ReviewSide::Old,
+                    Some(ReviewRange {
+                        start: line_no,
+                        end: line_no,
+                    }),
+                );
+                let mention = format!("@{current_file}:{location}");
                 if ref_count < MAX_REF_ITEMS
                     && seen.insert(mention.clone())
                     && matches_query(&mention)
                 {
                     items.push(ReviewMentionItem {
-                        label: format!("line  {}:old:{}", current_file, line_no),
+                        label: format!("line  {current_file} {location}"),
                         insert_text: mention,
                     });
                     ref_count += 1;
@@ -1991,45 +2489,28 @@ impl App {
         let chosen = nearest_hunk_line_index(&visible, pos)?;
 
         let (display_idx, line) = &visible[chosen];
-        let mut side = match line.kind {
-            LineKind::Deleted | LineKind::PendingDelete => ReviewSide::Old,
-            LineKind::Inserted | LineKind::PendingInsert => ReviewSide::New,
-            _ => {
-                if line.new_line.is_some() {
-                    ReviewSide::New
-                } else {
-                    ReviewSide::Old
-                }
-            }
-        };
+        line_review_anchor_from_view_line(file_index, file_path, *display_idx, line)
+    }
 
-        if side == ReviewSide::Old && line.old_line.is_none() && line.new_line.is_some() {
-            side = ReviewSide::New;
+    fn resolve_line_review_anchor_at_display_idx_on_side(
+        &mut self,
+        display_idx: usize,
+        preferred_side: Option<ReviewSide>,
+    ) -> Option<ReviewAnchor> {
+        let file_index = self.multi_diff.selected_index;
+        let file_path = self.current_file_path();
+        if file_path.is_empty() {
+            return None;
         }
-        if side == ReviewSide::New && line.new_line.is_none() && line.old_line.is_some() {
-            side = ReviewSide::Old;
-        }
-
-        let old_range = line.old_line.map(|n| ReviewRange { start: n, end: n });
-        let new_range = line.new_line.map(|n| ReviewRange { start: n, end: n });
-        let line_no = match side {
-            ReviewSide::Old => old_range.map(|r| r.start),
-            ReviewSide::New => new_range.map(|r| r.start),
-        }?;
-
-        let anchor_key = format!("line|{}|{}|{}", file_path, side.as_str(), line_no);
-
-        Some(ReviewAnchor {
+        let visible = self.review_visible_lines_with_idx();
+        let (_, line) = visible.iter().find(|(idx, _)| *idx == display_idx)?;
+        line_review_anchor_from_view_line_with_side(
             file_index,
             file_path,
-            kind: ReviewTargetKind::Line,
-            side: Some(side),
-            old_range,
-            new_range,
-            hunk_id: line.hunk_index,
-            display_idx_hint: Some(*display_idx),
-            anchor_key,
-        })
+            display_idx,
+            line,
+            preferred_side,
+        )
     }
 
     fn resolve_hunk_review_anchor(&mut self) -> Option<ReviewAnchor> {
@@ -2247,27 +2728,10 @@ impl App {
             format!("File: {}", anchor.file_path),
         ];
 
-        match anchor.kind {
-            ReviewTargetKind::Line => {
-                let side = anchor.side.unwrap_or(ReviewSide::New);
-                let range = match side {
-                    ReviewSide::Old => anchor.old_range,
-                    ReviewSide::New => anchor.new_range,
-                };
-                lines.push(format!("Side: {}", side.as_str()));
-                lines.push(format!("Line: {}", format_opt_range_display(range)));
-            }
-            ReviewTargetKind::Hunk => {
-                lines.push(format!(
-                    "Old: {}",
-                    format_opt_range_display(anchor.old_range)
-                ));
-                lines.push(format!(
-                    "New: {}",
-                    format_opt_range_display(anchor.new_range)
-                ));
-            }
-        }
+        lines.push(format!(
+            "Location: {}",
+            review_anchor_location_label(anchor)
+        ));
 
         lines.push("Body:".to_string());
         let body = comment.body.trim_end();
@@ -2407,8 +2871,8 @@ mod tests {
         }];
 
         assert_eq!(
-            app.review_action_labels_for_editor(),
-            vec![("ctrl-g".to_string(), "Capture".to_string())]
+            app.review_action_entries_for_editor(),
+            vec![(0, "ctrl-g".to_string(), "Capture".to_string())]
         );
         assert!(app.handle_review_action_key(KeyEvent::new(
             crossterm::event::KeyCode::Char('g'),

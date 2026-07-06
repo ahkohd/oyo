@@ -1,6 +1,5 @@
-use super::{App, DIFF_VIEW_MIN_WIDTH, FILE_PANEL_MIN_WIDTH};
+use super::{App, FilePanelMode, DIFF_VIEW_MIN_WIDTH, FILE_PANEL_MIN_WIDTH};
 use crate::config::FilePanelPosition;
-use crate::toasts::ToastEvent;
 
 fn point_in_rect(rect: (u16, u16, u16, u16), column: u16, row: u16) -> bool {
     let (x, y, width, height) = rect;
@@ -10,7 +9,79 @@ fn point_in_rect(rect: (u16, u16, u16, u16), column: u16, row: u16) -> bool {
 }
 
 impl App {
+    pub fn show_comments_sidebar(&mut self) {
+        self.file_panel_mode = FilePanelMode::Comments;
+        self.file_panel_visible = true;
+        self.file_panel_manually_set = true;
+        self.file_panel_auto_hidden = false;
+        self.file_list_focused = true;
+        self.file_filter.clear();
+        self.file_list_scroll = 0;
+    }
+
+    pub fn show_files_sidebar(&mut self) -> bool {
+        if !self.is_multi_file() {
+            return false;
+        }
+        self.file_panel_mode = FilePanelMode::Files;
+        self.file_panel_visible = true;
+        self.file_panel_manually_set = true;
+        self.file_panel_auto_hidden = false;
+        self.file_list_focused = true;
+        self.file_filter.clear();
+        self.file_list_scroll = 0;
+        true
+    }
+
+    pub fn toggle_file_panel_mode(&mut self) {
+        self.file_panel_mode = match self.file_panel_mode {
+            FilePanelMode::Files => FilePanelMode::Comments,
+            FilePanelMode::Comments => FilePanelMode::Files,
+        };
+        self.file_list_scroll = 0;
+        self.file_list_focused = true;
+    }
+
+    pub fn handle_status_comments_mouse_down(&mut self, column: u16, row: u16) -> bool {
+        let hit = self
+            .status_comments_hit
+            .is_some_and(|(x, y, width, height)| {
+                column >= x
+                    && column < x.saturating_add(width)
+                    && row >= y
+                    && row < y.saturating_add(height)
+            });
+        if !hit {
+            return false;
+        }
+        self.show_comments_sidebar();
+        true
+    }
+
+    pub fn handle_status_file_mouse_down(&mut self, column: u16, row: u16) -> bool {
+        let hit = self.status_file_hit.is_some_and(|(x, y, width, height)| {
+            column >= x
+                && column < x.saturating_add(width)
+                && row >= y
+                && row < y.saturating_add(height)
+        });
+        hit && self.show_files_sidebar()
+    }
+
     pub fn handle_file_list_click(&mut self, column: u16, row: u16, new_tab: bool) -> bool {
+        if self
+            .file_panel_mode_toggle_hit
+            .is_some_and(|(x, y, width, height)| {
+                column >= x
+                    && column < x.saturating_add(width)
+                    && row >= y
+                    && row < y.saturating_add(height)
+            })
+        {
+            self.toggle_file_panel_mode();
+            return true;
+        }
+
         if self
             .file_filter_clear_hit
             .is_some_and(|(x, y, width, height)| {
@@ -64,13 +135,16 @@ impl App {
         }
 
         let row_idx = (row - item_start) as usize;
-        if let Some(file_idx) = self.file_list_rows.get(row_idx).copied().flatten() {
+        if let Some(item_idx) = self.file_list_rows.get(row_idx).copied().flatten() {
             self.file_list_focused = true;
             self.stop_file_filter();
+            if self.file_panel_mode == FilePanelMode::Comments {
+                return self.open_review_comment(item_idx);
+            }
             if new_tab {
-                self.open_file_in_new_topbar_tab(file_idx);
+                self.open_file_in_new_topbar_tab(item_idx);
             } else {
-                self.select_file(file_idx);
+                self.select_file(item_idx);
             }
             return true;
         }
@@ -107,7 +181,6 @@ impl App {
             self.file_filter_hover = false;
             self.file_filter_clear_hover = false;
         }
-        self.notify(ToastEvent::Sidebar(self.file_panel_visible));
     }
 
     pub fn clamp_file_panel_width(&self, viewport_width: u16) -> u16 {

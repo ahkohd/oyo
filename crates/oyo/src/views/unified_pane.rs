@@ -2,8 +2,9 @@
 
 use super::{
     apply_line_bg, apply_spans_bg, clear_leading_ws_bg, diff_line_bg, expand_tabs_in_spans,
-    pad_spans_bg, pending_tail_text, render_empty_state, slice_spans, spans_to_text, spans_width,
-    truncate_text, wrap_count_for_spans, wrap_count_for_text, TAB_WIDTH,
+    pad_spans_bg, pending_tail_text, render_empty_state, review_note_line_spans, slice_spans,
+    spans_to_text, spans_width, truncate_text, wrap_count_for_spans, wrap_count_for_text,
+    TAB_WIDTH,
 };
 use crate::app::{
     is_conflict_marker, is_fold_line, AnimationPhase, App, UnifiedRenderKey, UnifiedRenderModel,
@@ -317,6 +318,8 @@ fn unified_render_key(
         review_mode: app.review_mode(),
         review_editor_active: app.review_editor_active(),
         review_revision: app.review_revision(),
+        review_preview_hover: app.review_preview_hover.clone(),
+        review_preview_delete_hover: app.review_preview_delete_hover.clone(),
     }
 }
 
@@ -362,29 +365,30 @@ fn build_unified_render_model(
     let mut active_display_idx: Option<usize> = None;
     let mut review_preview_rows: Vec<(usize, usize, String)> = Vec::new();
 
-    let mut review_preview_before_idx: std::collections::HashMap<usize, Vec<(String, String)>> =
-        std::collections::HashMap::new();
-    let mut review_preview_after_idx: std::collections::HashMap<usize, Vec<(String, String)>> =
+    let mut review_preview_before_idx: std::collections::HashMap<
+        usize,
+        Vec<(String, Vec<String>)>,
+    > = std::collections::HashMap::new();
+    let mut review_preview_after_idx: std::collections::HashMap<usize, Vec<(String, Vec<String>)>> =
         std::collections::HashMap::new();
     if app.review_mode()
-        && !app.review_editor_active()
         && matches!(
             app.view_mode,
             crate::app::ViewMode::UnifiedPane | crate::app::ViewMode::Blame
         )
     {
         for overlay in app.review_comment_overlays_for_current_file() {
-            let text = app.review_preview_hint_text(&overlay);
+            let lines = app.review_preview_note_lines(&overlay, visible_width);
             if overlay.is_hunk {
                 review_preview_before_idx
                     .entry(overlay.display_idx)
                     .or_default()
-                    .push((overlay.anchor_key, text));
+                    .push((overlay.anchor_key, lines));
             } else {
                 review_preview_after_idx
                     .entry(overlay.display_idx)
                     .or_default()
-                    .push((overlay.anchor_key, text));
+                    .push((overlay.anchor_key, lines));
             }
         }
     }
@@ -575,52 +579,48 @@ fn build_unified_render_model(
         }
 
         if let Some(previews) = review_preview_before_idx.get(&idx) {
-            for (anchor_key, preview_text) in previews {
-                let virtual_style = Style::default()
-                    .fg(app.theme.text_muted)
-                    .add_modifier(Modifier::ITALIC);
-                let mut virtual_spans = vec![Span::styled(preview_text.clone(), virtual_style)];
-                virtual_spans = expand_tabs_in_spans(&virtual_spans, TAB_WIDTH);
-
-                let virtual_width = spans_width(&virtual_spans);
-                max_line_width = max_line_width.max(virtual_width);
-
-                let virtual_wrap = if app.line_wrap {
-                    wrap_count_for_spans(&virtual_spans, wrap_width)
-                } else {
-                    1
-                };
+            for (anchor_key, note_lines) in previews {
                 let row_idx = if app.line_wrap {
                     display_len
                 } else {
                     content_lines.len()
                 };
-                if app.line_wrap {
-                    display_len += virtual_wrap;
-                }
+                let mut row_span = 0usize;
+                for note_line in note_lines {
+                    let mut virtual_spans = review_note_line_spans(app, anchor_key, note_line);
+                    virtual_spans = expand_tabs_in_spans(&virtual_spans, TAB_WIDTH);
 
-                let mut display_virtual = virtual_spans;
-                if !app.line_wrap {
-                    display_virtual =
-                        slice_spans(&display_virtual, app.horizontal_scroll, visible_width);
-                }
-                if let Some(bg_lines) = bg_lines.as_mut() {
-                    super::push_wrapped_bg_line(bg_lines, wrap_width, virtual_wrap, None);
-                }
-                content_lines.push(Line::from(display_virtual));
-                gutter_lines.push(Line::from(vec![
-                    Span::raw(" "),
-                    Span::raw("    "),
-                    Span::raw(" "),
-                    Span::raw(" "),
-                    Span::raw(" "),
-                ]));
-                if app.line_wrap && virtual_wrap > 1 {
-                    for _ in 1..virtual_wrap {
-                        gutter_lines.push(Line::from(Span::raw(" ")));
+                    let virtual_width = spans_width(&virtual_spans);
+                    max_line_width = max_line_width.max(virtual_width);
+
+                    let virtual_wrap = if app.line_wrap {
+                        wrap_count_for_spans(&virtual_spans, wrap_width)
+                    } else {
+                        1
+                    };
+                    row_span = row_span.saturating_add(virtual_wrap);
+                    if app.line_wrap {
+                        display_len += virtual_wrap;
+                    }
+
+                    if let Some(bg_lines) = bg_lines.as_mut() {
+                        super::push_wrapped_bg_line(bg_lines, wrap_width, virtual_wrap, None);
+                    }
+                    content_lines.push(Line::from(virtual_spans));
+                    gutter_lines.push(Line::from(vec![
+                        Span::raw(" "),
+                        Span::raw("    "),
+                        Span::raw(" "),
+                        Span::raw(" "),
+                        Span::raw(" "),
+                    ]));
+                    if app.line_wrap && virtual_wrap > 1 {
+                        for _ in 1..virtual_wrap {
+                            gutter_lines.push(Line::from(Span::raw(" ")));
+                        }
                     }
                 }
-                review_preview_rows.push((row_idx, virtual_wrap, anchor_key.clone()));
+                review_preview_rows.push((row_idx, row_span, anchor_key.clone()));
             }
         }
 
@@ -1197,52 +1197,48 @@ fn build_unified_render_model(
         }
 
         if let Some(previews) = review_preview_after_idx.get(&idx) {
-            for (anchor_key, preview_text) in previews {
-                let virtual_style = Style::default()
-                    .fg(app.theme.text_muted)
-                    .add_modifier(Modifier::ITALIC);
-                let mut virtual_spans = vec![Span::styled(preview_text.clone(), virtual_style)];
-                virtual_spans = expand_tabs_in_spans(&virtual_spans, TAB_WIDTH);
-
-                let virtual_width = spans_width(&virtual_spans);
-                max_line_width = max_line_width.max(virtual_width);
-
-                let virtual_wrap = if app.line_wrap {
-                    wrap_count_for_spans(&virtual_spans, wrap_width)
-                } else {
-                    1
-                };
+            for (anchor_key, note_lines) in previews {
                 let row_idx = if app.line_wrap {
                     display_len
                 } else {
                     content_lines.len()
                 };
-                if app.line_wrap {
-                    display_len += virtual_wrap;
-                }
+                let mut row_span = 0usize;
+                for note_line in note_lines {
+                    let mut virtual_spans = review_note_line_spans(app, anchor_key, note_line);
+                    virtual_spans = expand_tabs_in_spans(&virtual_spans, TAB_WIDTH);
 
-                let mut display_virtual = virtual_spans;
-                if !app.line_wrap {
-                    display_virtual =
-                        slice_spans(&display_virtual, app.horizontal_scroll, visible_width);
-                }
-                if let Some(bg_lines) = bg_lines.as_mut() {
-                    super::push_wrapped_bg_line(bg_lines, wrap_width, virtual_wrap, None);
-                }
-                content_lines.push(Line::from(display_virtual));
-                gutter_lines.push(Line::from(vec![
-                    Span::raw(" "),
-                    Span::raw("    "),
-                    Span::raw(" "),
-                    Span::raw(" "),
-                    Span::raw(" "),
-                ]));
-                if app.line_wrap && virtual_wrap > 1 {
-                    for _ in 1..virtual_wrap {
-                        gutter_lines.push(Line::from(Span::raw(" ")));
+                    let virtual_width = spans_width(&virtual_spans);
+                    max_line_width = max_line_width.max(virtual_width);
+
+                    let virtual_wrap = if app.line_wrap {
+                        wrap_count_for_spans(&virtual_spans, wrap_width)
+                    } else {
+                        1
+                    };
+                    row_span = row_span.saturating_add(virtual_wrap);
+                    if app.line_wrap {
+                        display_len += virtual_wrap;
+                    }
+
+                    if let Some(bg_lines) = bg_lines.as_mut() {
+                        super::push_wrapped_bg_line(bg_lines, wrap_width, virtual_wrap, None);
+                    }
+                    content_lines.push(Line::from(virtual_spans));
+                    gutter_lines.push(Line::from(vec![
+                        Span::raw(" "),
+                        Span::raw("    "),
+                        Span::raw(" "),
+                        Span::raw(" "),
+                        Span::raw(" "),
+                    ]));
+                    if app.line_wrap && virtual_wrap > 1 {
+                        for _ in 1..virtual_wrap {
+                            gutter_lines.push(Line::from(Span::raw(" ")));
+                        }
                     }
                 }
-                review_preview_rows.push((row_idx, virtual_wrap, anchor_key.clone()));
+                review_preview_rows.push((row_idx, row_span, anchor_key.clone()));
             }
         }
 
@@ -1654,7 +1650,6 @@ fn render_unified_model(
         frame.render_widget(content_paragraph, content_area);
 
         if app.review_mode()
-            && !app.review_editor_active()
             && matches!(
                 app.view_mode,
                 crate::app::ViewMode::UnifiedPane | crate::app::ViewMode::Blame
@@ -1682,6 +1677,17 @@ fn render_unified_model(
                     height,
                     anchor_key.clone(),
                 );
+                let delete_row = end.saturating_sub(1);
+                if delete_row >= viewport_start && delete_row < viewport_end {
+                    let local_delete_row = delete_row.saturating_sub(viewport_start);
+                    app.add_review_preview_delete_box(
+                        content_area.x.saturating_add(2),
+                        content_area.y.saturating_add(local_delete_row as u16),
+                        8,
+                        1,
+                        anchor_key.clone(),
+                    );
+                }
             }
         }
     }

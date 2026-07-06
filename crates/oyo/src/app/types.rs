@@ -215,6 +215,8 @@ pub(crate) struct UnifiedRenderKey {
     pub(crate) review_mode: bool,
     pub(crate) review_editor_active: bool,
     pub(crate) review_revision: u64,
+    pub(crate) review_preview_hover: Option<String>,
+    pub(crate) review_preview_delete_hover: Option<String>,
 }
 
 pub(crate) struct UnifiedRenderModel {

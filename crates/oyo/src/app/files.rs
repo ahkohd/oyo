@@ -1,5 +1,6 @@
 use super::{
-    AnimationPhase, App, FileDiskStamp, PreviewLinkBox, TopbarTab, TopbarTabContent, ViewMode,
+    AnimationPhase, App, FileDiskStamp, FilePanelMode, PreviewLinkBox, TopbarTab, TopbarTabContent,
+    ViewMode,
 };
 use crate::csv_preview::{CsvPreviewSignature, CsvPreviewState};
 use crate::structured_preview::{StructuredPreviewSignature, StructuredPreviewState};
@@ -124,10 +125,13 @@ impl App {
     }
 
     pub fn scroll_file_panel_down(&mut self) {
-        let indices = self.filtered_file_indices();
-        let max_scroll = self
-            .file_list_total_rows(&indices)
-            .saturating_sub(self.file_list_visible_rows());
+        let total_rows = if self.file_panel_mode == FilePanelMode::Comments {
+            self.filtered_review_comment_indices().len()
+        } else {
+            let indices = self.filtered_file_indices();
+            self.file_list_total_rows(&indices)
+        };
+        let max_scroll = total_rows.saturating_sub(self.file_list_visible_rows());
         self.file_list_scroll = self.file_list_scroll.saturating_add(1).min(max_scroll);
     }
 
@@ -208,6 +212,9 @@ impl App {
 
     fn select_file_in_active_tab(&mut self, index: usize) {
         let old_index = self.multi_diff.selected_index;
+        if old_index != index && self.review_editor_active() {
+            self.review_cancel_editor();
+        }
         self.clear_step_edge_hint();
         self.clear_hunk_edge_hint();
         self.clear_blame_step_hint();
@@ -417,6 +424,13 @@ impl App {
             }
         }
         let old_index = self.multi_diff.selected_index;
+        let target_file = match tab.content {
+            TopbarTabContent::File(index) => Some(index),
+            TopbarTabContent::Help => None,
+        };
+        if target_file != Some(old_index) && self.review_editor_active() {
+            self.review_cancel_editor();
+        }
         self.save_active_topbar_tab_state();
         if !self.stepping {
             self.save_no_step_state_snapshot(old_index);
@@ -997,7 +1011,29 @@ impl App {
                     && row >= y
                     && row < y.saturating_add(height)
             });
+        let status_comments_hover =
+            self.status_comments_hit
+                .is_some_and(|(x, y, width, height)| {
+                    column >= x
+                        && column < x.saturating_add(width)
+                        && row >= y
+                        && row < y.saturating_add(height)
+                });
+        let status_file_hover = self.status_file_hit.is_some_and(|(x, y, width, height)| {
+            column >= x
+                && column < x.saturating_add(width)
+                && row >= y
+                && row < y.saturating_add(height)
+        });
         let file_panel_hover = self.mouse_over_file_panel(column, row);
+        let file_panel_mode_toggle_hover =
+            self.file_panel_mode_toggle_hit
+                .is_some_and(|(x, y, width, height)| {
+                    column >= x
+                        && column < x.saturating_add(width)
+                        && row >= y
+                        && row < y.saturating_add(height)
+                });
         let file_filter_hover = self.file_filter_area.is_some_and(|(x, y, width, height)| {
             column >= x
                 && column < x.saturating_add(width)
@@ -1035,6 +1071,29 @@ impl App {
                     && row < hit.y.saturating_add(hit.height)
             })
             .map(|hit| hit.action);
+        let (review_line_add_row, review_line_add_hover) =
+            self.review_line_add_hover_at(column, row);
+        let review_preview_hit = self.review_preview_boxes.iter().rev().find_map(|hit| {
+            let end_x = hit.x.saturating_add(hit.width);
+            let end_y = hit.y.saturating_add(hit.height);
+            (column >= hit.x && column < end_x && row >= hit.y && row < end_y)
+                .then(|| (hit.anchor_key.clone(), hit.delete))
+        });
+        let review_preview_hover = review_preview_hit
+            .as_ref()
+            .map(|(anchor_key, _)| anchor_key.clone());
+        let review_preview_delete_hover =
+            review_preview_hit.and_then(|(anchor_key, delete)| delete.then_some(anchor_key));
+        let review_editor_hover = self
+            .review_editor_toolbar_hits
+            .iter()
+            .find(|hit| {
+                column >= hit.x
+                    && column < hit.x.saturating_add(hit.width)
+                    && row >= hit.y
+                    && row < hit.y.saturating_add(hit.height)
+            })
+            .map(|hit| hit.action);
         if self.topbar_hover_tab == hover
             && self.topbar_hover_close == close_hover
             && self.topbar_plus_hover == plus_hover
@@ -1042,15 +1101,28 @@ impl App {
             && self.topbar_scroll_right_hover == scroll_right_hover
             && self.preview_toggle_hover == preview_hover
             && self.topbar_sidebar_toggle_hover == sidebar_hover
+            && self.status_comments_hover == status_comments_hover
+            && self.status_file_hover == status_file_hover
             && self.file_list_hover == file_hover
             && self.file_panel_hover == file_panel_hover
+            && self.file_panel_mode_toggle_hover == file_panel_mode_toggle_hover
             && self.file_filter_hover == file_filter_hover
             && self.file_filter_clear_hover == file_filter_clear_hover
             && self.selection_toolbar_hover == selection_hover
+            && self.review_line_add_row == review_line_add_row
+            && self.review_line_add_hover == review_line_add_hover
+            && self.review_preview_hover == review_preview_hover
+            && self.review_preview_delete_hover == review_preview_delete_hover
+            && self.review_editor_toolbar_hover == review_editor_hover
         {
             return false;
         }
         self.selection_toolbar_hover = selection_hover;
+        self.review_line_add_row = review_line_add_row;
+        self.review_line_add_hover = review_line_add_hover;
+        self.review_preview_hover = review_preview_hover;
+        self.review_preview_delete_hover = review_preview_delete_hover;
+        self.review_editor_toolbar_hover = review_editor_hover;
         self.topbar_hover_tab = hover;
         self.topbar_hover_close = close_hover;
         self.topbar_plus_hover = plus_hover;
@@ -1058,8 +1130,11 @@ impl App {
         self.topbar_scroll_right_hover = scroll_right_hover;
         self.preview_toggle_hover = preview_hover;
         self.topbar_sidebar_toggle_hover = sidebar_hover;
+        self.status_comments_hover = status_comments_hover;
+        self.status_file_hover = status_file_hover;
         self.file_list_hover = file_hover;
         self.file_panel_hover = file_panel_hover;
+        self.file_panel_mode_toggle_hover = file_panel_mode_toggle_hover;
         self.file_filter_hover = file_filter_hover;
         self.file_filter_clear_hover = file_filter_clear_hover;
         true

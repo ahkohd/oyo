@@ -828,7 +828,9 @@ fn dispatch_normal_action(
         }
         NormalAction::RemoveLineComment => {
             app.reset_count();
-            app.remove_line_comment_at_cursor();
+            if !app.remove_hovered_review_comment() {
+                app.remove_line_comment_at_cursor();
+            }
         }
         NormalAction::RemoveHunkComment => {
             app.reset_count();

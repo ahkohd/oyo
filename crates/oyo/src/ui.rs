@@ -1,9 +1,9 @@
 //! UI rendering for the TUI
 
 use crate::app::{
-    diff_scrollbar_thumb, App, FilePanelScrollbarState, SelectionToolbarAction,
-    SelectionToolbarHit, TopbarTabContent, TopbarTabHit, ViewMode, DIFF_VIEW_MIN_WIDTH,
-    FILE_PANEL_MIN_WIDTH,
+    diff_scrollbar_thumb, App, FilePanelMode, FilePanelScrollbarState, ReviewEditorToolbarAction,
+    ReviewEditorToolbarHit, ReviewLineAddHit, SelectionToolbarAction, SelectionToolbarHit,
+    TopbarTabContent, TopbarTabHit, ViewMode, DIFF_VIEW_MIN_WIDTH, FILE_PANEL_MIN_WIDTH,
 };
 use crate::color;
 use crate::config::FilePanelPosition;
@@ -481,22 +481,15 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     if app.review_mode() {
         if app.review_editor_active() {
-            app.clear_review_preview_boxes();
             draw_review_editor_overlay(frame, app);
-        } else if !matches!(
-            app.view_mode,
-            ViewMode::UnifiedPane
-                | ViewMode::Split
-                | ViewMode::Evolution
-                | ViewMode::Blame
-                | ViewMode::Preview
-        ) {
-            draw_review_comment_overlays(frame, app);
+        } else if app.selection_toolbar_visible() || app.diff_selection_mode_active() {
+            app.clear_review_preview_boxes();
         }
     } else {
         app.clear_review_preview_boxes();
     }
 
+    draw_review_line_add_button(frame, app);
     draw_toasts(frame, app);
 }
 
@@ -749,6 +742,8 @@ fn line_input_status_spans(app: &App) -> Option<Vec<Span<'static>>> {
 }
 
 fn draw_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
+    app.status_comments_hit = None;
+    app.status_file_hit = None;
     if app.view_mode == ViewMode::Preview {
         draw_preview_status_bar(frame, app, area);
         return;
@@ -867,6 +862,7 @@ fn draw_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
         || app.syntax_warmup_pending();
     let stats_known = insertions > 0 || deletions > 0;
     let mut right_spans = Vec::new();
+    let mut comments_hit: Option<(usize, usize)> = None;
     if let Some(ref hunk) = hunk_text {
         let hunk_label = if let Some(ref hunk_step) = hunk_step_text {
             format!("{} {}", hunk_step, hunk)
@@ -920,16 +916,33 @@ fn draw_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
             1 => "1 comment".to_string(),
             n => format!("{n} comments"),
         };
-        right_spans.push(Span::styled(
-            comments_label,
-            Style::default().fg(app.theme.primary),
-        ));
+        let start = spans_width(&right_spans);
+        let width = text_width(&comments_label);
+        comments_hit = Some((start, width));
+        let mut style = Style::default().fg(if app.status_comments_hover {
+            app.theme.accent
+        } else {
+            app.theme.text_muted
+        });
+        if app.status_comments_hover {
+            style = style.add_modifier(Modifier::BOLD);
+        }
+        right_spans.push(Span::styled(comments_label, style));
     }
     right_spans.push(Span::raw("  "));
-    right_spans.push(Span::styled(
-        format!("file {}", file_text),
-        Style::default().fg(app.theme.text_muted),
-    ));
+    let file_label = format!("file {}", file_text);
+    let file_start = spans_width(&right_spans);
+    let file_width = text_width(&file_label);
+    let file_hit = (file_start, file_width);
+    let mut file_style = Style::default().fg(if app.status_file_hover {
+        app.theme.accent
+    } else {
+        app.theme.text_muted
+    });
+    if app.status_file_hover {
+        file_style = file_style.add_modifier(Modifier::BOLD);
+    }
+    right_spans.push(Span::styled(file_label, file_style));
     right_spans.push(Span::raw(" "));
 
     // Fixed-width footer layout: left/middle/right sections prevent shifting.
@@ -956,6 +969,27 @@ fn draw_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
         Span::raw(" "),
         Span::styled(display_scope, Style::default().fg(app.theme.text_muted)),
     ];
+
+    let right_raw_width = spans_width(&right_spans);
+    if right_raw_width <= right_width {
+        let right_x = area.x.saturating_add((left_width + center_width) as u16);
+        let pad = right_width.saturating_sub(right_raw_width);
+        if let Some((start, width)) = comments_hit {
+            app.status_comments_hit = Some((
+                right_x.saturating_add((pad + start) as u16),
+                area.y,
+                width as u16,
+                1,
+            ));
+        }
+        let (start, width) = file_hit;
+        app.status_file_hit = Some((
+            right_x.saturating_add((pad + start) as u16),
+            area.y,
+            width as u16,
+            1,
+        ));
+    }
 
     let left_spans = clamp_spans_to_width(&left_spans, left_width);
     let left_spans = pad_spans_left(left_spans, left_width);
@@ -1354,11 +1388,9 @@ fn topbar_tab_spans(app: &mut App, area: Rect, max_width: usize) -> Vec<Span<'st
         col = col.saturating_add(width);
     }
 
-    let plus_gap = if hidden_right { 2 } else { 1 };
-    if col + plus_gap < max_width {
-        spans.push(Span::raw(" ".repeat(plus_gap)));
-        let plus_col = area.x.saturating_add(col.saturating_add(plus_gap) as u16);
-        app.topbar_plus_hit = Some((plus_col, area.y, 1, 1));
+    if col + 3 <= max_width {
+        let plus_col = area.x.saturating_add(col as u16);
+        app.topbar_plus_hit = Some((plus_col, area.y, 3, 1));
         let plus_style = Style::default()
             .fg(if app.topbar_plus_hover {
                 app.theme.accent
@@ -1366,7 +1398,7 @@ fn topbar_tab_spans(app: &mut App, area: Rect, max_width: usize) -> Vec<Span<'st
                 app.theme.text_muted
             })
             .add_modifier(Modifier::BOLD);
-        spans.push(Span::styled("+", plus_style));
+        spans.push(Span::styled(" + ", plus_style));
     }
     spans
 }
@@ -1485,18 +1517,20 @@ fn draw_content(frame: &mut Frame, app: &mut App, area: Rect, show_topbar: bool)
     // But respect user's manual toggle preference
     let min_width_for_panel = FILE_PANEL_MIN_WIDTH + DIFF_VIEW_MIN_WIDTH;
 
+    let panel_allowed = app.is_multi_file() || app.file_panel_mode == FilePanelMode::Comments;
+
     // Track if panel would be auto-hidden (for toggle behavior)
-    app.file_panel_auto_hidden = app.is_multi_file()
+    app.file_panel_auto_hidden = panel_allowed
         && app.file_panel_visible
         && area.width < min_width_for_panel
         && !app.file_panel_manually_set;
 
     let show_panel = if app.file_panel_manually_set {
         // User explicitly toggled, respect their preference
-        app.is_multi_file() && app.file_panel_visible
+        panel_allowed && app.file_panel_visible
     } else {
         // Auto-hide when viewport is too narrow
-        app.is_multi_file() && app.file_panel_visible && area.width >= min_width_for_panel
+        panel_allowed && app.file_panel_visible && area.width >= min_width_for_panel
     };
 
     if show_panel {
@@ -1552,6 +1586,8 @@ fn draw_content(frame: &mut Frame, app: &mut App, area: Rect, show_topbar: bool)
         app.file_panel_hover = false;
         app.file_filter_area = None;
         app.file_filter_clear_hit = None;
+        app.file_panel_mode_toggle_hit = None;
+        app.file_panel_mode_toggle_hover = false;
         app.file_filter_hover = false;
         app.file_filter_clear_hover = false;
         app.file_panel_rect = None;
@@ -1677,6 +1713,7 @@ fn draw_file_panel_divider(frame: &mut Frame, app: &App, area: Rect, panel_bg: O
 }
 
 fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
+    app.file_panel_mode_toggle_hit = None;
     let panel_bg = app.theme.background_panel.or(app.theme.background);
     let content_area = file_panel_content_area(app, area);
     draw_file_panel_divider(frame, app, area, panel_bg);
@@ -1737,7 +1774,14 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
                 .map(|s| s.to_string())
         })
         .unwrap_or_else(|| ".".to_string());
-    let header_max_width = header_area.width.saturating_sub(1) as usize;
+    let mode_toggle_text = match app.file_panel_mode {
+        FilePanelMode::Files => "comments",
+        FilePanelMode::Comments => "files",
+    };
+    let mode_toggle_width = text_width(mode_toggle_text);
+    let header_max_width = header_area
+        .width
+        .saturating_sub(mode_toggle_width as u16 + 3) as usize;
     let range_display = app.multi_diff.git_range_display();
     let header_text = if let Some((from, to)) = range_display {
         let range_text = format!("{from}..{to}");
@@ -1770,46 +1814,93 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
     let root_style = Style::default()
         .fg(app.theme.border_subtle)
         .add_modifier(Modifier::DIM);
-    let header_lines = vec![
-        Line::from(vec![Span::raw(" "), Span::styled(header_text, root_style)]),
-        Line::raw(""),
-        Line::from(vec![
-            Span::raw(" "),
-            Span::styled("●", Style::default().fg(app.theme.text_muted)),
-            Span::raw(" "),
-            Span::styled(
-                format!("{} files", file_count),
-                Style::default().fg(app.theme.text),
-            ),
-            Span::raw(" "),
-            Span::styled(via_text, Style::default().fg(app.theme.text_muted)),
-        ]),
-        Line::from(vec![
-            Span::raw(" "),
-            Span::styled(
-                format!("+{}", added),
-                Style::default().fg(app.theme.success),
-            ),
-            Span::raw(" "),
-            Span::styled(
-                format!("~{}", modified),
-                Style::default().fg(app.theme.warning),
-            ),
-            Span::raw(" "),
-            Span::styled(
-                format!("-{}", deleted),
-                Style::default().fg(app.theme.error),
-            ),
-            Span::raw(" "),
-            Span::styled(format!("→{}", renamed), Style::default().fg(app.theme.info)),
-        ]),
-    ];
+    let header_lines = if app.file_panel_mode == FilePanelMode::Comments {
+        let comment_count = app.review_comment_count();
+        let comments_label = match comment_count {
+            1 => "1 comment".to_string(),
+            n => format!("{n} comments"),
+        };
+        vec![
+            Line::from(vec![Span::raw(" "), Span::styled(header_text, root_style)]),
+            Line::raw(""),
+            Line::from(vec![
+                Span::raw(" "),
+                Span::styled("●", Style::default().fg(app.theme.text_muted)),
+                Span::raw(" "),
+                Span::styled(comments_label, Style::default().fg(app.theme.text)),
+                Span::raw(" "),
+                Span::styled("review", Style::default().fg(app.theme.text_muted)),
+            ]),
+            Line::raw(""),
+        ]
+    } else {
+        vec![
+            Line::from(vec![Span::raw(" "), Span::styled(header_text, root_style)]),
+            Line::raw(""),
+            Line::from(vec![
+                Span::raw(" "),
+                Span::styled("●", Style::default().fg(app.theme.text_muted)),
+                Span::raw(" "),
+                Span::styled(
+                    format!("{} files", file_count),
+                    Style::default().fg(app.theme.text),
+                ),
+                Span::raw(" "),
+                Span::styled(via_text, Style::default().fg(app.theme.text_muted)),
+            ]),
+            Line::from(vec![
+                Span::raw(" "),
+                Span::styled(
+                    format!("+{}", added),
+                    Style::default().fg(app.theme.success),
+                ),
+                Span::raw(" "),
+                Span::styled(
+                    format!("~{}", modified),
+                    Style::default().fg(app.theme.warning),
+                ),
+                Span::raw(" "),
+                Span::styled(
+                    format!("-{}", deleted),
+                    Style::default().fg(app.theme.error),
+                ),
+                Span::raw(" "),
+                Span::styled(format!("→{}", renamed), Style::default().fg(app.theme.info)),
+            ]),
+        ]
+    };
 
     let mut header = Paragraph::new(header_lines);
     if let Some(bg) = panel_bg {
         header = header.style(Style::default().bg(bg));
     }
     frame.render_widget(header, header_area);
+    if header_area.width > mode_toggle_width as u16 + 1 {
+        let toggle_x = header_area.x.saturating_add(
+            header_area
+                .width
+                .saturating_sub(mode_toggle_width as u16 + 1),
+        );
+        app.file_panel_mode_toggle_hit =
+            Some((toggle_x, header_area.y, mode_toggle_width as u16, 1));
+        let mut toggle_style = Style::default().fg(if app.file_panel_mode_toggle_hover {
+            app.theme.accent
+        } else {
+            app.theme.text_muted
+        });
+        if app.file_panel_mode_toggle_hover {
+            toggle_style = toggle_style.add_modifier(Modifier::BOLD);
+        }
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(mode_toggle_text, toggle_style))),
+            Rect::new(toggle_x, header_area.y, mode_toggle_width as u16, 1),
+        );
+    }
+
+    if app.file_panel_mode == FilePanelMode::Comments {
+        draw_comment_list(frame, app, list_area, filter_area, panel_bg);
+        return;
+    }
 
     let filtered_indices = app.filtered_file_indices();
     let total_file_rows = app.file_list_total_rows(&filtered_indices);
@@ -1907,7 +1998,18 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
         } else {
             String::new()
         };
-        let signs_len = if show_signs {
+        let comment_count = app.review_comment_count_for_file(file_idx);
+        let show_comment_count = show_for_row && comment_count > 0;
+        let comment_text = if show_comment_count {
+            format!("*{comment_count}")
+        } else {
+            String::new()
+        };
+        let signs_len = if show_comment_count {
+            1 + comment_text.len()
+        } else {
+            0
+        } + if show_signs {
             if file.binary {
                 1 + "bin".len()
             } else {
@@ -1965,6 +2067,16 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
             Span::raw(" "),
             Span::styled(name, name_style),
         ];
+
+        if show_comment_count {
+            let comment_style = if app.file_list_focused && is_selected {
+                Style::default().fg(app.theme.warning)
+            } else {
+                Style::default().fg(app.theme.text_muted)
+            };
+            line_spans.push(Span::raw(" "));
+            line_spans.push(Span::styled(comment_text, comment_style));
+        }
 
         if show_signs {
             line_spans.push(Span::raw(" "));
@@ -2093,6 +2205,168 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
         app.file_filter_clear_hit = None;
         app.file_filter_hover = false;
         app.file_filter_clear_hover = false;
+    }
+}
+
+fn draw_comment_list(
+    frame: &mut Frame,
+    app: &mut App,
+    list_area: Rect,
+    filter_area: Option<Rect>,
+    panel_bg: Option<Color>,
+) {
+    let indices = app.filtered_review_comment_indices();
+    let total_rows = indices.len();
+    let visible_rows = list_area.height.saturating_sub(2) as usize;
+    let show_scrollbar = app.scrollbar_visible
+        && total_rows > visible_rows
+        && visible_rows > 0
+        && list_area.width > 1;
+    let (list_content_area, scrollbar_area) =
+        reserve_file_scrollbar_lane(list_area, show_scrollbar);
+    let row_offset = app
+        .file_list_scroll
+        .min(total_rows.saturating_sub(visible_rows));
+    app.file_list_scroll = row_offset;
+
+    let mut items = Vec::new();
+    let mut row_map = Vec::new();
+    for comment_idx in indices.iter().skip(row_offset).take(visible_rows).copied() {
+        let Some((_file_idx, path, location, preview)) =
+            app.review_comment_sidebar_item(comment_idx)
+        else {
+            continue;
+        };
+        let is_active = app.review_comment_is_active(comment_idx);
+        let is_hovered = app.file_list_hover == Some(comment_idx);
+        let selected_bg = if is_active {
+            if app.file_list_focused {
+                app.theme.background_element.or(app.theme.background_panel)
+            } else {
+                app.theme.background_panel
+            }
+        } else {
+            None
+        };
+        let marker_style = if is_active || is_hovered {
+            Style::default()
+                .fg(app.theme.accent)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(app.theme.text_muted)
+        };
+        let marker = if is_active { "•" } else { " " };
+        let name_width = list_content_area.width.saturating_sub(12) as usize;
+        let name = truncate_path(&path, name_width);
+        let mut name_style = Style::default().fg(if is_active || is_hovered {
+            app.theme.accent
+        } else {
+            app.theme.text
+        });
+        if is_active || is_hovered {
+            name_style = name_style.add_modifier(Modifier::BOLD);
+        }
+        if let Some(bg) = selected_bg {
+            name_style = name_style.bg(bg);
+        }
+        let location_style = if is_active && app.file_list_focused {
+            Style::default().fg(app.theme.warning)
+        } else {
+            Style::default().fg(app.theme.text_muted)
+        };
+        let preview_width = list_content_area.width.saturating_sub(6) as usize;
+        let line = Line::from(vec![
+            Span::styled(marker, marker_style),
+            Span::raw(" "),
+            Span::styled(name, name_style),
+            Span::raw(" "),
+            Span::styled(location, location_style),
+            Span::raw(" "),
+            Span::styled(
+                truncate_to_width(&preview, preview_width),
+                Style::default().fg(app.theme.text_muted),
+            ),
+        ]);
+        items.push(ListItem::new(line));
+        row_map.push(Some(comment_idx));
+    }
+
+    let mut block = Block::default().padding(ratatui::widgets::Padding::new(1, 0, 1, 0));
+    if let Some(bg) = panel_bg {
+        block = block.style(Style::default().bg(bg));
+    }
+    app.file_list_area = Some((
+        list_content_area.x,
+        list_content_area.y,
+        list_content_area.width,
+        list_content_area.height,
+    ));
+    app.file_list_rows = row_map;
+    frame.render_widget(List::new(items).block(block), list_content_area);
+    render_file_panel_scrollbar(frame, app, scrollbar_area, total_rows, visible_rows);
+
+    if total_rows == 0 {
+        let text = if app.file_filter.is_empty() {
+            "No Comments"
+        } else {
+            "No Filter Results"
+        };
+        let mut empty = Paragraph::new(Line::from(Span::styled(
+            text,
+            Style::default().fg(app.theme.text_muted),
+        )))
+        .alignment(Alignment::Center)
+        .block(Block::default().padding(ratatui::widgets::Padding::new(0, 0, 1, 0)));
+        if let Some(bg) = panel_bg {
+            empty = empty.style(Style::default().bg(bg));
+        }
+        frame.render_widget(empty, list_content_area);
+    }
+
+    if let Some(filter_area) = filter_area {
+        app.file_filter_area = Some((
+            filter_area.x,
+            filter_area.y,
+            filter_area.width,
+            filter_area.height,
+        ));
+        let filter_bg = app
+            .theme
+            .background_element
+            .or(app.theme.background_panel)
+            .or(app.theme.background);
+        let mut filter = Paragraph::new(file_filter_line(
+            app,
+            !app.file_filter.is_empty(),
+            filter_area.width,
+        ))
+        .alignment(Alignment::Left);
+        let mut filter_block = Block::default().padding(ratatui::widgets::Padding::new(1, 0, 1, 0));
+        if let Some(bg) = filter_bg {
+            filter_block = filter_block.style(Style::default().bg(bg));
+        }
+        filter = filter.block(filter_block);
+        frame.render_widget(filter, filter_area);
+        if !app.file_filter.is_empty() && filter_area.width > 2 {
+            let clear_x = filter_area
+                .x
+                .saturating_add(filter_area.width.saturating_sub(2));
+            let clear_y = filter_area.y.saturating_add(1);
+            app.file_filter_clear_hit = Some((clear_x, clear_y, 1, 1));
+            let clear_style = if app.file_filter_clear_hover {
+                Style::default()
+                    .fg(app.theme.accent)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(app.theme.text_muted)
+            };
+            if let Some(cell) = frame.buffer_mut().cell_mut((clear_x, clear_y)) {
+                cell.set_symbol("×").set_style(clear_style);
+            }
+        } else {
+            app.file_filter_clear_hit = None;
+            app.file_filter_clear_hover = false;
+        }
     }
 }
 
@@ -4501,8 +4775,45 @@ fn draw_diff_selection(frame: &mut Frame, app: &App) {
     }
 }
 
+fn draw_review_line_add_button(frame: &mut Frame, app: &mut App) {
+    app.clear_review_line_add_hit();
+    let Some(row) = app.review_line_add_row else {
+        return;
+    };
+    if !app.review_mode() || app.review_editor_active() || app.selection_toolbar_visible() {
+        return;
+    }
+    let Some((_, y, _, height)) = app.diff_view_area else {
+        return;
+    };
+    if row < y || row >= y.saturating_add(height) {
+        return;
+    }
+    let Some(x) = app.review_line_add_button_x() else {
+        return;
+    };
+    let style = Style::default()
+        .fg(if app.review_line_add_hover {
+            app.theme.accent
+        } else {
+            app.theme.text_muted
+        })
+        .add_modifier(Modifier::BOLD);
+    app.review_line_add_hit = Some(ReviewLineAddHit {
+        x,
+        y: row,
+        width: 3,
+        height: 1,
+        row,
+    });
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(" + ", style))),
+        Rect::new(x, row, 3, 1),
+    );
+}
+
 fn draw_selection_toolbar(frame: &mut Frame, app: &mut App) {
-    if !app.selection_toolbar_visible() {
+    if app.review_editor_active() || !app.selection_toolbar_visible() {
         app.set_selection_toolbar_hits(Vec::new());
         return;
     }
@@ -4796,112 +5107,9 @@ fn draw_selection_toolbar(frame: &mut Frame, app: &mut App) {
     );
 }
 
-fn draw_review_comment_overlays(frame: &mut Frame, app: &mut App) {
-    app.clear_review_preview_boxes();
-
-    let Some((x, y, width, height)) = app.diff_view_area else {
-        return;
-    };
-    if width < 20 || height < 4 {
-        return;
-    }
-
-    let diff_area = Rect::new(x, y, width, height);
-    let overlays = app.review_comment_overlays_for_current_file();
-    if overlays.is_empty() {
-        return;
-    }
-
-    let scroll_offset = app.render_scroll_offset();
-    let diff_bottom = diff_area.y.saturating_add(diff_area.height);
-
-    if matches!(app.view_mode, ViewMode::UnifiedPane | ViewMode::Split) {
-        return;
-    }
-
-    // Other modes: keep compact card previews.
-    let max_popup_width = diff_area.width.saturating_sub(8);
-    if max_popup_width < 16 {
-        return;
-    }
-    let popup_width = if max_popup_width < 24 {
-        max_popup_width
-    } else {
-        max_popup_width.min(40)
-    };
-
-    let mut next_free_y = diff_area.y;
-    for overlay in overlays.into_iter().take(16) {
-        if overlay.display_idx < scroll_offset {
-            continue;
-        }
-        let row = overlay.display_idx.saturating_sub(scroll_offset) as u16;
-        if row >= diff_area.height {
-            continue;
-        }
-
-        let anchor_y = diff_area.y.saturating_add(row);
-        let preferred_y = anchor_y.saturating_add(1);
-        // Height 3 => 1 inner row (excerpt only)
-        let popup_height = 3u16;
-        let mut popup_y = preferred_y.max(next_free_y);
-
-        // Keep collapsed preview below its anchor line when possible.
-        if popup_y.saturating_add(popup_height) > diff_bottom {
-            let fallback = diff_bottom.saturating_sub(popup_height);
-            if fallback <= anchor_y {
-                // No room below this anchor; skip instead of covering the anchor line.
-                continue;
-            }
-            popup_y = fallback.max(next_free_y);
-            if popup_y.saturating_add(popup_height) > diff_bottom || popup_y <= anchor_y {
-                continue;
-            }
-        }
-
-        let popup_x = diff_area.x.saturating_add(
-            diff_area
-                .width
-                .saturating_sub(popup_width)
-                .saturating_sub(1),
-        );
-        let popup_area = Rect::new(popup_x, popup_y, popup_width, popup_height);
-
-        frame.render_widget(Clear, popup_area);
-
-        let mut block = Block::default()
-            .borders(Borders::ALL)
-            .border_type(ratatui::widgets::BorderType::Rounded)
-            .border_style(Style::default().fg(app.theme.border_subtle));
-        if let Some(bg) = app.theme.background_panel.or(app.theme.background) {
-            block = block.style(Style::default().bg(bg));
-        }
-        let inner = block.inner(popup_area);
-        frame.render_widget(block, popup_area);
-
-        let preview_text = app.review_preview_hint_text(&overlay);
-        let preview = truncate_text(&preview_text, inner.width as usize);
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                preview,
-                Style::default().fg(app.theme.text),
-            ))),
-            inner,
-        );
-        app.add_review_preview_box(
-            popup_area.x,
-            popup_area.y,
-            popup_area.width,
-            popup_area.height,
-            overlay.anchor_key,
-        );
-
-        next_free_y = popup_y.saturating_add(popup_height);
-    }
-}
-
 fn draw_review_editor_overlay(frame: &mut Frame, app: &mut App) {
     let Some(editor) = app.review_editor_render() else {
+        app.clear_review_editor_toolbar();
         return;
     };
     let Some((x, y, width, height)) = app.diff_view_area else {
@@ -4953,18 +5161,28 @@ fn draw_review_editor_overlay(frame: &mut Frame, app: &mut App) {
         .min(editor_area.height.saturating_sub(1));
     let forbidden_rows = anchor_span_rows.unwrap_or((anchor_row, anchor_row));
 
-    let max_popup_width = editor_area.width.saturating_sub(2);
-    let popup_width = if max_popup_width < 24 {
-        max_popup_width
-    } else {
-        max_popup_width.min(72)
-    };
-    let desired_popup_height = (editor.lines.len() as u16).saturating_add(5).clamp(6, 12);
+    let popup_x = editor_area.x.saturating_add(1);
+    let editor_right = editor_area.x.saturating_add(editor_area.width);
+    let popup_width = editor_right.saturating_sub(1).saturating_sub(popup_x);
+    if popup_width < 4 {
+        return;
+    }
+    let max_popup_height = editor_area.height.saturating_sub(1).max(6);
+    let text_wrap_width = popup_width.saturating_sub(4).max(1) as usize;
+    let desired_text_lines = editor
+        .lines
+        .iter()
+        .map(|line| wrap_editor_line(line, text_wrap_width).len())
+        .sum::<usize>()
+        .max(1)
+        .min(u16::MAX as usize) as u16;
+    let desired_popup_height = desired_text_lines
+        .saturating_add(2)
+        .clamp(6, max_popup_height);
     let min_popup_height = 4u16;
     let mut popup_height =
         desired_popup_height.min(editor_area.height.saturating_sub(1).max(min_popup_height));
 
-    let popup_x = editor_area.x.saturating_add(1);
     let area_top = editor_area.y;
     let area_bottom = editor_area.y.saturating_add(editor_area.height);
     let forbidden_top_y = editor_area.y.saturating_add(forbidden_rows.0);
@@ -5026,34 +5244,153 @@ fn draw_review_editor_overlay(frame: &mut Frame, app: &mut App) {
 
     frame.render_widget(Clear, popup_area);
 
-    let mut footer_parts = vec![
-        format!(
-            "{} save",
-            app.keybindings.review_editor_keys(ReviewEditorAction::Save)
+    let mut actions = vec![
+        (
+            app.keybindings.review_editor_keys(ReviewEditorAction::Save),
+            "save".to_string(),
+            ReviewEditorToolbarAction::Save,
         ),
-        format!(
-            "{} cancel",
+        (
             app.keybindings
-                .review_editor_keys(ReviewEditorAction::Cancel)
+                .review_editor_keys(ReviewEditorAction::Cancel),
+            "cancel".to_string(),
+            ReviewEditorToolbarAction::Cancel,
         ),
-        "@ mention".to_string(),
+        (
+            "@".to_string(),
+            "mention".to_string(),
+            ReviewEditorToolbarAction::Mention,
+        ),
     ];
-    footer_parts.extend(
-        app.review_action_labels_for_editor()
+    actions.extend(
+        app.review_action_entries_for_editor()
             .into_iter()
-            .map(|(key, label)| format!("{key} {label}")),
+            .map(|(idx, key, label)| (key, label, ReviewEditorToolbarAction::Custom(idx))),
     );
 
+    let item_width = |key: &str, label: &str| {
+        if key.is_empty() {
+            label.chars().count()
+        } else {
+            key.chars().count() + 1 + label.chars().count()
+        }
+    };
+    const ARROW: usize = 2;
+    let max_scroll = actions.len().saturating_sub(1);
+    app.review_editor_toolbar_scroll = app.review_editor_toolbar_scroll.min(max_scroll);
+    let scroll = app.review_editor_toolbar_scroll;
+    let fit_actions = |reserve_left: bool, reserve_right: bool| {
+        let reserve = usize::from(reserve_left) * ARROW + usize::from(reserve_right) * ARROW;
+        let limit = (popup_width as usize).saturating_sub(4 + reserve);
+        let mut fitted: Vec<(String, String, ReviewEditorToolbarAction, usize)> = Vec::new();
+        let mut used = 0usize;
+        for (key, label, action) in actions.iter().skip(scroll) {
+            let width = item_width(key, label);
+            let gap = if fitted.is_empty() { 0 } else { 2 };
+            if used + gap + width > limit {
+                break;
+            }
+            used += gap + width;
+            fitted.push((key.clone(), label.clone(), *action, width));
+        }
+        fitted
+    };
+    let hidden_left = scroll > 0;
+    let mut fitted = fit_actions(hidden_left, false);
+    let mut hidden_right = scroll + fitted.len() < actions.len();
+    if hidden_right {
+        fitted = fit_actions(hidden_left, true);
+        hidden_right = scroll + fitted.len() < actions.len();
+    }
+    let footer_y = popup_area
+        .y
+        .saturating_add(popup_area.height.saturating_sub(1));
+    let footer_area = Rect::new(
+        popup_area.x.saturating_add(1),
+        footer_y,
+        popup_area.width.saturating_sub(2),
+        1,
+    );
+    let mut footer_spans = vec![Span::raw(" ")];
+    let mut toolbar_hits = Vec::new();
+    let mut col = footer_area.x.saturating_add(1);
+    let key_style = Style::default()
+        .fg(app.theme.accent)
+        .add_modifier(Modifier::BOLD);
+    let label_style = Style::default().fg(app.theme.text);
+    let hover_label = Style::default()
+        .fg(app.theme.accent)
+        .add_modifier(Modifier::BOLD);
+    let hovered = app.review_editor_toolbar_hover;
+    if hidden_left {
+        let action = ReviewEditorToolbarAction::ScrollLeft;
+        toolbar_hits.push(ReviewEditorToolbarHit {
+            action,
+            x: col,
+            y: footer_y,
+            width: ARROW as u16,
+            height: 1,
+        });
+        footer_spans.push(Span::styled(
+            "‹ ",
+            topbar_overflow_style(app, hovered == Some(action)),
+        ));
+        col = col.saturating_add(ARROW as u16);
+    }
+    for (idx, (key, label, action, width)) in fitted.into_iter().enumerate() {
+        if idx > 0 {
+            footer_spans.push(Span::raw("  "));
+            col = col.saturating_add(2);
+        }
+        toolbar_hits.push(ReviewEditorToolbarHit {
+            action,
+            x: col,
+            y: footer_y,
+            width: width as u16,
+            height: 1,
+        });
+        let is_hover = hovered == Some(action);
+        let label_style = if is_hover { hover_label } else { label_style };
+        if key.is_empty() {
+            footer_spans.push(Span::styled(label, label_style));
+        } else {
+            footer_spans.push(Span::styled(key, key_style));
+            footer_spans.push(Span::styled(format!(" {label}"), label_style));
+        }
+        col = col.saturating_add(width as u16);
+    }
+    if hidden_right {
+        let action = ReviewEditorToolbarAction::ScrollRight;
+        toolbar_hits.push(ReviewEditorToolbarHit {
+            action,
+            x: col,
+            y: footer_y,
+            width: ARROW as u16,
+            height: 1,
+        });
+        footer_spans.push(Span::styled(
+            " ›",
+            topbar_overflow_style(app, hovered == Some(action)),
+        ));
+    }
+    footer_spans.push(Span::raw(" "));
+    app.set_review_editor_toolbar_hits(
+        Some((
+            footer_area.x,
+            footer_area.y,
+            footer_area.width,
+            footer_area.height,
+        )),
+        toolbar_hits,
+    );
+
+    let title = truncate_to_width(&editor.title, popup_width.saturating_sub(4) as usize);
     let mut block = Block::default()
         .title(Span::styled(
-            editor.title,
+            title,
             Style::default()
                 .fg(app.theme.accent)
                 .add_modifier(Modifier::BOLD),
-        ))
-        .title_bottom(Span::styled(
-            format!(" {} ", footer_parts.join(" | ")),
-            Style::default().fg(app.theme.text_muted),
         ))
         .borders(Borders::ALL)
         .border_type(ratatui::widgets::BorderType::Rounded)
@@ -5064,22 +5401,9 @@ fn draw_review_editor_overlay(frame: &mut Frame, app: &mut App) {
 
     let inner = block.inner(popup_area);
     frame.render_widget(block, popup_area);
+    frame.render_widget(Paragraph::new(Line::from(footer_spans)), footer_area);
 
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(1)])
-        .split(inner);
-
-    let anchor_line = Paragraph::new(Line::from(vec![
-        Span::styled(" ", Style::default().fg(app.theme.text_muted)),
-        Span::styled(
-            editor.anchor_label,
-            Style::default().fg(app.theme.text_muted),
-        ),
-    ]));
-    frame.render_widget(anchor_line, chunks[0]);
-
-    let text_area = chunks[1];
+    let text_area = inner;
     let padded_text_area = text_area.inner(ratatui::layout::Margin {
         horizontal: 1,
         vertical: 0,
@@ -6195,7 +6519,8 @@ mod tests {
             .iter()
             .map(|span| span.content.as_ref())
             .collect::<String>();
-        assert!(text.contains("›  +"));
+        assert!(text.contains('›'));
+        assert!(text.contains(" + "));
         assert!(app.topbar_scroll_right_hit.is_some());
         assert!(app.topbar_plus_hit.is_some());
 
