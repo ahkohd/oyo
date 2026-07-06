@@ -133,11 +133,12 @@ In preview view:
 - Markdown files render as Markdown
 - JSON, YAML and TOML files show an interactive tree
 - CSV files show a table
+- PNG, JPEG, GIF, WebP and BMP files show an image preview in preview view
 - other text files show source text with syntax highlighting when syntax is on
 - source, Markdown, CSV and structured previews show change bars when `ui.diff.preview_change_bars` is on
 - deleted files preview the old side
 - other files preview the new side
-- the top-right toggle switches rendered files between preview and source
+- the top-right toggle switches Markdown, CSV and structured previews between preview and source
 
 In JSON, YAML and TOML preview:
 

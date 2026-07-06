@@ -64,7 +64,7 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
         app.clamp_horizontal_scroll_cached(visible_width);
     }
     if app.current_file_is_binary() {
-        render_empty_state(frame, area, &app.theme, false, true);
+        super::render_binary_empty_state(frame, app, area);
         return;
     }
 

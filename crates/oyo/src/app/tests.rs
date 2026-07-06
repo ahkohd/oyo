@@ -180,6 +180,20 @@ fn split_selection_comment_uses_selected_side() {
 }
 
 #[test]
+fn entering_image_file_keeps_current_view_mode() {
+    let diff = MultiFileDiff::from_file_pair(
+        std::path::PathBuf::from("image.png"),
+        std::path::PathBuf::from("image.png"),
+        String::new(),
+        String::new(),
+    );
+    let mut app = App::new(diff, ViewMode::UnifiedPane, 100, false, None);
+    app.handle_file_enter();
+
+    assert_eq!(app.view_mode, ViewMode::UnifiedPane);
+}
+
+#[test]
 fn selecting_file_discards_review_editor() {
     let diff = MultiFileDiff::from_file_pairs(vec![
         (

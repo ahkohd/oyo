@@ -403,7 +403,9 @@ impl App {
             .selection_actions
             .len()
             .saturating_add(2)
-            .saturating_add(usize::from(self.review_mode()));
+            .saturating_add(usize::from(
+                self.review_mode() && self.view_mode != ViewMode::Preview,
+            ));
         let max_scroll = action_count.saturating_sub(1);
         let old = self.selection_toolbar_scroll.min(max_scroll);
         let next = if delta.is_negative() {
@@ -435,6 +437,9 @@ impl App {
                 true
             }
             SelectionToolbarAction::Comment => {
+                if self.view_mode == ViewMode::Preview {
+                    return false;
+                }
                 if !self.start_line_comment_for_selection() {
                     self.start_line_comment();
                 }

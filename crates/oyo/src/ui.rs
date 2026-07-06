@@ -414,6 +414,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     app.preview_toggle_hit = None;
     app.topbar_sidebar_toggle_hit = None;
     app.status_mode_hit = None;
+    app.binary_preview_hit = None;
     app.topbar_area = None;
 
     if app.multi_diff.file_count() == 0 {
@@ -656,18 +657,6 @@ fn reskin_toast(
 fn draw_preview_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
     let mode = " PREVIEW ";
     let path = app.current_file_path();
-    let state = if preview_can_render_markdown(app)
-        || preview_structured_kind(app).is_some()
-        || preview_can_render_csv(app)
-    {
-        if app.active_preview_rendered() {
-            "preview"
-        } else {
-            "source"
-        }
-    } else {
-        "source"
-    };
     app.status_mode_hit = Some((area.x, area.y, text_width(mode) as u16, 1));
     let available_width = area.width as usize;
     let left_width = (available_width * 4) / 10;
@@ -695,13 +684,66 @@ fn draw_preview_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
         ),
         center_width,
     );
-    let right_spans = pad_spans_right(
-        vec![Span::styled(
-            state,
-            Style::default().fg(app.theme.text_muted),
-        )],
-        right_width,
-    );
+
+    let mut right_spans = Vec::new();
+    let mut comments_hit: Option<(usize, usize)> = None;
+    let comment_count = app.review_comment_count();
+    if comment_count > 0 || app.review_editor_active() {
+        let comments_label = match comment_count {
+            0 => "no comment".to_string(),
+            1 => "1 comment".to_string(),
+            n => format!("{n} comments"),
+        };
+        let start = spans_width(&right_spans);
+        let width = text_width(&comments_label);
+        comments_hit = Some((start, width));
+        let mut style = Style::default().fg(if app.status_comments_hover {
+            app.theme.accent
+        } else {
+            app.theme.text_muted
+        });
+        if app.status_comments_hover {
+            style = style.add_modifier(Modifier::BOLD);
+        }
+        right_spans.push(Span::styled(comments_label, style));
+        right_spans.push(Span::raw("  "));
+    }
+    let file_count = app.multi_diff.file_count();
+    let current_file = app.multi_diff.selected_index + 1;
+    let file_label = format!("file {}/{}", current_file, file_count);
+    let file_start = spans_width(&right_spans);
+    let file_width = text_width(&file_label);
+    let mut file_style = Style::default().fg(if app.status_file_hover {
+        app.theme.accent
+    } else {
+        app.theme.text_muted
+    });
+    if app.status_file_hover {
+        file_style = file_style.add_modifier(Modifier::BOLD);
+    }
+    right_spans.push(Span::styled(file_label, file_style));
+    right_spans.push(Span::raw(" "));
+
+    let right_raw_width = spans_width(&right_spans);
+    if right_raw_width <= right_width {
+        let right_x = area.x.saturating_add((left_width + center_width) as u16);
+        let pad = right_width.saturating_sub(right_raw_width);
+        if let Some((start, width)) = comments_hit {
+            app.status_comments_hit = Some((
+                right_x.saturating_add((pad + start) as u16),
+                area.y,
+                width as u16,
+                1,
+            ));
+        }
+        app.status_file_hit = Some((
+            right_x.saturating_add((pad + file_start) as u16),
+            area.y,
+            file_width as u16,
+            1,
+        ));
+    }
+    let right_spans = pad_spans_right(clamp_spans_to_width(&right_spans, right_width), right_width);
     let mut spans = Vec::new();
     spans.extend(left_spans);
     spans.extend(center_spans);
@@ -1182,6 +1224,9 @@ fn topbar_sidebar_toggle_spans(app: &App) -> Vec<Span<'static>> {
 }
 
 fn preview_topbar_spans(app: &App) -> Vec<Span<'static>> {
+    if preview_can_render_image(app) {
+        return Vec::new();
+    }
     if preview_can_render_markdown(app)
         || preview_structured_kind(app).is_some()
         || preview_can_render_csv(app)
@@ -1240,6 +1285,18 @@ fn preview_can_render_markdown(app: &App) -> bool {
             .map(|file| is_markdown_name(&file.display_name))
             .unwrap_or(false),
         None => false,
+    }
+}
+
+fn preview_can_render_image(app: &App) -> bool {
+    match app.active_topbar_content() {
+        Some(TopbarTabContent::File(index)) => app
+            .multi_diff
+            .files
+            .get(index)
+            .map(|file| is_image_name(&file.display_name))
+            .unwrap_or(false),
+        _ => false,
     }
 }
 
@@ -2456,67 +2513,75 @@ fn render_preview(frame: &mut Frame, app: &mut App, area: Rect) {
         frame.render_widget(Block::default().style(Style::default().bg(bg)), area);
     }
     let (content_area, scrollbar_area) = reserve_diff_scrollbar_lane(app, area);
-    let (title, text, side, binary, base_dir) = preview_document(app);
+    let (title, text, side, binary, base_dir, image_path) = preview_document(app);
     app.clear_preview_link_boxes();
     // Number of leading lines pinned to the top (CSV header and separator).
     let mut sticky_rows = 0usize;
-    let (mut lines, links) = if binary {
-        (
-            vec![
-                Line::from(Span::styled(
-                    title,
-                    Style::default()
-                        .fg(app.theme.text)
-                        .add_modifier(Modifier::BOLD),
-                )),
-                Line::from(""),
-                Line::from(Span::styled(
-                    "Preview is not available for binary files.",
-                    Style::default().fg(app.theme.text_muted),
-                )),
-            ],
-            Vec::new(),
-        )
-    } else if let Some(kind) =
-        preview_structured_kind(app).filter(|_| app.active_preview_rendered())
-    {
-        let change_bars = structured_preview_change_bars(app, kind, side);
-        structured_preview_lines(
-            &title,
-            &text,
-            app,
-            content_area.width as usize,
-            content_area.height as usize,
-            kind,
-            change_bars.as_ref(),
-        )
-    } else if preview_can_render_csv(app) && app.active_preview_rendered() {
-        // Pin the top padding, header, and separator to the top.
-        sticky_rows = 3;
-        let change_bars = preview_change_bars(app, side);
-        csv_preview_lines(
-            &title,
-            &text,
-            app,
-            content_area.width as usize,
-            change_bars.as_ref(),
-        )
-    } else if preview_can_render_markdown(app) && app.active_preview_rendered() {
-        let change_bars = preview_change_bars(app, side);
-        markdown_preview_lines(
-            &text,
-            app,
-            content_area.width as usize,
-            base_dir.as_deref(),
-            change_bars.as_ref(),
-        )
-    } else {
-        let change_bars = preview_change_bars(app, side);
-        (
-            source_preview_lines(app, &title, &text, side, change_bars.as_ref()),
-            Vec::new(),
-        )
-    };
+    let (mut lines, links) =
+        if let Some(path) = image_path.filter(|_| app.active_preview_rendered()) {
+            image_file_preview_lines(
+                &path,
+                content_area.width as usize,
+                content_area.height as usize,
+                &app.theme,
+            )
+        } else if binary {
+            (
+                vec![
+                    Line::from(Span::styled(
+                        title,
+                        Style::default()
+                            .fg(app.theme.text)
+                            .add_modifier(Modifier::BOLD),
+                    )),
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        "Preview is not available for binary files.",
+                        Style::default().fg(app.theme.text_muted),
+                    )),
+                ],
+                Vec::new(),
+            )
+        } else if let Some(kind) =
+            preview_structured_kind(app).filter(|_| app.active_preview_rendered())
+        {
+            let change_bars = structured_preview_change_bars(app, kind, side);
+            structured_preview_lines(
+                &title,
+                &text,
+                app,
+                content_area.width as usize,
+                content_area.height as usize,
+                kind,
+                change_bars.as_ref(),
+            )
+        } else if preview_can_render_csv(app) && app.active_preview_rendered() {
+            // Pin the top padding, header, and separator to the top.
+            sticky_rows = 3;
+            let change_bars = preview_change_bars(app, side);
+            csv_preview_lines(
+                &title,
+                &text,
+                app,
+                content_area.width as usize,
+                change_bars.as_ref(),
+            )
+        } else if preview_can_render_markdown(app) && app.active_preview_rendered() {
+            let change_bars = preview_change_bars(app, side);
+            markdown_preview_lines(
+                &text,
+                app,
+                content_area.width as usize,
+                base_dir.as_deref(),
+                change_bars.as_ref(),
+            )
+        } else {
+            let change_bars = preview_change_bars(app, side);
+            (
+                source_preview_lines(app, &title, &text, side, change_bars.as_ref()),
+                Vec::new(),
+            )
+        };
     app.set_preview_search_lines(preview_search_text_lines(&lines));
     highlight_preview_search_lines(app, &mut lines);
     let visible_lines = content_area.height as usize;
@@ -2618,14 +2683,28 @@ fn line_text(line: &Line<'static>) -> String {
         .collect()
 }
 
-fn preview_document(app: &App) -> (String, String, Option<SyntaxSide>, bool, Option<PathBuf>) {
+fn preview_document(
+    app: &App,
+) -> (
+    String,
+    String,
+    Option<SyntaxSide>,
+    bool,
+    Option<PathBuf>,
+    Option<PathBuf>,
+) {
     match app.active_topbar_content() {
-        Some(TopbarTabContent::Help) => {
-            ("Help.md".to_string(), help_markdown(app), None, false, None)
-        }
+        Some(TopbarTabContent::Help) => (
+            "Help.md".to_string(),
+            help_markdown(app),
+            None,
+            false,
+            None,
+            None,
+        ),
         Some(TopbarTabContent::File(index)) => {
             let Some(file) = app.multi_diff.files.get(index) else {
-                return (String::new(), String::new(), None, false, None);
+                return (String::new(), String::new(), None, false, None, None);
             };
             let side = if matches!(file.status, FileStatus::Deleted) {
                 SyntaxSide::Old
@@ -2644,20 +2723,28 @@ fn preview_document(app: &App) -> (String, String, Option<SyntaxSide>, bool, Opt
                 SyntaxSide::Old => FileSide::Old,
                 SyntaxSide::New => FileSide::New,
             };
-            let base_dir = app
+            let source_path = app
                 .multi_diff
-                .source_path(index, file_side)
-                .or_else(|| Some(PathBuf::from(&file.display_name)))
+                .existing_source_path(index, file_side)
+                .or_else(|| app.multi_diff.source_path(index, file_side))
+                .or_else(|| Some(PathBuf::from(&file.display_name)));
+            let base_dir = source_path
+                .as_ref()
                 .and_then(|path| path.parent().map(Path::to_path_buf));
+            let image_path = is_image_name(&file.display_name)
+                .then(|| source_path.clone())
+                .flatten()
+                .filter(|path| path.is_file());
             (
                 file.display_name.clone(),
                 text,
                 Some(side),
                 file.binary,
                 base_dir,
+                image_path,
             )
         }
-        None => (String::new(), String::new(), None, false, None),
+        None => (String::new(), String::new(), None, false, None, None),
     }
 }
 
@@ -4187,7 +4274,7 @@ impl<'a> MarkdownRenderer<'a> {
             .background
             .or(self.theme.background_panel)
             .unwrap_or(Color::Black);
-        let Some(image_lines) = image_preview_lines(&path, self.width, bg) else {
+        let Some(image_lines) = image_preview_lines(&path, self.width, 20, bg) else {
             let mut line = vec![Span::styled(
                 image_fallback_label(&image.alt, &image.dest_url),
                 self.styles.muted,
@@ -4319,15 +4406,44 @@ fn image_fallback_label(alt: &str, url: &str) -> String {
     }
 }
 
-fn image_preview_lines(path: &Path, max_width: usize, bg: Color) -> Option<Vec<Line<'static>>> {
-    const MAX_IMAGE_ROWS: u32 = 20;
+fn image_file_preview_lines(
+    path: &Path,
+    max_width: usize,
+    max_rows: usize,
+    theme: &crate::config::ResolvedTheme,
+) -> (Vec<Line<'static>>, Vec<PreviewLink>) {
+    let bg = theme
+        .background
+        .or(theme.background_panel)
+        .unwrap_or(Color::Black);
+    let lines = image_preview_lines(path, max_width, max_rows, bg).unwrap_or_else(|| {
+        vec![
+            Line::from(Span::styled(
+                "Could not render image preview.",
+                Style::default().fg(theme.warning),
+            )),
+            Line::from(Span::styled(
+                path.display().to_string(),
+                Style::default().fg(theme.text_muted),
+            )),
+        ]
+    });
+    (lines, Vec::new())
+}
+
+fn image_preview_lines(
+    path: &Path,
+    max_width: usize,
+    max_rows: usize,
+    bg: Color,
+) -> Option<Vec<Line<'static>>> {
     let image = image::ImageReader::open(path).ok()?.decode().ok()?;
     let (width, height) = image.dimensions();
-    if width == 0 || height == 0 || max_width == 0 {
+    if width == 0 || height == 0 || max_width == 0 || max_rows == 0 {
         return None;
     }
     let max_cols = max_width.clamp(1, 80) as u32;
-    let max_pixel_rows = MAX_IMAGE_ROWS * 2;
+    let max_pixel_rows = (max_rows as u32).saturating_mul(2).max(1);
     let scale = (max_cols as f32 / width as f32)
         .min(max_pixel_rows as f32 / height as f32)
         .min(1.0);
@@ -4512,6 +4628,13 @@ fn is_csv_name(name: &str) -> bool {
     name.to_ascii_lowercase().ends_with(".csv")
 }
 
+fn is_image_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"]
+        .iter()
+        .any(|ext| lower.ends_with(ext))
+}
+
 fn help_markdown(app: &App) -> String {
     let mut out = String::new();
     out.push_str("# Oyo help\n\n");
@@ -4536,7 +4659,7 @@ fn help_markdown(app: &App) -> String {
 
     out.push_str("## Tabs and preview\n\n");
     out.push_str("Each tab is a separate view. The same file can be open in more than one tab. Each tab keeps its own view mode, step mode and scroll position.\n\n");
-    out.push_str("Preview mode shows file content instead of a diff. Markdown files open as rendered Markdown. Use the top-right `source` or `preview` button to switch between source and preview.\n\n");
+    out.push_str("Preview mode shows file content instead of a diff. Markdown and image files open as rendered previews. Markdown, CSV and structured previews can switch between source and preview.\n\n");
 
     out.push_str("## Keybindings\n\n");
     out.push_str("These are your active keybindings, including config overrides.\n\n");
@@ -4771,7 +4894,12 @@ fn draw_review_line_add_button(frame: &mut Frame, app: &mut App) {
     let Some(row) = app.review_line_add_row else {
         return;
     };
-    if !app.review_mode() || app.review_editor_active() || app.selection_toolbar_visible() {
+    if !app.review_mode()
+        || app.view_mode == ViewMode::Preview
+        || app.current_file_is_binary()
+        || app.review_editor_active()
+        || app.selection_toolbar_visible()
+    {
         return;
     }
     let Some((_, y, _, height)) = app.diff_view_area else {
@@ -4829,7 +4957,7 @@ fn draw_selection_toolbar(frame: &mut Frame, app: &mut App) {
         "copy".to_string(),
         SelectionToolbarAction::Copy,
     )];
-    if app.review_mode() {
+    if app.review_mode() && app.view_mode != ViewMode::Preview {
         items.push((
             "m".to_string(),
             "comment".to_string(),
@@ -6415,14 +6543,16 @@ fn draw_file_search_popover(frame: &mut Frame, app: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::{counted_binding_label, MarkdownRenderer, MarkdownStyles};
-    use crate::app::{App, ViewMode};
+    use crate::app::{App, SelectionToolbarAction, ViewMode};
     use crate::config::ResolvedTheme;
     use crate::structured_preview::StructuredPreviewKind;
     use crate::syntax::SyntaxSide;
     use oyo_core::MultiFileDiff;
+    use ratatui::backend::TestBackend;
     use ratatui::layout::Rect;
     use ratatui::style::{Modifier, Style};
     use ratatui::text::Line;
+    use ratatui::Terminal;
     use std::collections::HashMap;
 
     /// Render Markdown through the real preview renderer without needing an
@@ -6643,6 +6773,106 @@ mod tests {
     }
 
     #[test]
+    fn image_files_are_renderable_previews() {
+        let multi = MultiFileDiff::from_file_pair(
+            std::path::PathBuf::from("image.png"),
+            std::path::PathBuf::from("image.png"),
+            String::new(),
+            String::new(),
+        );
+        let app = App::new(multi, ViewMode::Preview, 50, false, None);
+        assert!(super::preview_can_render_image(&app));
+    }
+
+    #[test]
+    fn image_preview_topbar_has_no_source_toggle() {
+        let multi = MultiFileDiff::from_file_pair(
+            std::path::PathBuf::from("image.png"),
+            std::path::PathBuf::from("image.png"),
+            String::new(),
+            String::new(),
+        );
+        let mut app = App::new(multi, ViewMode::Preview, 50, false, None);
+        let backend = TestBackend::new(50, 1);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| super::draw_top_bar(frame, &mut app, Rect::new(0, 0, 50, 1)))
+            .unwrap();
+        let text = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(!text.contains("source"), "topbar text: {text:?}");
+        assert!(app.preview_toggle_hit.is_none());
+    }
+
+    #[test]
+    fn preview_status_bar_has_no_render_state_label() {
+        let multi = MultiFileDiff::from_file_pair(
+            std::path::PathBuf::from("README.md"),
+            std::path::PathBuf::from("README.md"),
+            "old\n".to_string(),
+            "new\n".to_string(),
+        );
+        let mut app = App::new(multi, ViewMode::UnifiedPane, 50, false, None);
+        app.enable_review_mode();
+        app.start_line_comment();
+        app.review_insert_char('x');
+        app.review_save_editor();
+        app.view_mode = ViewMode::Preview;
+        let backend = TestBackend::new(50, 1);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| super::draw_preview_status_bar(frame, &mut app, Rect::new(0, 0, 50, 1)))
+            .unwrap();
+        let text = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(!text.contains("source"), "status text: {text:?}");
+        assert!(!text.contains("preview"), "status text: {text:?}");
+        assert!(text.contains("1 comment"), "status text: {text:?}");
+        assert!(text.contains("file 1/1"), "status text: {text:?}");
+        assert!(app.status_comments_hit.is_some());
+        assert!(app.status_file_hit.is_some());
+    }
+
+    #[test]
+    fn preview_selection_toolbar_hides_comment_action() {
+        let multi = MultiFileDiff::from_file_pair(
+            std::path::PathBuf::from("a.txt"),
+            std::path::PathBuf::from("a.txt"),
+            "old\n".to_string(),
+            "new\n".to_string(),
+        );
+        let mut app = App::new(multi, ViewMode::Preview, 50, false, None);
+        app.enable_review_mode();
+        app.diff_view_area = Some((0, 0, 50, 5));
+        app.set_diff_selection_cells(vec![vec!["x".to_string(); 50]; 5]);
+        assert!(app.start_diff_selection(0, 0));
+        assert!(app.finish_diff_selection(1, 0));
+
+        let backend = TestBackend::new(50, 5);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| super::draw_selection_toolbar(frame, &mut app))
+            .unwrap();
+
+        assert!(!app
+            .selection_toolbar_hits
+            .iter()
+            .any(|hit| hit.action == SelectionToolbarAction::Comment));
+    }
+
+    #[test]
     fn blame_age_legend_labels_use_subtle_style() {
         let multi = MultiFileDiff::from_file_pair(
             std::path::PathBuf::from("old.txt"),
@@ -6694,7 +6924,7 @@ mod tests {
             env!("CARGO_MANIFEST_DIR"),
             "/../../docs/assets/preview.png"
         ));
-        let lines = super::image_preview_lines(path, 16, ratatui::style::Color::Black)
+        let lines = super::image_preview_lines(path, 16, 20, ratatui::style::Color::Black)
             .expect("image should render");
         assert!(
             lines

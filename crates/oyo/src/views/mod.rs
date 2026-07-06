@@ -23,6 +23,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::app::{diff_scrollbar_thumb, App, DiffScrollbarState};
+use crate::keybindings::GlobalAction;
 use oyo_core::{LineKind, ViewLine, ViewSpan};
 use ratatui::{
     layout::{Margin, Rect},
@@ -1471,6 +1472,56 @@ fn should_strikethrough(phase: AnimationPhase, progress: f32, backward: bool) ->
     }
 }
 
+pub(crate) fn render_binary_empty_state(frame: &mut Frame, app: &mut App, area: Rect) {
+    app.binary_preview_hit = None;
+    if !app.current_file_is_image() {
+        render_empty_state_text(
+            frame,
+            area,
+            &app.theme,
+            "Binary file (preview disabled)",
+            false,
+        );
+        return;
+    }
+
+    if let Some(bg) = app.theme.background {
+        let bg_fill = Paragraph::new("").style(Style::default().bg(bg));
+        frame.render_widget(bg_fill, area);
+    }
+
+    let key = app
+        .keybindings
+        .global_keys(GlobalAction::OpenCommandPalette);
+    let label = "preview";
+    let width = key.width().saturating_add(1).saturating_add(label.width());
+    let y = area.y.saturating_add(area.height.saturating_sub(1) / 2);
+    let x = area
+        .x
+        .saturating_add(area.width.saturating_sub(width as u16) / 2);
+    app.binary_preview_hit = Some((x, y, width.min(area.width as usize) as u16, 1));
+
+    let key_style = Style::default()
+        .fg(app.theme.accent)
+        .add_modifier(Modifier::BOLD);
+    let label_style = if app.binary_preview_hover {
+        Style::default()
+            .fg(app.theme.accent)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(app.theme.text_muted)
+    };
+    let line = Line::from(vec![
+        Span::styled(key, key_style),
+        Span::raw(" "),
+        Span::styled(label.to_string(), label_style),
+    ]);
+    frame.render_widget(
+        Paragraph::new(line).alignment(Alignment::Center),
+        Rect::new(area.x, y, area.width, 1),
+    );
+}
+
 /// Render empty state message centered in area.
 /// Shows hint line only if viewport has enough height and width.
 fn render_empty_state(
@@ -1480,12 +1531,6 @@ fn render_empty_state(
     has_changes: bool,
     is_binary: bool,
 ) {
-    // Fill entire area with background
-    if let Some(bg) = theme.background {
-        let bg_fill = Paragraph::new("").style(Style::default().bg(bg));
-        frame.render_widget(bg_fill, area);
-    }
-
     let (primary_text, show_hint) = if is_binary {
         ("Binary file (preview disabled)", false)
     } else if has_changes {
@@ -1493,6 +1538,22 @@ fn render_empty_state(
     } else {
         ("No changes in this file", false)
     };
+    render_empty_state_text(frame, area, theme, primary_text, show_hint);
+}
+
+fn render_empty_state_text(
+    frame: &mut Frame,
+    area: Rect,
+    theme: &ResolvedTheme,
+    primary_text: &str,
+    show_hint: bool,
+) {
+    // Fill entire area with background
+    if let Some(bg) = theme.background {
+        let bg_fill = Paragraph::new("").style(Style::default().bg(bg));
+        frame.render_widget(bg_fill, area);
+    }
+
     let primary = Line::from(Span::styled(
         primary_text,
         Style::default().fg(theme.text_muted),

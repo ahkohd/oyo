@@ -1609,6 +1609,9 @@ fn run_app(
                             if app.handle_preview_link_click(me.column, me.row) {
                                 continue;
                             }
+                            if app.handle_binary_preview_click(me.column, me.row) {
+                                continue;
+                            }
                             if app.handle_structured_preview_click(me.column, me.row) {
                                 continue;
                             }

@@ -16,6 +16,13 @@ fn is_openable_url(url: &str) -> bool {
         .any(|s| url.len() > s.len() && url[..s.len()].eq_ignore_ascii_case(s))
 }
 
+fn is_image_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"]
+        .iter()
+        .any(|ext| lower.ends_with(ext))
+}
+
 /// Open a URL with the operating system's default handler. The URL is passed as
 /// a single argument so it can never be interpreted by a shell.
 fn open_url(url: &str) {
@@ -864,6 +871,23 @@ impl App {
         true
     }
 
+    pub(crate) fn handle_binary_preview_click(&mut self, column: u16, row: u16) -> bool {
+        let hit = self
+            .binary_preview_hit
+            .is_some_and(|(x, y, width, height)| {
+                column >= x
+                    && column < x.saturating_add(width)
+                    && row >= y
+                    && row < y.saturating_add(height)
+            });
+        if !hit {
+            return false;
+        }
+        self.set_view_mode(ViewMode::Preview);
+        self.clear_diff_selection();
+        true
+    }
+
     pub(crate) fn handle_topbar_mouse_down(&mut self, column: u16, row: u16) -> bool {
         self.update_topbar_hover(column, row);
         if self
@@ -1025,6 +1049,14 @@ impl App {
                 && row >= y
                 && row < y.saturating_add(height)
         });
+        let binary_preview_hover = self
+            .binary_preview_hit
+            .is_some_and(|(x, y, width, height)| {
+                column >= x
+                    && column < x.saturating_add(width)
+                    && row >= y
+                    && row < y.saturating_add(height)
+            });
         let file_panel_hover = self.mouse_over_file_panel(column, row);
         let file_panel_mode_toggle_hover =
             self.file_panel_mode_toggle_hit
@@ -1103,6 +1135,7 @@ impl App {
             && self.topbar_sidebar_toggle_hover == sidebar_hover
             && self.status_comments_hover == status_comments_hover
             && self.status_file_hover == status_file_hover
+            && self.binary_preview_hover == binary_preview_hover
             && self.file_list_hover == file_hover
             && self.file_panel_hover == file_panel_hover
             && self.file_panel_mode_toggle_hover == file_panel_mode_toggle_hover
@@ -1132,6 +1165,7 @@ impl App {
         self.topbar_sidebar_toggle_hover = sidebar_hover;
         self.status_comments_hover = status_comments_hover;
         self.status_file_hover = status_file_hover;
+        self.binary_preview_hover = binary_preview_hover;
         self.file_list_hover = file_hover;
         self.file_panel_hover = file_panel_hover;
         self.file_panel_mode_toggle_hover = file_panel_mode_toggle_hover;
@@ -1724,6 +1758,12 @@ impl App {
 
     pub fn current_file_is_binary(&self) -> bool {
         self.multi_diff.current_file_is_binary()
+    }
+
+    pub(crate) fn current_file_is_image(&self) -> bool {
+        self.multi_diff
+            .current_file()
+            .is_some_and(|file| is_image_name(&file.display_name))
     }
 }
 

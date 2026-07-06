@@ -51,7 +51,7 @@ You can also press `s` in the TUI, or set `stepping = true` in config.
 - unified, split, evolution, blame and preview views
 - tabs for multiple views
 - mouse support
-- Markdown, JSON, YAML, TOML and CSV previews
+- Markdown, JSON, YAML, TOML, CSV and image previews
 - inline review comments
 - visual text selection with copy, comments and command actions
 - word-level diffing

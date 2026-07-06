@@ -77,6 +77,27 @@ fn count_occurrences(haystack: &str, needle: &str) -> usize {
     haystack.match_indices(needle).count()
 }
 
+#[test]
+fn binary_image_empty_state_points_to_preview() {
+    let diff = MultiFileDiff::from_file_pair_bytes(
+        PathBuf::from("image.png"),
+        vec![0xff, 0x00],
+        vec![0xff, 0x01],
+    );
+    let mut app = App::new(diff, ViewMode::UnifiedPane, 200, false, None);
+    let text = buffer_text(&render_buffer(&mut app, 40, 5)).join("\n");
+
+    assert!(text.contains("ctrl-p preview"), "empty state: {text}");
+    assert!(!text.contains("preview disabled"), "empty state: {text}");
+    app.enable_review_mode();
+    app.diff_view_area = Some((0, 0, 40, 5));
+    app.set_diff_selection_cells(vec![vec!["x".to_string(); 40]; 5]);
+    assert_eq!(app.review_line_add_hover_at(38, 2), (None, false));
+    let (x, y, width, _) = app.binary_preview_hit.expect("preview action hitbox");
+    assert!(app.handle_binary_preview_click(x + width / 2, y));
+    assert_eq!(app.view_mode, ViewMode::Preview);
+}
+
 fn column_contains(buf: &Buffer, x: u16, needle: &str) -> bool {
     for y in 0..buf.area.height {
         if buf[(x, y)].symbol() == needle {

@@ -398,7 +398,7 @@ pub fn render_split(frame: &mut Frame, app: &mut App, area: Rect) {
     let (area, scrollbar_area) = super::reserve_diff_scrollbar_lane(app, area);
     let visible_height = area.height as usize;
     if app.current_file_is_binary() {
-        render_empty_state(frame, area, &app.theme, false, true);
+        super::render_binary_empty_state(frame, app, area);
         return;
     }
     if app.line_wrap {

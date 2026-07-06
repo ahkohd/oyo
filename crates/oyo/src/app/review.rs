@@ -1000,7 +1000,12 @@ impl App {
     }
 
     pub(crate) fn review_line_add_hover_at(&self, column: u16, row: u16) -> (Option<u16>, bool) {
-        if !self.review_mode || self.review_editor.is_some() || self.selection_toolbar_visible() {
+        if !self.review_mode
+            || self.view_mode == ViewMode::Preview
+            || self.current_file_is_binary()
+            || self.review_editor.is_some()
+            || self.selection_toolbar_visible()
+        {
             return (None, false);
         }
         let Some((x, y, width, height)) = self.diff_view_area else {
