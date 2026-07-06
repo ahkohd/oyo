@@ -4588,36 +4588,27 @@ fn help_markdown(app: &App) -> String {
     append_embedded_doc(
         &mut out,
         "Configuration reference",
-        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/CONFIG.md")),
+        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/CONFIG.md")),
     );
     append_embedded_doc(
         &mut out,
         "Diff viewer reference",
-        include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../docs/DIFF_VIEWER.md"
-        )),
+        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/DIFF_VIEWER.md")),
     );
     append_embedded_doc(
         &mut out,
         "Keybindings reference",
-        include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../docs/KEYBINDINGS.md"
-        )),
+        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/KEYBINDINGS.md")),
     );
     append_embedded_doc(
         &mut out,
         "Review hooks reference",
-        include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../docs/REVIEW_HOOKS.md"
-        )),
+        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/REVIEW_HOOKS.md")),
     );
     append_embedded_doc(
         &mut out,
         "Theme reference",
-        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/THEME.md")),
+        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/THEME.md")),
     );
     out
 }

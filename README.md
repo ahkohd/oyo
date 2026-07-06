@@ -268,11 +268,13 @@ Full keybinding and mouse reference: [keybindings](./docs/KEYBINDINGS.md).
 
 Selection works with mouse drag or `v`, `V` and `ctrl-v`. Press `y` to copy and `esc` to clear.
 
-Clipboard support uses system tools:
+Clipboard support first uses system tools:
 
 - `pbcopy` on macOS
 - `wl-copy`, `xclip` or `xsel` on Linux
 - `clip` on Windows
+
+If those fail, Oyo falls back to OSC 52 terminal clipboard support.
 
 ## Configure Oyo
 

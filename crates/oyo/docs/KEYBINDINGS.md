@@ -1,0 +1,1 @@
+../../../docs/KEYBINDINGS.md
