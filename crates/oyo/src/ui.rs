@@ -456,13 +456,12 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     app.no_changes_quit_hit = None;
     app.topbar_area = None;
 
-    if app.multi_diff.file_count() == 0 {
+    if app.multi_diff.file_count() == 0
+        && app.active_topbar_content() != Some(TopbarTabContent::Help)
+    {
         app.clear_diff_selection();
         app.set_diff_selection_cells(Vec::new());
         draw_no_changes(frame, app, frame.area());
-        if app.show_help {
-            draw_help_popover(frame, app);
-        }
         draw_toasts(frame, app);
         return;
     }
@@ -1346,7 +1345,6 @@ fn topbar_tab_spans(app: &mut App, area: Rect, max_width: usize) -> Vec<Span<'st
     app.topbar_scroll_left_hit = None;
     app.topbar_scroll_right_hit = None;
 
-    let closeable = app.topbar_tabs.len() > 1;
     let active = app.active_topbar_tab;
     let drag_target = app
         .topbar_drag_target
@@ -1408,6 +1406,7 @@ fn topbar_tab_spans(app: &mut App, area: Rect, max_width: usize) -> Vec<Span<'st
             }
             TopbarTabContent::Help => ("Help".to_string(), ""),
         };
+        let closeable = app.topbar_close_allowed(tab.id);
         let show_close = closeable && app.topbar_hover_tab == Some(tab.id);
         let close = if closeable {
             if show_close {
@@ -4829,7 +4828,9 @@ fn append_embedded_doc(out: &mut String, title: &str, text: &str) {
 }
 
 fn draw_diff_view(frame: &mut Frame, app: &mut App, area: Rect) {
-    if app.multi_diff.file_count() == 0 {
+    if app.multi_diff.file_count() == 0
+        && app.active_topbar_content() != Some(TopbarTabContent::Help)
+    {
         draw_no_changes(frame, app, area);
         return;
     }

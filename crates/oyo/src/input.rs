@@ -1,4 +1,4 @@
-use crate::app::{App, ViewMode};
+use crate::app::{App, TopbarTabContent, ViewMode};
 use crate::config;
 use crate::keybindings::{
     Dispatch, FileFilterAction, GlobalAction, HelpAction, LineInputAction, NormalAction,
@@ -385,6 +385,7 @@ fn dispatch_normal_action(
     editor_config: &config::EditorConfig,
 ) -> Result<()> {
     if app.multi_diff.file_count() == 0
+        && app.active_topbar_content() != Some(TopbarTabContent::Help)
         && !matches!(
             action,
             NormalAction::Quit | NormalAction::Refresh | NormalAction::ToggleHelp

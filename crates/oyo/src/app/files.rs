@@ -245,8 +245,12 @@ impl App {
     pub(crate) fn ensure_topbar_tabs(&mut self) {
         let count = self.multi_diff.file_count();
         if count == 0 {
-            self.topbar_tabs.clear();
-            self.active_topbar_tab = None;
+            self.topbar_tabs
+                .retain(|tab| matches!(tab.content, TopbarTabContent::Help));
+            self.active_topbar_tab = self
+                .active_topbar_tab
+                .filter(|id| self.topbar_tabs.iter().any(|tab| tab.id == *id))
+                .or_else(|| self.topbar_tabs.first().map(|tab| tab.id));
             self.topbar_drag_target = None;
             return;
         }
@@ -392,13 +396,36 @@ impl App {
         self.active_topbar_tab = Some(id);
     }
 
+    pub(crate) fn topbar_close_allowed(&self, tab_id: usize) -> bool {
+        if self.topbar_tabs.len() > 1 {
+            return true;
+        }
+        self.multi_diff.file_count() == 0
+            && self
+                .topbar_tabs
+                .iter()
+                .any(|tab| tab.id == tab_id && tab.content == TopbarTabContent::Help)
+    }
+
     fn close_topbar_tab(&mut self, tab_id: usize) {
-        if self.topbar_tabs.len() <= 1 {
+        if !self.topbar_close_allowed(tab_id) {
             return;
         }
         let Some(pos) = self.topbar_tabs.iter().position(|tab| tab.id == tab_id) else {
             return;
         };
+        if self.topbar_tabs.len() == 1 {
+            self.structured_previews.remove(&tab_id);
+            self.csv_previews.remove(&tab_id);
+            self.topbar_tabs.clear();
+            self.active_topbar_tab = None;
+            self.topbar_hover_tab = None;
+            self.topbar_hover_close = None;
+            self.view_mode = ViewMode::UnifiedPane;
+            self.scroll_offset = 0;
+            self.horizontal_scroll = 0;
+            return;
+        }
         self.structured_previews.remove(&tab_id);
         self.csv_previews.remove(&tab_id);
         self.topbar_tabs.remove(pos);
@@ -481,10 +508,6 @@ impl App {
     }
 
     pub(crate) fn open_help_tab(&mut self) {
-        if self.multi_diff.file_count() == 0 {
-            self.toggle_help();
-            return;
-        }
         if let Some(id) = self
             .topbar_tabs
             .iter()
@@ -966,7 +989,7 @@ impl App {
         let Some(hit) = self.topbar_hit(column, row) else {
             return false;
         };
-        if hit.close_col == Some(column) && self.topbar_tabs.len() > 1 {
+        if hit.close_col == Some(column) && self.topbar_close_allowed(hit.tab_id) {
             self.close_topbar_tab(hit.tab_id);
             return true;
         }

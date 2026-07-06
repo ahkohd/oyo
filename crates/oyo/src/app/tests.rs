@@ -1040,6 +1040,28 @@ fn topbar_sidebar_toggle_button_toggles_file_panel() {
 }
 
 #[test]
+fn empty_help_tab_can_close_as_last_tab() {
+    let diff = MultiFileDiff::from_file_pairs(Vec::new());
+    let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+    app.open_help_tab();
+    let tab_id = app.active_topbar_tab.unwrap();
+    app.topbar_tab_hits = vec![TopbarTabHit {
+        tab_id,
+        row: 0,
+        start_col: 0,
+        end_col: 8,
+        close_col: Some(6),
+    }];
+
+    assert!(app.update_topbar_hover(6, 0));
+    assert_eq!(app.topbar_hover_close, Some(tab_id));
+    assert!(app.handle_topbar_mouse_down(6, 0));
+    assert!(app.topbar_tabs.is_empty());
+    assert_eq!(app.active_topbar_content(), None);
+    assert_eq!(app.view_mode, ViewMode::UnifiedPane);
+}
+
+#[test]
 fn topbar_close_keeps_last_tab() {
     let diff = MultiFileDiff::from_file_pairs(vec![
         (
@@ -1109,6 +1131,22 @@ fn topbar_select_replaces_active_tab_file() {
     assert_eq!(topbar_files(&app), vec![1, 1]);
     app.select_file(0);
     assert_eq!(topbar_files(&app), vec![1, 0]);
+}
+
+#[test]
+fn help_opens_as_preview_tab_for_empty_diff() {
+    let diff = MultiFileDiff::from_file_pairs(Vec::new());
+    let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+
+    app.open_help_tab();
+
+    assert!(!app.show_help);
+    assert_eq!(app.view_mode, ViewMode::Preview);
+    assert_eq!(app.active_topbar_content(), Some(TopbarTabContent::Help));
+    assert_eq!(app.topbar_tabs.len(), 1);
+
+    app.ensure_topbar_tabs();
+    assert_eq!(app.active_topbar_content(), Some(TopbarTabContent::Help));
 }
 
 #[test]
