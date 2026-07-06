@@ -44,8 +44,7 @@ use std::time::{Duration, Instant};
 
 const INDEX_REF: &str = "INDEX";
 const MAX_COALESCED_MOUSE_SCROLL_READS: usize = 4096;
-const MAX_DIFF_MOUSE_SCROLL_ACTIONS_PER_FRAME: isize = 16;
-const MAX_DISCRETE_MOUSE_SCROLL_ACTIONS_PER_FRAME: isize = 8;
+const MAX_DISCRETE_MOUSE_SCROLL_ACTIONS_PER_FRAME: isize = 16;
 const MAX_EXIT_INPUT_DRAIN_EVENTS: usize = 65_536;
 const EXIT_INPUT_DRAIN: Duration = Duration::from_millis(100);
 const MOUSE_SCROLL_FRAME: Duration = Duration::from_millis(16);
@@ -870,6 +869,7 @@ fn apply_config_to_app(app: &mut App, config: &config::Config, args: &Args, ligh
         .unwrap_or_else(|| "▐".to_string());
     app.extent_marker_deleted = config.ui.extent_marker_deleted.clone();
     app.theme = config.ui.theme.resolve(light_mode);
+    app.ui_theme_name = config.ui.theme.name.clone();
     app.time_format = TimeFormatter::new(&config.ui.time);
     app.theme_is_light = light_mode;
 
@@ -1575,6 +1575,22 @@ fn run_app(
                         }
                         continue;
                     }
+                    if app.theme_picker_active() {
+                        match me.kind {
+                            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                                if matches!(me.kind, MouseEventKind::ScrollUp) {
+                                    app.move_theme_picker_selection(-1);
+                                } else {
+                                    app.move_theme_picker_selection(1);
+                                }
+                            }
+                            MouseEventKind::Down(MouseButton::Left) => {
+                                app.handle_theme_picker_click(me.column, me.row);
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
                     match me.kind {
                         MouseEventKind::Down(MouseButton::Left) => {
                             if app.handle_no_changes_quit_click(me.column, me.row) {
@@ -1914,19 +1930,22 @@ fn collect_mouse_scroll_delta(
     Ok(delta)
 }
 
-fn mouse_scroll_action_cap(target: MouseScrollTarget) -> isize {
+fn mouse_scroll_action_cap(target: MouseScrollTarget) -> Option<isize> {
     match target {
-        MouseScrollTarget::Diff => MAX_DIFF_MOUSE_SCROLL_ACTIONS_PER_FRAME,
+        MouseScrollTarget::Diff => None,
         MouseScrollTarget::CommandPalette
         | MouseScrollTarget::FileSearch
         | MouseScrollTarget::FilePanel
-        | MouseScrollTarget::Step => MAX_DISCRETE_MOUSE_SCROLL_ACTIONS_PER_FRAME,
+        | MouseScrollTarget::Step => Some(MAX_DISCRETE_MOUSE_SCROLL_ACTIONS_PER_FRAME),
     }
 }
 
 fn clamp_mouse_scroll_delta(target: MouseScrollTarget, delta: isize) -> isize {
-    let cap = mouse_scroll_action_cap(target);
-    delta.clamp(-cap, cap)
+    if let Some(cap) = mouse_scroll_action_cap(target) {
+        delta.clamp(-cap, cap)
+    } else {
+        delta
+    }
 }
 
 fn blocks_mouse_scroll(
@@ -2302,7 +2321,7 @@ mod tests {
         blocks_mouse_scroll, config, detect_input_mode, mouse_horizontal_scroll_delta, parse_range,
         push_pending_mouse_scroll, render_editor_args, update_mouse_scroll_block,
         BlockedMouseScroll, InputMode, MouseScrollTarget, PendingMouseScroll,
-        MAX_DIFF_MOUSE_SCROLL_ACTIONS_PER_FRAME, MAX_DISCRETE_MOUSE_SCROLL_ACTIONS_PER_FRAME,
+        MAX_DISCRETE_MOUSE_SCROLL_ACTIONS_PER_FRAME,
     };
     use crossterm::event::{KeyModifiers, MouseEventKind};
     use std::path::{Path, PathBuf};
@@ -2350,7 +2369,7 @@ mod tests {
     }
 
     #[test]
-    fn mouse_scroll_clamps_and_reverses_pending_delta() {
+    fn mouse_scroll_preserves_diff_delta_and_reverses_pending_delta() {
         let mut pending = None;
 
         assert_eq!(
@@ -2358,10 +2377,14 @@ mod tests {
             None
         );
         assert_eq!(
+            push_pending_mouse_scroll(&mut pending, MouseScrollTarget::Diff, 50),
+            None
+        );
+        assert_eq!(
             pending,
             Some(PendingMouseScroll {
                 target: MouseScrollTarget::Diff,
-                delta: MAX_DIFF_MOUSE_SCROLL_ACTIONS_PER_FRAME,
+                delta: 150,
             })
         );
 
@@ -2409,7 +2432,7 @@ mod tests {
             &mut blocked,
             Some(PendingMouseScroll {
                 target: MouseScrollTarget::Diff,
-                delta: MAX_DIFF_MOUSE_SCROLL_ACTIONS_PER_FRAME,
+                delta: 42,
             }),
             10,
             10,
@@ -2461,7 +2484,7 @@ mod tests {
             &mut blocked,
             Some(PendingMouseScroll {
                 target: MouseScrollTarget::Diff,
-                delta: MAX_DIFF_MOUSE_SCROLL_ACTIONS_PER_FRAME,
+                delta: 42,
             }),
             10,
             20,

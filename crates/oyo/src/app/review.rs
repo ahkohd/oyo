@@ -1903,6 +1903,7 @@ impl App {
         self.touch_review_state();
         self.stop_command_palette();
         self.stop_file_search();
+        self.stop_theme_picker();
         self.stop_file_filter();
         self.clear_search();
         self.clear_goto();

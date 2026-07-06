@@ -999,6 +999,49 @@ fn file_list_scroll_counts_group_rows() {
 }
 
 #[test]
+fn theme_picker_previews_and_restores_on_cancel() {
+    let diff = MultiFileDiff::from_file_pair(
+        std::path::PathBuf::from("a.txt"),
+        std::path::PathBuf::from("a.txt"),
+        "a\n".to_string(),
+        "aa\n".to_string(),
+    );
+    let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+    app.apply_ui_theme("aura");
+
+    app.start_theme_picker();
+    app.push_theme_picker_char('n');
+    app.push_theme_picker_char('o');
+    app.push_theme_picker_char('r');
+
+    assert!(app.theme_picker_active());
+    assert_eq!(app.ui_theme_name.as_deref(), Some("nord"));
+    app.stop_theme_picker();
+    assert_eq!(app.ui_theme_name.as_deref(), Some("aura"));
+}
+
+#[test]
+fn theme_picker_accept_keeps_previewed_theme() {
+    let diff = MultiFileDiff::from_file_pair(
+        std::path::PathBuf::from("a.txt"),
+        std::path::PathBuf::from("a.txt"),
+        "a\n".to_string(),
+        "aa\n".to_string(),
+    );
+    let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+    app.apply_ui_theme("aura");
+
+    app.start_theme_picker();
+    app.push_theme_picker_char('n');
+    app.push_theme_picker_char('o');
+    app.push_theme_picker_char('r');
+    app.apply_theme_picker_selection();
+
+    assert!(!app.theme_picker_active());
+    assert_eq!(app.ui_theme_name.as_deref(), Some("nord"));
+}
+
+#[test]
 fn single_file_can_show_sidebar() {
     let diff = MultiFileDiff::from_file_pair(
         std::path::PathBuf::from("a.txt"),

@@ -12,6 +12,7 @@ If you do not set an action, Oyo uses the default keys. Set an action to an empt
 [keybindings.global]
 open_command_palette = ["ctrl-p"]
 open_file_search = ["ctrl-shift-p"]
+open_theme_picker = ["ctrl-t"]
 
 [keybindings.normal]
 step_down = ["j", "down"]
@@ -58,7 +59,7 @@ In `normal` mode, plain `1` to `9` are reserved for counts. Plain `0` means `lin
 
 `global` runs before most input modes. It does not run before `help` or `review_editor`.
 
-`normal.open_command_palette` and `normal.open_file_search` still work in normal mode. Use `global` if you want shortcuts to work while a picker, search box or filter is active.
+`normal.open_command_palette`, `normal.open_file_search` and `normal.open_theme_picker` still work in normal mode. Use `global` if you want shortcuts to work while a picker, search box or filter is active.
 
 ## Mouse interactions
 
@@ -108,6 +109,7 @@ Use each mode as `[keybindings.<mode>]`.
 | `review_editor` | `[keybindings.review_editor]` | Inline comment editor |
 | `command_palette` | `[keybindings.command_palette]` | Command palette picker |
 | `file_search` | `[keybindings.file_search]` | Quick file search picker |
+| `theme_picker` | `[keybindings.theme_picker]` | Theme picker |
 | `file_filter` | `[keybindings.file_filter]` | File panel filter |
 | `goto` | `[keybindings.goto]` | Go to prompt |
 | `search` | `[keybindings.search]` | Diff search prompt |
@@ -121,6 +123,7 @@ Use each mode as `[keybindings.<mode>]`.
 | --- | --- | --- |
 | `open_command_palette` | `ctrl-p` | Open the command palette |
 | `open_file_search` | `ctrl-shift-p` | Open quick file search |
+| `open_theme_picker` | `ctrl-t` | Open theme picker |
 
 ## Normal mode
 
@@ -193,6 +196,7 @@ Use each mode as `[keybindings.<mode>]`.
 | `toggle_help` | `?` | Show or hide help |
 | `open_command_palette` | `ctrl-p` | Open the command palette in normal mode |
 | `open_file_search` | `ctrl-shift-p` | Open quick file search in normal mode |
+| `open_theme_picker` | `ctrl-t` | Open theme picker in normal mode |
 
 ## Help mode
 
@@ -243,6 +247,17 @@ Use each mode as `[keybindings.<mode>]`.
 | `clear` | `ctrl-u` | Clear the query |
 | `select_next` | `down` | Select the next item |
 | `select_prev` | `up` | Select the previous item |
+
+## Theme picker mode
+
+| Action | Default keys | What it does |
+| --- | --- | --- |
+| `cancel` | `esc` | Cancel |
+| `accept` | `enter` | Apply the theme |
+| `backspace` | `backspace` | Delete the previous character |
+| `clear` | `ctrl-u` | Clear the query |
+| `select_next` | `down` | Preview the next theme |
+| `select_prev` | `up` | Preview the previous theme |
 
 ## File filter mode
 

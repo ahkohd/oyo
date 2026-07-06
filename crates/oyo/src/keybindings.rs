@@ -12,6 +12,7 @@ pub(crate) enum KeybindingMode {
     ReviewEditor,
     CommandPalette,
     FileSearch,
+    ThemePicker,
     FileFilter,
     Goto,
     Search,
@@ -29,6 +30,7 @@ impl KeybindingMode {
             Self::ReviewEditor => "review_editor",
             Self::CommandPalette => "command_palette",
             Self::FileSearch => "file_search",
+            Self::ThemePicker => "theme_picker",
             Self::FileFilter => "file_filter",
             Self::Goto => "goto",
             Self::Search => "search",
@@ -40,9 +42,11 @@ impl KeybindingMode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[allow(clippy::enum_variant_names)]
 pub(crate) enum GlobalAction {
     OpenCommandPalette,
     OpenFileSearch,
+    OpenThemePicker,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -114,6 +118,7 @@ pub(crate) enum NormalAction {
     ToggleHelp,
     OpenCommandPalette,
     OpenFileSearch,
+    OpenThemePicker,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -256,6 +261,7 @@ macro_rules! binding_action {
 binding_action!(GlobalAction, [
     OpenCommandPalette => ("open_command_palette", "Command palette", ["ctrl-p"]),
     OpenFileSearch => ("open_file_search", "Quick file search", ["ctrl-shift-p"]),
+    OpenThemePicker => ("open_theme_picker", "Theme picker", ["ctrl-t"]),
 ]);
 
 binding_action!(NormalAction, [
@@ -326,6 +332,7 @@ binding_action!(NormalAction, [
     ToggleHelp => ("toggle_help", "Toggle help", ["?"]),
     OpenCommandPalette => ("open_command_palette", "Command palette", ["ctrl-p"]),
     OpenFileSearch => ("open_file_search", "Quick file search", ["ctrl-shift-p"]),
+    OpenThemePicker => ("open_theme_picker", "Theme picker", ["ctrl-t"]),
 ]);
 
 binding_action!(HelpAction, [
@@ -430,6 +437,7 @@ pub(crate) struct Keybindings {
     review_editor: ModeBindings<ReviewEditorAction>,
     command_palette: ModeBindings<PickerAction>,
     file_search: ModeBindings<PickerAction>,
+    theme_picker: ModeBindings<PickerAction>,
     file_filter: ModeBindings<FileFilterAction>,
     goto: ModeBindings<LineInputAction>,
     search: ModeBindings<LineInputAction>,
@@ -479,6 +487,7 @@ impl Keybindings {
             review_editor: ModeBindings::build(KeybindingMode::ReviewEditor, config, warnings),
             command_palette: ModeBindings::build(KeybindingMode::CommandPalette, config, warnings),
             file_search: ModeBindings::build(KeybindingMode::FileSearch, config, warnings),
+            theme_picker: ModeBindings::build(KeybindingMode::ThemePicker, config, warnings),
             file_filter: ModeBindings::build(KeybindingMode::FileFilter, config, warnings),
             goto: ModeBindings::build(KeybindingMode::Goto, config, warnings),
             search: ModeBindings::build(KeybindingMode::Search, config, warnings),
@@ -501,6 +510,7 @@ impl Keybindings {
             Some(KeybindingMode::ReviewEditor) => self.review_editor.clear_sequence(),
             Some(KeybindingMode::CommandPalette) => self.command_palette.clear_sequence(),
             Some(KeybindingMode::FileSearch) => self.file_search.clear_sequence(),
+            Some(KeybindingMode::ThemePicker) => self.theme_picker.clear_sequence(),
             Some(KeybindingMode::FileFilter) => self.file_filter.clear_sequence(),
             Some(KeybindingMode::Goto) => self.goto.clear_sequence(),
             Some(KeybindingMode::Search) => self.search.clear_sequence(),
@@ -543,6 +553,11 @@ impl Keybindings {
     pub(crate) fn file_search(&mut self, key: KeyEvent) -> Dispatch<PickerAction> {
         self.prepare_mode(KeybindingMode::FileSearch);
         dispatch_mode(&mut self.active_sequence_mode, &mut self.file_search, key)
+    }
+
+    pub(crate) fn theme_picker(&mut self, key: KeyEvent) -> Dispatch<PickerAction> {
+        self.prepare_mode(KeybindingMode::ThemePicker);
+        dispatch_mode(&mut self.active_sequence_mode, &mut self.theme_picker, key)
     }
 
     pub(crate) fn file_filter(&mut self, key: KeyEvent) -> Dispatch<FileFilterAction> {
@@ -601,6 +616,10 @@ impl Keybindings {
 
     pub(crate) fn file_search_keys(&self, action: PickerAction) -> String {
         self.file_search.keys_label(action)
+    }
+
+    pub(crate) fn theme_picker_keys(&self, action: PickerAction) -> String {
+        self.theme_picker.keys_label(action)
     }
 
     pub(crate) fn file_filter_keys(&self, action: FileFilterAction) -> String {
@@ -757,6 +776,7 @@ fn warn_unknown_modes(config: &KeybindingsConfig, warnings: &mut Vec<String>) {
             KeybindingMode::ReviewEditor.id(),
             KeybindingMode::CommandPalette.id(),
             KeybindingMode::FileSearch.id(),
+            KeybindingMode::ThemePicker.id(),
             KeybindingMode::FileFilter.id(),
             KeybindingMode::Goto.id(),
             KeybindingMode::Search.id(),
@@ -980,6 +1000,20 @@ mod tests {
         assert_eq!(
             bindings.dashboard(key('e')),
             Dispatch::Matched(DashboardAction::SelectHovered)
+        );
+    }
+
+    #[test]
+    fn ctrl_t_opens_theme_picker() {
+        let mut bindings = Keybindings::default();
+
+        assert_eq!(
+            bindings.global(ctrl('t')),
+            Dispatch::Matched(GlobalAction::OpenThemePicker)
+        );
+        assert_eq!(
+            bindings.normal(ctrl('t')),
+            Dispatch::Matched(NormalAction::OpenThemePicker)
         );
     }
 

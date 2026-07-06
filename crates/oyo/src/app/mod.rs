@@ -461,6 +461,8 @@ pub struct App {
     pub clear_active_on_next_render: bool,
     /// Resolved theme (colors, gradients)
     pub theme: ResolvedTheme,
+    /// Current named UI theme, if any.
+    pub(crate) ui_theme_name: Option<String>,
     /// Time formatting rules
     pub time_format: TimeFormatter,
     /// Whether the UI theme is in light mode
@@ -620,6 +622,22 @@ pub struct App {
     file_search_list_count: usize,
     /// Quick file search list item height (rows per item)
     file_search_item_height: u16,
+    /// Theme picker query
+    theme_picker_query: String,
+    /// True when theme picker is active
+    theme_picker_active: bool,
+    /// Selected theme picker entry
+    theme_picker_selection: usize,
+    /// Theme picker list area (x, y, width, height)
+    theme_picker_list_area: Option<(u16, u16, u16, u16)>,
+    /// Theme picker list start index
+    theme_picker_list_start: usize,
+    /// Theme picker visible list count
+    theme_picker_list_count: usize,
+    /// Theme picker list item height (rows per item)
+    theme_picker_item_height: u16,
+    /// Theme to restore if the theme picker is cancelled.
+    theme_picker_restore: Option<(ResolvedTheme, Option<String>)>,
     /// Comment capture state enabled for the current app session
     review_mode: bool,
     /// Collected review comments for current session
@@ -943,6 +961,7 @@ impl App {
             extent_marker_deleted: "╏".to_string(),
             clear_active_on_next_render: false,
             theme: ResolvedTheme::default(),
+            ui_theme_name: None,
             time_format: TimeFormatter::default(),
             theme_is_light: false,
             stepping: true,
@@ -1024,6 +1043,14 @@ impl App {
             file_search_list_start: 0,
             file_search_list_count: 0,
             file_search_item_height: 1,
+            theme_picker_query: String::new(),
+            theme_picker_active: false,
+            theme_picker_selection: 0,
+            theme_picker_list_area: None,
+            theme_picker_list_start: 0,
+            theme_picker_list_count: 0,
+            theme_picker_item_height: 1,
+            theme_picker_restore: None,
             review_mode: false,
             review_comments: Vec::new(),
             review_editor: None,

@@ -15,9 +15,9 @@ Use it as a normal scrollable diff viewer, or step through changes one at a time
 
 ## Choose a review mode
 
-### Scroll-only diff
+### Scroll mode
 
-Use scroll-only mode when you want a traditional diff viewer.
+Use scroll mode when you want a traditional diff viewer.
 
 You can:
 
@@ -45,7 +45,7 @@ You can also press `s` in the TUI, or set `stepping = true` in config.
 
 ## Features
 
-- scroll-only diff mode
+- scroll mode
 - step-through navigation
 - hunk navigation
 - unified, split, evolution, blame and preview views
@@ -224,16 +224,20 @@ Do not set `core.pager` or `interactive.diffFilter` to `oy`.
 
 ## Use with Jujutsu
 
-Add this to your Jujutsu config:
+Register `oy` as a diff tool and add a shortcut for it:
 
 ```toml
-[ui]
-paginate = "never"
-diff-formatter = ["oy", "$left", "$right"]
+[merge-tools.oy]
+program = "oy"
+diff-args = ["$left", "$right"]
 
-[diff-tools.oy]
-command = ["oy", "$left", "$right"]
+[aliases]
+d = ["diff", "--tool", "oy"]
 ```
+
+Then run `jj d` (or `jj diff --tool oy`). This keeps your pager for
+`jj diff`, `jj log` and everything else — don't set `oy` as the global
+`ui.diff-formatter`.
 
 ## Keybindings
 

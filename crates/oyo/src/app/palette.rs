@@ -1,4 +1,5 @@
 use super::{App, ViewMode};
+use crate::config::{list_ui_themes, ThemeConfig};
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum PaletteAction {
@@ -14,6 +15,7 @@ pub(crate) enum PaletteAction {
     ToggleAutoplay,
     ToggleAutoplayReverse,
     OpenDashboard,
+    OpenThemePicker,
     Quit,
     RefreshCurrentFile,
     RefreshAllFiles,
@@ -35,6 +37,7 @@ impl App {
         self.clear_search();
         self.clear_goto();
         self.stop_file_search();
+        self.stop_theme_picker();
     }
 
     pub fn stop_command_palette(&mut self) {
@@ -215,6 +218,11 @@ impl App {
         });
 
         entries.push(PaletteEntry {
+            label: "Pick theme".to_string(),
+            action: PaletteAction::OpenThemePicker,
+        });
+
+        entries.push(PaletteEntry {
             label: "Refresh current file".to_string(),
             action: PaletteAction::RefreshCurrentFile,
         });
@@ -264,6 +272,7 @@ impl App {
                 action,
                 PaletteAction::ToggleHelp
                     | PaletteAction::OpenDashboard
+                    | PaletteAction::OpenThemePicker
                     | PaletteAction::Quit
                     | PaletteAction::RefreshAllFiles
             )
@@ -283,6 +292,7 @@ impl App {
             PaletteAction::ToggleAutoplay => self.toggle_autoplay(),
             PaletteAction::ToggleAutoplayReverse => self.toggle_autoplay_reverse(),
             PaletteAction::OpenDashboard => self.open_dashboard = true,
+            PaletteAction::OpenThemePicker => self.start_theme_picker(),
             PaletteAction::Quit => self.should_quit = true,
             PaletteAction::RefreshCurrentFile => self.refresh_current_file(),
             PaletteAction::RefreshAllFiles => self.refresh_all_files(),
@@ -298,6 +308,7 @@ impl App {
         self.clear_search();
         self.clear_goto();
         self.stop_command_palette();
+        self.stop_theme_picker();
     }
 
     pub fn stop_file_search(&mut self) {
@@ -399,5 +410,155 @@ impl App {
             self.file_search_selection = indices.len().saturating_sub(1);
         }
         indices
+    }
+
+    pub fn start_theme_picker(&mut self) {
+        if !self.theme_picker_active {
+            self.theme_picker_restore = Some((self.theme.clone(), self.ui_theme_name.clone()));
+        }
+        self.theme_picker_active = true;
+        self.theme_picker_query.clear();
+        self.theme_picker_selection = self
+            .ui_theme_name
+            .as_ref()
+            .and_then(|current| list_ui_themes().iter().position(|name| name == current))
+            .unwrap_or(0);
+        self.file_filter_active = false;
+        self.clear_search();
+        self.clear_goto();
+        self.stop_command_palette();
+        self.stop_file_search();
+    }
+
+    pub fn stop_theme_picker(&mut self) {
+        if let Some((theme, name)) = self.theme_picker_restore.take() {
+            self.theme = theme;
+            self.ui_theme_name = name;
+        }
+        self.theme_picker_active = false;
+    }
+
+    pub fn theme_picker_active(&self) -> bool {
+        self.theme_picker_active
+    }
+
+    pub fn theme_picker_query(&self) -> &str {
+        &self.theme_picker_query
+    }
+
+    pub fn theme_picker_selection(&self) -> usize {
+        self.theme_picker_selection
+    }
+
+    pub fn push_theme_picker_char(&mut self, ch: char) {
+        self.theme_picker_query.push(ch);
+        self.theme_picker_selection = 0;
+        self.preview_theme_picker_selection();
+    }
+
+    pub fn pop_theme_picker_char(&mut self) {
+        self.theme_picker_query.pop();
+        self.theme_picker_selection = 0;
+        self.preview_theme_picker_selection();
+    }
+
+    pub fn clear_theme_picker_text(&mut self) {
+        self.theme_picker_query.clear();
+        self.theme_picker_selection = 0;
+        self.preview_theme_picker_selection();
+    }
+
+    pub fn move_theme_picker_selection(&mut self, delta: isize) {
+        let names = self.theme_picker_filtered_names();
+        let total = names.len();
+        if total == 0 {
+            self.theme_picker_selection = 0;
+            return;
+        }
+        let current = self.theme_picker_selection.min(total.saturating_sub(1)) as isize;
+        let next = (current + delta).clamp(0, total.saturating_sub(1) as isize);
+        self.theme_picker_selection = next as usize;
+        self.preview_theme_picker_selection();
+    }
+
+    pub fn apply_theme_picker_selection(&mut self) {
+        let names = self.theme_picker_filtered_names();
+        if names.is_empty() {
+            return;
+        }
+        let idx = self
+            .theme_picker_selection
+            .min(names.len().saturating_sub(1));
+        self.apply_ui_theme(&names[idx]);
+        self.theme_picker_restore = None;
+        self.stop_theme_picker();
+    }
+
+    pub fn set_theme_picker_list_area(
+        &mut self,
+        area: Option<(u16, u16, u16, u16)>,
+        start: usize,
+        count: usize,
+        item_height: u16,
+    ) {
+        self.theme_picker_list_area = area;
+        self.theme_picker_list_start = start;
+        self.theme_picker_list_count = count;
+        self.theme_picker_item_height = item_height.max(1);
+    }
+
+    pub fn handle_theme_picker_click(&mut self, column: u16, row: u16) -> bool {
+        let Some((x, y, width, height)) = self.theme_picker_list_area else {
+            return false;
+        };
+        if row < y || row >= y.saturating_add(height) {
+            return false;
+        }
+        if column < x || column >= x.saturating_add(width) {
+            return false;
+        }
+        let item_height = self.theme_picker_item_height.max(1);
+        let offset = row.saturating_sub(y) / item_height;
+        let offset = offset as usize;
+        if offset >= self.theme_picker_list_count {
+            return false;
+        }
+        self.theme_picker_selection = self.theme_picker_list_start.saturating_add(offset);
+        self.apply_theme_picker_selection();
+        true
+    }
+
+    pub(crate) fn theme_picker_filtered_names(&mut self) -> Vec<String> {
+        let query = self.theme_picker_query.trim().to_ascii_lowercase();
+        let names = list_ui_themes()
+            .into_iter()
+            .filter(|name| query.is_empty() || name.to_ascii_lowercase().contains(&query))
+            .collect::<Vec<_>>();
+        if names.is_empty() {
+            self.theme_picker_selection = 0;
+        } else if self.theme_picker_selection >= names.len() {
+            self.theme_picker_selection = names.len().saturating_sub(1);
+        }
+        names
+    }
+
+    fn preview_theme_picker_selection(&mut self) {
+        let names = self.theme_picker_filtered_names();
+        let Some(name) = names.get(self.theme_picker_selection) else {
+            return;
+        };
+        self.apply_ui_theme(&name.clone());
+    }
+
+    pub(crate) fn apply_ui_theme(&mut self, name: &str) {
+        self.theme = ThemeConfig {
+            name: Some(name.to_string()),
+            ..ThemeConfig::default()
+        }
+        .resolve(self.theme_is_light);
+        self.ui_theme_name = Some(name.to_string());
+        self.unified_render_cache = None;
+        self.blame_render_cache = None;
+        self.blame_bar_cache.clear();
     }
 }

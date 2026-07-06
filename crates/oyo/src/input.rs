@@ -43,6 +43,11 @@ pub(crate) fn handle_app_key(
         return Ok(());
     }
 
+    if app.theme_picker_active() {
+        handle_theme_picker_key(app, key);
+        return Ok(());
+    }
+
     if app.file_filter_active {
         handle_file_filter_key(app, key);
         return Ok(());
@@ -108,11 +113,11 @@ fn handle_selection_key(app: &mut App, key: KeyEvent) -> bool {
 }
 
 fn handle_global_key(app: &mut App, key: KeyEvent) -> bool {
-    if app.multi_diff.file_count() == 0 {
-        return false;
-    }
     match app.keybindings.global(key) {
         Dispatch::Matched(GlobalAction::OpenCommandPalette) => {
+            if app.multi_diff.file_count() == 0 {
+                return false;
+            }
             app.reset_count();
             if app.command_palette_active() {
                 app.stop_command_palette();
@@ -122,11 +127,23 @@ fn handle_global_key(app: &mut App, key: KeyEvent) -> bool {
             true
         }
         Dispatch::Matched(GlobalAction::OpenFileSearch) => {
+            if app.multi_diff.file_count() == 0 {
+                return false;
+            }
             app.reset_count();
             if app.file_search_active() {
                 app.stop_file_search();
             } else {
                 app.start_file_search();
+            }
+            true
+        }
+        Dispatch::Matched(GlobalAction::OpenThemePicker) => {
+            app.reset_count();
+            if app.theme_picker_active() {
+                app.stop_theme_picker();
+            } else {
+                app.start_theme_picker();
             }
             true
         }
@@ -233,6 +250,29 @@ fn handle_command_palette_key(app: &mut App, key: KeyEvent) {
         Dispatch::Unmatched => {
             if let Some(c) = printable_char(key) {
                 app.push_command_palette_char(c);
+            }
+        }
+    }
+}
+
+fn handle_theme_picker_key(app: &mut App, key: KeyEvent) {
+    match app.keybindings.theme_picker(key) {
+        Dispatch::Matched(PickerAction::Cancel) => app.stop_theme_picker(),
+        Dispatch::Matched(PickerAction::Accept) => app.apply_theme_picker_selection(),
+        Dispatch::Matched(PickerAction::Backspace) => {
+            if app.theme_picker_query().is_empty() {
+                app.stop_theme_picker();
+            } else {
+                app.pop_theme_picker_char();
+            }
+        }
+        Dispatch::Matched(PickerAction::Clear) => app.clear_theme_picker_text(),
+        Dispatch::Matched(PickerAction::SelectNext) => app.move_theme_picker_selection(1),
+        Dispatch::Matched(PickerAction::SelectPrev) => app.move_theme_picker_selection(-1),
+        Dispatch::Pending => {}
+        Dispatch::Unmatched => {
+            if let Some(c) = printable_char(key) {
+                app.push_theme_picker_char(c);
             }
         }
     }
@@ -388,7 +428,10 @@ fn dispatch_normal_action(
         && app.active_topbar_content() != Some(TopbarTabContent::Help)
         && !matches!(
             action,
-            NormalAction::Quit | NormalAction::Refresh | NormalAction::ToggleHelp
+            NormalAction::Quit
+                | NormalAction::Refresh
+                | NormalAction::ToggleHelp
+                | NormalAction::OpenThemePicker
         )
     {
         app.reset_count();
@@ -859,6 +902,14 @@ fn dispatch_normal_action(
                 app.stop_file_search();
             } else {
                 app.start_file_search();
+            }
+        }
+        NormalAction::OpenThemePicker => {
+            app.reset_count();
+            if app.theme_picker_active() {
+                app.stop_theme_picker();
+            } else {
+                app.start_theme_picker();
             }
         }
     }

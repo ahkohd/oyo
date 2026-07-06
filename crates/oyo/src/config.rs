@@ -72,6 +72,7 @@
 //! [keybindings.global]
 //! open_command_palette = ["ctrl-p"]
 //! open_file_search = ["ctrl-shift-p"]
+//! open_theme_picker = ["ctrl-t"]
 //!
 //! [keybindings.normal]
 //! # Unmodified 1-9 are reserved for counts.

@@ -160,7 +160,7 @@ In CSV preview:
 
 ## No-step mode
 
-No-step mode works like a scroll-only diff viewer.
+No-step mode is the config name for scroll mode.
 
 In no-step mode:
 
@@ -221,7 +221,7 @@ Files larger than this value are shown immediately, then diffed in the backgroun
 
 Use `ui.diff.full_context_max_bytes` to choose when Oyo switches from full-context rendering to limited context rendering.
 
-If a file is deferred, Oyo first renders it in scroll-only mode. It upgrades to a full diff when background computation finishes.
+If a file is deferred, Oyo first renders it in scroll mode. It upgrades to a full diff when background computation finishes.
 
 Use `ui.diff.defer = true` to enable deferred diffing.
 

@@ -45,7 +45,7 @@ impl ToastEvent {
             Self::Animation(true) => "Animation on".to_string(),
             Self::Animation(false) => "Animation off".to_string(),
             Self::Stepping(true) => "Step-through mode on".to_string(),
-            Self::Stepping(false) => "Scroll-only mode on".to_string(),
+            Self::Stepping(false) => "Scroll mode on".to_string(),
             Self::Strikethrough(true) => "Deleted text strikethrough on".to_string(),
             Self::Strikethrough(false) => "Deleted text strikethrough off".to_string(),
             Self::FoldContext(true) => "Context folding on".to_string(),

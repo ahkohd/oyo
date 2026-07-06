@@ -163,15 +163,29 @@ pub(crate) fn render_diff_scrollbar(
         vertical: 0,
         horizontal: 0,
     });
+    if track.width == 0 {
+        return;
+    }
+    let x = track.x;
+    let mut style = Style::default().fg(app.theme.text_muted);
+    let track_style = app.theme.background.map(|bg| Style::default().bg(bg));
+    if let Some(bg) = app.theme.background {
+        style = style.bg(bg);
+    }
+    let buffer = frame.buffer_mut();
+    for row in track.y..track.y.saturating_add(track.height) {
+        if let Some(cell) = buffer.cell_mut((x, row)) {
+            cell.set_symbol(" ");
+            if let Some(track_style) = track_style {
+                cell.set_style(track_style);
+            }
+        }
+    }
     let Some((thumb_top, thumb_height)) =
         diff_scrollbar_thumb(total_lines, visible_lines, track.height, scroll_offset)
     else {
         return;
     };
-    if track.width == 0 {
-        return;
-    }
-    let x = track.x;
     app.set_diff_scrollbar(DiffScrollbarState {
         x,
         y: track.y,
@@ -186,8 +200,6 @@ pub(crate) fn render_diff_scrollbar(
     } else {
         "▐"
     };
-    let style = Style::default().fg(app.theme.text_muted);
-    let buffer = frame.buffer_mut();
     let start = track.y.saturating_add(thumb_top);
     let end = start
         .saturating_add(thumb_height)

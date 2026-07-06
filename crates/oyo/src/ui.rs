@@ -462,6 +462,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         app.clear_diff_selection();
         app.set_diff_selection_cells(Vec::new());
         draw_no_changes(frame, app, frame.area());
+        if app.theme_picker_active() {
+            draw_theme_picker_popover(frame, app);
+        }
         draw_toasts(frame, app);
         return;
     }
@@ -518,6 +521,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         draw_file_search_popover(frame, app);
     }
 
+    if app.theme_picker_active() {
+        draw_theme_picker_popover(frame, app);
+    }
+
     if app.review_mode() {
         if app.review_editor_active() {
             draw_review_editor_overlay(frame, app);
@@ -568,6 +575,9 @@ fn draw_toasts(frame: &mut Frame, app: &mut App) {
     let border = app.theme.border_subtle;
     // None => transparent (matches a theme with no background).
     let bg = app.theme.background.unwrap_or(Color::Reset);
+    // The toaster crate hard-codes the message fg to white (fine on dark themes,
+    // unreadable on light ones), so repaint it with the theme's text color.
+    let text = app.theme.text;
     let icons = [
         ('✕', app.theme.error),
         ('✓', app.theme.success),
@@ -630,18 +640,20 @@ fn draw_toasts(frame: &mut Frame, app: &mut App) {
             r.y = target_y;
         }
         boundary = Some(if upward { r.y } else { r.y + r.height });
-        reskin_toast(buffer, *r, border, bg, &icons);
+        reskin_toast(buffer, *r, border, bg, text, &icons);
     }
 }
 
 /// Re-skin one crate-rendered toast in place: match `bg` (transparent when the
 /// theme has none), tuck a thin rounded border in over the crate's outer padding
-/// rows so the frame hugs the message, and color the leading severity icon.
+/// rows so the frame hugs the message, recolor the message text to `text`, and
+/// color the leading severity icon.
 fn reskin_toast(
     buffer: &mut ratatui::buffer::Buffer,
     ta: Rect,
     border: Color,
     bg: Color,
+    text: Color,
     icons: &[(char, Color)],
 ) {
     if ta.width < 2 || ta.height < 3 {
@@ -674,7 +686,7 @@ fn reskin_toast(
             } else if x == ta.x || x == right {
                 cell.set_symbol("│").set_fg(border).set_bg(bg);
             } else {
-                cell.set_bg(bg);
+                cell.set_bg(bg).set_fg(text);
             }
         }
     }
@@ -1742,13 +1754,30 @@ fn render_file_panel_scrollbar(
         vertical: 0,
         horizontal: 0,
     });
+    let x = track.x;
+    let panel_bg = app.theme.background_panel.or(app.theme.background);
+    let track_style = panel_bg.map(|bg| Style::default().bg(bg));
+    let focused = app.file_list_focused || app.file_filter_active;
+    let symbol = if focused { "▐" } else { "▕" };
+    let mut style = Style::default().fg(app.theme.text_muted);
+    if let Some(bg) = panel_bg {
+        style = style.bg(bg);
+    }
+    let buffer = frame.buffer_mut();
+    for row in track.y..track.y.saturating_add(track.height) {
+        if let Some(cell) = buffer.cell_mut((x, row)) {
+            cell.set_symbol(" ");
+            if let Some(track_style) = track_style {
+                cell.set_style(track_style);
+            }
+        }
+    }
     let scroll = app.file_list_scroll;
     let Some((thumb_top, thumb_height)) =
         diff_scrollbar_thumb(total_items, visible_items, track.height, scroll)
     else {
         return;
     };
-    let x = track.x;
     app.set_file_panel_scrollbar(FilePanelScrollbarState {
         x,
         y: track.y,
@@ -1758,17 +1787,13 @@ fn render_file_panel_scrollbar(
         thumb_top,
         thumb_height,
     });
-    let focused = app.file_list_focused || app.file_filter_active;
     if !focused && !app.file_panel_hover {
         return;
     }
-    let symbol = if focused { "▐" } else { "▕" };
-    let style = Style::default().fg(app.theme.text_muted);
     let start = track.y.saturating_add(thumb_top);
     let end = start
         .saturating_add(thumb_height)
         .min(track.y.saturating_add(track.height));
-    let buffer = frame.buffer_mut();
     for row in start..end {
         if let Some(cell) = buffer.cell_mut((x, row)) {
             cell.set_symbol(symbol).set_style(style);
@@ -1924,9 +1949,7 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
             .fg(app.theme.accent)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default()
-            .fg(app.theme.border_subtle)
-            .add_modifier(Modifier::DIM)
+        Style::default().fg(app.theme.text_muted)
     };
     let header_lines = if app.file_panel_mode == FilePanelMode::Comments {
         let comment_count = app.review_comment_count();
@@ -2281,11 +2304,7 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
             filter_area.width,
             filter_area.height,
         ));
-        let filter_bg = app
-            .theme
-            .background_element
-            .or(app.theme.background_panel)
-            .or(app.theme.background);
+        let filter_bg = panel_bg;
         let mut filter = Paragraph::new(file_filter_line(app, has_query, filter_area.width))
             .alignment(Alignment::Left);
         let mut filter_block = Block::default().padding(ratatui::widgets::Padding::new(1, 0, 1, 0));
@@ -2444,11 +2463,7 @@ fn draw_comment_list(
             filter_area.width,
             filter_area.height,
         ));
-        let filter_bg = app
-            .theme
-            .background_element
-            .or(app.theme.background_panel)
-            .or(app.theme.background);
+        let filter_bg = panel_bg;
         let mut filter = Paragraph::new(file_filter_line(
             app,
             !app.file_filter.is_empty(),
@@ -2613,8 +2628,8 @@ fn render_preview(frame: &mut Frame, app: &mut App, area: Rect) {
                 change_bars.as_ref(),
             )
         } else if preview_can_render_csv(app) && app.active_preview_rendered() {
-            // Pin the top padding, header, and separator to the top.
-            sticky_rows = 3;
+            // Pin the header and separator to the top.
+            sticky_rows = 2;
             let change_bars = preview_change_bars(app, side);
             csv_preview_lines(
                 &title,
@@ -3293,12 +3308,8 @@ fn csv_table_lines(
     let stripe_bg = crate::color::blend_colors(surface, theme.text, 0.06);
     let bar = || Span::styled(" │ ".to_string(), rule_style);
 
-    // A blank top-padding line above the (pinned) header.
-    let mut top_spans = Vec::new();
-    push_preview_change_gutter(&mut top_spans, change_bars, None, None);
-    let mut lines = vec![Line::from(top_spans)];
-
     // Header row (blank row-number gutter).
+    let mut lines = Vec::new();
     let mut hspans = Vec::new();
     push_preview_change_gutter(&mut hspans, change_bars, Some(1), None);
     hspans.extend([Span::styled(" ".repeat(gutter_w), num_style), bar()]);
@@ -4712,6 +4723,7 @@ fn help_markdown(app: &App) -> String {
     out.push_str("- use `J` and `K` to scroll\n");
     out.push_str("- use `tab` to change view\n");
     out.push_str("- use `ctrl-shift-p` to open file search\n");
+    out.push_str("- use `ctrl-t` to open theme picker\n");
     out.push_str("- use `?` to focus this help tab\n\n");
 
     out.push_str("## Tabs and preview\n\n");
@@ -4739,6 +4751,10 @@ fn help_markdown(app: &App) -> String {
     out.push_str(&keybinding_section::<PickerAction, _>(
         "File search",
         |action| app.keybindings.file_search_keys(action),
+    ));
+    out.push_str(&keybinding_section::<PickerAction, _>(
+        "Theme picker",
+        |action| app.keybindings.theme_picker_keys(action),
     ));
     out.push_str(&keybinding_section::<FileFilterAction, _>(
         "File filter",
@@ -6488,6 +6504,122 @@ fn draw_command_palette_popover(frame: &mut Frame, app: &mut App) {
     frame.render_stateful_widget(list, chunks[1], &mut state);
 }
 
+fn draw_theme_picker_popover(frame: &mut Frame, app: &mut App) {
+    let area = frame.area();
+    let popup_width = 60u16.min(area.width.saturating_sub(4));
+    let max_height = (area.height / 2).saturating_sub(2).max(6);
+    let names = app.theme_picker_filtered_names();
+    let selection = app.theme_picker_selection();
+    let item_height = 1u16;
+    let overhead = 6u16;
+    let max_list_height = max_height.saturating_sub(overhead).max(1) as usize;
+    let list_height = names.len().max(1).min(max_list_height);
+    let popup_height = (list_height as u16)
+        .saturating_add(overhead)
+        .min(max_height);
+
+    let popup_x = (area.width.saturating_sub(popup_width)) / 2;
+    let desired_y = area.height / 4;
+    let max_y = area.height.saturating_sub(popup_height);
+    let popup_y = desired_y.min(max_y);
+    let popup_area = Rect::new(popup_x, popup_y, popup_width, popup_height);
+
+    frame.render_widget(Clear, popup_area);
+    let mut block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded);
+    block = block.border_style(Style::default().fg(app.theme.border_active));
+    if let Some(bg) = app.theme.background {
+        block = block.style(Style::default().bg(bg));
+    }
+    frame.render_widget(block.clone(), popup_area);
+    let inner = block.inner(popup_area);
+    let padded = inner.inner(Margin {
+        vertical: 1,
+        horizontal: 1,
+    });
+    let content = if padded.width > 0 && padded.height > 0 {
+        padded
+    } else {
+        inner
+    };
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(2), Constraint::Min(1)])
+        .split(content);
+
+    let query = app.theme_picker_query();
+    let placeholder = "Search for themes…";
+    let (query_text, query_style) = if query.is_empty() {
+        (placeholder, Style::default().fg(app.theme.text_muted))
+    } else {
+        (query, Style::default().fg(app.theme.text))
+    };
+    let input_line = Line::from(vec![
+        Span::styled("› ", Style::default().fg(app.theme.primary)),
+        Span::styled(query_text, query_style),
+    ]);
+    frame.render_widget(
+        Paragraph::new(vec![input_line]).alignment(Alignment::Left),
+        chunks[0],
+    );
+
+    if names.is_empty() {
+        app.set_theme_picker_list_area(None, 0, 0, 1);
+        let line = Line::from(Span::styled(
+            "No results",
+            Style::default().fg(app.theme.text_muted),
+        ));
+        frame.render_widget(
+            Paragraph::new(vec![line]).alignment(Alignment::Center),
+            chunks[1],
+        );
+        return;
+    }
+
+    let mut start = 0usize;
+    if selection >= list_height {
+        start = selection + 1 - list_height;
+    }
+    let end = (start + list_height).min(names.len());
+    let visible = &names[start..end];
+    let list_width = chunks[1].width.saturating_sub(2) as usize;
+    app.set_theme_picker_list_area(
+        Some((chunks[1].x, chunks[1].y, chunks[1].width, chunks[1].height)),
+        start,
+        visible.len(),
+        item_height,
+    );
+
+    let items: Vec<ListItem> = visible
+        .iter()
+        .map(|name| {
+            let current = app.ui_theme_name.as_deref() == Some(name.as_str());
+            let suffix = if current { " current" } else { "" };
+            let label = truncate_text(&format!("{name}{suffix}"), list_width);
+            let style = if current {
+                Style::default()
+                    .fg(app.theme.accent)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(app.theme.text)
+            };
+            ListItem::new(Line::from(Span::styled(label, style)))
+        })
+        .collect();
+
+    let mut state = ListState::default();
+    let selection_in_view = selection.saturating_sub(start);
+    state.select(Some(selection_in_view.min(visible.len().saturating_sub(1))));
+    let mut highlight_style = Style::default().fg(app.theme.accent);
+    if let Some(bg) = app.theme.background_element.or(app.theme.background_panel) {
+        highlight_style = highlight_style.bg(bg);
+    }
+    let list = List::new(items).highlight_style(highlight_style);
+    frame.render_stateful_widget(list, chunks[1], &mut state);
+}
+
 fn draw_file_search_popover(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
     let popup_width = 60u16.min(area.width.saturating_sub(4));
@@ -7078,13 +7210,12 @@ mod tests {
             .iter()
             .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
             .collect();
-        // Borderless csvlens layout: top padding, header, separator, rows.
-        assert!(flat[0].trim().is_empty(), "top padding line: {flat:?}");
+        // Borderless csvlens layout: header, separator, rows.
         assert!(
-            flat[1].contains("name") && flat[1].contains("age"),
+            flat[0].contains("name") && flat[0].contains("age"),
             "header: {flat:?}"
         );
-        assert!(flat[2].contains('┼'), "gutter separator: {flat:?}");
+        assert!(flat[1].contains('┼'), "gutter separator: {flat:?}");
         assert!(
             !flat.iter().any(|l| l.contains('╭')),
             "no box borders: {flat:?}"

@@ -308,7 +308,7 @@ ignore_globs = [".git/**", ".jj/**", ".hg/**", ".svn/**"]
 
 ## No-step mode
 
-Use `[no_step]` for scroll-only mode behaviour.
+Use `[no_step]` for scroll mode behaviour.
 
 | Key | Values | Default | What it does |
 | --- | --- | --- | --- |
@@ -426,6 +426,7 @@ Use `[keybindings.<mode>]` tables to override keys.
 [keybindings.global]
 open_command_palette = ["ctrl-p"]
 open_file_search = ["ctrl-shift-p"]
+open_theme_picker = ["ctrl-t"]
 
 [keybindings.normal]
 step_down = ["j", "down"]

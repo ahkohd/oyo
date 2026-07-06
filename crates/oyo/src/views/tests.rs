@@ -6,11 +6,11 @@ use crate::config::{
 };
 use crate::test_utils::TestApp;
 use crate::views::{
-    extent_marker_text, render_blame, render_evolution, render_split, render_unified_pane,
-    show_extent_marker,
+    extent_marker_text, render_blame, render_diff_scrollbar, render_evolution, render_split,
+    render_unified_pane, show_extent_marker,
 };
 use oyo_core::{AnimationFrame, LineKind, MultiFileDiff, ViewLine};
-use ratatui::{backend::TestBackend, buffer::Buffer, Terminal};
+use ratatui::{backend::TestBackend, buffer::Buffer, style::Color, Terminal};
 
 fn make_app(old: &str, new: &str, view_mode: ViewMode) -> TestApp {
     TestApp::new_default(|| {
@@ -47,6 +47,26 @@ fn render_buffer(app: &mut App, width: u16, height: u16) -> Buffer {
         })
         .expect("draw");
     terminal.backend().buffer().clone()
+}
+
+#[test]
+fn diff_scrollbar_track_uses_background_without_thumb() {
+    let mut app = make_app("same\n", "same\n", ViewMode::UnifiedPane);
+    app.theme.background = Some(Color::Blue);
+    let backend = TestBackend::new(1, 4);
+    let mut terminal = Terminal::new(backend).expect("terminal");
+
+    terminal
+        .draw(|frame| render_diff_scrollbar(frame, &mut app, frame.area(), 4, 4, 0))
+        .expect("draw");
+
+    assert!(terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .all(|cell| cell.style().bg == Some(Color::Blue)));
+    assert!(app.diff_scrollbar.is_none());
 }
 
 fn render_unified_buffer(app: &mut App, width: u16, height: u16) -> Buffer {

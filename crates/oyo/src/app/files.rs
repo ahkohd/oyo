@@ -605,9 +605,8 @@ impl App {
     }
 
     pub(crate) fn sync_scroll_from_csv_preview(&mut self) {
-        // Three rows (top padding, header, and separator) stay pinned, so the
-        // scrollable body is shorter than the viewport.
-        let viewport_height = self.last_viewport_height.saturating_sub(3).max(1);
+        // Header and separator stay pinned, so the scrollable body is shorter than the viewport.
+        let viewport_height = self.last_viewport_height.saturating_sub(2).max(1);
         if let Some(state) = self.active_csv_preview_mut() {
             let line = state.selected_visual_line();
             if line < self.scroll_offset {
