@@ -85,7 +85,7 @@ The recording script shows these Oyo features in order:
 5. It switches to split view and blame view.
 6. It opens previews for image, CSV, YAML, JSON and Markdown files.
 7. It opens a second tab and switches tabs by clicking the tab bar.
-8. It opens the commit dashboard with `ctrl-r`.
+8. It opens History with `ctrl-r`.
 
 ## Check the recording without a display
 

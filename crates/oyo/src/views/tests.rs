@@ -109,7 +109,16 @@ fn binary_image_empty_state_points_to_preview() {
 
     assert!(text.contains("ctrl-p preview"), "empty state: {text}");
     assert!(!text.contains("preview disabled"), "empty state: {text}");
+
     app.enable_review_mode();
+    let text = buffer_text(&render_buffer(&mut app, 40, 5)).join("\n");
+    assert!(text.contains("m comment"), "empty state: {text}");
+    let (comment_x, comment_y, comment_width, _) =
+        app.review_file_comment_hit.expect("comment action hitbox");
+    assert!(app.handle_review_file_comment_click(comment_x + comment_width / 2, comment_y));
+    assert!(app.review_editor_active());
+    app.review_cancel_editor();
+
     app.diff_view_area = Some((0, 0, 40, 5));
     app.set_diff_selection_cells(vec![vec!["x".to_string(); 40]; 5]);
     assert_eq!(app.review_line_add_hover_at(38, 2), (None, false));

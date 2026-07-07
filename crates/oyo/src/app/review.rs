@@ -17,6 +17,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum ReviewTargetKind {
+    File,
     Line,
     Hunk,
 }
@@ -260,6 +261,7 @@ fn review_both_sides_label(
 
 fn review_anchor_location_label(anchor: &ReviewAnchor) -> String {
     match anchor.kind {
+        ReviewTargetKind::File => "file".to_string(),
         ReviewTargetKind::Line => match anchor.side {
             Some(ReviewSide::Old) => review_side_label(ReviewSide::Old, anchor.old_range),
             Some(ReviewSide::New) => review_side_label(ReviewSide::New, anchor.new_range),
@@ -334,6 +336,24 @@ fn wrap_note_line(line: &str, width: usize) -> Vec<String> {
         out.push(chunk);
     }
     out
+}
+
+fn file_review_anchor(file_index: usize, file_path: String) -> Option<ReviewAnchor> {
+    if file_path.is_empty() {
+        return None;
+    }
+    let anchor_key = format!("file|{file_path}");
+    Some(ReviewAnchor {
+        file_index,
+        file_path,
+        kind: ReviewTargetKind::File,
+        side: None,
+        old_range: None,
+        new_range: None,
+        hunk_id: None,
+        display_idx_hint: None,
+        anchor_key,
+    })
 }
 
 fn line_review_anchor_from_view_line(
@@ -659,6 +679,29 @@ impl App {
             .iter()
             .filter(|comment| comment.anchor.file_index == file_index)
             .count()
+    }
+
+    pub(crate) fn file_review_comments_supported(&self) -> bool {
+        self.review_mode && (self.current_file_is_binary() || self.current_file_is_image())
+    }
+
+    pub(crate) fn set_review_file_comment_hit(&mut self, hit: Option<(u16, u16, u16, u16)>) {
+        self.review_file_comment_hit = hit;
+    }
+
+    pub(crate) fn handle_review_file_comment_click(&mut self, column: u16, row: u16) -> bool {
+        let hit = self
+            .review_file_comment_hit
+            .is_some_and(|(x, y, width, height)| {
+                column >= x
+                    && column < x.saturating_add(width)
+                    && row >= y
+                    && row < y.saturating_add(height)
+            });
+        if !hit {
+            return false;
+        }
+        self.start_file_comment()
     }
 
     pub(crate) fn filtered_review_comment_indices(&self) -> Vec<usize> {
@@ -1093,6 +1136,7 @@ impl App {
         }
 
         let span = match anchor.kind {
+            ReviewTargetKind::File => None,
             ReviewTargetKind::Line => visible
                 .iter()
                 .find_map(|(idx, line)| line_anchor_matches(anchor, line).then_some(*idx))
@@ -1162,6 +1206,7 @@ impl App {
         let anchor_display_span = self.review_anchor_display_span(&editor.anchor);
 
         let prefer_right = match editor.anchor.kind {
+            ReviewTargetKind::File => true,
             ReviewTargetKind::Line => !matches!(editor.anchor.side, Some(ReviewSide::Old)),
             ReviewTargetKind::Hunk => !matches!(
                 (editor.anchor.old_range, editor.anchor.new_range),
@@ -1208,6 +1253,7 @@ impl App {
             .filter(|comment| active_anchor_key != Some(comment.anchor.anchor_key.as_str()))
         {
             let display_idx = match comment.anchor.kind {
+                ReviewTargetKind::File => None,
                 ReviewTargetKind::Line => visible.iter().find_map(|(idx, line)| {
                     line_anchor_matches(&comment.anchor, line).then_some(*idx)
                 }),
@@ -1253,6 +1299,7 @@ impl App {
             }
 
             let prefer_right = match comment.anchor.kind {
+                ReviewTargetKind::File => true,
                 ReviewTargetKind::Line => !matches!(comment.anchor.side, Some(ReviewSide::Old)),
                 ReviewTargetKind::Hunk => !matches!(
                     (comment.anchor.old_range, comment.anchor.new_range),
@@ -1273,6 +1320,44 @@ impl App {
 
         overlays.sort_by_key(|overlay| overlay.display_idx);
         overlays
+    }
+
+    pub fn review_file_comment_overlay(&self) -> Option<ReviewCommentOverlay> {
+        if !self.file_review_comments_supported() {
+            return None;
+        }
+        let anchor = self.resolve_file_review_anchor()?;
+        let active_anchor_key = self
+            .review_editor
+            .as_ref()
+            .map(|editor| editor.anchor.anchor_key.as_str());
+        let comment = self
+            .review_comments
+            .iter()
+            .find(|comment| comment.anchor.anchor_key == anchor.anchor_key)?;
+        if active_anchor_key == Some(comment.anchor.anchor_key.as_str()) {
+            return None;
+        }
+
+        let first_line = comment.body.lines().next().unwrap_or_default().trim();
+        let (mut preview, was_truncated) = truncate_preview_chars(first_line, 50);
+        let multiline = comment.body.contains('\n');
+        if multiline && !was_truncated {
+            preview.push_str(" …");
+        }
+        if preview.is_empty() {
+            preview = "(empty)".to_string();
+        }
+
+        Some(ReviewCommentOverlay {
+            display_idx: 0,
+            preview,
+            body: comment.body.clone(),
+            title: review_comment_title(&comment.anchor),
+            anchor_key: comment.anchor.anchor_key.clone(),
+            prefer_right: true,
+            is_hunk: false,
+        })
     }
 
     pub fn enable_review_mode(&mut self) {
@@ -1352,8 +1437,23 @@ impl App {
         self.persist_review_session();
     }
 
+    pub fn start_file_comment(&mut self) -> bool {
+        if !self.file_review_comments_supported() {
+            return false;
+        }
+        let Some(anchor) = self.resolve_file_review_anchor() else {
+            return false;
+        };
+        self.open_review_editor(anchor);
+        true
+    }
+
     pub fn start_line_comment(&mut self) {
         if !self.review_mode {
+            return;
+        }
+        if self.file_review_comments_supported() {
+            let _ = self.start_file_comment();
             return;
         }
         let Some(anchor) = self.resolve_line_review_anchor() else {
@@ -1405,6 +1505,12 @@ impl App {
     pub fn remove_line_comment_at_cursor(&mut self) -> bool {
         if !self.review_mode {
             return false;
+        }
+        if self.file_review_comments_supported() {
+            let Some(anchor) = self.resolve_file_review_anchor() else {
+                return false;
+            };
+            return self.remove_comment_for_anchor_key(&anchor.anchor_key);
         }
         let Some(anchor) = self.resolve_line_review_anchor() else {
             return false;
@@ -1828,6 +1934,7 @@ impl App {
                 id: comment.id,
                 file: &comment.anchor.file_path,
                 kind: match comment.anchor.kind {
+                    ReviewTargetKind::File => "file",
                     ReviewTargetKind::Line => "line",
                     ReviewTargetKind::Hunk => "hunk",
                 },
@@ -2459,6 +2566,10 @@ impl App {
         items
     }
 
+    fn resolve_file_review_anchor(&self) -> Option<ReviewAnchor> {
+        file_review_anchor(self.multi_diff.selected_index, self.current_file_path())
+    }
+
     fn resolve_line_review_anchor(&mut self) -> Option<ReviewAnchor> {
         let file_index = self.multi_diff.selected_index;
         let file_path = self.current_file_path();
@@ -2697,10 +2808,13 @@ impl App {
             a.anchor
                 .file_path
                 .cmp(&b.anchor.file_path)
-                .then_with(|| match (a.anchor.kind, b.anchor.kind) {
-                    (ReviewTargetKind::Line, ReviewTargetKind::Hunk) => std::cmp::Ordering::Less,
-                    (ReviewTargetKind::Hunk, ReviewTargetKind::Line) => std::cmp::Ordering::Greater,
-                    _ => std::cmp::Ordering::Equal,
+                .then_with(|| {
+                    let rank = |kind| match kind {
+                        ReviewTargetKind::File => 0,
+                        ReviewTargetKind::Line => 1,
+                        ReviewTargetKind::Hunk => 2,
+                    };
+                    rank(a.anchor.kind).cmp(&rank(b.anchor.kind))
                 })
                 .then_with(|| {
                     let a_line = a
@@ -2842,6 +2956,29 @@ mod tests {
         assert_eq!(value["diff"]["branch"], "branch");
         assert_eq!(value["review"]["comments"][0]["file"], "new.txt");
         assert_eq!(value["review"]["comments"][0]["body"], "please fix");
+    }
+
+    #[test]
+    fn binary_file_comments_use_file_anchor() {
+        let diff = MultiFileDiff::from_file_pair_bytes(
+            std::path::PathBuf::from("old.bin"),
+            vec![0, 1],
+            vec![0, 2],
+        );
+        let mut app = App::new(diff, ViewMode::Preview, 0, false, None);
+        app.enable_review_mode();
+
+        assert!(app.start_file_comment());
+        app.review_insert_char('x');
+        app.review_save_editor();
+
+        assert_eq!(app.review_comments.len(), 1);
+        assert_eq!(app.review_comments[0].anchor.kind, ReviewTargetKind::File);
+        assert_eq!(app.review_comments[0].anchor.anchor_key, "file|old.bin");
+
+        let json = app.review_export_json(ReviewHookEvent::ReviewReady, None);
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["review"]["comments"][0]["kind"], "file");
     }
 
     #[test]

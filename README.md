@@ -66,7 +66,7 @@ You can also press `s` in the TUI, or set `stepping = true` in config.
 - animated transitions
 - autoplay
 - Git integration
-- commit picker with `oy view`
+- History view with `oy view`
 - built-in themes and `.tmTheme` syntax themes
 - XDG config file support
 
@@ -157,7 +157,7 @@ oy old.rs new.rs --step --autoplay
 oy old.rs new.rs --step --speed 100
 ```
 
-### Pick a commit range
+### Open History
 
 ```sh
 oy view

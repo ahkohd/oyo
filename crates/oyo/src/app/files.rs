@@ -1,6 +1,6 @@
 use super::{
-    AnimationPhase, App, FileDiskStamp, FilePanelMode, PreviewLinkBox, TopbarTab, TopbarTabContent,
-    ViewMode,
+    AnimationPhase, App, FileDiskStamp, FilePanelMode, PreviewLinkBox, StatusModeMenu, TopbarTab,
+    TopbarTabContent, ViewMode,
 };
 use crate::csv_preview::{CsvPreviewSignature, CsvPreviewState};
 use crate::structured_preview::{StructuredPreviewSignature, StructuredPreviewState};
@@ -870,6 +870,21 @@ impl App {
         old != next
     }
 
+    pub(crate) fn handle_no_changes_dashboard_click(&mut self, column: u16, row: u16) -> bool {
+        let hit = self
+            .no_changes_dashboard_hit
+            .is_some_and(|(x, y, width, height)| {
+                column >= x
+                    && column < x.saturating_add(width)
+                    && row >= y
+                    && row < y.saturating_add(height)
+            });
+        if hit {
+            self.open_dashboard = true;
+        }
+        hit
+    }
+
     pub(crate) fn handle_no_changes_quit_click(&mut self, column: u16, row: u16) -> bool {
         let hit = self
             .no_changes_quit_hit
@@ -906,6 +921,63 @@ impl App {
             self.toggle_view_mode();
         }
         true
+    }
+
+    pub(crate) fn open_status_mode_menu(&mut self, column: u16, row: u16) -> bool {
+        let hit = self.status_mode_hit.is_some_and(|(x, y, width, height)| {
+            column >= x
+                && column < x.saturating_add(width)
+                && row >= y
+                && row < y.saturating_add(height)
+        });
+        if !hit {
+            return false;
+        }
+        self.close_file_context_menu();
+        self.status_mode_menu = Some(StatusModeMenu { x: column, y: row });
+        self.status_mode_menu_hover = None;
+        true
+    }
+
+    pub(crate) fn close_status_mode_menu(&mut self) -> bool {
+        let was_open = self.status_mode_menu.take().is_some();
+        self.status_mode_menu_hits.clear();
+        self.status_mode_menu_hover = None;
+        was_open
+    }
+
+    fn status_mode_menu_mode_at(&self, column: u16, row: u16) -> Option<ViewMode> {
+        self.status_mode_menu_hits
+            .iter()
+            .find(|hit| {
+                column >= hit.x
+                    && column < hit.x.saturating_add(hit.width)
+                    && row >= hit.y
+                    && row < hit.y.saturating_add(hit.height)
+            })
+            .map(|hit| hit.mode)
+    }
+
+    pub(crate) fn update_status_mode_menu_hover(&mut self, column: u16, row: u16) -> bool {
+        let hover = self.status_mode_menu_mode_at(column, row);
+        if self.status_mode_menu_hover == hover {
+            return false;
+        }
+        self.status_mode_menu_hover = hover;
+        true
+    }
+
+    pub(crate) fn handle_status_mode_menu_click(&mut self, column: u16, row: u16) -> bool {
+        let Some(mode) = self.status_mode_menu_mode_at(column, row) else {
+            return self.close_status_mode_menu();
+        };
+        self.set_view_mode(mode);
+        self.close_status_mode_menu();
+        true
+    }
+
+    pub(crate) fn status_mode_menu_open(&self) -> bool {
+        self.status_mode_menu.is_some()
     }
 
     pub(crate) fn handle_binary_preview_click(&mut self, column: u16, row: u16) -> bool {
@@ -1094,6 +1166,22 @@ impl App {
                     && row >= y
                     && row < y.saturating_add(height)
             });
+        let review_file_comment_hover =
+            self.review_file_comment_hit
+                .is_some_and(|(x, y, width, height)| {
+                    column >= x
+                        && column < x.saturating_add(width)
+                        && row >= y
+                        && row < y.saturating_add(height)
+                });
+        let no_changes_dashboard_hover =
+            self.no_changes_dashboard_hit
+                .is_some_and(|(x, y, width, height)| {
+                    column >= x
+                        && column < x.saturating_add(width)
+                        && row >= y
+                        && row < y.saturating_add(height)
+                });
         let no_changes_quit_hover =
             self.no_changes_quit_hit
                 .is_some_and(|(x, y, width, height)| {
@@ -1133,19 +1221,8 @@ impl App {
                         && row >= y
                         && row < y.saturating_add(height)
                 });
-        let file_hover = self.file_list_area.and_then(|(x, y, width, height)| {
-            let in_list = column >= x
-                && column < x.saturating_add(width)
-                && row >= y.saturating_add(1)
-                && row < y.saturating_add(height);
-            if !in_list {
-                return None;
-            }
-            self.file_list_rows
-                .get(row.saturating_sub(y.saturating_add(1)) as usize)
-                .copied()
-                .flatten()
-        });
+        let file_hover = self.file_list_item_at(column, row);
+        let file_context_menu_hover = self.file_context_menu_action_at(column, row);
         let selection_hover = self
             .selection_toolbar_hits
             .iter()
@@ -1189,8 +1266,11 @@ impl App {
             && self.status_comments_hover == status_comments_hover
             && self.status_file_hover == status_file_hover
             && self.binary_preview_hover == binary_preview_hover
+            && self.review_file_comment_hover == review_file_comment_hover
+            && self.no_changes_dashboard_hover == no_changes_dashboard_hover
             && self.no_changes_quit_hover == no_changes_quit_hover
             && self.file_list_hover == file_hover
+            && self.file_context_menu_hover == file_context_menu_hover
             && self.file_panel_hover == file_panel_hover
             && self.file_panel_mode_toggle_hover == file_panel_mode_toggle_hover
             && self.file_panel_root_hover == file_panel_root_hover
@@ -1221,8 +1301,11 @@ impl App {
         self.status_comments_hover = status_comments_hover;
         self.status_file_hover = status_file_hover;
         self.binary_preview_hover = binary_preview_hover;
+        self.review_file_comment_hover = review_file_comment_hover;
+        self.no_changes_dashboard_hover = no_changes_dashboard_hover;
         self.no_changes_quit_hover = no_changes_quit_hover;
         self.file_list_hover = file_hover;
+        self.file_context_menu_hover = file_context_menu_hover;
         self.file_panel_hover = file_panel_hover;
         self.file_panel_mode_toggle_hover = file_panel_mode_toggle_hover;
         self.file_panel_root_hover = file_panel_root_hover;

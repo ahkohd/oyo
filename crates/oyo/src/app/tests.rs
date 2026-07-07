@@ -795,6 +795,21 @@ fn topbar_overflow_buttons_scroll_tabs() {
 }
 
 #[test]
+fn no_changes_dashboard_click_opens_history() {
+    let diff = MultiFileDiff::from_file_pair(
+        std::path::PathBuf::from("a.txt"),
+        std::path::PathBuf::from("a.txt"),
+        "a\n".to_string(),
+        "aa\n".to_string(),
+    );
+    let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+    app.no_changes_dashboard_hit = Some((2, 9, 14, 1));
+
+    assert!(app.handle_no_changes_dashboard_click(3, 9));
+    assert!(app.open_dashboard);
+}
+
+#[test]
 fn status_bar_mode_click_cycles_views() {
     let diff = MultiFileDiff::from_file_pair(
         std::path::PathBuf::from("a.txt"),
@@ -809,6 +824,47 @@ fn status_bar_mode_click_cycles_views() {
     assert_eq!(app.view_mode, ViewMode::Split);
     assert!(app.handle_status_bar_mouse_down(1, 9, true));
     assert_eq!(app.view_mode, ViewMode::UnifiedPane);
+}
+
+#[test]
+fn right_click_status_mode_opens_mode_menu() {
+    let diff = MultiFileDiff::from_file_pair(
+        std::path::PathBuf::from("a.txt"),
+        std::path::PathBuf::from("a.txt"),
+        "a\n".to_string(),
+        "aa\n".to_string(),
+    );
+    let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+    app.status_mode_hit = Some((0, 9, 9, 1));
+
+    assert!(app.open_status_mode_menu(1, 9));
+    assert_eq!(
+        app.status_mode_menu.map(|menu| (menu.x, menu.y)),
+        Some((1, 9))
+    );
+}
+
+#[test]
+fn status_mode_menu_click_sets_view_mode() {
+    let diff = MultiFileDiff::from_file_pair(
+        std::path::PathBuf::from("a.txt"),
+        std::path::PathBuf::from("a.txt"),
+        "a\n".to_string(),
+        "aa\n".to_string(),
+    );
+    let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+    app.status_mode_menu = Some(StatusModeMenu { x: 1, y: 9 });
+    app.status_mode_menu_hits.push(StatusModeMenuHit {
+        mode: ViewMode::Preview,
+        x: 2,
+        y: 4,
+        width: 12,
+        height: 1,
+    });
+
+    assert!(app.handle_status_mode_menu_click(3, 4));
+    assert_eq!(app.view_mode, ViewMode::Preview);
+    assert!(app.status_mode_menu.is_none());
 }
 
 #[test]
@@ -902,6 +958,62 @@ fn ctrl_click_file_list_opens_new_tab() {
 
     assert_eq!(topbar_files(&app), vec![0, 1]);
     assert_eq!(app.active_topbar_content(), Some(TopbarTabContent::File(1)));
+}
+
+#[test]
+fn right_click_file_list_opens_context_menu_without_selecting() {
+    let diff = MultiFileDiff::from_file_pairs(vec![
+        (
+            std::path::PathBuf::from("a.txt"),
+            "a\n".to_string(),
+            "aa\n".to_string(),
+        ),
+        (
+            std::path::PathBuf::from("b.txt"),
+            "b\n".to_string(),
+            "bb\n".to_string(),
+        ),
+    ]);
+    let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+    app.file_list_area = Some((0, 0, 20, 5));
+    app.file_list_rows = vec![Some(1)];
+
+    assert!(app.open_file_context_menu(1, 1));
+    assert_eq!(app.file_context_menu.map(|menu| menu.file_index), Some(1));
+    assert_eq!(app.multi_diff.selected_index, 0);
+}
+
+#[test]
+fn file_context_menu_click_opens_new_tab() {
+    let diff = MultiFileDiff::from_file_pairs(vec![
+        (
+            std::path::PathBuf::from("a.txt"),
+            "a\n".to_string(),
+            "aa\n".to_string(),
+        ),
+        (
+            std::path::PathBuf::from("b.txt"),
+            "b\n".to_string(),
+            "bb\n".to_string(),
+        ),
+    ]);
+    let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+    app.file_list_area = Some((0, 0, 20, 5));
+    app.file_list_rows = vec![Some(1)];
+    assert!(app.open_file_context_menu(1, 1));
+    app.file_context_menu_hits.push(FileContextMenuHit {
+        action: FileContextMenuAction::OpenInNewTab,
+        x: 2,
+        y: 2,
+        width: 20,
+        height: 1,
+    });
+
+    assert!(app.handle_file_context_menu_click(3, 2));
+
+    assert_eq!(topbar_files(&app), vec![0, 1]);
+    assert_eq!(app.active_topbar_content(), Some(TopbarTabContent::File(1)));
+    assert!(app.file_context_menu.is_none());
 }
 
 #[test]

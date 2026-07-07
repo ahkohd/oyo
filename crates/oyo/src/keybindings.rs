@@ -294,7 +294,7 @@ binding_action!(NormalAction, [
     ToggleAutoplayReverse => ("toggle_autoplay_reverse", "Autoplay reverse", ["B"]),
     ToggleViewMode => ("toggle_view_mode", "Cycle view mode", ["tab"]),
     ToggleViewModeReverse => ("toggle_view_mode_reverse", "Cycle view mode reverse", ["backtab"]),
-    OpenDashboard => ("open_dashboard", "Open oy view", ["ctrl-r"]),
+    OpenDashboard => ("open_dashboard", "Open history", ["ctrl-r"]),
     ScrollUp => ("scroll_up", "Scroll up", ["K"]),
     ScrollDown => ("scroll_down", "Scroll down", ["J"]),
     HalfPageUp => ("half_page_up", "Scroll half-page up", ["ctrl-u"]),
@@ -402,9 +402,9 @@ binding_action!(SelectionAction, [
 ]);
 
 binding_action!(DashboardAction, [
-    Quit => ("quit", "Quit dashboard", ["esc", "q"]),
+    Quit => ("quit", "Quit history", ["esc", "q"]),
     StartFilter => ("start_filter", "Filter commits", ["/"]),
-    ClearPin => ("clear_pin", "Clear pinned range start", ["r"]),
+    ClearPin => ("clear_pin", "Clear range", ["r"]),
     TogglePin => ("toggle_pin", "Mark range start", ["space"]),
     SelectHovered => ("select_hovered", "Move range end to hovered item", ["e"]),
     Accept => ("accept", "Open selection", ["enter"]),

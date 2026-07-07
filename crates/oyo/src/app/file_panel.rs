@@ -1,5 +1,10 @@
-use super::{App, FilePanelMode, DIFF_VIEW_MIN_WIDTH, FILE_PANEL_MIN_WIDTH};
+use super::{
+    App, FileContextMenu, FileContextMenuAction, FilePanelMode, DIFF_VIEW_MIN_WIDTH,
+    FILE_PANEL_MIN_WIDTH,
+};
+use crate::app::utils::copy_to_clipboard;
 use crate::config::FilePanelPosition;
+use crate::toasts::ToastEvent;
 
 fn point_in_rect(rect: (u16, u16, u16, u16), column: u16, row: u16) -> bool {
     let (x, y, width, height) = rect;
@@ -10,6 +15,7 @@ fn point_in_rect(rect: (u16, u16, u16, u16), column: u16, row: u16) -> bool {
 
 impl App {
     pub fn show_comments_sidebar(&mut self) {
+        self.close_file_context_menu();
         self.file_panel_mode = FilePanelMode::Comments;
         self.file_panel_visible = true;
         self.file_panel_manually_set = true;
@@ -20,6 +26,7 @@ impl App {
     }
 
     pub fn show_files_sidebar(&mut self) -> bool {
+        self.close_file_context_menu();
         if !self.can_show_file_panel() {
             return false;
         }
@@ -34,6 +41,7 @@ impl App {
     }
 
     pub fn toggle_file_panel_mode(&mut self) {
+        self.close_file_context_menu();
         self.file_panel_mode = match self.file_panel_mode {
             FilePanelMode::Files => FilePanelMode::Comments,
             FilePanelMode::Comments => FilePanelMode::Files,
@@ -66,6 +74,105 @@ impl App {
                 && row < y.saturating_add(height)
         });
         hit && self.show_files_sidebar()
+    }
+
+    pub(crate) fn file_list_item_at(&self, column: u16, row: u16) -> Option<usize> {
+        let (x, y, width, height) = self.file_list_area?;
+        let end_x = x.saturating_add(width);
+        let end_y = y.saturating_add(height);
+        let item_start = y.saturating_add(1);
+        if column < x || column >= end_x || row < item_start || row >= end_y {
+            return None;
+        }
+        self.file_list_rows
+            .get(row.saturating_sub(item_start) as usize)
+            .copied()
+            .flatten()
+    }
+
+    pub fn open_file_context_menu(&mut self, column: u16, row: u16) -> bool {
+        if self.file_panel_mode != FilePanelMode::Files {
+            return false;
+        }
+        let Some(file_index) = self.file_list_item_at(column, row) else {
+            return false;
+        };
+        self.close_status_mode_menu();
+        self.file_context_menu = Some(FileContextMenu {
+            file_index,
+            x: column,
+            y: row,
+        });
+        self.file_context_menu_hover = None;
+        self.file_list_hover = Some(file_index);
+        self.file_list_focused = true;
+        self.stop_file_filter();
+        true
+    }
+
+    pub fn close_file_context_menu(&mut self) -> bool {
+        let was_open = self.file_context_menu.take().is_some();
+        self.file_context_menu_hits.clear();
+        self.file_context_menu_hover = None;
+        was_open
+    }
+
+    pub(crate) fn file_context_menu_action_at(
+        &self,
+        column: u16,
+        row: u16,
+    ) -> Option<FileContextMenuAction> {
+        self.file_context_menu_hits
+            .iter()
+            .find(|hit| point_in_rect((hit.x, hit.y, hit.width, hit.height), column, row))
+            .map(|hit| hit.action)
+    }
+
+    pub fn update_file_context_menu_hover(&mut self, column: u16, row: u16) -> bool {
+        let hover = self.file_context_menu_action_at(column, row);
+        if self.file_context_menu_hover == hover {
+            return false;
+        }
+        self.file_context_menu_hover = hover;
+        true
+    }
+
+    pub fn handle_file_context_menu_click(&mut self, column: u16, row: u16) -> bool {
+        if self.file_context_menu.is_none() {
+            return false;
+        }
+        if let Some(action) = self.file_context_menu_action_at(column, row) {
+            self.run_file_context_menu_action(action);
+            self.close_file_context_menu();
+            return true;
+        }
+        self.close_file_context_menu();
+        true
+    }
+
+    fn run_file_context_menu_action(&mut self, action: FileContextMenuAction) {
+        let Some(file_index) = self.file_context_menu.map(|menu| menu.file_index) else {
+            return;
+        };
+        match action {
+            FileContextMenuAction::Open => self.select_file(file_index),
+            FileContextMenuAction::OpenInNewTab => self.open_file_in_new_topbar_tab(file_index),
+            FileContextMenuAction::CopyPath => {
+                let Some(path) = self
+                    .multi_diff
+                    .files
+                    .get(file_index)
+                    .map(|file| file.display_name.clone())
+                else {
+                    return;
+                };
+                if copy_to_clipboard(&path) {
+                    self.notify(ToastEvent::CopiedPath);
+                } else {
+                    self.notify(ToastEvent::CopyFailed);
+                }
+            }
+        }
     }
 
     pub fn handle_file_list_click(&mut self, column: u16, row: u16, new_tab: bool) -> bool {
@@ -189,6 +296,7 @@ impl App {
             }
         }
         if !self.file_panel_visible {
+            self.close_file_context_menu();
             self.file_list_focused = false;
             self.file_panel_hover = false;
             self.file_filter_hover = false;

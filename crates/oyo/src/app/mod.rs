@@ -95,6 +95,48 @@ pub(crate) struct FilePanelScrollbarState {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FileContextMenuAction {
+    Open,
+    OpenInNewTab,
+    CopyPath,
+}
+
+impl FileContextMenuAction {
+    pub(crate) const ALL: [Self; 3] = [Self::Open, Self::OpenInNewTab, Self::CopyPath];
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct FileContextMenu {
+    pub file_index: usize,
+    pub x: u16,
+    pub y: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct FileContextMenuHit {
+    pub action: FileContextMenuAction,
+    pub x: u16,
+    pub y: u16,
+    pub width: u16,
+    pub height: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct StatusModeMenu {
+    pub x: u16,
+    pub y: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct StatusModeMenuHit {
+    pub mode: ViewMode,
+    pub x: u16,
+    pub y: u16,
+    pub width: u16,
+    pub height: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TopbarTabContent {
     File(usize),
     Help,
@@ -243,7 +285,7 @@ pub struct App {
     pub should_quit: bool,
     /// Runtime keyboard bindings and sequence state
     pub(crate) keybindings: Keybindings,
-    /// Whether to open the commit picker dashboard
+    /// Whether to open History.
     pub open_dashboard: bool,
     /// Current animation phase
     pub animation_phase: AnimationPhase,
@@ -298,6 +340,9 @@ pub struct App {
     pub file_list_rows: Vec<Option<usize>>,
     /// File list item currently under the mouse.
     pub(crate) file_list_hover: Option<usize>,
+    pub(crate) file_context_menu: Option<FileContextMenu>,
+    pub(crate) file_context_menu_hits: Vec<FileContextMenuHit>,
+    pub(crate) file_context_menu_hover: Option<FileContextMenuAction>,
     /// True when the mouse is over the file panel.
     pub(crate) file_panel_hover: bool,
     /// File list filter input area (x, y, width, height)
@@ -358,6 +403,10 @@ pub struct App {
     git_index_baseline: FileDiskStamp,
     /// Message shown when a git diff currently has no files
     pub no_changes_message: Option<String>,
+    /// Open History action area on the no changes screen.
+    pub(crate) no_changes_dashboard_hit: Option<(u16, u16, u16, u16)>,
+    /// True when the no changes History action is hovered.
+    pub(crate) no_changes_dashboard_hover: bool,
     /// Quit action area on the no changes screen.
     pub(crate) no_changes_quit_hit: Option<(u16, u16, u16, u16)>,
     /// True when the no changes quit action is hovered.
@@ -403,9 +452,13 @@ pub struct App {
     pub(crate) preview_toggle_hit: Option<(u16, u16, u16, u16)>,
     pub(crate) topbar_sidebar_toggle_hit: Option<(u16, u16, u16, u16)>,
     pub(crate) status_mode_hit: Option<(u16, u16, u16, u16)>,
+    pub(crate) status_mode_menu: Option<StatusModeMenu>,
+    pub(crate) status_mode_menu_hits: Vec<StatusModeMenuHit>,
+    pub(crate) status_mode_menu_hover: Option<ViewMode>,
     pub(crate) status_comments_hit: Option<(u16, u16, u16, u16)>,
     pub(crate) status_file_hit: Option<(u16, u16, u16, u16)>,
     pub(crate) binary_preview_hit: Option<(u16, u16, u16, u16)>,
+    pub(crate) review_file_comment_hit: Option<(u16, u16, u16, u16)>,
     pub(crate) topbar_area: Option<(u16, u16, u16, u16)>,
     pub(crate) topbar_hover_tab: Option<usize>,
     pub(crate) topbar_hover_close: Option<usize>,
@@ -417,6 +470,7 @@ pub struct App {
     pub(crate) status_comments_hover: bool,
     pub(crate) status_file_hover: bool,
     pub(crate) binary_preview_hover: bool,
+    pub(crate) review_file_comment_hover: bool,
     pub(crate) topbar_drag_target: Option<usize>,
     topbar_drag_tab: Option<usize>,
     pub(crate) structured_previews: FxHashMap<usize, StructuredPreviewState>,
@@ -848,6 +902,9 @@ impl App {
             file_list_area: None,
             file_list_rows: Vec::new(),
             file_list_hover: None,
+            file_context_menu: None,
+            file_context_menu_hits: Vec::new(),
+            file_context_menu_hover: None,
             file_panel_hover: false,
             file_filter_area: None,
             file_filter_clear_hit: None,
@@ -878,6 +935,8 @@ impl App {
             last_git_watch_check: Instant::now(),
             git_index_baseline: FileDiskStamp::default(),
             no_changes_message: None,
+            no_changes_dashboard_hit: None,
+            no_changes_dashboard_hover: false,
             no_changes_quit_hit: None,
             no_changes_quit_hover: false,
             view_build_defer: false,
@@ -921,9 +980,13 @@ impl App {
             preview_toggle_hit: None,
             topbar_sidebar_toggle_hit: None,
             status_mode_hit: None,
+            status_mode_menu: None,
+            status_mode_menu_hits: Vec::new(),
+            status_mode_menu_hover: None,
             status_comments_hit: None,
             status_file_hit: None,
             binary_preview_hit: None,
+            review_file_comment_hit: None,
             topbar_area: None,
             topbar_hover_tab: None,
             topbar_hover_close: None,
@@ -935,6 +998,7 @@ impl App {
             status_comments_hover: false,
             status_file_hover: false,
             binary_preview_hover: false,
+            review_file_comment_hover: false,
             topbar_drag_target: None,
             topbar_drag_tab: None,
             structured_previews: FxHashMap::default(),

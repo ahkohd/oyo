@@ -82,13 +82,19 @@ Mouse actions use built-in behaviour and cannot be changed with keybindings.
 | Click the filter clear button | Clear the filter |
 | Click a file in the sidebar | Open it in the active tab |
 | Control-click a file in the sidebar | Open it in a new tab |
+| Right-click a file in the sidebar | Open the file context menu |
+| Click a sidebar file context menu action | Open, open in a new tab or copy the path |
 | Click a comment in the sidebar | Open it for editing |
-| Click an item in `oy view` | Open it |
-| Control-click an item in `oy view` | Mark the range start |
-| Click an action in the `oy view` footer | Open, pin or quit |
+| Click an item in History | Open it |
+| Control-click an item in History | Mark the range start |
+| Right-click an item in History | Open the range context menu |
+| Click a History context menu action | Open, mark start or mark end |
+| Click an action in the History footer | Open, mark the range, clear the range or quit |
 | Click the sidebar header mode label | Switch between files and comments |
 | Click the footer mode label | Cycle view mode |
 | Control-click the footer mode label | Cycle view mode backwards |
+| Right-click the footer mode label | Pick a view mode from a context menu |
+| Click the empty-state `ctrl-r history` action | Open History |
 | Click the footer file count | Open the sidebar in files mode |
 | Click the footer comment count | Open the sidebar in comments mode |
 | Scroll over the tab bar | Move through tabs |
@@ -114,8 +120,8 @@ Use each mode as `[keybindings.<mode>]`.
 | `goto` | `[keybindings.goto]` | Go to prompt |
 | `search` | `[keybindings.search]` | Diff search prompt |
 | `selection` | `[keybindings.selection]` | Diff text selection |
-| `dashboard` | `[keybindings.dashboard]` | Commit picker dashboard |
-| `dashboard_filter` | `[keybindings.dashboard_filter]` | Dashboard filter prompt |
+| `dashboard` | `[keybindings.dashboard]` | History view |
+| `dashboard_filter` | `[keybindings.dashboard_filter]` | History filter prompt |
 
 ## Global mode
 
@@ -129,7 +135,7 @@ Use each mode as `[keybindings.<mode>]`.
 
 | Action | Default keys | What it does |
 | --- | --- | --- |
-| `quit` | `q`, `esc` | Quit, or return to `oy view` when started from `oy view` |
+| `quit` | `q`, `esc` | Quit, or return to History when started with `oy view` |
 | `step_down` | `j`, `down` | Step forward |
 | `step_up` | `k`, `up` | Step backward |
 | `next_hunk` | `l`, `right` | Go to the next hunk |
@@ -158,7 +164,7 @@ Use each mode as `[keybindings.<mode>]`.
 | `toggle_autoplay_reverse` | `B` | Start or stop reverse autoplay |
 | `toggle_view_mode` | `tab` | Cycle view mode |
 | `toggle_view_mode_reverse` | `backtab` | Cycle view mode in reverse |
-| `open_dashboard` | `ctrl-r` | Open `oy view` |
+| `open_dashboard` | `ctrl-r` | Open History |
 | `scroll_up` | `K` | Scroll up |
 | `scroll_down` | `J` | Scroll down |
 | `half_page_up` | `ctrl-u` | Scroll up half a page |
@@ -313,13 +319,13 @@ The selection toolbar appears above the selection after you finish a mouse selec
 | `goto_end` | `G` | Extend to the last visible cell |
 | `goto_half_page_down` | `d` | Extend down half a page |
 
-## Dashboard mode
+## History mode
 
 | Action | Default keys | What it does |
 | --- | --- | --- |
-| `quit` | `esc`, `q` | Quit the dashboard |
+| `quit` | `esc`, `q` | Quit History |
 | `start_filter` | `/` | Filter commits |
-| `clear_pin` | `r` | Clear the pinned range start |
+| `clear_pin` | `r` | Clear the range |
 | `toggle_pin` | `space` | Mark the range start |
 | `select_hovered` | `e` | Mark the range end |
 | `accept` | `enter` | Open the selection |
@@ -330,7 +336,7 @@ The selection toolbar appears above the selection after you finish a mouse selec
 | `select_first` | `g`, `home` | Select the first commit |
 | `select_last` | `G`, `end` | Select the last commit |
 
-## Dashboard filter mode
+## History filter mode
 
 | Action | Default keys | What it does |
 | --- | --- | --- |

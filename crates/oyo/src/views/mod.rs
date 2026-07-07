@@ -23,7 +23,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::app::{diff_scrollbar_thumb, App, DiffScrollbarState};
-use crate::keybindings::GlobalAction;
+use crate::keybindings::{GlobalAction, NormalAction};
 use oyo_core::{LineKind, ViewLine, ViewSpan};
 use ratatui::{
     layout::{Margin, Rect},
@@ -1484,35 +1484,142 @@ fn should_strikethrough(phase: AnimationPhase, progress: f32, backward: bool) ->
     }
 }
 
+fn review_file_comment_action(app: &App) -> Option<(Vec<Span<'static>>, usize)> {
+    if !app.file_review_comments_supported() || app.review_editor_active() {
+        return None;
+    }
+    let key = app.keybindings.normal_keys(NormalAction::LineComment);
+    let label = "comment";
+    let width = key.width().saturating_add(1).saturating_add(label.width());
+    let key_style = Style::default()
+        .fg(app.theme.accent)
+        .add_modifier(Modifier::BOLD);
+    let label_style = if app.review_file_comment_hover {
+        Style::default()
+            .fg(app.theme.accent)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(app.theme.text_muted)
+    };
+    Some((
+        vec![
+            Span::styled(key, key_style),
+            Span::raw(" "),
+            Span::styled(label.to_string(), label_style),
+        ],
+        width,
+    ))
+}
+
+fn review_file_comment_card(app: &App, width: usize) -> Option<(String, Vec<Line<'static>>)> {
+    let overlay = app.review_file_comment_overlay()?;
+    let key = overlay.anchor_key.clone();
+    let lines = app
+        .review_preview_note_lines(&overlay, width)
+        .into_iter()
+        .map(|line| Line::from(review_note_line_spans(app, &key, &line)))
+        .collect();
+    Some((key, lines))
+}
+
 pub(crate) fn render_binary_empty_state(frame: &mut Frame, app: &mut App, area: Rect) {
     app.binary_preview_hit = None;
-    if !app.current_file_is_image() {
-        render_empty_state_text(
-            frame,
-            area,
-            &app.theme,
-            "Binary file (preview disabled)",
-            false,
-        );
-        return;
-    }
+    app.set_review_file_comment_hit(None);
 
     if let Some(bg) = app.theme.background {
         let bg_fill = Paragraph::new("").style(Style::default().bg(bg));
         frame.render_widget(bg_fill, area);
     }
 
+    let comment_action = review_file_comment_action(app);
+    let comment_card = review_file_comment_card(app, area.width as usize);
+
+    if !app.current_file_is_image() {
+        if comment_action.is_none() && comment_card.is_none() {
+            render_empty_state_text(
+                frame,
+                area,
+                &app.theme,
+                "Binary file (preview disabled)",
+                false,
+            );
+            return;
+        }
+
+        let mut lines = vec![Line::from(Span::styled(
+            "Binary file (preview disabled)",
+            Style::default().fg(app.theme.text_muted),
+        ))];
+        let action_row = comment_action.as_ref().map(|_| lines.len());
+        if let Some((comment_spans, _)) = comment_action.as_ref() {
+            lines.push(Line::from(comment_spans.clone()));
+        }
+        let card_row = comment_card.as_ref().map(|_| lines.len().saturating_add(1));
+        if let Some((_, card_lines)) = comment_card.as_ref() {
+            lines.push(Line::from(""));
+            lines.extend(card_lines.clone());
+        }
+
+        let height = (lines.len() as u16).min(area.height);
+        let y = area
+            .y
+            .saturating_add(area.height.saturating_sub(height) / 2);
+        if let (Some(row), Some((_, comment_width))) = (action_row, comment_action.as_ref()) {
+            if row < height as usize {
+                let comment_width = *comment_width;
+                let x = area
+                    .x
+                    .saturating_add(area.width.saturating_sub(comment_width as u16) / 2);
+                app.set_review_file_comment_hit(Some((
+                    x,
+                    y.saturating_add(row as u16),
+                    comment_width.min(area.width as usize) as u16,
+                    1,
+                )));
+            }
+        }
+        if let (Some(row), Some((anchor_key, card_lines))) = (card_row, comment_card.as_ref()) {
+            if row < height as usize {
+                let visible_height = card_lines.len().min(height as usize - row) as u16;
+                app.add_review_preview_box(
+                    area.x,
+                    y.saturating_add(row as u16),
+                    area.width,
+                    visible_height,
+                    anchor_key.clone(),
+                );
+                if visible_height == card_lines.len() as u16 {
+                    app.add_review_preview_delete_box(
+                        area.x,
+                        y.saturating_add(row as u16 + visible_height.saturating_sub(1)),
+                        area.width,
+                        1,
+                        anchor_key.clone(),
+                    );
+                }
+            }
+        }
+
+        frame.render_widget(
+            Paragraph::new(lines).alignment(Alignment::Center),
+            Rect::new(area.x, y, area.width, height),
+        );
+        return;
+    }
+
     let key = app
         .keybindings
         .global_keys(GlobalAction::OpenCommandPalette);
     let label = "preview";
-    let width = key.width().saturating_add(1).saturating_add(label.width());
-    let y = area.y.saturating_add(area.height.saturating_sub(1) / 2);
-    let x = area
-        .x
-        .saturating_add(area.width.saturating_sub(width as u16) / 2);
-    app.binary_preview_hit = Some((x, y, width.min(area.width as usize) as u16, 1));
-
+    let preview_width = key.width().saturating_add(1).saturating_add(label.width());
+    let gap = usize::from(comment_action.is_some()) * 2;
+    let comment_width = comment_action
+        .as_ref()
+        .map(|(_, width)| *width)
+        .unwrap_or(0);
+    let width = preview_width
+        .saturating_add(gap)
+        .saturating_add(comment_width);
     let key_style = Style::default()
         .fg(app.theme.accent)
         .add_modifier(Modifier::BOLD);
@@ -1523,14 +1630,63 @@ pub(crate) fn render_binary_empty_state(frame: &mut Frame, app: &mut App, area: 
     } else {
         Style::default().fg(app.theme.text_muted)
     };
-    let line = Line::from(vec![
+    let mut spans = vec![
         Span::styled(key, key_style),
         Span::raw(" "),
         Span::styled(label.to_string(), label_style),
-    ]);
+    ];
+    if let Some((comment_spans, _)) = comment_action.as_ref() {
+        spans.push(Span::raw("  "));
+        spans.extend(comment_spans.clone());
+    }
+
+    let mut lines = vec![Line::from(spans)];
+    let card_row = comment_card.as_ref().map(|_| lines.len().saturating_add(1));
+    if let Some((_, card_lines)) = comment_card.as_ref() {
+        lines.push(Line::from(""));
+        lines.extend(card_lines.clone());
+    }
+    let height = (lines.len() as u16).min(area.height);
+    let y = area
+        .y
+        .saturating_add(area.height.saturating_sub(height) / 2);
+    let x = area
+        .x
+        .saturating_add(area.width.saturating_sub(width as u16) / 2);
+    app.binary_preview_hit = Some((x, y, preview_width.min(area.width as usize) as u16, 1));
+    if comment_action.is_some() && width <= area.width as usize {
+        app.set_review_file_comment_hit(Some((
+            x.saturating_add((preview_width + gap) as u16),
+            y,
+            comment_width as u16,
+            1,
+        )));
+    }
+    if let (Some(row), Some((anchor_key, card_lines))) = (card_row, comment_card.as_ref()) {
+        if row < height as usize {
+            let visible_height = card_lines.len().min(height as usize - row) as u16;
+            app.add_review_preview_box(
+                area.x,
+                y.saturating_add(row as u16),
+                area.width,
+                visible_height,
+                anchor_key.clone(),
+            );
+            if visible_height == card_lines.len() as u16 {
+                app.add_review_preview_delete_box(
+                    area.x,
+                    y.saturating_add(row as u16 + visible_height.saturating_sub(1)),
+                    area.width,
+                    1,
+                    anchor_key.clone(),
+                );
+            }
+        }
+    }
+
     frame.render_widget(
-        Paragraph::new(line).alignment(Alignment::Center),
-        Rect::new(area.x, y, area.width, 1),
+        Paragraph::new(lines).alignment(Alignment::Center),
+        Rect::new(area.x, y, area.width, height),
     );
 }
 

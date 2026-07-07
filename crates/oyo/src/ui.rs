@@ -1,9 +1,10 @@
 //! UI rendering for the TUI
 
 use crate::app::{
-    diff_scrollbar_thumb, App, FilePanelMode, FilePanelScrollbarState, ReviewEditorToolbarAction,
-    ReviewEditorToolbarHit, ReviewLineAddHit, SelectionToolbarAction, SelectionToolbarHit,
-    TopbarTabContent, TopbarTabHit, ViewMode, DIFF_VIEW_MIN_WIDTH, FILE_PANEL_MIN_WIDTH,
+    diff_scrollbar_thumb, App, FileContextMenuAction, FileContextMenuHit, FilePanelMode,
+    FilePanelScrollbarState, ReviewEditorToolbarAction, ReviewEditorToolbarHit, ReviewLineAddHit,
+    SelectionToolbarAction, SelectionToolbarHit, StatusModeMenuHit, TopbarTabContent, TopbarTabHit,
+    ViewMode, DIFF_VIEW_MIN_WIDTH, FILE_PANEL_MIN_WIDTH,
 };
 use crate::color;
 use crate::config::FilePanelPosition;
@@ -18,7 +19,7 @@ use crate::structured_preview::{
 use crate::syntax::SyntaxSide;
 use crate::views::{
     render_blame, render_diff_scrollbar, render_evolution, render_split, render_unified_pane,
-    reserve_diff_scrollbar_lane,
+    reserve_diff_scrollbar_lane, review_note_line_spans,
 };
 use image::GenericImageView;
 use oyo_core::{multi::DiffStatus, multi::FileSide, ChangeKind, FileStatus, LineKind};
@@ -374,42 +375,74 @@ fn no_changes_hint_line(app: &App) -> Line<'static> {
     let key_style = Style::default()
         .fg(app.theme.accent)
         .add_modifier(Modifier::BOLD);
-    let action_style = if app.no_changes_quit_hover {
+    let dashboard_style = if app.no_changes_dashboard_hover {
         Style::default()
             .fg(app.theme.text_muted)
             .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(app.theme.text_muted)
     };
-    if app.watch {
-        Line::from(vec![
-            Span::styled("Watching for changes. Press ", text_style),
-            Span::styled("q", key_style),
-            Span::styled(" to quit.", action_style),
-        ])
+    let quit_style = if app.no_changes_quit_hover {
+        Style::default()
+            .fg(app.theme.text_muted)
+            .add_modifier(Modifier::BOLD)
     } else {
-        Line::from(vec![
-            Span::styled("Press ", text_style),
-            Span::styled("R", key_style),
-            Span::styled(" to refresh or ", text_style),
-            Span::styled("q", key_style),
-            Span::styled(" to quit.", action_style),
-        ])
+        Style::default().fg(app.theme.text_muted)
+    };
+    let mut spans = Vec::new();
+    if app.watch {
+        spans.push(Span::styled("Watching for changes. ", text_style));
+    } else {
+        spans.push(Span::styled("R", key_style));
+        spans.push(Span::styled(" refresh  ", text_style));
+    }
+    spans.push(Span::styled("ctrl-r", key_style));
+    spans.push(Span::styled(" history", dashboard_style));
+    spans.push(Span::styled("  ", text_style));
+    spans.push(Span::styled("q", key_style));
+    spans.push(Span::styled(" quit", quit_style));
+    Line::from(spans)
+}
+
+fn no_changes_hint_text(app: &App) -> String {
+    if app.watch {
+        "Watching for changes. ctrl-r history  q quit".to_string()
+    } else {
+        "R refresh  ctrl-r history  q quit".to_string()
     }
 }
 
-fn no_changes_quit_hit(app: &App, area: Rect, hint_y: u16) -> (u16, u16, u16, u16) {
-    let (prefix, action) = if app.watch {
-        ("Watching for changes. Press ", "q to quit.")
-    } else {
-        ("Press R to refresh or ", "q to quit.")
-    };
-    let full_width = text_width(&format!("{prefix}{action}")) as u16;
+fn no_changes_action_hit(
+    app: &App,
+    area: Rect,
+    hint_y: u16,
+    prefix: &str,
+    action: &str,
+) -> (u16, u16, u16, u16) {
+    let full_width = text_width(&no_changes_hint_text(app)) as u16;
     let x = area
         .x
         .saturating_add(area.width.saturating_sub(full_width) / 2)
         .saturating_add(text_width(prefix) as u16);
     (x, hint_y, text_width(action) as u16, 1)
+}
+
+fn no_changes_dashboard_hit(app: &App, area: Rect, hint_y: u16) -> (u16, u16, u16, u16) {
+    let prefix = if app.watch {
+        "Watching for changes. "
+    } else {
+        "R refresh  "
+    };
+    no_changes_action_hit(app, area, hint_y, prefix, "ctrl-r history")
+}
+
+fn no_changes_quit_hit(app: &App, area: Rect, hint_y: u16) -> (u16, u16, u16, u16) {
+    let prefix = if app.watch {
+        "Watching for changes. ctrl-r history  "
+    } else {
+        "R refresh  ctrl-r history  "
+    };
+    no_changes_action_hit(app, area, hint_y, prefix, "q quit")
 }
 
 fn draw_no_changes(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -419,6 +452,8 @@ fn draw_no_changes(frame: &mut Frame, app: &mut App, area: Rect) {
     let height = 3.min(area.height);
     let y = area.y + area.height.saturating_sub(height) / 2;
     let hint_y = y.saturating_add(2);
+    app.no_changes_dashboard_hit =
+        (height > 2).then(|| no_changes_dashboard_hit(app, area, hint_y));
     app.no_changes_quit_hit = (height > 2).then(|| no_changes_quit_hit(app, area, hint_y));
 
     let mut message = Paragraph::new(Line::from(Span::styled(
@@ -452,7 +487,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     app.topbar_sidebar_toggle_hit = None;
     app.status_mode_hit = None;
     app.binary_preview_hit = None;
+    app.review_file_comment_hit = None;
     app.file_panel_root_hit = None;
+    app.no_changes_dashboard_hit = None;
     app.no_changes_quit_hit = None;
     app.topbar_area = None;
 
@@ -536,7 +573,180 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
 
     draw_review_line_add_button(frame, app);
+    draw_file_context_menu(frame, app);
+    draw_status_mode_menu(frame, app);
     draw_toasts(frame, app);
+}
+
+fn file_context_menu_label(action: FileContextMenuAction) -> &'static str {
+    match action {
+        FileContextMenuAction::Open => "Open",
+        FileContextMenuAction::OpenInNewTab => "Open in new tab",
+        FileContextMenuAction::CopyPath => "Copy path",
+    }
+}
+
+fn view_mode_label(mode: ViewMode) -> &'static str {
+    match mode {
+        ViewMode::UnifiedPane => "Unified",
+        ViewMode::Split => "Split",
+        ViewMode::Evolution => "Evolution",
+        ViewMode::Blame => "Blame",
+        ViewMode::Preview => "Preview",
+    }
+}
+
+fn draw_file_context_menu(frame: &mut Frame, app: &mut App) {
+    app.file_context_menu_hits.clear();
+    if app.file_panel_rect.is_none() {
+        app.close_file_context_menu();
+        return;
+    }
+    let Some(menu) = app.file_context_menu else {
+        return;
+    };
+    let area = frame.area();
+    let actions = FileContextMenuAction::ALL;
+    if area.width < 10 || area.height < actions.len() as u16 + 2 {
+        return;
+    }
+    let width = 20.min(area.width);
+    let height = actions.len() as u16 + 2;
+    let x = menu
+        .x
+        .min(area.x.saturating_add(area.width.saturating_sub(width)));
+    let y = menu
+        .y
+        .min(area.y.saturating_add(area.height.saturating_sub(height)));
+    let menu_area = Rect::new(x, y, width, height);
+
+    frame.render_widget(Clear, menu_area);
+    let mut block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(Style::default().fg(app.theme.border_active));
+    if let Some(bg) = app.theme.background_panel.or(app.theme.background) {
+        block = block.style(Style::default().bg(bg));
+    }
+    frame.render_widget(block.clone(), menu_area);
+
+    let inner = block.inner(menu_area);
+    let menu_bg = app.theme.background_panel.or(app.theme.background);
+    let hover_bg = app
+        .theme
+        .background_element
+        .or_else(|| menu_bg.and_then(|bg| color::blend_colors(bg, app.theme.accent, 0.16)))
+        .or(menu_bg);
+    for (idx, action) in actions.into_iter().enumerate() {
+        let row = inner.y.saturating_add(idx as u16);
+        let hover = app.file_context_menu_hover == Some(action);
+        let mut text_style = Style::default().fg(if hover {
+            app.theme.accent
+        } else {
+            app.theme.text
+        });
+        if hover {
+            text_style = text_style.add_modifier(Modifier::BOLD);
+        }
+        let mut row_style = Style::default();
+        if let Some(bg) = if hover { hover_bg } else { menu_bg } {
+            row_style = row_style.bg(bg);
+        }
+        app.file_context_menu_hits.push(FileContextMenuHit {
+            action,
+            x: inner.x,
+            y: row,
+            width: inner.width,
+            height: 1,
+        });
+        let label = format!(" {}", file_context_menu_label(action));
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                truncate_text(&label, inner.width as usize),
+                text_style,
+            )))
+            .style(row_style),
+            Rect::new(inner.x, row, inner.width, 1),
+        );
+    }
+}
+
+fn draw_status_mode_menu(frame: &mut Frame, app: &mut App) {
+    app.status_mode_menu_hits.clear();
+    let Some(menu) = app.status_mode_menu else {
+        return;
+    };
+    let area = frame.area();
+    let modes = [
+        ViewMode::UnifiedPane,
+        ViewMode::Split,
+        ViewMode::Evolution,
+        ViewMode::Blame,
+        ViewMode::Preview,
+    ];
+    if area.width < 10 || area.height < modes.len() as u16 + 2 {
+        return;
+    }
+    let width = 14.min(area.width);
+    let height = modes.len() as u16 + 2;
+    let x = menu
+        .x
+        .min(area.x.saturating_add(area.width.saturating_sub(width)));
+    let y = menu
+        .y
+        .min(area.y.saturating_add(area.height.saturating_sub(height)));
+    let menu_area = Rect::new(x, y, width, height);
+
+    frame.render_widget(Clear, menu_area);
+    let mut block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(Style::default().fg(app.theme.border_active));
+    if let Some(bg) = app.theme.background_panel.or(app.theme.background) {
+        block = block.style(Style::default().bg(bg));
+    }
+    frame.render_widget(block.clone(), menu_area);
+
+    let inner = block.inner(menu_area);
+    let menu_bg = app.theme.background_panel.or(app.theme.background);
+    let active_bg = app
+        .theme
+        .background_element
+        .or_else(|| menu_bg.and_then(|bg| color::blend_colors(bg, app.theme.accent, 0.16)))
+        .or(menu_bg);
+    for (idx, mode) in modes.into_iter().enumerate() {
+        let row = inner.y.saturating_add(idx as u16);
+        let hover = app.status_mode_menu_hover == Some(mode);
+        let active = app.view_mode == mode;
+        let mut text_style = Style::default().fg(if hover || active {
+            app.theme.accent
+        } else {
+            app.theme.text
+        });
+        if hover || active {
+            text_style = text_style.add_modifier(Modifier::BOLD);
+        }
+        let mut row_style = Style::default();
+        if let Some(bg) = if hover || active { active_bg } else { menu_bg } {
+            row_style = row_style.bg(bg);
+        }
+        app.status_mode_menu_hits.push(StatusModeMenuHit {
+            mode,
+            x: inner.x,
+            y: row,
+            width: inner.width,
+            height: 1,
+        });
+        let label = format!(" {}", view_mode_label(mode));
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                truncate_text(&label, inner.width as usize),
+                text_style,
+            )))
+            .style(row_style),
+            Rect::new(inner.x, row, inner.width, 1),
+        );
+    }
 }
 
 fn draw_toasts(frame: &mut Frame, app: &mut App) {
@@ -2580,6 +2790,79 @@ impl PreviewChangeBars {
     }
 }
 
+struct PreviewFileCommentMeta {
+    action_width: usize,
+    card_start: Option<usize>,
+    card_height: usize,
+    anchor_key: Option<String>,
+}
+
+fn review_file_comment_action_line(app: &App) -> Option<(Line<'static>, usize)> {
+    if !app.file_review_comments_supported() || app.review_editor_active() {
+        return None;
+    }
+    let key = app.keybindings.normal_keys(NormalAction::LineComment);
+    let label = "comment";
+    let width = text_width(&key)
+        .saturating_add(1)
+        .saturating_add(text_width(label));
+    let key_style = Style::default()
+        .fg(app.theme.accent)
+        .add_modifier(Modifier::BOLD);
+    let label_style = if app.review_file_comment_hover {
+        Style::default()
+            .fg(app.theme.accent)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(app.theme.text_muted)
+    };
+    Some((
+        Line::from(vec![
+            Span::styled(key, key_style),
+            Span::raw(" "),
+            Span::styled(label.to_string(), label_style),
+        ]),
+        width,
+    ))
+}
+
+fn prepend_review_file_comment_lines(
+    app: &mut App,
+    lines: &mut Vec<Line<'static>>,
+    max_width: usize,
+) -> Option<PreviewFileCommentMeta> {
+    let (action, action_width) = review_file_comment_action_line(app)?;
+    let mut prefix = vec![action, Line::from("")];
+    let mut card_start = None;
+    let mut card_height = 0usize;
+    let mut anchor_key = None;
+
+    if let Some(overlay) = app.review_file_comment_overlay() {
+        let start = prefix.len();
+        let key = overlay.anchor_key.clone();
+        let note_lines = app.review_preview_note_lines(&overlay, max_width);
+        card_height = note_lines.len();
+        card_start = Some(start);
+        anchor_key = Some(key.clone());
+        prefix.extend(
+            note_lines
+                .into_iter()
+                .map(|line| Line::from(review_note_line_spans(app, &key, &line))),
+        );
+        prefix.push(Line::from(""));
+    }
+
+    prefix.append(lines);
+    *lines = prefix;
+
+    Some(PreviewFileCommentMeta {
+        action_width,
+        card_start,
+        card_height,
+        anchor_key,
+    })
+}
+
 fn render_preview(frame: &mut Frame, app: &mut App, area: Rect) {
     if let Some(bg) = app.theme.background {
         frame.render_widget(Block::default().style(Style::default().bg(bg)), area);
@@ -2654,6 +2937,8 @@ fn render_preview(frame: &mut Frame, app: &mut App, area: Rect) {
                 Vec::new(),
             )
         };
+    let file_comment_meta =
+        prepend_review_file_comment_lines(app, &mut lines, content_area.width as usize);
     app.set_preview_search_lines(preview_search_text_lines(&lines));
     highlight_preview_search_lines(app, &mut lines);
     let visible_lines = content_area.height as usize;
@@ -2703,8 +2988,46 @@ fn render_preview(frame: &mut Frame, app: &mut App, area: Rect) {
     app.clamp_scroll(total_lines, visible_lines, false);
     let scroll = app.scroll_offset.min(total_lines.saturating_sub(1));
 
-    // Map visible links from content coordinates to on-screen click boxes.
+    // Map visible action rows from content coordinates to on-screen click boxes.
     let content_w = content_area.width as usize;
+    if let Some(meta) = &file_comment_meta {
+        if scroll == 0 && visible_lines > 0 {
+            app.set_review_file_comment_hit(Some((
+                content_area.x,
+                content_area.y,
+                meta.action_width.min(content_w) as u16,
+                1,
+            )));
+        }
+        if let (Some(card_start), Some(anchor_key)) = (meta.card_start, meta.anchor_key.as_ref()) {
+            let card_end = card_start.saturating_add(meta.card_height);
+            let visible_start = card_start.max(scroll);
+            let visible_end = card_end.min(scroll.saturating_add(visible_lines));
+            if visible_start < visible_end {
+                app.add_review_preview_box(
+                    content_area.x,
+                    content_area
+                        .y
+                        .saturating_add((visible_start - scroll) as u16),
+                    content_area.width,
+                    (visible_end - visible_start) as u16,
+                    anchor_key.clone(),
+                );
+            }
+            let delete_line = card_end.saturating_sub(1);
+            if delete_line >= scroll && delete_line < scroll.saturating_add(visible_lines) {
+                app.add_review_preview_delete_box(
+                    content_area.x.saturating_add(2),
+                    content_area.y.saturating_add((delete_line - scroll) as u16),
+                    text_width("x delete") as u16,
+                    1,
+                    anchor_key.clone(),
+                );
+            }
+        }
+    }
+
+    // Map visible links from content coordinates to on-screen click boxes.
     for link in &links {
         if link.line < scroll || link.line >= scroll + visible_lines || link.col >= content_w {
             continue;
@@ -4773,11 +5096,11 @@ fn help_markdown(app: &App) -> String {
         |action| app.keybindings.review_editor_keys(action),
     ));
     out.push_str(&keybinding_section::<DashboardAction, _>(
-        "Dashboard",
+        "History",
         |action| app.keybindings.dashboard_keys(action),
     ));
     out.push_str(&keybinding_section::<DashboardFilterAction, _>(
-        "Dashboard filter",
+        "History filter",
         |action| app.keybindings.dashboard_filter_keys(action),
     ));
 
@@ -6855,14 +7178,18 @@ mod tests {
         );
         let mut app = App::new(multi, ViewMode::UnifiedPane, 50, false, None);
         app.watch = true;
+        app.no_changes_dashboard_hover = true;
         app.no_changes_quit_hover = true;
 
         let line = super::no_changes_hint_line(&app);
 
-        assert_eq!(line.spans[1].content.as_ref(), "q");
+        assert_eq!(line.spans[1].content.as_ref(), "ctrl-r");
         assert_eq!(line.spans[1].style.fg, Some(app.theme.accent));
         assert_eq!(line.spans[2].style.fg, Some(app.theme.text_muted));
         assert!(line.spans[2].style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(line.spans[4].content.as_ref(), "q");
+        assert_eq!(line.spans[4].style.fg, Some(app.theme.accent));
+        assert!(line.spans[5].style.add_modifier.contains(Modifier::BOLD));
     }
 
     #[test]
@@ -7054,6 +7381,38 @@ mod tests {
         assert!(text.contains("file 1/1"), "status text: {text:?}");
         assert!(app.status_comments_hit.is_some());
         assert!(app.status_file_hit.is_some());
+    }
+
+    #[test]
+    fn binary_preview_shows_file_comment_action_and_comment() {
+        let multi = MultiFileDiff::from_file_pair_bytes(
+            std::path::PathBuf::from("file.bin"),
+            vec![0, 1],
+            vec![0, 2],
+        );
+        let mut app = App::new(multi, ViewMode::Preview, 50, false, None);
+        app.enable_review_mode();
+        assert!(app.start_file_comment());
+        app.review_insert_char('o');
+        app.review_insert_char('k');
+        app.review_save_editor();
+
+        let backend = TestBackend::new(50, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| super::render_preview(frame, &mut app, Rect::new(0, 0, 50, 8)))
+            .unwrap();
+        let text = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(text.contains("m comment"), "preview text: {text:?}");
+        assert!(text.contains("ok"), "preview text: {text:?}");
+        assert!(app.review_file_comment_hit.is_some());
     }
 
     #[test]

@@ -8,6 +8,7 @@ pub(crate) enum ToastEvent {
     CopiedLine,
     CopiedHunk,
     CopiedPatch,
+    CopiedPath,
     CopiedToast,
     CopyFailed,
     LineWrap(bool),
@@ -34,6 +35,7 @@ impl ToastEvent {
             Self::CopiedLine => "Line copied".to_string(),
             Self::CopiedHunk => "Hunk copied".to_string(),
             Self::CopiedPatch => "Patch copied".to_string(),
+            Self::CopiedPath => "Path copied".to_string(),
             Self::CopiedToast => "Toast copied".to_string(),
             Self::CopyFailed => "Could not copy to clipboard".to_string(),
             Self::LineWrap(true) => "Line wrap on".to_string(),
@@ -77,6 +79,7 @@ impl ToastEvent {
             | Self::CopiedLine
             | Self::CopiedHunk
             | Self::CopiedPatch
+            | Self::CopiedPath
             | Self::CopiedToast
             | Self::CommentSaved
             | Self::ReviewSubmitted

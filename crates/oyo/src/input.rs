@@ -29,6 +29,22 @@ pub(crate) fn handle_app_key(
         return Ok(());
     }
 
+    if app.status_mode_menu_open() {
+        if key.code == KeyCode::Esc {
+            app.close_status_mode_menu();
+            return Ok(());
+        }
+        app.close_status_mode_menu();
+    }
+
+    if app.file_context_menu.is_some() {
+        if key.code == KeyCode::Esc {
+            app.close_file_context_menu();
+            return Ok(());
+        }
+        app.close_file_context_menu();
+    }
+
     if handle_global_key(app, key) {
         return Ok(());
     }

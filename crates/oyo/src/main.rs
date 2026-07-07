@@ -18,7 +18,9 @@ mod toasts;
 mod ui;
 mod views;
 
-use crate::dashboard::{Dashboard, DashboardConfig, DashboardSelection};
+use crate::dashboard::{
+    Dashboard, DashboardConfig, DashboardContextMenuResult, DashboardSelection,
+};
 use crate::input::handle_app_key;
 use crate::keybindings::{DashboardAction, DashboardFilterAction, Dispatch, Keybindings};
 use crate::syntax::{list_syntax_themes, SyntaxEngine};
@@ -170,7 +172,7 @@ enum Command {
     Themes,
     /// List syntax themes
     SyntaxThemes,
-    /// Open the git range picker dashboard
+    /// Open History to pick a git range
     View {
         /// Number of commits to show
         #[arg(long, default_value = "200")]
@@ -1237,7 +1239,7 @@ fn main() -> Result<()> {
     if let Some(limit) = view_limit {
         let mut terminal = setup_terminal()?;
         let mut input_mode =
-            match run_commit_picker(&mut terminal, &config, light_mode, limit, None)? {
+            match run_commit_picker(&mut terminal, &config, light_mode, limit, None, None)? {
                 Some(mode) => mode,
                 None => {
                     restore_terminal(&mut terminal)?;
@@ -1248,6 +1250,7 @@ fn main() -> Result<()> {
         let mut exit_message: Option<String> = None;
         let mut review_output: Option<String> = None;
         let mut review_hook_warnings = Vec::new();
+        let mut runtime_theme: Option<(config::ResolvedTheme, Option<String>)> = None;
         loop {
             let empty_message = match &input_mode {
                 InputMode::GitUncommitted => Some("No uncommitted changes found.".to_string()),
@@ -1278,6 +1281,10 @@ fn main() -> Result<()> {
             let mut app = App::new(multi_diff, view_mode, speed, autoplay, git_branch);
             app.no_changes_message = empty_message.clone();
             apply_config_to_app(&mut app, &config, &args, light_mode);
+            if let Some((theme, name)) = &runtime_theme {
+                app.theme = theme.clone();
+                app.ui_theme_name = name.clone();
+            }
             app.set_review_persist_enabled(!args.no_review_persist);
             app.set_review_clear_session_on_start(args.clear_review_session);
             app.enable_review_mode();
@@ -1287,6 +1294,7 @@ fn main() -> Result<()> {
                 review_output = app.take_review_submission_output();
             }
             review_hook_warnings.extend(app.take_review_hook_warnings());
+            runtime_theme = Some((app.theme.clone(), app.ui_theme_name.clone()));
             match exit {
                 AppExit::Quit | AppExit::OpenDashboard => {
                     let Some(mode) = run_commit_picker(
@@ -1295,6 +1303,7 @@ fn main() -> Result<()> {
                         light_mode,
                         limit,
                         Some(&input_mode),
+                        runtime_theme.as_ref().map(|(theme, _)| theme),
                     )?
                     else {
                         break;
@@ -1359,6 +1368,7 @@ fn main() -> Result<()> {
     let mut exit_message: Option<String> = None;
     let mut review_output: Option<String> = None;
     let mut review_hook_warnings = Vec::new();
+    let mut runtime_theme: Option<(config::ResolvedTheme, Option<String>)> = None;
     let mut pending_diff = Some(prefetched);
     loop {
         let empty_message = match &input_mode {
@@ -1393,6 +1403,10 @@ fn main() -> Result<()> {
         let mut app = App::new(multi_diff, view_mode, speed, autoplay, git_branch);
         app.no_changes_message = empty_message.clone();
         apply_config_to_app(&mut app, &config, &args, light_mode);
+        if let Some((theme, name)) = &runtime_theme {
+            app.theme = theme.clone();
+            app.ui_theme_name = name.clone();
+        }
         app.set_review_persist_enabled(!args.no_review_persist);
         app.set_review_clear_session_on_start(args.clear_review_session);
         app.enable_review_mode();
@@ -1402,6 +1416,7 @@ fn main() -> Result<()> {
             review_output = app.take_review_submission_output();
         }
         review_hook_warnings.extend(app.take_review_hook_warnings());
+        runtime_theme = Some((app.theme.clone(), app.ui_theme_name.clone()));
         match exit {
             AppExit::Quit => break,
             AppExit::OpenDashboard => {
@@ -1411,6 +1426,7 @@ fn main() -> Result<()> {
                     light_mode,
                     dashboard_limit,
                     Some(&input_mode),
+                    runtime_theme.as_ref().map(|(theme, _)| theme),
                 )?
                 else {
                     break;
@@ -1517,6 +1533,62 @@ fn run_app(
                             continue;
                         }
                     }
+                    if app.status_mode_menu_open() {
+                        match me.kind {
+                            MouseEventKind::Down(MouseButton::Left) => {
+                                app.handle_status_mode_menu_click(me.column, me.row);
+                                continue;
+                            }
+                            MouseEventKind::Down(MouseButton::Right) => {
+                                if !app.open_status_mode_menu(me.column, me.row) {
+                                    app.close_status_mode_menu();
+                                }
+                                continue;
+                            }
+                            MouseEventKind::Moved => {
+                                if !app.update_status_mode_menu_hover(me.column, me.row) {
+                                    needs_draw = false;
+                                }
+                                continue;
+                            }
+                            MouseEventKind::ScrollUp
+                            | MouseEventKind::ScrollDown
+                            | MouseEventKind::ScrollLeft
+                            | MouseEventKind::ScrollRight => {
+                                app.close_status_mode_menu();
+                                continue;
+                            }
+                            _ => {}
+                        }
+                    }
+                    if app.file_context_menu.is_some() {
+                        match me.kind {
+                            MouseEventKind::Down(MouseButton::Left) => {
+                                app.handle_file_context_menu_click(me.column, me.row);
+                                continue;
+                            }
+                            MouseEventKind::Down(MouseButton::Right) => {
+                                if !app.open_file_context_menu(me.column, me.row) {
+                                    app.close_file_context_menu();
+                                }
+                                continue;
+                            }
+                            MouseEventKind::Moved => {
+                                if !app.update_file_context_menu_hover(me.column, me.row) {
+                                    needs_draw = false;
+                                }
+                                continue;
+                            }
+                            MouseEventKind::ScrollUp
+                            | MouseEventKind::ScrollDown
+                            | MouseEventKind::ScrollLeft
+                            | MouseEventKind::ScrollRight => {
+                                app.close_file_context_menu();
+                                continue;
+                            }
+                            _ => {}
+                        }
+                    }
                     if app.command_palette_active() {
                         match me.kind {
                             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
@@ -1593,6 +1665,9 @@ fn run_app(
                     }
                     match me.kind {
                         MouseEventKind::Down(MouseButton::Left) => {
+                            if app.handle_no_changes_dashboard_click(me.column, me.row) {
+                                continue;
+                            }
                             if app.handle_no_changes_quit_click(me.column, me.row) {
                                 continue;
                             }
@@ -1636,6 +1711,9 @@ fn run_app(
                             if app.handle_review_preview_click(me.column, me.row) {
                                 continue;
                             }
+                            if app.handle_review_file_comment_click(me.column, me.row) {
+                                continue;
+                            }
                             if app.handle_preview_link_click(me.column, me.row) {
                                 continue;
                             }
@@ -1655,6 +1733,16 @@ fn run_app(
                             ) {
                                 continue;
                             }
+                        }
+                        MouseEventKind::Down(MouseButton::Right)
+                            if app.open_status_mode_menu(me.column, me.row) =>
+                        {
+                            continue;
+                        }
+                        MouseEventKind::Down(MouseButton::Right)
+                            if app.open_file_context_menu(me.column, me.row) =>
+                        {
+                            continue;
                         }
                         MouseEventKind::Drag(MouseButton::Left) => {
                             if app.drag_topbar_tab(me.column, me.row) {
@@ -2105,6 +2193,12 @@ fn run_dashboard<B: Backend>(
             Event::Key(key) if key.kind == KeyEventKind::Press => {
                 let list_height =
                     dashboard.list_height(terminal.size().map_err(|e| anyhow!("{e}"))?.height);
+                if dashboard.context_menu_open() {
+                    dashboard.close_context_menu();
+                    if key.code == KeyCode::Esc {
+                        continue;
+                    }
+                }
                 if dashboard.filter_active() {
                     match dashboard.keybindings_mut().dashboard_filter(key) {
                         Dispatch::Matched(DashboardFilterAction::Cancel) => {
@@ -2189,9 +2283,43 @@ fn run_dashboard<B: Backend>(
                 }
             }
             Event::Mouse(mouse) => {
-                dashboard.update_hover(mouse.column, mouse.row);
                 let list_height =
                     dashboard.list_height(terminal.size().map_err(|e| anyhow!("{e}"))?.height);
+                if dashboard.context_menu_open() {
+                    match mouse.kind {
+                        MouseEventKind::Down(MouseButton::Left) => {
+                            match dashboard.handle_context_menu_click(mouse.column, mouse.row) {
+                                Some(DashboardContextMenuResult::Open(selection)) => {
+                                    return Ok(Some(selection));
+                                }
+                                Some(DashboardContextMenuResult::Handled) => {}
+                                None => {}
+                            }
+                            continue;
+                        }
+                        MouseEventKind::Down(MouseButton::Right) => {
+                            if !dashboard.open_context_menu(mouse.column, mouse.row) {
+                                dashboard.close_context_menu();
+                            }
+                            continue;
+                        }
+                        MouseEventKind::Moved => {
+                            if !dashboard.update_context_menu_hover(mouse.column, mouse.row) {
+                                needs_draw = false;
+                            }
+                            continue;
+                        }
+                        MouseEventKind::ScrollUp
+                        | MouseEventKind::ScrollDown
+                        | MouseEventKind::ScrollLeft
+                        | MouseEventKind::ScrollRight => {
+                            dashboard.close_context_menu();
+                            continue;
+                        }
+                        _ => {}
+                    }
+                }
+                dashboard.update_hover(mouse.column, mouse.row);
                 match mouse.kind {
                     MouseEventKind::ScrollUp => {
                         dashboard.move_selection(-3, list_height);
@@ -2217,6 +2345,7 @@ fn run_dashboard<B: Backend>(
                                 DashboardAction::SelectHovered => {
                                     dashboard.select_hovered();
                                 }
+                                DashboardAction::ClearPin => dashboard.clear_pin(),
                                 _ => {}
                             }
                             continue;
@@ -2230,6 +2359,9 @@ fn run_dashboard<B: Backend>(
                                 return Ok(Some(selection));
                             }
                         }
+                    }
+                    MouseEventKind::Down(MouseButton::Right) => {
+                        dashboard.open_context_menu(mouse.column, mouse.row);
                     }
                     MouseEventKind::Moved | MouseEventKind::Drag(MouseButton::Left) => {}
                     _ => {}
@@ -2270,6 +2402,7 @@ fn run_commit_picker<B: Backend>(
     light_mode: bool,
     limit: usize,
     initial: Option<&InputMode>,
+    theme_override: Option<&config::ResolvedTheme>,
 ) -> Result<Option<InputMode>> {
     let cwd = std::env::current_dir().unwrap_or_default();
     if !oyo_core::git::is_git_repo(&cwd) {
@@ -2286,7 +2419,9 @@ fn run_commit_picker<B: Backend>(
     let staged_changes =
         oyo_core::git::get_staged_changes(&repo_root).context("Failed to get staged changes")?;
 
-    let theme = config.ui.theme.resolve(light_mode);
+    let theme = theme_override
+        .cloned()
+        .unwrap_or_else(|| config.ui.theme.resolve(light_mode));
     let time_format = TimeFormatter::new(&config.ui.time);
     let mut dashboard = Dashboard::new(DashboardConfig {
         repo_root,

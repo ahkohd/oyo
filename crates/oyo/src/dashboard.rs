@@ -1,5 +1,6 @@
-//! Git range picker dashboard for oy view
+//! Git history picker for oy view
 
+use crate::color;
 use crate::config::ResolvedTheme;
 use crate::keybindings::{DashboardAction, Keybindings};
 use crate::time_format::TimeFormatter;
@@ -8,7 +9,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Paragraph},
+    widgets::{Block, Borders, Clear, Paragraph},
     Frame,
 };
 use std::path::PathBuf;
@@ -63,6 +64,39 @@ struct DashboardFooterHit {
     height: u16,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DashboardContextMenuAction {
+    Open,
+    MarkStart,
+    MarkEnd,
+}
+
+impl DashboardContextMenuAction {
+    const ALL: [Self; 3] = [Self::Open, Self::MarkStart, Self::MarkEnd];
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DashboardContextMenu {
+    idx: usize,
+    x: u16,
+    y: u16,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DashboardContextMenuHit {
+    action: DashboardContextMenuAction,
+    x: u16,
+    y: u16,
+    width: u16,
+    height: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DashboardContextMenuResult {
+    Handled,
+    Open(DashboardSelection),
+}
+
 #[derive(Debug)]
 pub struct Dashboard {
     repo_root: PathBuf,
@@ -82,6 +116,9 @@ pub struct Dashboard {
     filter_clear_hover: bool,
     footer_action_hits: Vec<DashboardFooterHit>,
     footer_action_hover: Option<DashboardAction>,
+    context_menu: Option<DashboardContextMenu>,
+    context_menu_hits: Vec<DashboardContextMenuHit>,
+    context_menu_hover: Option<DashboardContextMenuAction>,
     hovered: Option<usize>,
     pinned_from: Option<String>,
     theme: ResolvedTheme,
@@ -166,6 +203,9 @@ impl Dashboard {
             filter_clear_hover: false,
             footer_action_hits: Vec::new(),
             footer_action_hover: None,
+            context_menu: None,
+            context_menu_hits: Vec::new(),
+            context_menu_hover: None,
             hovered: None,
             pinned_from: None,
             theme: config.theme,
@@ -322,15 +362,23 @@ impl Dashboard {
         }
     }
 
-    fn toggle_pin_for_idx(&mut self, filtered_idx: usize) {
-        let Some(entry_idx) = self.filtered.get(filtered_idx) else {
-            return;
-        };
-        let Some(pin_id) = self.entries.get(*entry_idx).map(|entry| match &entry.kind {
+    fn pin_id_for_idx(&self, filtered_idx: usize) -> Option<String> {
+        let entry_idx = self.filtered.get(filtered_idx)?;
+        self.entries.get(*entry_idx).map(|entry| match &entry.kind {
             EntryKind::Commit(commit) => commit.id.clone(),
             EntryKind::WorkingTree { .. } => HEAD_REF.to_string(),
             EntryKind::Staged { .. } => INDEX_REF.to_string(),
-        }) else {
+        })
+    }
+
+    fn mark_pin_for_idx(&mut self, filtered_idx: usize) {
+        if let Some(pin_id) = self.pin_id_for_idx(filtered_idx) {
+            self.pinned_from = Some(pin_id);
+        }
+    }
+
+    fn toggle_pin_for_idx(&mut self, filtered_idx: usize) {
+        let Some(pin_id) = self.pin_id_for_idx(filtered_idx) else {
             return;
         };
         if self.pinned_from.as_deref() == Some(pin_id.as_str()) {
@@ -427,6 +475,7 @@ impl Dashboard {
         self.draw_header(frame, chunks[0]);
         self.draw_list(frame, chunks[1]);
         self.draw_footer(frame, chunks[2]);
+        self.draw_context_menu(frame);
     }
 
     pub fn list_height(&self, height: u16) -> usize {
@@ -626,12 +675,7 @@ impl Dashboard {
             filter_area.height,
         ));
         let mut filter = Paragraph::new(self.filter_line(filter_area.width));
-        if let Some(bg) = self
-            .theme
-            .background_element
-            .or(self.theme.background_panel)
-            .or(self.theme.background)
-        {
+        if let Some(bg) = self.theme.background {
             filter = filter.style(Style::default().bg(bg));
         }
         frame.render_widget(filter, filter_area);
@@ -680,6 +724,7 @@ impl Dashboard {
             (DashboardAction::Accept, "open"),
             (DashboardAction::TogglePin, "start"),
             (DashboardAction::SelectHovered, "end"),
+            (DashboardAction::ClearPin, "clear"),
             (DashboardAction::Quit, "quit"),
         ];
         for (idx, (action, label)) in actions.into_iter().enumerate() {
@@ -710,6 +755,77 @@ impl Dashboard {
         }
         spans.push(Span::raw(" "));
         frame.render_widget(Paragraph::new(Line::from(spans)), hint_area);
+    }
+
+    fn draw_context_menu(&mut self, frame: &mut Frame) {
+        self.context_menu_hits.clear();
+        let Some(menu) = self.context_menu else {
+            return;
+        };
+        let area = frame.area();
+        let actions = DashboardContextMenuAction::ALL;
+        if area.width < 10 || area.height < actions.len() as u16 + 2 {
+            return;
+        }
+        let width = 18.min(area.width);
+        let height = actions.len() as u16 + 2;
+        let x = menu
+            .x
+            .min(area.x.saturating_add(area.width.saturating_sub(width)));
+        let y = menu
+            .y
+            .min(area.y.saturating_add(area.height.saturating_sub(height)));
+        let menu_area = Rect::new(x, y, width, height);
+
+        frame.render_widget(Clear, menu_area);
+        let mut block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(ratatui::widgets::BorderType::Rounded)
+            .border_style(Style::default().fg(self.theme.border_active));
+        if let Some(bg) = self.theme.background_panel.or(self.theme.background) {
+            block = block.style(Style::default().bg(bg));
+        }
+        frame.render_widget(block.clone(), menu_area);
+
+        let inner = block.inner(menu_area);
+        let menu_bg = self.theme.background_panel.or(self.theme.background);
+        let hover_bg = self
+            .theme
+            .background_element
+            .or_else(|| menu_bg.and_then(|bg| color::blend_colors(bg, self.theme.accent, 0.16)))
+            .or(menu_bg);
+        for (idx, action) in actions.into_iter().enumerate() {
+            let row = inner.y.saturating_add(idx as u16);
+            let hover = self.context_menu_hover == Some(action);
+            let mut text_style = Style::default().fg(if hover {
+                self.theme.accent
+            } else {
+                self.theme.text
+            });
+            if hover {
+                text_style = text_style.add_modifier(Modifier::BOLD);
+            }
+            let mut row_style = Style::default();
+            if let Some(bg) = if hover { hover_bg } else { menu_bg } {
+                row_style = row_style.bg(bg);
+            }
+            self.context_menu_hits.push(DashboardContextMenuHit {
+                action,
+                x: inner.x,
+                y: row,
+                width: inner.width,
+                height: 1,
+            });
+            let label = format!(" {}", dashboard_context_menu_label(action));
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    truncate_text(&label, inner.width as usize),
+                    text_style,
+                )))
+                .style(row_style),
+                Rect::new(inner.x, row, inner.width, 1),
+            );
+        }
     }
 
     fn dashboard_footer_key(&self, action: DashboardAction) -> String {
@@ -949,22 +1065,90 @@ impl Dashboard {
             .map(|hit| hit.action)
     }
 
-    pub fn select_at_mouse(&mut self, x: u16, y: u16) -> Option<bool> {
-        let idx = self.hovered_at(x, y)?;
+    pub(crate) fn context_menu_open(&self) -> bool {
+        self.context_menu.is_some()
+    }
+
+    pub(crate) fn open_context_menu(&mut self, x: u16, y: u16) -> bool {
+        let Some(idx) = self.hovered_at(x, y) else {
+            return false;
+        };
+        self.context_menu = Some(DashboardContextMenu { idx, x, y });
+        self.context_menu_hover = None;
+        self.hovered = Some(idx);
+        true
+    }
+
+    pub(crate) fn close_context_menu(&mut self) -> bool {
+        let was_open = self.context_menu.take().is_some();
+        self.context_menu_hits.clear();
+        self.context_menu_hover = None;
+        was_open
+    }
+
+    fn context_menu_action_at(&self, x: u16, y: u16) -> Option<DashboardContextMenuAction> {
+        self.context_menu_hits
+            .iter()
+            .find(|hit| self.hit(Some((hit.x, hit.y, hit.width, hit.height)), x, y))
+            .map(|hit| hit.action)
+    }
+
+    pub(crate) fn update_context_menu_hover(&mut self, x: u16, y: u16) -> bool {
+        let hover = self.context_menu_action_at(x, y);
+        if self.context_menu_hover == hover {
+            return false;
+        }
+        self.context_menu_hover = hover;
+        true
+    }
+
+    pub(crate) fn handle_context_menu_click(
+        &mut self,
+        x: u16,
+        y: u16,
+    ) -> Option<DashboardContextMenuResult> {
+        let menu = self.context_menu?;
+        let Some(action) = self.context_menu_action_at(x, y) else {
+            self.close_context_menu();
+            return Some(DashboardContextMenuResult::Handled);
+        };
+        let result = match action {
+            DashboardContextMenuAction::Open => {
+                self.select_idx(menu.idx);
+                self.selection()
+                    .map(DashboardContextMenuResult::Open)
+                    .unwrap_or(DashboardContextMenuResult::Handled)
+            }
+            DashboardContextMenuAction::MarkStart => {
+                self.mark_pin_for_idx(menu.idx);
+                DashboardContextMenuResult::Handled
+            }
+            DashboardContextMenuAction::MarkEnd => {
+                self.select_idx(menu.idx);
+                DashboardContextMenuResult::Handled
+            }
+        };
+        self.close_context_menu();
+        Some(result)
+    }
+
+    fn select_idx(&mut self, idx: usize) -> bool {
         let changed = self.selected != idx;
         self.selected = idx;
         self.ensure_visible(self.last_list_area.height as usize);
-        Some(changed)
+        changed
+    }
+
+    pub fn select_at_mouse(&mut self, x: u16, y: u16) -> Option<bool> {
+        let idx = self.hovered_at(x, y)?;
+        Some(self.select_idx(idx))
     }
 
     pub fn select_hovered(&mut self) -> bool {
         let Some(hovered) = self.hovered else {
             return false;
         };
-        let changed = self.selected != hovered;
-        self.selected = hovered;
-        self.ensure_visible(self.last_list_area.height as usize);
-        changed
+        self.select_idx(hovered)
     }
 
     pub fn toggle_pin_at_mouse(&mut self, x: u16, y: u16) -> bool {
@@ -998,6 +1182,14 @@ impl Dashboard {
                 && y >= hit_y
                 && y < hit_y.saturating_add(height)
         })
+    }
+}
+
+fn dashboard_context_menu_label(action: DashboardContextMenuAction) -> &'static str {
+    match action {
+        DashboardContextMenuAction::Open => "Open",
+        DashboardContextMenuAction::MarkStart => "Mark start",
+        DashboardContextMenuAction::MarkEnd => "Mark end",
     }
 }
 
@@ -1513,6 +1705,94 @@ mod tests {
         });
 
         assert_eq!(line.spans[0].style.fg, Some(theme.diff_ext_marker));
+    }
+
+    #[test]
+    fn right_click_opens_dashboard_context_menu_without_selecting() {
+        let mut dashboard = dashboard();
+        dashboard.last_list_area = Rect::new(10, 5, 40, 6);
+
+        assert!(dashboard.open_context_menu(12, 9));
+
+        assert_eq!(dashboard.context_menu.map(|menu| menu.idx), Some(2));
+        assert_eq!(dashboard.selected, 0);
+    }
+
+    #[test]
+    fn dashboard_context_menu_marks_start() {
+        let mut dashboard = dashboard();
+        dashboard.context_menu = Some(DashboardContextMenu {
+            idx: 2,
+            x: 10,
+            y: 5,
+        });
+        dashboard.context_menu_hits.push(DashboardContextMenuHit {
+            action: DashboardContextMenuAction::MarkStart,
+            x: 1,
+            y: 2,
+            width: 10,
+            height: 1,
+        });
+
+        assert_eq!(
+            dashboard.handle_context_menu_click(5, 2),
+            Some(DashboardContextMenuResult::Handled)
+        );
+        assert_eq!(dashboard.pinned_from.as_deref(), Some("bbbbbbbb"));
+        assert!(dashboard.context_menu.is_none());
+    }
+
+    #[test]
+    fn dashboard_context_menu_marks_end() {
+        let mut dashboard = dashboard();
+        dashboard.context_menu = Some(DashboardContextMenu {
+            idx: 2,
+            x: 10,
+            y: 5,
+        });
+        dashboard.context_menu_hits.push(DashboardContextMenuHit {
+            action: DashboardContextMenuAction::MarkEnd,
+            x: 1,
+            y: 2,
+            width: 10,
+            height: 1,
+        });
+
+        assert_eq!(
+            dashboard.handle_context_menu_click(5, 2),
+            Some(DashboardContextMenuResult::Handled)
+        );
+        assert_eq!(dashboard.selected, 2);
+        assert!(dashboard.context_menu.is_none());
+    }
+
+    #[test]
+    fn dashboard_context_menu_open_returns_selection() {
+        let mut dashboard = dashboard();
+        dashboard.context_menu = Some(DashboardContextMenu {
+            idx: 2,
+            x: 10,
+            y: 5,
+        });
+        dashboard.context_menu_hits.push(DashboardContextMenuHit {
+            action: DashboardContextMenuAction::Open,
+            x: 1,
+            y: 2,
+            width: 10,
+            height: 1,
+        });
+
+        assert_eq!(
+            dashboard.handle_context_menu_click(5, 2),
+            Some(DashboardContextMenuResult::Open(
+                DashboardSelection::Range {
+                    from: "aaaaaaaa".to_string(),
+                    to: "bbbbbbbb".to_string(),
+                }
+            ))
+        );
+        assert_eq!(dashboard.selected, 2);
+        assert!(dashboard.context_menu.is_none());
     }
 
     #[test]
