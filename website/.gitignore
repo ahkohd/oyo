@@ -1,0 +1,16 @@
+# build output
+dist/
+.astro/
+
+# deps
+node_modules/
+
+# generated from ../docs by scripts/sync-docs.mjs
+src/content/docs/
+
+# vendored asciinema-player bundle (copied from node_modules by sync-docs.mjs)
+public/vendor/
+
+# misc
+.DS_Store
+*.log

@@ -1,0 +1,57 @@
+/* Everforest palette for the Starlight docs, so the docs and the landing page
+   share one visual identity. Starlight is dark-by-default (:root); light lives
+   under [data-theme='light']. Accent is aqua; grays ramp toward everforest. */
+
+:root {
+  --sl-font-mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code",
+    "Fira Code", Menlo, Consolas, monospace;
+
+  /* accent: aqua */
+  --sl-color-accent-low: #16342a;
+  --sl-color-accent: #3a8f70;
+  --sl-color-accent-high: #a8dcc0;
+  --sl-color-text-accent: #83c092;
+
+  /* grays: everforest dark */
+  --sl-color-white: #e7e0c8;
+  --sl-color-gray-1: #d3c6aa;
+  --sl-color-gray-2: #bdc3af;
+  --sl-color-gray-3: #9da9a0;
+  --sl-color-gray-4: #7a8478;
+  --sl-color-gray-5: #4a555b;
+  --sl-color-gray-6: #3d474d;
+  --sl-color-black: #232a2e;
+
+  --sl-color-bg: #232a2e;
+  --sl-color-bg-nav: #272e33;
+  --sl-color-bg-sidebar: #272e33;
+  --sl-color-hairline: #3d474d;
+}
+
+:root[data-theme="light"] {
+  --sl-color-accent-low: #dbe9d8;
+  --sl-color-accent: #35a77c;
+  --sl-color-accent-high: #1d5c43;
+  --sl-color-text-accent: #216e4e;
+
+  --sl-color-white: #3d484d;
+  --sl-color-gray-1: #4c565c;
+  --sl-color-gray-2: #5c6a72;
+  --sl-color-gray-3: #829181;
+  --sl-color-gray-4: #a6b0a0;
+  --sl-color-gray-5: #d5d0b6;
+  --sl-color-gray-6: #e0dcc4;
+  --sl-color-gray-7: #efebd4;
+  --sl-color-black: #fdf6e3;
+
+  --sl-color-bg: #fdf6e3;
+  --sl-color-bg-nav: #f4f0d9;
+  --sl-color-bg-sidebar: #f4f0d9;
+  --sl-color-hairline: #e0dcc4;
+}
+
+/* Screenshots on the previews page read better boxed. */
+.sl-markdown-content img {
+  border: 1px solid var(--sl-color-hairline);
+  border-radius: 8px;
+}

@@ -1,0 +1,9 @@
+---
+// Starlight Footer override: render the stock footer, then attach the dev-only
+// Agentation toolbar so it's present on every docs page.
+import Default from "@astrojs/starlight/components/Footer.astro";
+import DevTools from "./DevTools.astro";
+---
+
+<Default><slot /></Default>
+<DevTools />

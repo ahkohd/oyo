@@ -1,0 +1,29 @@
+{
+  "name": "oyo-website",
+  "type": "module",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "sync": "node scripts/sync-docs.mjs",
+    "dev": "npm run sync && astro dev",
+    "start": "npm run sync && astro dev",
+    "build": "npm run sync && astro build",
+    "preview": "astro preview",
+    "astro": "astro"
+  },
+  "dependencies": {
+    "@astrojs/starlight": "^0.35.0",
+    "asciinema-player": "^3.17.0",
+    "astro": "^5.13.0",
+    "sharp": "^0.34.0"
+  },
+  "devDependencies": {
+    "@astrojs/react": "^6.0.1",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-basic-ssl": "^2.3.0",
+    "agentation": "^3.0.2",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7"
+  }
+}

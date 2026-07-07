@@ -1,0 +1,4 @@
+# Config for the small "two modes" clips: hide the sidebar so the diff fills
+# the tiny terminal.
+[files]
+panel_visible = false
