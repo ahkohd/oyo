@@ -50,6 +50,68 @@
   --sl-color-hairline: #e0dcc4;
 }
 
+/* Match the landing nav bar's height (Starlight is 4rem on desktop; the landing
+   is ~3.4rem). Overridden in a media query too, since Starlight bumps it there. */
+:root {
+  --sl-nav-height: calc(3.4rem + 1px);
+}
+@media (min-width: 50rem) {
+  :root {
+    --sl-nav-height: calc(3.4rem + 1px);
+  }
+}
+
+/* Match the landing nav bar: translucent + blurred, with a single hairline
+   underline. Scope to the OUTER bar only (`.page > .header`) — Starlight nests a
+   second element also classed `.header`, and styling both gave a double border
+   and a double tint. This overrides Starlight's own border on the same element,
+   so it stays one line. Drop the bar's own inline padding: the centered
+   `.oy-header` (max-width 72rem) carries the 1.5rem side padding, matching the
+   landing's `.nav-in` exactly. */
+.page > .header {
+  background: color-mix(in srgb, var(--sl-color-bg) 82%, transparent);
+  backdrop-filter: blur(10px);
+  border-bottom: 1px solid var(--sl-color-hairline);
+  padding: 0;
+}
+
+/* The `~/oy` brand itself lives in src/components/SiteTitle.astro. */
+
+/* Bring the header controls in line with the landing's compact, bordered, mono
+   aesthetic so the whole bar reads as one design. Unlayered, so these win over
+   Starlight's @layer styles. */
+
+/* Search trigger: a subtle bordered pill in mono, like the landing controls. */
+site-search > button {
+  font-family: var(--sl-font-mono);
+  font-size: 0.8rem;
+  gap: 0.5rem;
+  padding: 0.42rem 0.7rem;
+  border: 1px solid var(--sl-color-hairline);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--sl-color-bg) 55%, transparent);
+  color: var(--sl-color-gray-2);
+  transition:
+    border-color 0.15s,
+    color 0.15s;
+}
+site-search > button:hover {
+  border-color: var(--sl-color-text-accent);
+  color: var(--sl-color-white);
+}
+site-search > button kbd {
+  font-family: var(--sl-font-mono);
+  background: var(--sl-color-gray-6);
+  border: 1px solid var(--sl-color-hairline);
+  color: var(--sl-color-gray-2);
+}
+
+/* The mobile "On this page" bar sits directly under the header; drop its top
+   border so it doesn't double up with the header's bottom border. */
+mobile-starlight-toc nav {
+  border-top: 0;
+}
+
 /* Screenshots on the previews page read better boxed. */
 .sl-markdown-content img {
   border: 1px solid var(--sl-color-hairline);

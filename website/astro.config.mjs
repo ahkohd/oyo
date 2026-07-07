@@ -32,6 +32,8 @@ export default defineConfig({
       // Inject the dev-only Agentation toolbar on every docs page.
       components: {
         Footer: "./src/components/Footer.astro",
+        SiteTitle: "./src/components/SiteTitle.astro",
+        Header: "./src/components/Header.astro",
       },
       social: [
         { icon: "github", label: "GitHub", href: "https://github.com/ahkohd/oyo" },

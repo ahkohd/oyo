@@ -169,7 +169,7 @@ section { position: relative; z-index: 1; }
 }
 .divider::after {
   content: ""; flex: 1; height: 1px;
-  background: linear-gradient(90deg, var(--border), transparent);
+  background: var(--border);
 }
 .divider .hash { color: var(--accent); }
 h2 {
@@ -184,7 +184,7 @@ h2 {
 .hero h1 {
   font-family: var(--mono); font-weight: 700;
   font-size: clamp(2.1rem, 6.2vw, 4rem); line-height: 1.02;
-  letter-spacing: -.035em; color: var(--fg-strong);
+  letter-spacing: -.035em; word-spacing: -.35em; color: var(--fg-strong);
   margin: 1rem 0 0; text-wrap: balance; max-width: 16ch;
 }
 .hero h1 .hl { color: var(--accent); }
