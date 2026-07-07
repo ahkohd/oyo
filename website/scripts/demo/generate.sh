@@ -76,6 +76,14 @@ if [ -z "${OYO_DEMO_FONT_DIR:-}" ]; then
 fi
 agg --font-size 16 --font-dir "$FONT_DIR" --font-family "$FONT_FAMILY" \
   "$PUBLIC/demo.cast" "$ASSETS/demo.gif"
+
+# Crop agg's padding (1 cell horizontal, 0.5 cell vertical per side) so the
+# terminal sits flush in the README. Hero geometry is 112x34 (see record.sh).
+# node resolves sharp from the script's own node_modules, regardless of cwd.
+echo "==> cropping gif padding (sharp)"
+node "$HERE/crop-gif.mjs" "$ASSETS/demo.gif" 112 34
+
+# Optional extra shrink if gifsicle happens to be installed.
 if command -v gifsicle >/dev/null 2>&1; then
   echo "==> optimizing gif (gifsicle)"
   gifsicle -O3 --lossy=80 -b "$ASSETS/demo.gif"
