@@ -4,8 +4,8 @@
 
 A diff viewer for stepping through changes and reviewing scrollable diffs.
 
-<!-- Demo source: https://github.com/user-attachments/assets/0f43b54b-69fe-4cf3-9221-a7749872342b -->
-https://github.com/user-attachments/assets/0f43b54b-69fe-4cf3-9221-a7749872342b
+<!-- Regenerate with: cd website && npm run generate-demos -->
+![Oyo demo](docs/assets/demo.gif)
 
 </div>
 

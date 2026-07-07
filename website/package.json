@@ -9,6 +9,7 @@
     "start": "npm run sync && astro dev",
     "build": "npm run sync && astro build",
     "preview": "astro preview",
+    "generate-demos": "bash scripts/demo/generate.sh",
     "astro": "astro"
   },
   "dependencies": {

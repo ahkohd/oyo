@@ -3,6 +3,9 @@
 # Deterministic content and git history so blame, the dashboard and the multi-file
 # sidebar all have something real to show. Safe to re-run.
 set -eu
+# Don't let the user's global git pager (riff, delta, ...) run for this script's
+# git commands; some pagers aren't installed and would abort under `set -e`.
+export GIT_PAGER=cat
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(git -C "$HERE" rev-parse --show-toplevel)"
 SAMPLES="$ROOT/docs/assets"
@@ -158,4 +161,4 @@ open(path, "wb").write(png)
 PY
 
 echo "fixture ready at $FIXTURE"
-git log --oneline
+git --no-pager log --oneline
