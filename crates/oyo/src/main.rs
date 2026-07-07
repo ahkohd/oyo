@@ -438,6 +438,10 @@ fn setup_terminal() -> Result<TuiTerminal> {
     Ok(terminal)
 }
 
+fn setup_image_picker() -> Option<ratatui_image::picker::Picker> {
+    ratatui_image::picker::Picker::from_query_stdio().ok()
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum EditorSide {
     Old,
@@ -1238,6 +1242,7 @@ fn main() -> Result<()> {
 
     if let Some(limit) = view_limit {
         let mut terminal = setup_terminal()?;
+        let image_picker = setup_image_picker();
         let mut input_mode =
             match run_commit_picker(&mut terminal, &config, light_mode, limit, None, None)? {
                 Some(mode) => mode,
@@ -1279,6 +1284,9 @@ fn main() -> Result<()> {
             let autoplay = args.autoplay || config.playback.autoplay;
 
             let mut app = App::new(multi_diff, view_mode, speed, autoplay, git_branch);
+            if let Some(picker) = image_picker.as_ref() {
+                app.set_image_picker(picker.clone());
+            }
             app.no_changes_message = empty_message.clone();
             apply_config_to_app(&mut app, &config, &args, light_mode);
             if let Some((theme, name)) = &runtime_theme {
@@ -1296,7 +1304,8 @@ fn main() -> Result<()> {
             review_hook_warnings.extend(app.take_review_hook_warnings());
             runtime_theme = Some((app.theme.clone(), app.ui_theme_name.clone()));
             match exit {
-                AppExit::Quit | AppExit::OpenDashboard => {
+                AppExit::Quit => break,
+                AppExit::OpenDashboard => {
                     let Some(mode) = run_commit_picker(
                         &mut terminal,
                         &config,
@@ -1363,6 +1372,7 @@ fn main() -> Result<()> {
         }
     };
     let mut terminal = setup_terminal()?;
+    let image_picker = setup_image_picker();
     let dashboard_limit = view_limit.unwrap_or(200);
 
     let mut exit_message: Option<String> = None;
@@ -1401,6 +1411,9 @@ fn main() -> Result<()> {
         let autoplay = args.autoplay || config.playback.autoplay;
 
         let mut app = App::new(multi_diff, view_mode, speed, autoplay, git_branch);
+        if let Some(picker) = image_picker.as_ref() {
+            app.set_image_picker(picker.clone());
+        }
         app.no_changes_message = empty_message.clone();
         apply_config_to_app(&mut app, &config, &args, light_mode);
         if let Some((theme, name)) = &runtime_theme {

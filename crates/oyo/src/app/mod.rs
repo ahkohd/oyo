@@ -16,10 +16,11 @@ use crate::toasts::{toast_builder, ToastEvent};
 use oyo_core::{
     multi::DiffStatus, AnimationFrame, LineKind, MultiFileDiff, StepDirection, StepState, ViewLine,
 };
-use ratatui::style::Color;
+use ratatui::{layout::Size, style::Color};
 use ratatui_comfy_toaster::{
     ToastEngine, ToastEngineBuilder, ToastInteraction, ToastMouseButton, ToastPosition,
 };
+use ratatui_image::{picker::Picker, protocol::Protocol};
 use regex::Regex;
 use rustc_hash::FxHashMap;
 use std::collections::VecDeque;
@@ -171,6 +172,19 @@ pub(crate) struct PreviewLinkBox {
     pub y: u16,
     pub width: u16,
     pub url: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ImagePreviewSignature {
+    pub path: PathBuf,
+    pub size: Size,
+    pub len: u64,
+    pub modified: Option<SystemTime>,
+}
+
+pub(crate) struct ImagePreviewCache {
+    pub signature: ImagePreviewSignature,
+    pub protocol: Protocol,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -475,6 +489,8 @@ pub struct App {
     topbar_drag_tab: Option<usize>,
     pub(crate) structured_previews: FxHashMap<usize, StructuredPreviewState>,
     pub(crate) csv_previews: FxHashMap<usize, CsvPreviewState>,
+    pub(crate) image_picker: Option<Picker>,
+    pub(crate) image_preview_cache: Option<ImagePreviewCache>,
     /// Show strikethrough on deleted text
     pub strikethrough_deletions: bool,
     /// Show +/- sign column in the gutter (unified/evolution)
@@ -1003,6 +1019,8 @@ impl App {
             topbar_drag_tab: None,
             structured_previews: FxHashMap::default(),
             csv_previews: FxHashMap::default(),
+            image_picker: None,
+            image_preview_cache: None,
             strikethrough_deletions: false,
             gutter_signs: true,
             toasts_enabled: true,

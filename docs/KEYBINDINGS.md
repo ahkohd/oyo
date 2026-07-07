@@ -135,7 +135,7 @@ Use each mode as `[keybindings.<mode>]`.
 
 | Action | Default keys | What it does |
 | --- | --- | --- |
-| `quit` | `q`, `esc` | Quit, or return to History when started with `oy view` |
+| `quit` | `q`, `esc` | Quit |
 | `step_down` | `j`, `down` | Step forward |
 | `step_up` | `k`, `up` | Step backward |
 | `next_hunk` | `l`, `right` | Go to the next hunk |

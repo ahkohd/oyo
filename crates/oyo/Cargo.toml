@@ -20,6 +20,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
 ratatui = { workspace = true }
+ratatui-image = { workspace = true }
 ratatui-comfy-toaster = "0.4"
 crossterm = { workspace = true, features = ["use-dev-tty"] }
 keymap = { workspace = true, features = ["crossterm"] }

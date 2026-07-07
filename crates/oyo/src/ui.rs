@@ -25,7 +25,7 @@ use image::GenericImageView;
 use oyo_core::{multi::DiffStatus, multi::FileSide, ChangeKind, FileStatus, LineKind};
 use pulldown_cmark::{BlockQuoteKind, CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use ratatui::{
-    layout::{Alignment, Constraint, Direction, Layout, Margin, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Margin, Rect, Size},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{
@@ -34,6 +34,7 @@ use ratatui::{
     },
     Frame,
 };
+use ratatui_image::Image as TerminalImage;
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -2863,6 +2864,106 @@ fn prepend_review_file_comment_lines(
     })
 }
 
+fn add_review_file_comment_hits(
+    app: &mut App,
+    content_area: Rect,
+    visible_lines: usize,
+    scroll: usize,
+    meta: Option<&PreviewFileCommentMeta>,
+) {
+    let Some(meta) = meta else {
+        return;
+    };
+    let content_w = content_area.width as usize;
+    if scroll == 0 && visible_lines > 0 {
+        app.set_review_file_comment_hit(Some((
+            content_area.x,
+            content_area.y,
+            meta.action_width.min(content_w) as u16,
+            1,
+        )));
+    }
+    if let (Some(card_start), Some(anchor_key)) = (meta.card_start, meta.anchor_key.as_ref()) {
+        let card_end = card_start.saturating_add(meta.card_height);
+        let visible_start = card_start.max(scroll);
+        let visible_end = card_end.min(scroll.saturating_add(visible_lines));
+        if visible_start < visible_end {
+            app.add_review_preview_box(
+                content_area.x,
+                content_area
+                    .y
+                    .saturating_add((visible_start - scroll) as u16),
+                content_area.width,
+                (visible_end - visible_start) as u16,
+                anchor_key.clone(),
+            );
+        }
+        let delete_line = card_end.saturating_sub(1);
+        if delete_line >= scroll && delete_line < scroll.saturating_add(visible_lines) {
+            app.add_review_preview_delete_box(
+                content_area.x.saturating_add(2),
+                content_area.y.saturating_add((delete_line - scroll) as u16),
+                text_width("x delete") as u16,
+                1,
+                anchor_key.clone(),
+            );
+        }
+    }
+}
+
+fn render_terminal_image_preview(
+    frame: &mut Frame,
+    app: &mut App,
+    content_area: Rect,
+    path: &Path,
+) -> bool {
+    let mut prefix_lines = Vec::new();
+    let meta =
+        prepend_review_file_comment_lines(app, &mut prefix_lines, content_area.width as usize);
+    let prefix_height = (prefix_lines.len() as u16).min(content_area.height);
+    let image_area = Rect {
+        y: content_area.y.saturating_add(prefix_height),
+        height: content_area.height.saturating_sub(prefix_height),
+        ..content_area
+    };
+    if image_area.width == 0 || image_area.height == 0 {
+        return false;
+    }
+
+    let Some(protocol) = app
+        .ensure_terminal_image_preview(path, Size::new(image_area.width, image_area.height))
+        .cloned()
+    else {
+        return false;
+    };
+
+    app.set_preview_search_lines(preview_search_text_lines(&prefix_lines));
+    highlight_preview_search_lines(app, &mut prefix_lines);
+    add_review_file_comment_hits(app, content_area, prefix_height as usize, 0, meta.as_ref());
+    let bg = app.theme.background;
+
+    if prefix_height > 0 {
+        let mut paragraph = Paragraph::new(prefix_lines);
+        if let Some(bg) = bg {
+            paragraph = paragraph.style(Style::default().bg(bg));
+        }
+        frame.render_widget(
+            paragraph,
+            Rect::new(
+                content_area.x,
+                content_area.y,
+                content_area.width,
+                prefix_height,
+            ),
+        );
+    }
+    frame.render_widget(
+        TerminalImage::new(&protocol).allow_clipping(true),
+        image_area,
+    );
+    true
+}
+
 fn render_preview(frame: &mut Frame, app: &mut App, area: Rect) {
     if let Some(bg) = app.theme.background {
         frame.render_widget(Block::default().style(Style::default().bg(bg)), area);
@@ -2870,6 +2971,14 @@ fn render_preview(frame: &mut Frame, app: &mut App, area: Rect) {
     let (content_area, scrollbar_area) = reserve_diff_scrollbar_lane(app, area);
     let (title, text, side, binary, base_dir, image_path) = preview_document(app);
     app.clear_preview_link_boxes();
+    if let Some(path) = image_path
+        .as_deref()
+        .filter(|_| app.active_preview_rendered())
+    {
+        if render_terminal_image_preview(frame, app, content_area, path) {
+            return;
+        }
+    }
     // Number of leading lines pinned to the top (CSV header and separator).
     let mut sticky_rows = 0usize;
     let (mut lines, links) =
@@ -2990,42 +3099,13 @@ fn render_preview(frame: &mut Frame, app: &mut App, area: Rect) {
 
     // Map visible action rows from content coordinates to on-screen click boxes.
     let content_w = content_area.width as usize;
-    if let Some(meta) = &file_comment_meta {
-        if scroll == 0 && visible_lines > 0 {
-            app.set_review_file_comment_hit(Some((
-                content_area.x,
-                content_area.y,
-                meta.action_width.min(content_w) as u16,
-                1,
-            )));
-        }
-        if let (Some(card_start), Some(anchor_key)) = (meta.card_start, meta.anchor_key.as_ref()) {
-            let card_end = card_start.saturating_add(meta.card_height);
-            let visible_start = card_start.max(scroll);
-            let visible_end = card_end.min(scroll.saturating_add(visible_lines));
-            if visible_start < visible_end {
-                app.add_review_preview_box(
-                    content_area.x,
-                    content_area
-                        .y
-                        .saturating_add((visible_start - scroll) as u16),
-                    content_area.width,
-                    (visible_end - visible_start) as u16,
-                    anchor_key.clone(),
-                );
-            }
-            let delete_line = card_end.saturating_sub(1);
-            if delete_line >= scroll && delete_line < scroll.saturating_add(visible_lines) {
-                app.add_review_preview_delete_box(
-                    content_area.x.saturating_add(2),
-                    content_area.y.saturating_add((delete_line - scroll) as u16),
-                    text_width("x delete") as u16,
-                    1,
-                    anchor_key.clone(),
-                );
-            }
-        }
-    }
+    add_review_file_comment_hits(
+        app,
+        content_area,
+        visible_lines,
+        scroll,
+        file_comment_meta.as_ref(),
+    );
 
     // Map visible links from content coordinates to on-screen click boxes.
     for link in &links {
@@ -7503,6 +7583,27 @@ mod tests {
                 .any(|span| span.content == "▀"),
             "image renders with halfblocks"
         );
+    }
+
+    #[test]
+    fn terminal_image_protocol_can_be_cached() {
+        let path = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/assets/preview.png"
+        ));
+        let multi = MultiFileDiff::from_file_pair(
+            path.to_path_buf(),
+            path.to_path_buf(),
+            String::new(),
+            String::new(),
+        );
+        let mut app = App::new(multi, ViewMode::Preview, 50, false, None);
+        app.set_image_picker(ratatui_image::picker::Picker::halfblocks());
+
+        assert!(app
+            .ensure_terminal_image_preview(path, ratatui::layout::Size::new(10, 5))
+            .is_some());
+        assert!(app.image_preview_cache.is_some());
     }
 
     #[test]

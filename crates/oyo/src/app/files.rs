@@ -1,11 +1,14 @@
 use super::{
-    AnimationPhase, App, FileDiskStamp, FilePanelMode, PreviewLinkBox, StatusModeMenu, TopbarTab,
-    TopbarTabContent, ViewMode,
+    AnimationPhase, App, FileDiskStamp, FilePanelMode, ImagePreviewCache, ImagePreviewSignature,
+    PreviewLinkBox, StatusModeMenu, TopbarTab, TopbarTabContent, ViewMode,
 };
 use crate::csv_preview::{CsvPreviewSignature, CsvPreviewState};
 use crate::structured_preview::{StructuredPreviewSignature, StructuredPreviewState};
 use crate::toasts::ToastEvent;
 use oyo_core::multi::FileSide;
+use ratatui::layout::Size;
+use ratatui_image::{picker::Picker, protocol::Protocol, Resize};
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 /// Whether a URL is safe to hand to the OS opener: only http(s)/mailto, so we
@@ -566,6 +569,50 @@ impl App {
         if let Some(rendered) = rendered {
             self.notify(ToastEvent::PreviewRendered(rendered));
         }
+    }
+
+    pub(crate) fn set_image_picker(&mut self, picker: Picker) {
+        self.image_picker = Some(picker);
+        self.image_preview_cache = None;
+    }
+
+    pub(crate) fn ensure_terminal_image_preview(
+        &mut self,
+        path: &Path,
+        size: Size,
+    ) -> Option<&Protocol> {
+        if size.width == 0 || size.height == 0 {
+            return None;
+        }
+        let picker = self.image_picker.as_ref()?.clone();
+
+        let metadata = std::fs::metadata(path).ok();
+        let signature = ImagePreviewSignature {
+            path: path.to_path_buf(),
+            size,
+            len: metadata.as_ref().map(std::fs::Metadata::len).unwrap_or(0),
+            modified: metadata.and_then(|metadata| metadata.modified().ok()),
+        };
+        if self
+            .image_preview_cache
+            .as_ref()
+            .is_some_and(|cache| cache.signature == signature)
+        {
+            return self
+                .image_preview_cache
+                .as_ref()
+                .map(|cache| &cache.protocol);
+        }
+
+        let image = image::ImageReader::open(path).ok()?.decode().ok()?;
+        let protocol = picker.new_protocol(image, size, Resize::Fit(None)).ok()?;
+        self.image_preview_cache = Some(ImagePreviewCache {
+            signature,
+            protocol,
+        });
+        self.image_preview_cache
+            .as_ref()
+            .map(|cache| &cache.protocol)
     }
 
     pub(crate) fn ensure_csv_preview(
