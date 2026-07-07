@@ -1,6 +1,8 @@
-// Strip only the TRAILING teardown run (alt-screen exit / terminal reset) so a
-// looping player doesn't flash the restored shell. Walks from the end and stops
-// at the first real frame, so mid-session mouse-mode toggles are never cut.
+// Strip the TRAILING teardown so a looping player / GIF doesn't end on a blank
+// restored screen. oy leaves the alternate screen exactly once, at quit, so we
+// cut from that alt-screen-exit (or a terminal reset) to the end — that also
+// drops any stray shell bytes emitted after it (e.g. a lone "0"). Everything
+// before it, including mid-session mouse-mode toggles, is kept.
 import fs from "node:fs";
 
 const path = process.argv[2];
@@ -18,8 +20,10 @@ for (let i = ev.length - 1; i >= 0; i--) {
     continue;
   }
   const d = e[2] || "";
-  if (d.includes("?1049l") || d.includes(RIS)) cut = i;
-  else break;
+  if (d.includes("?1049l") || d.includes(RIS)) {
+    cut = i; // cut from the teardown onward; keep scanning no further
+    break;
+  }
 }
 
 fs.writeFileSync(path, [header, ...ev.slice(0, cut)].join("\n") + "\n");

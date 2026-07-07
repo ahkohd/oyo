@@ -65,6 +65,9 @@ echo "==> rendering README gif -> docs/assets/demo.gif"
 mkdir -p "$ASSETS"
 FONT_FAMILY="${OYO_DEMO_FONT_FAMILY:-JetBrains Mono}"
 FONT_DIR="${OYO_DEMO_FONT_DIR:-/tmp/oyo/fonts}"
+# Higher font size = higher-res GIF (crisper, larger). 24 ~ 2x GitHub's display
+# width. Bump OYO_DEMO_FONT_SIZE for more.
+FONT_SIZE="${OYO_DEMO_FONT_SIZE:-24}"
 if [ -z "${OYO_DEMO_FONT_DIR:-}" ]; then
   need curl "your package manager"
   mkdir -p "$FONT_DIR"
@@ -74,7 +77,7 @@ if [ -z "${OYO_DEMO_FONT_DIR:-}" ]; then
     [ -f "$ttf" ] || { echo "    fetching JetBrainsMono-$style.ttf"; curl -fsSL -o "$ttf" "$jbm/JetBrainsMono-$style.ttf"; }
   done
 fi
-agg --font-size 16 --font-dir "$FONT_DIR" --font-family "$FONT_FAMILY" \
+agg --font-size "$FONT_SIZE" --font-dir "$FONT_DIR" --font-family "$FONT_FAMILY" \
   "$PUBLIC/demo.cast" "$ASSETS/demo.gif"
 
 # Crop agg's padding (1 cell horizontal, 0.5 cell vertical per side) so the
