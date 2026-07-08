@@ -1,4 +1,6 @@
-use super::{AnimationFrame, App, ReviewEditorToolbarAction, ReviewEditorToolbarHit, ViewMode};
+use super::{
+    AnimationFrame, App, FileDiskStamp, ReviewEditorToolbarAction, ReviewEditorToolbarHit, ViewMode,
+};
 use crate::config::{
     MentionFileScope, MentionFinder, ReviewActionConfig, ReviewHookConfig, ReviewHookEvent,
     ReviewHookStdin,
@@ -7,16 +9,21 @@ use crate::toasts::ToastEvent;
 use crossterm::event::KeyEvent;
 use keymap::{parser::parse_seq, ToKeyMap};
 use oyo_core::{ChangeKind, LineKind, ViewLine};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use std::collections::{hash_map::DefaultHasher, BTreeSet};
+use std::collections::{hash_map::DefaultHasher, BTreeMap, BTreeSet};
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use time::OffsetDateTime;
+use unicode_width::UnicodeWidthChar;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum ReviewTargetKind {
+    PullRequest,
     File,
     Line,
     Hunk,
@@ -29,7 +36,7 @@ pub(crate) enum ReviewSide {
 }
 
 impl ReviewSide {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             ReviewSide::Old => "old",
             ReviewSide::New => "new",
@@ -57,10 +64,65 @@ pub(crate) struct ReviewAnchor {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ReviewAuthor {
+    pub(crate) name: String,
+    pub(crate) email: Option<String>,
+    #[serde(
+        default,
+        rename = "type",
+        alias = "authorType",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub(crate) author_type: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) usernames: BTreeMap<String, String>,
+    #[serde(default, alias = "avatarUrl", skip_serializing_if = "Option::is_none")]
+    pub(crate) avatar_url: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ReviewProviderComment {
+    pub(crate) provider: String,
+    pub(crate) remote: String,
+    pub(crate) repo: String,
+    pub(crate) pr_number: u64,
+    pub(crate) comment_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) thread_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) author_username: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) pr_title: Option<String>,
+    #[serde(default = "review_provider_comment_api_kind_default")]
+    pub(crate) api_kind: String,
+    pub(crate) sync_state: String,
+}
+
+fn review_provider_comment_api_kind_default() -> String {
+    "review".to_string()
+}
+
+fn review_comment_can_edit_default() -> bool {
+    true
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ReviewComment {
     pub(crate) id: u64,
     pub(crate) anchor: ReviewAnchor,
     pub(crate) body: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) author: Option<ReviewAuthor>,
+    #[serde(default = "review_comment_can_edit_default")]
+    pub(crate) can_edit: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub(crate) deleted: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) provider: Option<ReviewProviderComment>,
     pub(crate) created_at: u64,
     pub(crate) updated_at: u64,
 }
@@ -72,15 +134,82 @@ pub(crate) struct ReviewEditorState {
     pub(crate) cursor: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ReviewTargetMetadata {
+    pub(crate) label: String,
+    pub(crate) vcs: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) jj_change_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) jj_commit_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) git_base_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) git_head_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) git_base_commit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) git_head_commit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) pr_provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) pr_repo: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) pr_number: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) author: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) timestamp: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) bookmarks: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ReviewPaths {
+    pub(crate) review_dir: Option<PathBuf>,
+    pub(crate) db_file: Option<PathBuf>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct ReviewSession {
+struct PublicReviewComments {
     version: u32,
-    repo_root: String,
-    diff_fingerprint: String,
-    created_at: u64,
-    updated_at: u64,
-    comments: Vec<ReviewComment>,
-    editor: Option<ReviewEditorState>,
+    comments: Vec<PublicReviewComment>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PublicReviewComment {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    id: Option<u64>,
+    file: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    side: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    old_range: Option<ReviewRange>,
+    #[serde(default, rename = "oldRange", skip_serializing_if = "Option::is_none")]
+    old_range_camel: Option<ReviewRange>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    new_range: Option<ReviewRange>,
+    #[serde(default, rename = "newRange", skip_serializing_if = "Option::is_none")]
+    new_range_camel: Option<ReviewRange>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    hunk_id: Option<usize>,
+    #[serde(default, rename = "hunkId", skip_serializing_if = "Option::is_none")]
+    hunk_id_camel: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    author: Option<ReviewAuthor>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    can_edit: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    provider: Option<ReviewProviderComment>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    created_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    updated_at: Option<u64>,
+    body: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -88,7 +217,7 @@ struct ReviewExport<'a> {
     version: u32,
     event: &'static str,
     repo_root: String,
-    session_file: Option<String>,
+    review_db: Option<String>,
     diff_fingerprint: String,
     diff: ReviewExportDiff,
     review: ReviewExportBody<'a>,
@@ -115,6 +244,9 @@ struct ReviewExportComment<'a> {
     side: Option<&'static str>,
     old_range: Option<ReviewRange>,
     new_range: Option<ReviewRange>,
+    author: Option<&'a ReviewAuthor>,
+    created_at: u64,
+    updated_at: u64,
     body: &'a str,
 }
 
@@ -136,9 +268,14 @@ pub(crate) struct ReviewCommentOverlay {
     pub(crate) preview: String,
     pub(crate) body: String,
     pub(crate) title: String,
+    pub(crate) avatar_url: Option<String>,
+    pub(crate) avatar_seed: String,
     pub(crate) anchor_key: String,
+    pub(crate) edit_label: Option<String>,
+    pub(crate) delete_label: Option<String>,
     pub(crate) prefer_right: bool,
     pub(crate) is_hunk: bool,
+    pub(crate) can_edit: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -148,7 +285,113 @@ pub(crate) struct ReviewPreviewBox {
     pub(crate) width: u16,
     pub(crate) height: u16,
     pub(crate) anchor_key: String,
+    pub(crate) edit: bool,
     pub(crate) delete: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ReviewDeleteTarget {
+    All,
+    DiscardSession,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ReviewDeleteConfirmation {
+    pub(crate) target: ReviewDeleteTarget,
+    pub(crate) title: String,
+    pub(crate) body: String,
+    pub(crate) confirm_label: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReviewDeleteConfirmationAction {
+    Confirm,
+    Cancel,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ReviewDeleteConfirmationHit {
+    pub(crate) x: u16,
+    pub(crate) y: u16,
+    pub(crate) width: u16,
+    pub(crate) height: u16,
+    pub(crate) action: ReviewDeleteConfirmationAction,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReviewSyncAction {
+    Sync,
+    Pull,
+    Push,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ReviewSyncRequest {
+    pub(crate) action: ReviewSyncAction,
+    pub(crate) remote: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ReviewRemoteOption {
+    pub(crate) name: String,
+    pub(crate) label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ReviewRemotePickerState {
+    pub(crate) action: ReviewSyncAction,
+    pub(crate) remotes: Vec<ReviewRemoteOption>,
+    pub(crate) selected: usize,
+    pub(crate) query: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ReviewRemotePickerHit {
+    pub(crate) x: u16,
+    pub(crate) y: u16,
+    pub(crate) width: u16,
+    pub(crate) height: u16,
+    pub(crate) index: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ReviewSidebarOverflowHit {
+    pub(crate) x: u16,
+    pub(crate) y: u16,
+    pub(crate) width: u16,
+    pub(crate) height: u16,
+    pub(crate) action: ReviewSyncAction,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PrCommentHitAction {
+    Open(u64),
+    Edit(u64),
+    Reply(u64),
+    Delete(u64),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PrCommentHit {
+    pub(crate) x: u16,
+    pub(crate) y: u16,
+    pub(crate) width: u16,
+    pub(crate) height: u16,
+    pub(crate) action: PrCommentHitAction,
+}
+
+fn review_index_action_label(prefix: &str, idx: usize) -> String {
+    if idx < 26 {
+        format!("{prefix}{}", (b'a' + idx as u8) as char)
+    } else {
+        format!("{prefix}{}", idx + 1)
+    }
+}
+
+fn pr_comment_action_label(prefix: &str, ids: &[u64], id: u64) -> Option<String> {
+    ids.iter()
+        .position(|comment_id| *comment_id == id)
+        .map(|idx| review_index_action_label(prefix, idx))
 }
 
 #[derive(Debug, Clone)]
@@ -220,6 +463,30 @@ fn hash_hex(value: &str) -> String {
     format!("{:016x}", hasher.finish())
 }
 
+#[cfg(not(test))]
+fn default_review_base_dir() -> PathBuf {
+    dirs::data_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("oyo")
+        .join("reviews")
+}
+
+fn review_db_stamp(path: &Path) -> FileDiskStamp {
+    let Ok(metadata) = fs::metadata(path) else {
+        return FileDiskStamp::default();
+    };
+    FileDiskStamp {
+        modified: metadata.modified().ok(),
+        len: metadata.len(),
+        exists: true,
+    }
+}
+
+#[cfg(test)]
+fn default_review_base_dir() -> PathBuf {
+    std::env::temp_dir().join("oyo").join("reviews")
+}
+
 fn format_opt_range(range: Option<ReviewRange>) -> String {
     match range {
         Some(range) => format!("{}-{}", range.start, range.end),
@@ -261,6 +528,7 @@ fn review_both_sides_label(
 
 fn review_anchor_location_label(anchor: &ReviewAnchor) -> String {
     match anchor.kind {
+        ReviewTargetKind::PullRequest => "pr".to_string(),
         ReviewTargetKind::File => "file".to_string(),
         ReviewTargetKind::Line => match anchor.side {
             Some(ReviewSide::Old) => review_side_label(ReviewSide::Old, anchor.old_range),
@@ -289,53 +557,139 @@ fn line_anchor_matches(anchor: &ReviewAnchor, line: &ViewLine) -> bool {
     }
 }
 
-fn review_comment_title(anchor: &ReviewAnchor) -> String {
-    format!(
-        "Comment • {} {}",
-        anchor.file_path,
-        review_anchor_location_label(anchor)
-    )
+fn same_review_author(author: &ReviewAuthor, current_author: &ReviewAuthor) -> bool {
+    if author.email.is_some() && author.email == current_author.email {
+        return true;
+    }
+    if author
+        .usernames
+        .iter()
+        .any(|(provider, username)| current_author.usernames.get(provider) == Some(username))
+    {
+        return true;
+    }
+    !author.name.trim().is_empty() && author.name == current_author.name
 }
 
-fn truncate_middle_chars(text: &str, max_chars: usize) -> String {
-    let len = text.chars().count();
-    if len <= max_chars {
-        return text.to_string();
-    }
-    if max_chars <= 3 {
-        return ".".repeat(max_chars);
-    }
-    let keep = max_chars.saturating_sub(3);
-    let head = keep / 2;
-    let tail = keep.saturating_sub(head);
-    let start = text.chars().take(head).collect::<String>();
-    let end = text
-        .chars()
-        .rev()
-        .take(tail)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect::<String>();
-    format!("{start}...{end}")
+fn review_author_avatar_seed(author: Option<&ReviewAuthor>) -> String {
+    let Some(author) = author else {
+        return "unknown".to_string();
+    };
+    author
+        .usernames
+        .values()
+        .next()
+        .cloned()
+        .or_else(|| author.email.clone())
+        .or_else(|| (!author.name.trim().is_empty()).then(|| author.name.clone()))
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
-fn wrap_note_line(line: &str, width: usize) -> Vec<String> {
-    if width == 0 {
-        return vec![String::new()];
-    }
-    let mut out = Vec::new();
-    let mut chunk = String::new();
-    for ch in line.chars() {
-        chunk.push(ch);
-        if chunk.chars().count() == width {
-            out.push(std::mem::take(&mut chunk));
+fn review_author_type_label(author: &ReviewAuthor) -> Option<&str> {
+    author
+        .author_type
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && *value != "human")
+}
+
+fn review_author_label(
+    author: Option<&ReviewAuthor>,
+    current_author: Option<&ReviewAuthor>,
+) -> String {
+    if let (Some(author), Some(current_author)) = (author, current_author) {
+        if same_review_author(author, current_author) {
+            return "You".to_string();
         }
     }
-    if !chunk.is_empty() || out.is_empty() {
-        out.push(chunk);
+    let Some(author) = author else {
+        return "Unknown".to_string();
+    };
+    let label = if !author.name.trim().is_empty() {
+        author.name.clone()
+    } else {
+        author
+            .usernames
+            .values()
+            .next()
+            .cloned()
+            .unwrap_or_else(|| "Unknown".to_string())
+    };
+    if let Some(author_type) = review_author_type_label(author) {
+        format!("{label} ({author_type})")
+    } else {
+        label
     }
-    out
+}
+
+fn review_time_label(timestamp: u64) -> String {
+    let now = now_ts();
+    let elapsed = now.saturating_sub(timestamp);
+    if elapsed < 60 {
+        return "a moment ago".to_string();
+    }
+    if elapsed < 60 * 60 {
+        return format!("{}m ago", elapsed / 60);
+    }
+    if elapsed < 24 * 60 * 60 {
+        return format!("{}h ago", elapsed / 60 / 60);
+    }
+    let Ok(date) = OffsetDateTime::from_unix_timestamp(timestamp as i64) else {
+        return "unknown date".to_string();
+    };
+    let Ok(now_date) = OffsetDateTime::from_unix_timestamp(now as i64) else {
+        return "unknown date".to_string();
+    };
+    let month = match u8::from(date.month()) {
+        1 => "Jan",
+        2 => "Feb",
+        3 => "Mar",
+        4 => "Apr",
+        5 => "May",
+        6 => "Jun",
+        7 => "Jul",
+        8 => "Aug",
+        9 => "Sep",
+        10 => "Oct",
+        11 => "Nov",
+        _ => "Dec",
+    };
+    if date.year() == now_date.year() {
+        format!(
+            "{} {month} {:02}:{:02}",
+            date.day(),
+            date.hour(),
+            date.minute()
+        )
+    } else {
+        format!("{} {month} {}", date.day(), date.year())
+    }
+}
+
+fn review_comment_subject(comment: &ReviewComment) -> String {
+    match comment.anchor.kind {
+        ReviewTargetKind::PullRequest => comment
+            .provider
+            .as_ref()
+            .and_then(|provider| provider.pr_title.clone())
+            .filter(|title| !title.trim().is_empty())
+            .unwrap_or_else(|| "Pull request".to_string()),
+        ReviewTargetKind::File => comment.anchor.file_path.clone(),
+        ReviewTargetKind::Line | ReviewTargetKind::Hunk => format!(
+            "{} {}",
+            comment.anchor.file_path,
+            review_anchor_location_label(&comment.anchor)
+        ),
+    }
+}
+
+fn review_comment_title(comment: &ReviewComment, current_author: Option<&ReviewAuthor>) -> String {
+    format!(
+        "{}, {} • {}",
+        review_author_label(comment.author.as_ref(), current_author),
+        review_time_label(comment.updated_at),
+        review_comment_subject(comment)
+    )
 }
 
 fn file_review_anchor(file_index: usize, file_path: String) -> Option<ReviewAnchor> {
@@ -473,18 +827,23 @@ fn cursor_row_col(text: &str, cursor: usize) -> (usize, usize) {
     (row, col)
 }
 
-fn cursor_for_row_col(text: &str, row: usize, col: usize) -> usize {
+fn logical_line_bounds(text: &str, row: usize) -> (usize, usize) {
     let starts = line_starts(text);
     if starts.is_empty() {
-        return 0;
+        return (0, 0);
     }
     let row = row.min(starts.len().saturating_sub(1));
     let start = starts[row];
-    let line_end = if row + 1 < starts.len() {
+    let end = if row + 1 < starts.len() {
         starts[row + 1].saturating_sub(1)
     } else {
         text.len()
     };
+    (start, end)
+}
+
+fn cursor_for_row_col(text: &str, row: usize, col: usize) -> usize {
+    let (start, line_end) = logical_line_bounds(text, row);
     let line = &text[start..line_end];
     let mut idx = start;
     for (chars, ch) in line.chars().enumerate() {
@@ -494,6 +853,71 @@ fn cursor_for_row_col(text: &str, row: usize, col: usize) -> usize {
         idx += ch.len_utf8();
     }
     idx
+}
+
+fn visual_pos_for_cursor(line: &str, cursor: usize, wrap_width: usize) -> (usize, usize) {
+    if wrap_width == 0 || line.is_empty() {
+        return (0, 0);
+    }
+    let mut row = 0usize;
+    let mut col = 0usize;
+    for (idx, ch) in line.char_indices() {
+        if idx >= cursor {
+            break;
+        }
+        let width = ch.width().unwrap_or(1).max(1);
+        if col > 0 && col.saturating_add(width) > wrap_width {
+            row = row.saturating_add(1);
+            col = 0;
+        }
+        col = col.saturating_add(width);
+        if col >= wrap_width {
+            row = row.saturating_add(1);
+            col = 0;
+        }
+    }
+    (row, col)
+}
+
+fn visual_row_count(line: &str, wrap_width: usize) -> usize {
+    if wrap_width == 0 || line.is_empty() {
+        return 1;
+    }
+    let (row, col) = visual_pos_for_cursor(line, line.len(), wrap_width);
+    row.saturating_add(usize::from(col > 0 || row == 0))
+}
+
+fn cursor_for_visual_pos(
+    line: &str,
+    line_start: usize,
+    row: usize,
+    col: usize,
+    wrap_width: usize,
+) -> usize {
+    if wrap_width == 0 || line.is_empty() {
+        return line_start;
+    }
+    let mut visual_row = 0usize;
+    let mut visual_col = 0usize;
+    for (idx, ch) in line.char_indices() {
+        if visual_row > row || (visual_row == row && visual_col >= col) {
+            return line_start.saturating_add(idx);
+        }
+        let width = ch.width().unwrap_or(1).max(1);
+        if visual_col > 0 && visual_col.saturating_add(width) > wrap_width {
+            visual_row = visual_row.saturating_add(1);
+            visual_col = 0;
+            if visual_row > row || (visual_row == row && visual_col >= col) {
+                return line_start.saturating_add(idx);
+            }
+        }
+        visual_col = visual_col.saturating_add(width);
+        if visual_col >= wrap_width {
+            visual_row = visual_row.saturating_add(1);
+            visual_col = 0;
+        }
+    }
+    line_start.saturating_add(line.len())
 }
 
 fn prev_char_boundary(text: &str, cursor: usize) -> usize {
@@ -658,12 +1082,105 @@ impl App {
     pub fn set_review_persist_enabled(&mut self, enabled: bool) {
         self.review_persist_enabled = enabled;
         if !enabled {
-            self.review_session_path = None;
+            self.review_dir_path = None;
+            self.review_db_path = None;
+            self.review_db_stamp = FileDiskStamp::default();
         }
     }
 
-    pub fn set_review_clear_session_on_start(&mut self, enabled: bool) {
-        self.review_clear_session_on_start = enabled;
+    pub(crate) fn set_review_filter_to_current_diff(&mut self, enabled: bool) {
+        self.review_filter_to_current_diff = enabled;
+    }
+
+    pub fn set_review_base_dir(&mut self, path: Option<PathBuf>) {
+        self.review_base_dir_override = path;
+    }
+
+    pub fn set_review_workspace_root(&mut self, path: Option<PathBuf>) {
+        self.review_workspace_root_override = path;
+    }
+
+    pub(crate) fn set_review_target_metadata(&mut self, metadata: Option<ReviewTargetMetadata>) {
+        self.review_target_metadata = metadata;
+    }
+
+    pub fn set_review_author(&mut self, author: Option<ReviewAuthor>) {
+        self.review_author = author;
+    }
+
+    fn fill_review_author_details(author: &mut ReviewAuthor, current: &ReviewAuthor) -> bool {
+        let mut changed = false;
+        for (provider, username) in &current.usernames {
+            if !author.usernames.contains_key(provider) {
+                author.usernames.insert(provider.clone(), username.clone());
+                changed = true;
+            }
+        }
+        if author.avatar_url.is_none() && current.avatar_url.is_some() {
+            author.avatar_url = current.avatar_url.clone();
+            changed = true;
+        }
+        changed
+    }
+
+    fn fill_current_author_comments(&mut self) -> bool {
+        let Some(current) = self.review_author.clone() else {
+            return false;
+        };
+        let mut changed = false;
+        for comment in &mut self.review_comments {
+            let Some(author) = comment.author.as_mut() else {
+                continue;
+            };
+            if same_review_author(author, &current) {
+                changed |= Self::fill_review_author_details(author, &current);
+            }
+        }
+        changed
+    }
+
+    pub(crate) fn set_review_author_provider_avatar(
+        &mut self,
+        provider: &str,
+        username: &str,
+        avatar_url: Option<String>,
+    ) {
+        let Some(author) = self.review_author.as_mut() else {
+            return;
+        };
+        author
+            .usernames
+            .insert(provider.to_string(), username.to_string());
+        if avatar_url.is_some() {
+            author.avatar_url = avatar_url;
+        }
+        if self.fill_current_author_comments() {
+            self.touch_review_state();
+            self.persist_review_session();
+        }
+    }
+
+    pub(crate) fn review_paths(&self) -> ReviewPaths {
+        ReviewPaths {
+            review_dir: self.review_dir_path.clone(),
+            db_file: self.review_db_path.clone(),
+        }
+    }
+
+    pub fn review_markdown(&self) -> String {
+        self.format_review_output()
+    }
+
+    pub fn review_comments_json(&self) -> String {
+        self.public_review_comments_json()
+    }
+
+    pub fn review_workspace_root(&self) -> Option<&str> {
+        self.review_repo_root.as_deref()
+    }
+
+    pub fn review_diff_fingerprint(&self) -> &str {
+        &self.review_diff_fingerprint
     }
 
     pub fn review_revision(&self) -> u64 {
@@ -671,13 +1188,16 @@ impl App {
     }
 
     pub fn review_comment_count(&self) -> usize {
-        self.review_comments.len()
+        self.review_comments
+            .iter()
+            .filter(|comment| !comment.deleted)
+            .count()
     }
 
     pub(crate) fn review_comment_count_for_file(&self, file_index: usize) -> usize {
         self.review_comments
             .iter()
-            .filter(|comment| comment.anchor.file_index == file_index)
+            .filter(|comment| !comment.deleted && comment.anchor.file_index == file_index)
             .count()
     }
 
@@ -705,66 +1225,637 @@ impl App {
     }
 
     pub(crate) fn filtered_review_comment_indices(&self) -> Vec<usize> {
-        let query = self.file_filter.trim().to_ascii_lowercase();
+        self.review_comment_indices_for_query(&self.file_filter)
+    }
+
+    pub(crate) fn review_comment_indices_for_query(&self, query: &str) -> Vec<usize> {
+        let query = query.trim().to_ascii_lowercase();
         self.review_comments
             .iter()
             .enumerate()
             .filter_map(|(idx, comment)| {
+                if comment.deleted {
+                    return None;
+                }
                 if query.is_empty() {
                     return Some(idx);
                 }
                 let location = review_anchor_location_label(&comment.anchor);
-                let haystack =
-                    format!("{} {} {}", comment.anchor.file_path, location, comment.body)
-                        .to_ascii_lowercase();
+                let author = comment
+                    .author
+                    .as_ref()
+                    .map(|author| {
+                        format!(
+                            "{} {}",
+                            author.name,
+                            author.email.as_deref().unwrap_or_default()
+                        )
+                    })
+                    .unwrap_or_default();
+                let haystack = format!(
+                    "{} {} {} {}",
+                    comment.anchor.file_path, location, comment.body, author
+                )
+                .to_ascii_lowercase();
                 haystack.contains(&query).then_some(idx)
             })
             .collect()
     }
 
     pub(crate) fn review_comment_is_active(&self, index: usize) -> bool {
-        let Some(editor) = self.review_editor.as_ref() else {
+        let Some(comment) = self
+            .review_comments
+            .get(index)
+            .filter(|comment| !comment.deleted)
+        else {
             return false;
         };
+        if self.active_review_comment_id == Some(comment.id) {
+            return true;
+        }
+        self.review_editor
+            .as_ref()
+            .is_some_and(|editor| comment.anchor.anchor_key == editor.anchor.anchor_key)
+    }
+
+    pub(crate) fn review_comment_sidebar_sort_key(&self, index: usize) -> Option<(u64, u64)> {
         self.review_comments
             .get(index)
-            .is_some_and(|comment| comment.anchor.anchor_key == editor.anchor.anchor_key)
+            .filter(|comment| !comment.deleted)
+            .map(|comment| (comment.updated_at, comment.id))
+    }
+
+    pub(crate) fn review_comment_sidebar_bucket(&self, index: usize) -> Option<String> {
+        let comment = self
+            .review_comments
+            .get(index)
+            .filter(|comment| !comment.deleted)?;
+        let now = now_ts();
+        let elapsed = now.saturating_sub(comment.updated_at);
+        if elapsed < 60 * 60 {
+            return Some("today".to_string());
+        }
+        if elapsed < 24 * 60 * 60 {
+            return Some(format!("{}hr ago", elapsed / 60 / 60));
+        }
+        let Ok(date) = OffsetDateTime::from_unix_timestamp(comment.updated_at as i64) else {
+            return Some("unknown date".to_string());
+        };
+        let Ok(now_date) = OffsetDateTime::from_unix_timestamp(now as i64) else {
+            return Some("unknown date".to_string());
+        };
+        let month = match u8::from(date.month()) {
+            1 => "Jan.",
+            2 => "Feb.",
+            3 => "Mar.",
+            4 => "Apr.",
+            5 => "May",
+            6 => "Jun.",
+            7 => "Jul.",
+            8 => "Aug.",
+            9 => "Sep.",
+            10 => "Oct.",
+            11 => "Nov.",
+            _ => "Dec.",
+        };
+        Some(if date.year() == now_date.year() {
+            format!("{month} {}", date.day())
+        } else {
+            format!("{month} {} {}", date.day(), date.year())
+        })
+    }
+
+    pub(crate) fn review_status_comment_rows(&self) -> Vec<(u64, String, String, String)> {
+        let mut comments = self
+            .review_comments
+            .iter()
+            .filter(|comment| !comment.deleted)
+            .collect::<Vec<_>>();
+        comments.sort_by(|a, b| {
+            a.anchor
+                .file_path
+                .cmp(&b.anchor.file_path)
+                .then_with(|| {
+                    let rank = |kind| match kind {
+                        ReviewTargetKind::PullRequest => 0,
+                        ReviewTargetKind::File => 1,
+                        ReviewTargetKind::Line => 2,
+                        ReviewTargetKind::Hunk => 3,
+                    };
+                    rank(a.anchor.kind).cmp(&rank(b.anchor.kind))
+                })
+                .then_with(|| {
+                    let a_line = a
+                        .anchor
+                        .new_range
+                        .or(a.anchor.old_range)
+                        .map(|r| r.start)
+                        .unwrap_or(usize::MAX);
+                    let b_line = b
+                        .anchor
+                        .new_range
+                        .or(b.anchor.old_range)
+                        .map(|r| r.start)
+                        .unwrap_or(usize::MAX);
+                    a_line.cmp(&b_line)
+                })
+        });
+        comments
+            .into_iter()
+            .map(|comment| {
+                let subject = match comment.anchor.kind {
+                    ReviewTargetKind::PullRequest => "pull request".to_string(),
+                    ReviewTargetKind::File | ReviewTargetKind::Line | ReviewTargetKind::Hunk => {
+                        comment.anchor.file_path.clone()
+                    }
+                };
+                let location = review_anchor_location_label(&comment.anchor);
+                let first_line = comment.body.lines().next().unwrap_or_default().trim();
+                let mut preview = if first_line.is_empty() {
+                    "(empty)".to_string()
+                } else {
+                    first_line.to_string()
+                };
+                if comment.body.contains('\n') && first_line.len() < comment.body.trim().len() {
+                    preview.push_str(" ...");
+                }
+                (comment.id, subject, location, preview)
+            })
+            .collect()
     }
 
     pub(crate) fn review_comment_sidebar_item(
         &self,
         index: usize,
     ) -> Option<(usize, String, String, String)> {
-        let comment = self.review_comments.get(index)?;
+        let comment = self
+            .review_comments
+            .get(index)
+            .filter(|comment| !comment.deleted)?;
+        let title = match comment.anchor.kind {
+            ReviewTargetKind::PullRequest => review_comment_subject(comment),
+            ReviewTargetKind::File | ReviewTargetKind::Line | ReviewTargetKind::Hunk => {
+                comment.anchor.file_path.clone()
+            }
+        };
+        let location = match comment.anchor.kind {
+            ReviewTargetKind::PullRequest => String::new(),
+            ReviewTargetKind::File => "file".to_string(),
+            ReviewTargetKind::Line | ReviewTargetKind::Hunk => {
+                review_anchor_location_label(&comment.anchor)
+            }
+        };
         let first_line = comment.body.lines().next().unwrap_or_default().trim();
-        let preview = if first_line.is_empty() {
+        let mut preview = if first_line.is_empty() {
             "(empty)".to_string()
         } else {
             first_line.to_string()
         };
-        Some((
-            comment.anchor.file_index,
-            comment.anchor.file_path.clone(),
-            review_anchor_location_label(&comment.anchor),
-            preview,
-        ))
+        if comment.body.contains('\n') && first_line.len() < comment.body.trim().len() {
+            preview.push_str(" ...");
+        }
+        Some((comment.anchor.file_index, title, location, preview))
     }
 
     pub fn open_review_comment(&mut self, index: usize) -> bool {
-        let Some(anchor) = self
+        let Some(comment) = self
             .review_comments
             .get(index)
-            .map(|comment| comment.anchor.clone())
+            .filter(|comment| !comment.deleted)
+            .cloned()
         else {
             return false;
         };
-        self.select_file(anchor.file_index);
-        self.open_review_editor(anchor);
+        self.active_review_comment_id = Some(comment.id);
+        self.flash_review_preview(comment.anchor.anchor_key.clone());
+        if self.review_editor_active() {
+            self.review_cancel_editor();
+        }
+        if comment.anchor.kind == ReviewTargetKind::PullRequest {
+            self.open_pr_comments_in_current_tab(Some(comment.id));
+            return true;
+        }
+        self.select_file(comment.anchor.file_index);
+        self.scroll_to_review_anchor(&comment.anchor);
         true
+    }
+
+    fn scroll_to_review_anchor(&mut self, anchor: &ReviewAnchor) {
+        let Some((start, _)) = self.review_anchor_display_span(anchor) else {
+            return;
+        };
+        let viewport_height = self.last_viewport_height.max(1);
+        if self.auto_center {
+            self.scroll_offset = start.saturating_sub(viewport_height / 2);
+            self.centered_once = true;
+        } else {
+            self.scroll_offset = start;
+            self.centered_once = false;
+        }
+        self.needs_scroll_to_active = false;
+        self.multi_diff.current_navigator().set_hunk_scope(false);
+    }
+
+    pub(crate) fn active_pr_comments_view(&self) -> bool {
+        self.active_topbar_content() == Some(super::TopbarTabContent::PrComments)
+    }
+
+    pub(crate) fn pull_request_comment_ids(&self) -> Vec<u64> {
+        let mut comments = self
+            .review_comments
+            .iter()
+            .filter(|comment| {
+                !comment.deleted && comment.anchor.kind == ReviewTargetKind::PullRequest
+            })
+            .collect::<Vec<_>>();
+        comments.sort_by_key(|comment| (comment.created_at, comment.id));
+        comments.into_iter().map(|comment| comment.id).collect()
+    }
+
+    pub(crate) fn pull_request_comment_overlays(&self) -> Vec<(u64, usize, ReviewCommentOverlay)> {
+        let mut comments = self
+            .review_comments
+            .iter()
+            .filter(|comment| {
+                !comment.deleted && comment.anchor.kind == ReviewTargetKind::PullRequest
+            })
+            .collect::<Vec<_>>();
+        comments.sort_by_key(|comment| (comment.created_at, comment.id));
+        comments
+            .into_iter()
+            .enumerate()
+            .map(|(idx, comment)| {
+                (
+                    comment.id,
+                    idx + 1,
+                    ReviewCommentOverlay {
+                        display_idx: 0,
+                        preview: comment.body.lines().next().unwrap_or_default().to_string(),
+                        body: comment.body.clone(),
+                        title: review_comment_title(comment, self.review_author.as_ref()),
+                        avatar_url: comment
+                            .author
+                            .as_ref()
+                            .and_then(|author| author.avatar_url.clone()),
+                        avatar_seed: review_author_avatar_seed(comment.author.as_ref()),
+                        anchor_key: comment.anchor.anchor_key.clone(),
+                        edit_label: None,
+                        delete_label: None,
+                        prefer_right: true,
+                        is_hunk: false,
+                        can_edit: comment.can_edit,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    pub(crate) fn pull_request_reply_label(&self, id: u64) -> Option<String> {
+        pr_comment_action_label("r", &self.pull_request_comment_ids(), id)
+    }
+
+    fn pull_request_editable_comment_ids(&self) -> Vec<u64> {
+        let mut comments = self
+            .review_comments
+            .iter()
+            .filter(|comment| {
+                !comment.deleted
+                    && comment.can_edit
+                    && comment.anchor.kind == ReviewTargetKind::PullRequest
+            })
+            .collect::<Vec<_>>();
+        comments.sort_by_key(|comment| (comment.created_at, comment.id));
+        comments.into_iter().map(|comment| comment.id).collect()
+    }
+
+    pub(crate) fn pull_request_edit_label(&self, id: u64) -> Option<String> {
+        pr_comment_action_label("i", &self.pull_request_editable_comment_ids(), id)
+    }
+
+    pub(crate) fn pull_request_delete_label(&self, id: u64) -> Option<String> {
+        pr_comment_action_label("x", &self.pull_request_editable_comment_ids(), id)
+    }
+
+    pub(crate) fn reply_to_pull_request_comment_letter(&mut self, letter: char) -> bool {
+        let letter = letter.to_ascii_lowercase();
+        if !letter.is_ascii_lowercase() {
+            return false;
+        }
+        let idx = (letter as u8 - b'a') as usize;
+        let Some(id) = self.pull_request_comment_ids().get(idx).copied() else {
+            return false;
+        };
+        self.start_pull_request_reply(id)
+    }
+
+    pub(crate) fn reply_to_pull_request_comment_number(&mut self, number: usize) -> bool {
+        let Some(id) = self
+            .pull_request_comment_ids()
+            .get(number.saturating_sub(1))
+            .copied()
+        else {
+            return false;
+        };
+        self.start_pull_request_reply(id)
+    }
+
+    pub(crate) fn edit_review_comment_letter(&mut self, letter: char) -> bool {
+        let letter = letter.to_ascii_lowercase();
+        if !letter.is_ascii_lowercase() {
+            return false;
+        }
+        self.edit_review_comment_index((letter as u8 - b'a') as usize)
+    }
+
+    pub(crate) fn edit_review_comment_number(&mut self, number: usize) -> bool {
+        if number == 0 {
+            return false;
+        }
+        self.edit_review_comment_index(number - 1)
+    }
+
+    fn editable_review_comment_anchor_at_index(&mut self, idx: usize) -> Option<String> {
+        if self.view_mode == ViewMode::Preview {
+            return self
+                .review_file_comment_overlay()
+                .filter(|overlay| overlay.can_edit)
+                .map(|overlay| overlay.anchor_key);
+        }
+        self.review_comment_overlays_for_current_file()
+            .into_iter()
+            .filter(|overlay| overlay.can_edit)
+            .nth(idx)
+            .map(|overlay| overlay.anchor_key)
+    }
+
+    fn edit_review_comment_index(&mut self, idx: usize) -> bool {
+        if self.active_pr_comments_view() {
+            let Some(id) = self.pull_request_editable_comment_ids().get(idx).copied() else {
+                return false;
+            };
+            return self.edit_pull_request_comment(id);
+        }
+
+        let anchor_key = self.editable_review_comment_anchor_at_index(idx);
+        let Some(anchor_key) = anchor_key else {
+            return false;
+        };
+        let anchor = self
+            .review_comments
+            .iter()
+            .find(|comment| {
+                !comment.deleted && comment.can_edit && comment.anchor.anchor_key == anchor_key
+            })
+            .map(|comment| comment.anchor.clone());
+        if let Some(anchor) = anchor {
+            self.open_review_editor(anchor);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn delete_review_comment_letter(&mut self, letter: char) -> bool {
+        let letter = letter.to_ascii_lowercase();
+        if !letter.is_ascii_lowercase() {
+            return false;
+        }
+        self.delete_review_comment_index((letter as u8 - b'a') as usize)
+    }
+
+    pub(crate) fn delete_review_comment_number(&mut self, number: usize) -> bool {
+        if number == 0 {
+            return false;
+        }
+        self.delete_review_comment_index(number - 1)
+    }
+
+    fn delete_review_comment_index(&mut self, idx: usize) -> bool {
+        if self.active_pr_comments_view() {
+            let Some(id) = self.pull_request_editable_comment_ids().get(idx).copied() else {
+                return false;
+            };
+            return self.request_delete_comment_by_id(id);
+        }
+        let Some(anchor_key) = self.editable_review_comment_anchor_at_index(idx) else {
+            return false;
+        };
+        self.request_delete_comment_by_anchor(anchor_key)
+    }
+
+    pub(crate) fn review_comment_body_for_id(&self, id: u64) -> Option<String> {
+        self.review_comments
+            .iter()
+            .find(|comment| comment.id == id && !comment.deleted)
+            .map(|comment| comment.body.clone())
+    }
+
+    pub(crate) fn pull_request_title(&self) -> String {
+        self.review_comments
+            .iter()
+            .find_map(|comment| {
+                comment
+                    .provider
+                    .as_ref()
+                    .and_then(|provider| provider.pr_title.clone())
+            })
+            .filter(|title| !title.trim().is_empty())
+            .unwrap_or_else(|| "Pull request".to_string())
+    }
+
+    pub(crate) fn pull_request_comment_target_available(&self) -> bool {
+        self.review_target_metadata
+            .as_ref()
+            .is_some_and(|metadata| metadata.pr_number.is_some())
+            || self.review_comments.iter().any(|comment| {
+                !comment.deleted
+                    && comment.provider.as_ref().is_some_and(|provider| {
+                        provider.pr_number > 0 && !provider.repo.trim().is_empty()
+                    })
+            })
+    }
+
+    fn pull_request_anchor(&self, anchor_key: String) -> ReviewAnchor {
+        ReviewAnchor {
+            file_index: 0,
+            file_path: self.pull_request_title(),
+            kind: ReviewTargetKind::PullRequest,
+            side: None,
+            old_range: None,
+            new_range: None,
+            hunk_id: None,
+            display_idx_hint: Some(0),
+            anchor_key,
+        }
+    }
+
+    pub(crate) fn start_pull_request_comment(&mut self) -> bool {
+        if !self.pull_request_comment_target_available() {
+            return false;
+        }
+        let key = format!("pr|new|{}", self.review_next_comment_id);
+        self.open_review_editor(self.pull_request_anchor(key));
+        true
+    }
+
+    pub(crate) fn start_pull_request_reply(&mut self, id: u64) -> bool {
+        if !self.pull_request_comment_target_available() {
+            return false;
+        }
+        let Some(body) = self.review_comment_body_for_id(id) else {
+            return false;
+        };
+        let quote = body
+            .lines()
+            .map(|line| format!("> {line}"))
+            .chain(std::iter::once(">".to_string()))
+            .chain(std::iter::once(String::new()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let key = format!("pr|reply|{}|{}", id, self.review_next_comment_id);
+        self.review_editor = Some(ReviewEditorState {
+            anchor: self.pull_request_anchor(key),
+            text: quote,
+            cursor: 0,
+        });
+        if let Some(editor) = self.review_editor.as_mut() {
+            editor.cursor = editor.text.len();
+        }
+        true
+    }
+
+    pub(crate) fn edit_pull_request_comment(&mut self, id: u64) -> bool {
+        let Some(comment) = self
+            .review_comments
+            .iter()
+            .find(|comment| comment.id == id && !comment.deleted && comment.can_edit)
+            .cloned()
+        else {
+            return false;
+        };
+        self.open_review_editor(comment.anchor);
+        true
+    }
+
+    pub(crate) fn set_pr_comment_hits(&mut self, hits: Vec<PrCommentHit>) {
+        self.pr_comment_hits = hits;
+    }
+
+    pub(crate) fn set_pr_comment_add_hit(&mut self, hit: Option<(u16, u16, u16, u16)>) {
+        self.pr_comment_add_hit = hit;
+    }
+
+    pub(crate) fn handle_pr_comment_view_click(&mut self, column: u16, row: u16) -> bool {
+        if !self.active_pr_comments_view() || self.review_editor.is_some() {
+            return false;
+        }
+        if let Some(action) = self.pr_comment_hits.iter().rev().find_map(|hit| {
+            let in_box = column >= hit.x
+                && column < hit.x.saturating_add(hit.width)
+                && row >= hit.y
+                && row < hit.y.saturating_add(hit.height);
+            in_box.then_some(hit.action)
+        }) {
+            return match action {
+                PrCommentHitAction::Open(id) | PrCommentHitAction::Edit(id) => {
+                    self.edit_pull_request_comment(id)
+                }
+                PrCommentHitAction::Reply(id) => self.start_pull_request_reply(id),
+                PrCommentHitAction::Delete(id) => self.request_delete_comment_by_id(id),
+            };
+        }
+        if self
+            .pr_comment_add_hit
+            .is_some_and(|(x, y, width, height)| {
+                column >= x
+                    && column < x.saturating_add(width)
+                    && row >= y
+                    && row < y.saturating_add(height)
+            })
+        {
+            self.start_pull_request_comment();
+            return true;
+        }
+        false
     }
 
     pub fn take_review_hook_warnings(&mut self) -> Vec<String> {
         std::mem::take(&mut self.review_hook_warnings)
+    }
+
+    pub(crate) fn review_delete_confirmation_active(&self) -> bool {
+        self.review_delete_confirmation.is_some()
+    }
+
+    pub(crate) fn review_delete_confirmation_render(&self) -> Option<ReviewDeleteConfirmation> {
+        self.review_delete_confirmation.clone()
+    }
+
+    pub(crate) fn set_review_delete_confirmation_hits(
+        &mut self,
+        hits: Vec<ReviewDeleteConfirmationHit>,
+    ) {
+        self.review_delete_confirmation_hits = hits;
+    }
+
+    pub(crate) fn cancel_review_delete_confirmation(&mut self) {
+        self.review_delete_confirmation = None;
+        self.review_delete_confirmation_hits.clear();
+        self.review_delete_confirmation_hover = None;
+    }
+
+    pub(crate) fn update_review_delete_confirmation_hover(
+        &mut self,
+        column: u16,
+        row: u16,
+    ) -> bool {
+        let hover = self.review_delete_confirmation_hits.iter().find_map(|hit| {
+            (column >= hit.x
+                && column < hit.x.saturating_add(hit.width)
+                && row >= hit.y
+                && row < hit.y.saturating_add(hit.height))
+            .then_some(hit.action)
+        });
+        if self.review_delete_confirmation_hover == hover {
+            return false;
+        }
+        self.review_delete_confirmation_hover = hover;
+        true
+    }
+
+    pub(crate) fn handle_review_delete_confirmation_key(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            crossterm::event::KeyCode::Char('d') | crossterm::event::KeyCode::Char('D') => {
+                self.confirm_review_delete();
+                true
+            }
+            crossterm::event::KeyCode::Esc => {
+                self.cancel_review_delete_confirmation();
+                true
+            }
+            _ => true,
+        }
+    }
+
+    pub(crate) fn handle_review_delete_confirmation_click(
+        &mut self,
+        column: u16,
+        row: u16,
+    ) -> bool {
+        let Some(action) = self.review_delete_confirmation_hits.iter().find_map(|hit| {
+            (column >= hit.x
+                && column < hit.x.saturating_add(hit.width)
+                && row >= hit.y
+                && row < hit.y.saturating_add(hit.height))
+            .then_some(hit.action)
+        }) else {
+            return true;
+        };
+        match action {
+            ReviewDeleteConfirmationAction::Confirm => self.confirm_review_delete(),
+            ReviewDeleteConfirmationAction::Cancel => self.cancel_review_delete_confirmation(),
+        }
+        true
     }
 
     pub(crate) fn review_action_entries_for_editor(&self) -> Vec<(usize, String, String)> {
@@ -883,6 +1974,10 @@ impl App {
         self.review_editor.is_some()
     }
 
+    pub(crate) fn set_review_editor_wrap_width(&mut self, width: usize) {
+        self.review_editor_wrap_width = width;
+    }
+
     pub fn review_mention_picker_active(&self) -> bool {
         self.review_mention_picker.is_some()
     }
@@ -909,6 +2004,9 @@ impl App {
     }
 
     pub fn review_preview_hint_text(&self, overlay: &ReviewCommentOverlay) -> String {
+        if !overlay.can_edit {
+            return format!("{} • read only", overlay.preview);
+        }
         let update_key = if overlay.is_hunk { "M" } else { "m" };
         let delete_key = if overlay.is_hunk { "X" } else { "x" };
         format!(
@@ -917,38 +2015,48 @@ impl App {
         )
     }
 
-    pub(crate) fn review_preview_note_lines(
-        &self,
-        overlay: &ReviewCommentOverlay,
-        visible_width: usize,
-    ) -> Vec<String> {
-        let max_width = visible_width.max(12);
-        let content_width = max_width.saturating_sub(4).max(1);
-        let body_lines = if overlay.body.is_empty() {
-            vec!["(empty)".to_string()]
-        } else {
-            overlay
-                .body
-                .lines()
-                .flat_map(|line| wrap_note_line(line, content_width))
-                .collect::<Vec<_>>()
-        };
-        let title = truncate_middle_chars(&overlay.title, max_width.saturating_sub(4));
-        let rule = "─".repeat(max_width.saturating_sub(title.chars().count().saturating_add(4)));
-        let bottom_rule =
-            "─".repeat(max_width.saturating_sub("x delete".chars().count().saturating_add(4)));
-        let mut lines = Vec::with_capacity(body_lines.len().saturating_add(2));
-        lines.push(format!("╭ {title} {rule}╮"));
-        for line in body_lines {
-            let padding = " ".repeat(content_width.saturating_sub(line.chars().count()));
-            lines.push(format!("│ {line}{padding} │"));
-        }
-        lines.push(format!("╰ x delete {bottom_rule}╯"));
-        lines
-    }
-
     pub fn clear_review_preview_boxes(&mut self) {
         self.review_preview_boxes.clear();
+    }
+
+    pub(crate) fn review_preview_flash_key(&self) -> Option<String> {
+        self.review_preview_flash
+            .as_ref()
+            .and_then(|(key, until)| (Instant::now() < *until).then(|| key.clone()))
+    }
+
+    pub(crate) fn review_preview_flash_active(&self, anchor_key: &str) -> bool {
+        self.review_preview_flash
+            .as_ref()
+            .is_some_and(|(key, until)| key == anchor_key && Instant::now() < *until)
+    }
+
+    fn flash_review_preview(&mut self, anchor_key: String) {
+        self.review_preview_flash = Some((anchor_key, Instant::now() + Duration::from_millis(650)));
+    }
+
+    fn request_delete_comment_by_anchor(&mut self, anchor_key: String) -> bool {
+        self.remove_comment_for_anchor_key(&anchor_key)
+    }
+
+    fn request_delete_comment_by_id(&mut self, id: u64) -> bool {
+        self.remove_review_comment_from_cli(id)
+    }
+
+    pub fn confirm_review_delete(&mut self) {
+        let Some(confirmation) = self.review_delete_confirmation.take() else {
+            return;
+        };
+        self.review_delete_confirmation_hits.clear();
+        self.review_delete_confirmation_hover = None;
+        match confirmation.target {
+            ReviewDeleteTarget::All => {
+                self.clear_all_review_comments_now();
+            }
+            ReviewDeleteTarget::DiscardSession => {
+                self.discard_review_session_changes_now();
+            }
+        }
     }
 
     pub fn remove_hovered_review_comment(&mut self) -> bool {
@@ -956,7 +2064,7 @@ impl App {
             return false;
         };
         self.review_preview_hover = None;
-        self.remove_comment_for_anchor_key(&anchor_key)
+        self.request_delete_comment_by_anchor(anchor_key)
     }
 
     pub fn add_review_preview_box(
@@ -973,6 +2081,26 @@ impl App {
             width,
             height,
             anchor_key,
+            edit: false,
+            delete: false,
+        });
+    }
+
+    pub fn add_review_preview_edit_box(
+        &mut self,
+        x: u16,
+        y: u16,
+        width: u16,
+        height: u16,
+        anchor_key: String,
+    ) {
+        self.review_preview_boxes.push(ReviewPreviewBox {
+            x,
+            y,
+            width,
+            height,
+            anchor_key,
+            edit: true,
             delete: false,
         });
     }
@@ -991,6 +2119,7 @@ impl App {
             width,
             height,
             anchor_key,
+            edit: false,
             delete: true,
         });
     }
@@ -1012,7 +2141,10 @@ impl App {
         if row < y || row >= y.saturating_add(height) {
             return None;
         }
-        let note_boxes = self.review_preview_boxes.iter().filter(|hit| !hit.delete);
+        let note_boxes = self
+            .review_preview_boxes
+            .iter()
+            .filter(|hit| !hit.delete && !hit.edit);
         if note_boxes.clone().any(|hit| {
             let end = hit.y.saturating_add(hit.height);
             row >= hit.y && row < end
@@ -1100,25 +2232,35 @@ impl App {
         if !self.review_mode || self.review_editor.is_some() {
             return false;
         }
+        let Some((x, y, width, height)) = self.diff_view_area else {
+            return false;
+        };
+        if column < x
+            || column >= x.saturating_add(width)
+            || row < y
+            || row >= y.saturating_add(height)
+        {
+            return false;
+        }
 
         let hit = self.review_preview_boxes.iter().rev().find_map(|hit| {
             let end_x = hit.x.saturating_add(hit.width);
             let end_y = hit.y.saturating_add(hit.height);
             (column >= hit.x && column < end_x && row >= hit.y && row < end_y)
-                .then(|| (hit.anchor_key.clone(), hit.delete))
+                .then(|| (hit.anchor_key.clone(), hit.edit, hit.delete))
         });
 
-        let Some((anchor_key, delete)) = hit else {
+        let Some((anchor_key, _edit, delete)) = hit else {
             return false;
         };
         if delete {
-            return self.remove_comment_for_anchor_key(&anchor_key);
+            return self.request_delete_comment_by_anchor(anchor_key);
         }
 
         let anchor = self
             .review_comments
             .iter()
-            .find(|c| c.anchor.anchor_key == anchor_key)
+            .find(|c| !c.deleted && c.can_edit && c.anchor.anchor_key == anchor_key)
             .map(|c| c.anchor.clone());
 
         if let Some(anchor) = anchor {
@@ -1136,7 +2278,7 @@ impl App {
         }
 
         let span = match anchor.kind {
-            ReviewTargetKind::File => None,
+            ReviewTargetKind::PullRequest | ReviewTargetKind::File => None,
             ReviewTargetKind::Line => visible
                 .iter()
                 .find_map(|(idx, line)| line_anchor_matches(anchor, line).then_some(*idx))
@@ -1206,7 +2348,7 @@ impl App {
         let anchor_display_span = self.review_anchor_display_span(&editor.anchor);
 
         let prefer_right = match editor.anchor.kind {
-            ReviewTargetKind::File => true,
+            ReviewTargetKind::PullRequest | ReviewTargetKind::File => true,
             ReviewTargetKind::Line => !matches!(editor.anchor.side, Some(ReviewSide::Old)),
             ReviewTargetKind::Hunk => !matches!(
                 (editor.anchor.old_range, editor.anchor.new_range),
@@ -1249,10 +2391,15 @@ impl App {
         for comment in self
             .review_comments
             .iter()
-            .filter(|comment| comment.anchor.file_path == file_path)
+            .filter(|comment| {
+                !comment.deleted
+                    && comment.anchor.kind != ReviewTargetKind::PullRequest
+                    && comment.anchor.file_path == file_path
+            })
             .filter(|comment| active_anchor_key != Some(comment.anchor.anchor_key.as_str()))
         {
             let display_idx = match comment.anchor.kind {
+                ReviewTargetKind::PullRequest => Some(0),
                 ReviewTargetKind::File => None,
                 ReviewTargetKind::Line => visible.iter().find_map(|(idx, line)| {
                     line_anchor_matches(&comment.anchor, line).then_some(*idx)
@@ -1299,7 +2446,7 @@ impl App {
             }
 
             let prefer_right = match comment.anchor.kind {
-                ReviewTargetKind::File => true,
+                ReviewTargetKind::PullRequest | ReviewTargetKind::File => true,
                 ReviewTargetKind::Line => !matches!(comment.anchor.side, Some(ReviewSide::Old)),
                 ReviewTargetKind::Hunk => !matches!(
                     (comment.anchor.old_range, comment.anchor.new_range),
@@ -1311,14 +2458,30 @@ impl App {
                 display_idx,
                 preview,
                 body: comment.body.clone(),
-                title: review_comment_title(&comment.anchor),
+                title: review_comment_title(comment, self.review_author.as_ref()),
+                avatar_url: comment
+                    .author
+                    .as_ref()
+                    .and_then(|author| author.avatar_url.clone()),
+                avatar_seed: review_author_avatar_seed(comment.author.as_ref()),
                 anchor_key: comment.anchor.anchor_key.clone(),
+                edit_label: None,
+                delete_label: None,
                 prefer_right,
                 is_hunk: matches!(comment.anchor.kind, ReviewTargetKind::Hunk),
+                can_edit: comment.can_edit,
             });
         }
 
         overlays.sort_by_key(|overlay| overlay.display_idx);
+        let mut action_idx = 0;
+        for overlay in &mut overlays {
+            if overlay.can_edit {
+                overlay.edit_label = Some(review_index_action_label("i", action_idx));
+                overlay.delete_label = Some(review_index_action_label("x", action_idx));
+                action_idx += 1;
+            }
+        }
         overlays
     }
 
@@ -1334,7 +2497,7 @@ impl App {
         let comment = self
             .review_comments
             .iter()
-            .find(|comment| comment.anchor.anchor_key == anchor.anchor_key)?;
+            .find(|comment| !comment.deleted && comment.anchor.anchor_key == anchor.anchor_key)?;
         if active_anchor_key == Some(comment.anchor.anchor_key.as_str()) {
             return None;
         }
@@ -1353,34 +2516,51 @@ impl App {
             display_idx: 0,
             preview,
             body: comment.body.clone(),
-            title: review_comment_title(&comment.anchor),
+            title: review_comment_title(comment, self.review_author.as_ref()),
+            avatar_url: comment
+                .author
+                .as_ref()
+                .and_then(|author| author.avatar_url.clone()),
+            avatar_seed: review_author_avatar_seed(comment.author.as_ref()),
             anchor_key: comment.anchor.anchor_key.clone(),
+            edit_label: comment.can_edit.then(|| review_index_action_label("i", 0)),
+            delete_label: comment.can_edit.then(|| review_index_action_label("x", 0)),
             prefer_right: true,
             is_hunk: false,
+            can_edit: comment.can_edit,
         })
     }
 
     pub fn enable_review_mode(&mut self) {
+        self.configure_review_mode(true);
+    }
+
+    pub fn load_review_mode(&mut self) {
+        self.configure_review_mode(false);
+    }
+
+    fn configure_review_mode(&mut self, create_missing: bool) {
         self.review_mode = true;
-        self.review_submission_output = None;
         self.touch_review_state();
 
         let repo_root = self
-            .multi_diff
-            .repo_root()
-            .map(|p| p.to_path_buf())
+            .review_workspace_root_override
+            .clone()
+            .or_else(|| self.multi_diff.repo_root().map(|p| p.to_path_buf()))
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
         self.review_repo_root = Some(repo_root.to_string_lossy().to_string());
         self.invalidate_review_repo_file_cache();
 
         let diff_fingerprint = self.compute_review_diff_fingerprint();
         self.review_diff_fingerprint = diff_fingerprint.clone();
-
         self.review_session_created_at = now_ts();
 
         if !self.review_persist_enabled {
-            self.review_session_path = None;
+            self.review_dir_path = None;
+            self.review_db_path = None;
+            self.review_db_stamp = FileDiskStamp::default();
             self.review_comments.clear();
+            self.review_session_baseline.clear();
             self.review_editor = None;
             self.review_mention_picker = None;
             self.review_next_comment_id = 1;
@@ -1389,52 +2569,45 @@ impl App {
         }
 
         let repo_key = hash_hex(&repo_root.to_string_lossy());
-        let base = std::env::temp_dir()
-            .join("oyo")
-            .join("review")
-            .join(repo_key);
-        let path = base.join(format!("{}.json", diff_fingerprint));
-        self.review_session_path = Some(path.clone());
+        let base = self
+            .review_base_dir_override
+            .clone()
+            .unwrap_or_else(default_review_base_dir);
+        let dir = base.join(repo_key);
+        let db_path = dir.join("review.db");
+        self.review_dir_path = Some(dir);
+        self.review_db_path = Some(db_path.clone());
+        self.review_db_stamp = review_db_stamp(&db_path);
+        self.last_review_db_check = Instant::now();
 
-        if self.review_clear_session_on_start {
-            let _ = fs::remove_file(&path);
-            self.review_comments.clear();
-            self.review_editor = None;
-            self.review_mention_picker = None;
-            self.review_next_comment_id = 1;
+        if self.load_review_state(&db_path) {
+            self.repair_review_comment_file_indexes();
+            self.repair_review_editor_file_index();
+            self.refresh_review_mention_picker();
+            self.review_next_comment_id = self
+                .review_comments
+                .iter()
+                .map(|c| c.id)
+                .max()
+                .unwrap_or(0)
+                .saturating_add(1);
+            if self.fill_current_author_comments() {
+                self.persist_review_session();
+            }
+            self.review_session_baseline = self.review_comments.clone();
             self.touch_review_state();
-            self.persist_review_session();
             return;
         }
 
-        if let Ok(data) = fs::read_to_string(&path) {
-            if let Ok(session) = serde_json::from_str::<ReviewSession>(&data) {
-                if session.version == 1 && session.diff_fingerprint == self.review_diff_fingerprint
-                {
-                    self.review_session_created_at = session.created_at;
-                    self.review_comments = session.comments;
-                    self.review_editor = session.editor;
-                    self.review_next_comment_id = self
-                        .review_comments
-                        .iter()
-                        .map(|c| c.id)
-                        .max()
-                        .unwrap_or(0)
-                        .saturating_add(1);
-                    self.repair_review_editor_file_index();
-                    self.refresh_review_mention_picker();
-                    self.touch_review_state();
-                    return;
-                }
-            }
-        }
-
         self.review_comments.clear();
+        self.review_session_baseline.clear();
         self.review_editor = None;
         self.review_mention_picker = None;
         self.review_next_comment_id = 1;
         self.touch_review_state();
-        self.persist_review_session();
+        if create_missing {
+            self.persist_review_session();
+        }
     }
 
     pub fn start_file_comment(&mut self) -> bool {
@@ -1450,6 +2623,10 @@ impl App {
 
     pub fn start_line_comment(&mut self) {
         if !self.review_mode {
+            return;
+        }
+        if self.active_pr_comments_view() {
+            self.start_pull_request_comment();
             return;
         }
         if self.file_review_comments_supported() {
@@ -1510,12 +2687,12 @@ impl App {
             let Some(anchor) = self.resolve_file_review_anchor() else {
                 return false;
             };
-            return self.remove_comment_for_anchor_key(&anchor.anchor_key);
+            return self.request_delete_comment_by_anchor(anchor.anchor_key);
         }
         let Some(anchor) = self.resolve_line_review_anchor() else {
             return false;
         };
-        self.remove_comment_for_anchor_key(&anchor.anchor_key)
+        self.request_delete_comment_by_anchor(anchor.anchor_key)
     }
 
     pub fn remove_hunk_comment_at_cursor(&mut self) -> bool {
@@ -1525,14 +2702,29 @@ impl App {
         let Some(anchor) = self.resolve_hunk_review_anchor() else {
             return false;
         };
-        self.remove_comment_for_anchor_key(&anchor.anchor_key)
+        self.request_delete_comment_by_anchor(anchor.anchor_key)
     }
 
     pub fn clear_all_review_comments(&mut self) -> bool {
+        if !self.review_mode || self.review_comment_count() == 0 {
+            return false;
+        }
+        let count = self.review_comment_count();
+        self.review_delete_confirmation = Some(ReviewDeleteConfirmation {
+            target: ReviewDeleteTarget::All,
+            title: "Delete all comments?".to_string(),
+            body: format!("This deletes {count} comments. This cannot be undone."),
+            confirm_label: "d delete all".to_string(),
+        });
+        true
+    }
+
+    fn clear_all_review_comments_now(&mut self) -> bool {
         if !self.review_mode || self.review_comments.is_empty() {
             return false;
         }
         self.review_comments.clear();
+        self.active_review_comment_id = None;
         self.review_editor = None;
         self.review_mention_picker = None;
         self.review_next_comment_id = 1;
@@ -1541,6 +2733,399 @@ impl App {
         self.run_review_hooks(ReviewHookEvent::CommentsCleared, None);
         self.notify(ToastEvent::CommentsCleared);
         true
+    }
+
+    pub(crate) fn review_session_has_changes(&self) -> bool {
+        self.review_comments != self.review_session_baseline || self.review_editor.is_some()
+    }
+
+    fn discard_review_session_summary(&self) -> String {
+        let mut new_comments = 0usize;
+        let mut edited_comments = 0usize;
+        let mut deleted_comments = 0usize;
+
+        let baseline = self
+            .review_session_baseline
+            .iter()
+            .map(|comment| (comment.id, comment))
+            .collect::<BTreeMap<_, _>>();
+        let current = self
+            .review_comments
+            .iter()
+            .map(|comment| (comment.id, comment))
+            .collect::<BTreeMap<_, _>>();
+
+        for comment in self
+            .review_comments
+            .iter()
+            .filter(|comment| !comment.deleted)
+        {
+            match baseline.get(&comment.id) {
+                None => new_comments += 1,
+                Some(old) if *old != comment => edited_comments += 1,
+                _ => {}
+            }
+        }
+        for comment in self
+            .review_session_baseline
+            .iter()
+            .filter(|comment| !comment.deleted)
+        {
+            if current
+                .get(&comment.id)
+                .is_none_or(|current| current.deleted)
+            {
+                deleted_comments += 1;
+            }
+        }
+
+        let editor_changed = self.review_editor.as_ref().is_some_and(|editor| {
+            self.review_comments
+                .iter()
+                .find(|comment| {
+                    !comment.deleted && comment.anchor.anchor_key == editor.anchor.anchor_key
+                })
+                .map(|comment| comment.body.as_str())
+                .unwrap_or_default()
+                != editor.text.as_str()
+        });
+
+        let comment_word = |count| if count == 1 { "comment" } else { "comments" };
+        let mut lines = vec!["This will discard:".to_string()];
+        if new_comments > 0 {
+            lines.push(format!(
+                "• {new_comments} new {}",
+                comment_word(new_comments)
+            ));
+        }
+        if edited_comments > 0 {
+            lines.push(format!(
+                "• {edited_comments} edited {}",
+                comment_word(edited_comments)
+            ));
+        }
+        if deleted_comments > 0 {
+            lines.push(format!(
+                "• {deleted_comments} deleted {}",
+                comment_word(deleted_comments)
+            ));
+        }
+        if editor_changed {
+            lines.push("• open editor draft".to_string());
+        }
+        if lines.len() == 1 {
+            lines.push("• open editor state".to_string());
+        }
+        lines.join("\n")
+    }
+
+    pub(crate) fn request_discard_review_session_changes(&mut self) -> bool {
+        if !self.review_session_has_changes() {
+            return false;
+        }
+        self.review_delete_confirmation = Some(ReviewDeleteConfirmation {
+            target: ReviewDeleteTarget::DiscardSession,
+            title: "Discard review changes?".to_string(),
+            body: self.discard_review_session_summary(),
+            confirm_label: "d discard".to_string(),
+        });
+        true
+    }
+
+    fn discard_review_session_changes_now(&mut self) -> bool {
+        if !self.review_session_has_changes() {
+            return false;
+        }
+        self.review_comments = self.review_session_baseline.clone();
+        self.active_review_comment_id = None;
+        self.review_editor = None;
+        self.review_mention_picker = None;
+        self.review_next_comment_id = self
+            .review_comments
+            .iter()
+            .map(|comment| comment.id)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        self.touch_review_state();
+        self.persist_review_session();
+        self.notify(ToastEvent::SelectionActionStarted(
+            "Review changes discarded".to_string(),
+        ));
+        true
+    }
+
+    pub(crate) fn request_review_sync_action(
+        &mut self,
+        action: ReviewSyncAction,
+        remote: Option<String>,
+    ) {
+        self.comments_sidebar_overflow_open = false;
+        self.comments_sidebar_overflow_menu_hover = None;
+        self.review_sync_requested = Some(ReviewSyncRequest { action, remote });
+    }
+
+    pub(crate) fn run_comments_sidebar_sync(&mut self) {
+        self.request_review_sync_action(ReviewSyncAction::Sync, None);
+    }
+
+    pub(crate) fn take_review_sync_requested(&mut self) -> Option<ReviewSyncRequest> {
+        self.review_sync_requested.take()
+    }
+
+    pub(crate) fn set_review_sync_status(&mut self, status: Option<ReviewSyncAction>) {
+        self.review_sync_status = status;
+    }
+
+    pub(crate) fn review_sync_status(&self) -> Option<ReviewSyncAction> {
+        self.review_sync_status
+    }
+
+    pub(crate) fn mark_review_session_clean(&mut self) {
+        self.review_session_baseline = self.review_comments.clone();
+    }
+
+    pub(crate) fn toggle_comments_sidebar_overflow(&mut self) {
+        self.comments_sidebar_overflow_open = !self.comments_sidebar_overflow_open;
+    }
+
+    pub(crate) fn set_comments_sidebar_overflow_hits(
+        &mut self,
+        hits: Vec<ReviewSidebarOverflowHit>,
+    ) {
+        self.comments_sidebar_overflow_hits = hits;
+    }
+
+    pub(crate) fn handle_comments_sidebar_overflow_click(&mut self, column: u16, row: u16) -> bool {
+        if self
+            .comments_sidebar_overflow_hit
+            .is_some_and(|(x, y, width, height)| {
+                column >= x
+                    && column < x.saturating_add(width)
+                    && row >= y
+                    && row < y.saturating_add(height)
+            })
+        {
+            self.toggle_comments_sidebar_overflow();
+            return true;
+        }
+        if !self.comments_sidebar_overflow_open {
+            return false;
+        }
+        let action = self.comments_sidebar_overflow_hits.iter().find_map(|hit| {
+            (column >= hit.x
+                && column < hit.x.saturating_add(hit.width)
+                && row >= hit.y
+                && row < hit.y.saturating_add(hit.height))
+            .then_some(hit.action)
+        });
+        if let Some(action) = action {
+            self.request_review_sync_action(action, None);
+        } else {
+            self.comments_sidebar_overflow_open = false;
+        }
+        true
+    }
+
+    pub(crate) fn open_review_remote_picker(
+        &mut self,
+        action: ReviewSyncAction,
+        remotes: Vec<ReviewRemoteOption>,
+    ) {
+        self.review_remote_picker = Some(ReviewRemotePickerState {
+            action,
+            remotes,
+            selected: 0,
+            query: String::new(),
+        });
+        self.file_filter_cursor_visible = true;
+        self.file_filter_cursor_last_blink = std::time::Instant::now();
+        self.review_remote_picker_hover = None;
+    }
+
+    pub(crate) fn review_remote_picker_active(&self) -> bool {
+        self.review_remote_picker.is_some()
+    }
+
+    pub(crate) fn review_remote_picker_render(&self) -> Option<&ReviewRemotePickerState> {
+        self.review_remote_picker.as_ref()
+    }
+
+    pub(crate) fn set_review_remote_picker_hits(&mut self, hits: Vec<ReviewRemotePickerHit>) {
+        self.review_remote_picker_hits = hits;
+    }
+
+    pub(crate) fn cancel_review_remote_picker(&mut self) {
+        self.review_remote_picker = None;
+        self.review_remote_picker_hits.clear();
+        self.review_remote_picker_hover = None;
+    }
+
+    fn review_remote_matches(remote: &ReviewRemoteOption, query: &str) -> bool {
+        let query = query.trim().to_ascii_lowercase();
+        query.is_empty()
+            || remote.name.to_ascii_lowercase().contains(&query)
+            || remote.label.to_ascii_lowercase().contains(&query)
+    }
+
+    fn review_remote_picker_filtered_indices(&self) -> Vec<usize> {
+        let Some(picker) = self.review_remote_picker.as_ref() else {
+            return Vec::new();
+        };
+        picker
+            .remotes
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, remote)| {
+                Self::review_remote_matches(remote, &picker.query).then_some(idx)
+            })
+            .collect()
+    }
+
+    fn reset_review_remote_picker_cursor(&mut self) {
+        self.file_filter_cursor_visible = true;
+        self.file_filter_cursor_last_blink = std::time::Instant::now();
+    }
+
+    fn select_first_matching_review_remote(&mut self) {
+        let Some(first) = self
+            .review_remote_picker_filtered_indices()
+            .first()
+            .copied()
+        else {
+            return;
+        };
+        if let Some(picker) = self.review_remote_picker.as_mut() {
+            picker.selected = first;
+        }
+    }
+
+    pub(crate) fn move_review_remote_picker(&mut self, delta: isize) {
+        let indices = self.review_remote_picker_filtered_indices();
+        if indices.is_empty() {
+            return;
+        }
+        let Some(picker) = self.review_remote_picker.as_mut() else {
+            return;
+        };
+        let current = indices
+            .iter()
+            .position(|idx| *idx == picker.selected)
+            .unwrap_or(0) as isize;
+        let next = (current + delta).rem_euclid(indices.len() as isize) as usize;
+        picker.selected = indices[next];
+    }
+
+    pub(crate) fn choose_review_remote_picker(&mut self, index: Option<usize>) -> bool {
+        let Some(picker) = self.review_remote_picker.as_ref() else {
+            return false;
+        };
+        let idx = index.unwrap_or(picker.selected);
+        let Some(remote) = picker.remotes.get(idx).cloned() else {
+            return false;
+        };
+        if !Self::review_remote_matches(&remote, &picker.query) {
+            return false;
+        }
+        let action = picker.action;
+        self.review_remote_picker = None;
+        self.review_remote_picker_hits.clear();
+        self.review_remote_picker_hover = None;
+        self.request_review_sync_action(action, Some(remote.name));
+        true
+    }
+
+    pub(crate) fn update_review_remote_picker_hover(&mut self, column: u16, row: u16) -> bool {
+        let hover = self.review_remote_picker_hits.iter().find_map(|hit| {
+            (column >= hit.x
+                && column < hit.x.saturating_add(hit.width)
+                && row >= hit.y
+                && row < hit.y.saturating_add(hit.height))
+            .then_some(hit.index)
+        });
+        if self.review_remote_picker_hover == hover {
+            return false;
+        }
+        if let (Some(idx), Some(picker)) = (hover, self.review_remote_picker.as_mut()) {
+            picker.selected = idx.min(picker.remotes.len().saturating_sub(1));
+        }
+        self.review_remote_picker_hover = hover;
+        true
+    }
+
+    pub(crate) fn handle_review_remote_picker_click(&mut self, column: u16, row: u16) -> bool {
+        let selected = self.review_remote_picker_hits.iter().find_map(|hit| {
+            (column >= hit.x
+                && column < hit.x.saturating_add(hit.width)
+                && row >= hit.y
+                && row < hit.y.saturating_add(hit.height))
+            .then_some(hit.index)
+        });
+        if let Some(index) = selected {
+            self.choose_review_remote_picker(Some(index));
+        } else {
+            self.cancel_review_remote_picker();
+        }
+        true
+    }
+
+    pub(crate) fn handle_review_remote_picker_key(&mut self, key: KeyEvent) -> bool {
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        match key.code {
+            KeyCode::Esc => self.cancel_review_remote_picker(),
+            KeyCode::Enter => {
+                self.choose_review_remote_picker(None);
+            }
+            KeyCode::Up => self.move_review_remote_picker(-1),
+            KeyCode::Down => self.move_review_remote_picker(1),
+            KeyCode::Backspace => {
+                let Some(picker) = self.review_remote_picker.as_mut() else {
+                    return true;
+                };
+                if picker.query.is_empty() {
+                    self.cancel_review_remote_picker();
+                } else {
+                    picker.query.pop();
+                    self.select_first_matching_review_remote();
+                    self.reset_review_remote_picker_cursor();
+                }
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if let Some(picker) = self.review_remote_picker.as_mut() {
+                    picker.query.clear();
+                    picker.selected = 0;
+                }
+                self.reset_review_remote_picker_cursor();
+            }
+            KeyCode::Char(ch)
+                if !key.modifiers.intersects(
+                    KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER,
+                ) =>
+            {
+                if let Some(picker) = self.review_remote_picker.as_mut() {
+                    picker.query.push(ch);
+                }
+                self.select_first_matching_review_remote();
+                self.reset_review_remote_picker_cursor();
+            }
+            _ => {}
+        }
+        true
+    }
+
+    pub(crate) fn handle_comments_sidebar_action_key(&mut self, key: KeyEvent) -> bool {
+        if key.modifiers != crossterm::event::KeyModifiers::NONE {
+            return false;
+        }
+        match key.code {
+            crossterm::event::KeyCode::Char('s') => {
+                self.run_comments_sidebar_sync();
+                true
+            }
+            crossterm::event::KeyCode::Char('d') => self.request_discard_review_session_changes(),
+            _ => false,
+        }
     }
 
     pub fn review_mention_move_selection(&mut self, delta: isize) {
@@ -1651,10 +3236,31 @@ impl App {
             return;
         };
         let (row, col) = cursor_row_col(&editor.text, editor.cursor);
+        let wrap_width = self.review_editor_wrap_width;
+        if wrap_width > 0 {
+            let (line_start, line_end) = logical_line_bounds(&editor.text, row);
+            let line = &editor.text[line_start..line_end];
+            let (visual_row, visual_col) =
+                visual_pos_for_cursor(line, editor.cursor.saturating_sub(line_start), wrap_width);
+            if visual_row > 0 {
+                editor.cursor =
+                    cursor_for_visual_pos(line, line_start, visual_row - 1, visual_col, wrap_width);
+                self.refresh_review_mention_picker();
+                return;
+            }
+        }
         if row == 0 {
             return;
         }
-        editor.cursor = cursor_for_row_col(&editor.text, row - 1, col);
+        if wrap_width > 0 {
+            let (line_start, line_end) = logical_line_bounds(&editor.text, row - 1);
+            let line = &editor.text[line_start..line_end];
+            let last_visual_row = visual_row_count(line, wrap_width).saturating_sub(1);
+            editor.cursor =
+                cursor_for_visual_pos(line, line_start, last_visual_row, col, wrap_width);
+        } else {
+            editor.cursor = cursor_for_row_col(&editor.text, row - 1, col);
+        }
         self.refresh_review_mention_picker();
     }
 
@@ -1667,10 +3273,29 @@ impl App {
             return;
         }
         let (row, col) = cursor_row_col(&editor.text, editor.cursor);
+        let wrap_width = self.review_editor_wrap_width;
+        if wrap_width > 0 {
+            let (line_start, line_end) = logical_line_bounds(&editor.text, row);
+            let line = &editor.text[line_start..line_end];
+            let (visual_row, visual_col) =
+                visual_pos_for_cursor(line, editor.cursor.saturating_sub(line_start), wrap_width);
+            if visual_row + 1 < visual_row_count(line, wrap_width) {
+                editor.cursor =
+                    cursor_for_visual_pos(line, line_start, visual_row + 1, visual_col, wrap_width);
+                self.refresh_review_mention_picker();
+                return;
+            }
+        }
         if row + 1 >= starts.len() {
             return;
         }
-        editor.cursor = cursor_for_row_col(&editor.text, row + 1, col);
+        if wrap_width > 0 {
+            let (line_start, line_end) = logical_line_bounds(&editor.text, row + 1);
+            let line = &editor.text[line_start..line_end];
+            editor.cursor = cursor_for_visual_pos(line, line_start, 0, col, wrap_width);
+        } else {
+            editor.cursor = cursor_for_row_col(&editor.text, row + 1, col);
+        }
         self.refresh_review_mention_picker();
     }
 
@@ -1730,10 +3355,9 @@ impl App {
             body.push(' ');
         }
 
-        let existing_idx = self
-            .review_comments
-            .iter()
-            .position(|c| c.anchor.anchor_key == editor.anchor.anchor_key);
+        let existing_idx = self.review_comments.iter().position(|c| {
+            !c.deleted && c.can_edit && c.anchor.anchor_key == editor.anchor.anchor_key
+        });
 
         if body.trim().is_empty() {
             if let Some(idx) = existing_idx {
@@ -1751,9 +3375,16 @@ impl App {
 
         let now = now_ts();
         if let Some(idx) = existing_idx {
+            let author = self.review_author.clone();
             if let Some(existing) = self.review_comments.get_mut(idx) {
                 existing.body = body;
                 existing.anchor = editor.anchor;
+                if existing.author.is_none() {
+                    existing.author = author;
+                }
+                if let Some(provider) = existing.provider.as_mut() {
+                    provider.sync_state = "dirty".to_string();
+                }
                 existing.updated_at = now;
             }
         } else {
@@ -1763,6 +3394,10 @@ impl App {
                 id,
                 anchor: editor.anchor,
                 body,
+                author: self.review_author.clone(),
+                can_edit: true,
+                deleted: false,
+                provider: None,
                 created_at: now,
                 updated_at: now,
             });
@@ -1781,15 +3416,10 @@ impl App {
         self.review_mention_picker = None;
         let output = self.format_review_output();
         self.run_review_hooks(ReviewHookEvent::ReviewReady, Some(&output));
-        self.review_submission_output = Some(output);
         self.touch_review_state();
         self.persist_review_session();
         self.notify(ToastEvent::ReviewSubmitted);
         self.should_quit = true;
-    }
-
-    pub fn take_review_submission_output(&mut self) -> Option<String> {
-        self.review_submission_output.take()
     }
 
     fn run_review_hooks(&mut self, event: ReviewHookEvent, output: Option<&str>) {
@@ -1840,8 +3470,8 @@ impl App {
         }
         command.env("OYO_REVIEW_EVENT", review_event_name(event));
         command.env("OYO_DIFF_FINGERPRINT", &self.review_diff_fingerprint);
-        if let Some(path) = self.review_session_path.as_ref() {
-            command.env("OYO_SESSION_FILE", path);
+        if let Some(path) = self.review_db_path.as_ref() {
+            command.env("OYO_REVIEW_DB", path);
         }
         command.stdout(Stdio::null());
         command.stderr(Stdio::null());
@@ -1930,10 +3560,12 @@ impl App {
         let comments = self
             .review_comments
             .iter()
+            .filter(|comment| !comment.deleted)
             .map(|comment| ReviewExportComment {
                 id: comment.id,
                 file: &comment.anchor.file_path,
                 kind: match comment.anchor.kind {
+                    ReviewTargetKind::PullRequest => "pr",
                     ReviewTargetKind::File => "file",
                     ReviewTargetKind::Line => "line",
                     ReviewTargetKind::Hunk => "hunk",
@@ -1941,6 +3573,9 @@ impl App {
                 side: comment.anchor.side.map(ReviewSide::as_str),
                 old_range: comment.anchor.old_range,
                 new_range: comment.anchor.new_range,
+                author: comment.author.as_ref(),
+                created_at: comment.created_at,
+                updated_at: comment.updated_at,
                 body: &comment.body,
             })
             .collect();
@@ -1948,8 +3583,8 @@ impl App {
             version: 1,
             event: review_event_name(event),
             repo_root: self.review_repo_root.clone().unwrap_or_default(),
-            session_file: self
-                .review_session_path
+            review_db: self
+                .review_db_path
                 .as_ref()
                 .map(|path| path.to_string_lossy().to_string()),
             diff_fingerprint: self.review_diff_fingerprint.clone(),
@@ -1975,13 +3610,28 @@ impl App {
         self.review_revision = self.review_revision.saturating_add(1);
     }
 
+    fn mark_or_remove_review_comment(&mut self, idx: usize) {
+        if self.active_review_comment_id == Some(self.review_comments[idx].id) {
+            self.active_review_comment_id = None;
+        }
+        if self.review_comments[idx].provider.is_some() {
+            self.review_comments[idx].deleted = true;
+            self.review_comments[idx].updated_at = now_ts();
+            if let Some(provider) = self.review_comments[idx].provider.as_mut() {
+                provider.sync_state = "deleted".to_string();
+            }
+        } else {
+            self.review_comments.remove(idx);
+        }
+    }
+
     fn remove_comment_for_anchor_key(&mut self, anchor_key: &str) -> bool {
         if let Some(idx) = self
             .review_comments
             .iter()
-            .position(|c| c.anchor.anchor_key == anchor_key)
+            .position(|c| !c.deleted && c.can_edit && c.anchor.anchor_key == anchor_key)
         {
-            self.review_comments.remove(idx);
+            self.mark_or_remove_review_comment(idx);
             self.touch_review_state();
             self.persist_review_session();
             self.run_review_hooks(ReviewHookEvent::CommentDeleted, None);
@@ -1994,12 +3644,12 @@ impl App {
 
     fn open_review_editor(&mut self, anchor: ReviewAnchor) {
         self.clear_diff_selection();
-        let text = self
+        let existing = self
             .review_comments
             .iter()
-            .find(|c| c.anchor.anchor_key == anchor.anchor_key)
-            .map(|c| c.body.clone())
-            .unwrap_or_default();
+            .find(|c| !c.deleted && c.anchor.anchor_key == anchor.anchor_key);
+        self.active_review_comment_id = existing.map(|comment| comment.id);
+        let text = existing.map(|c| c.body.clone()).unwrap_or_default();
         let cursor = text.len();
         self.review_editor = Some(ReviewEditorState {
             anchor,
@@ -2739,46 +4389,663 @@ impl App {
         out
     }
 
+    fn review_db(path: &Path) -> rusqlite::Result<Connection> {
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let conn = Connection::open(path)?;
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS reviews (
+                diff_fingerprint TEXT PRIMARY KEY,
+                repo_root TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                editor_json TEXT,
+                target_json TEXT
+            );
+            CREATE TABLE IF NOT EXISTS comments (
+                diff_fingerprint TEXT NOT NULL,
+                id INTEGER NOT NULL,
+                comment_json TEXT NOT NULL,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (diff_fingerprint, id)
+            );",
+        )?;
+        Ok(conn)
+    }
+
     fn persist_review_session(&mut self) {
         if !self.review_mode || !self.review_persist_enabled {
             return;
         }
-        let Some(path) = self.review_session_path.as_ref() else {
+        let Some(path) = self.review_db_path.clone() else {
             return;
         };
-
-        let Some(parent) = path.parent() else {
+        let Ok(mut conn) = Self::review_db(&path) else {
             return;
         };
-        if fs::create_dir_all(parent).is_err() {
+        let Ok(tx) = conn.transaction() else {
+            return;
+        };
+        let now = now_ts();
+        let editor_json = self
+            .review_editor
+            .as_ref()
+            .and_then(|editor| serde_json::to_string(editor).ok());
+        let target_json = self
+            .review_target_metadata
+            .as_ref()
+            .and_then(|target| serde_json::to_string(target).ok());
+        if tx
+            .execute(
+                "INSERT INTO reviews (
+                    diff_fingerprint, repo_root, created_at, updated_at, editor_json, target_json
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                ON CONFLICT(diff_fingerprint) DO UPDATE SET
+                    repo_root = excluded.repo_root,
+                    updated_at = excluded.updated_at,
+                    editor_json = excluded.editor_json,
+                    target_json = excluded.target_json",
+                params![
+                    self.review_diff_fingerprint,
+                    self.review_repo_root.clone().unwrap_or_default(),
+                    self.review_session_created_at as i64,
+                    now as i64,
+                    editor_json,
+                    target_json,
+                ],
+            )
+            .is_err()
+        {
             return;
         }
+        if tx
+            .execute(
+                "DELETE FROM comments WHERE diff_fingerprint = ?1",
+                params![self.review_diff_fingerprint],
+            )
+            .is_err()
+        {
+            return;
+        }
+        for comment in &self.review_comments {
+            let Ok(comment_json) = serde_json::to_string(comment) else {
+                return;
+            };
+            if tx
+                .execute(
+                    "INSERT INTO comments (diff_fingerprint, id, comment_json, updated_at)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    params![
+                        self.review_diff_fingerprint,
+                        comment.id as i64,
+                        comment_json,
+                        comment.updated_at as i64,
+                    ],
+                )
+                .is_err()
+            {
+                return;
+            }
+        }
+        if tx.commit().is_ok() {
+            self.review_db_stamp = review_db_stamp(&path);
+            self.last_review_db_check = Instant::now();
+        }
+    }
 
-        let session = ReviewSession {
-            version: 1,
-            repo_root: self.review_repo_root.clone().unwrap_or_default(),
-            diff_fingerprint: self.review_diff_fingerprint.clone(),
-            created_at: self.review_session_created_at,
-            updated_at: now_ts(),
-            comments: self.review_comments.clone(),
-            editor: self.review_editor.clone(),
+    pub(crate) fn maybe_watch_reload_review_state(&mut self) -> bool {
+        if !self.review_mode || !self.review_persist_enabled || self.review_editor.is_some() {
+            return false;
+        }
+        let now = Instant::now();
+        if now.duration_since(self.last_review_db_check) < Duration::from_secs(1) {
+            return false;
+        }
+        self.last_review_db_check = now;
+        let Some(path) = self.review_db_path.clone() else {
+            return false;
         };
+        let stamp = review_db_stamp(&path);
+        if stamp == self.review_db_stamp {
+            return false;
+        }
+        if !self.load_review_state(&path) {
+            self.review_db_stamp = stamp;
+            return false;
+        }
+        self.repair_review_comment_file_indexes();
+        self.repair_review_editor_file_index();
+        self.refresh_review_mention_picker();
+        self.review_next_comment_id = self
+            .review_comments
+            .iter()
+            .map(|comment| comment.id)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        self.review_session_baseline = self.review_comments.clone();
+        self.touch_review_state();
+        true
+    }
 
-        if let Ok(serialized) = serde_json::to_string_pretty(&session) {
-            let _ = fs::write(path, serialized);
+    pub(crate) fn load_review_by_fingerprint(&mut self, fingerprint: &str) -> bool {
+        self.review_diff_fingerprint = fingerprint.to_string();
+        let Some(path) = self.review_db_path.clone() else {
+            return false;
+        };
+        self.load_review_state(&path)
+    }
+
+    pub(crate) fn load_review_snapshot_into_current_target(&mut self, fingerprint: &str) -> bool {
+        self.load_review_snapshots_into_current_target(&[fingerprint.to_string()])
+    }
+
+    pub(crate) fn load_review_snapshots_into_current_target(
+        &mut self,
+        fingerprints: &[String],
+    ) -> bool {
+        let current_fingerprint = self.review_diff_fingerprint.clone();
+        let current_metadata = self.review_target_metadata.clone();
+        let mut comments = Vec::new();
+        let mut seen = BTreeSet::new();
+        for fingerprint in fingerprints {
+            if !self.load_review_by_fingerprint(fingerprint) {
+                continue;
+            }
+            for comment in self
+                .review_comments
+                .iter()
+                .filter(|comment| !comment.deleted)
+            {
+                let key = (
+                    comment.anchor.anchor_key.clone(),
+                    comment.body.clone(),
+                    serde_json::to_string(&comment.provider).unwrap_or_default(),
+                );
+                if seen.insert(key) {
+                    comments.push(comment.clone());
+                }
+            }
+        }
+        self.review_diff_fingerprint = current_fingerprint;
+        self.review_target_metadata = current_metadata;
+        if comments.is_empty() {
+            return false;
+        }
+        for (index, comment) in comments.iter_mut().enumerate() {
+            comment.id = index.saturating_add(1) as u64;
+        }
+        self.review_comments = comments;
+        self.review_editor = None;
+        self.repair_review_comment_file_indexes();
+        self.repair_review_editor_file_index();
+        self.refresh_review_mention_picker();
+        self.review_next_comment_id = self
+            .review_comments
+            .iter()
+            .map(|c| c.id)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        self.review_session_baseline = self.review_comments.clone();
+        self.touch_review_state();
+        true
+    }
+
+    fn load_review_state(&mut self, path: &Path) -> bool {
+        if !path.exists() {
+            return false;
+        }
+        let Ok(conn) = Self::review_db(path) else {
+            return false;
+        };
+        let row = conn
+            .query_row(
+                "SELECT created_at, editor_json, target_json FROM reviews WHERE diff_fingerprint = ?1",
+                params![self.review_diff_fingerprint],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .optional();
+        let Ok(Some((created_at, editor_json, target_json))) = row else {
+            return false;
+        };
+        let mut stmt = match conn
+            .prepare("SELECT comment_json FROM comments WHERE diff_fingerprint = ?1 ORDER BY id")
+        {
+            Ok(stmt) => stmt,
+            Err(_) => return false,
+        };
+        let rows = match stmt.query_map(params![self.review_diff_fingerprint], |row| {
+            row.get::<_, String>(0)
+        }) {
+            Ok(rows) => rows,
+            Err(_) => return false,
+        };
+        let mut comments = Vec::new();
+        for row in rows {
+            let Ok(data) = row else {
+                return false;
+            };
+            let Ok(comment) = serde_json::from_str::<ReviewComment>(&data) else {
+                return false;
+            };
+            comments.push(comment);
+        }
+        self.review_session_created_at = created_at.max(0) as u64;
+        self.review_editor = editor_json.and_then(|json| serde_json::from_str(&json).ok());
+        self.review_target_metadata = target_json.and_then(|json| serde_json::from_str(&json).ok());
+        self.review_comments = comments;
+        if self.review_filter_to_current_diff {
+            self.filter_review_comments_to_current_diff();
+        }
+        self.review_db_stamp = review_db_stamp(path);
+        self.last_review_db_check = Instant::now();
+        true
+    }
+
+    fn public_review_comments_json(&self) -> String {
+        let comments = self
+            .review_comments
+            .iter()
+            .filter(|comment| !comment.deleted)
+            .map(|comment| PublicReviewComment {
+                id: Some(comment.id),
+                file: comment.anchor.file_path.clone(),
+                kind: Some(
+                    match comment.anchor.kind {
+                        ReviewTargetKind::PullRequest => "pr",
+                        ReviewTargetKind::File => "file",
+                        ReviewTargetKind::Line => "line",
+                        ReviewTargetKind::Hunk => "hunk",
+                    }
+                    .to_string(),
+                ),
+                side: comment.anchor.side.map(|side| side.as_str().to_string()),
+                old_range: comment.anchor.old_range,
+                old_range_camel: None,
+                new_range: comment.anchor.new_range,
+                new_range_camel: None,
+                hunk_id: comment.anchor.hunk_id,
+                hunk_id_camel: None,
+                author: comment.author.clone(),
+                can_edit: Some(comment.can_edit),
+                provider: comment.provider.clone(),
+                created_at: Some(comment.created_at),
+                updated_at: Some(comment.updated_at),
+                body: comment.body.clone(),
+            })
+            .collect();
+        let file = PublicReviewComments {
+            version: 1,
+            comments,
+        };
+        serde_json::to_string_pretty(&file).unwrap_or_else(|_| "{}".to_string())
+    }
+
+    pub(crate) fn parse_review_comments_json_for_sync(
+        &self,
+        data: &str,
+    ) -> Result<Vec<ReviewComment>, String> {
+        self.parse_public_review_comments(data)
+    }
+
+    fn parse_public_review_comments(&self, data: &str) -> Result<Vec<ReviewComment>, String> {
+        let file: PublicReviewComments = serde_json::from_str(data).map_err(|e| e.to_string())?;
+        if file.version != 1 {
+            return Err("Unsupported comments JSON version".to_string());
+        }
+        let mut comments = Vec::new();
+        for item in file.comments {
+            comments.push(self.public_comment_to_review_comment(item)?);
+        }
+        Ok(comments)
+    }
+
+    fn public_comment_to_review_comment(
+        &self,
+        item: PublicReviewComment,
+    ) -> Result<ReviewComment, String> {
+        let kind = match item.kind.as_deref().unwrap_or("line") {
+            "review" | "pr" | "pull_request" => ReviewTargetKind::PullRequest,
+            "file" => ReviewTargetKind::File,
+            "line" => ReviewTargetKind::Line,
+            "hunk" => ReviewTargetKind::Hunk,
+            other => return Err(format!("Unsupported comment kind: {other}")),
+        };
+        let file_index = if kind == ReviewTargetKind::PullRequest {
+            0
+        } else {
+            self.multi_diff
+                .files
+                .iter()
+                .position(|file| {
+                    file.display_name == item.file || file.path == Path::new(&item.file)
+                })
+                .ok_or_else(|| format!("No changed file matches {}", item.file))?
+        };
+        let side = match item.side.as_deref() {
+            Some("old") => Some(ReviewSide::Old),
+            Some("new") => Some(ReviewSide::New),
+            Some(other) => return Err(format!("Unsupported comment side: {other}")),
+            None => None,
+        };
+        let old_range = item.old_range.or(item.old_range_camel);
+        let new_range = item.new_range.or(item.new_range_camel);
+        let hunk_id = item.hunk_id.or(item.hunk_id_camel);
+        let mut anchor_key = match kind {
+            ReviewTargetKind::PullRequest => "pr".to_string(),
+            ReviewTargetKind::File => format!("file|{}", item.file),
+            ReviewTargetKind::Line => match side {
+                Some(side) => {
+                    let line_no = match side {
+                        ReviewSide::Old => old_range.map(|range| range.start),
+                        ReviewSide::New => new_range.map(|range| range.start),
+                    }
+                    .ok_or_else(|| "Line comments need a matching range".to_string())?;
+                    format!("line|{}|{}|{}", item.file, side.as_str(), line_no)
+                }
+                None => format!(
+                    "line|{}|both|{}|{}",
+                    item.file,
+                    format_opt_range(old_range),
+                    format_opt_range(new_range)
+                ),
+            },
+            ReviewTargetKind::Hunk => format!(
+                "hunk|{}|{}|{}",
+                item.file,
+                format_opt_range(old_range),
+                format_opt_range(new_range)
+            ),
+        };
+        if let Some(provider) = item.provider.as_ref() {
+            anchor_key = format!(
+                "{}|provider|{}|{}|{}",
+                anchor_key, provider.provider, provider.repo, provider.comment_id
+            );
+        }
+        let now = now_ts();
+        Ok(ReviewComment {
+            id: item.id.unwrap_or(0),
+            anchor: ReviewAnchor {
+                file_index,
+                file_path: item.file,
+                kind,
+                side,
+                old_range,
+                new_range,
+                hunk_id,
+                display_idx_hint: None,
+                anchor_key,
+            },
+            body: item.body,
+            author: item.author.or_else(|| self.review_author.clone()),
+            can_edit: item.can_edit.unwrap_or(true),
+            deleted: false,
+            provider: item.provider,
+            created_at: item.created_at.unwrap_or(now),
+            updated_at: item.updated_at.or(item.created_at).unwrap_or(now),
+        })
+    }
+
+    pub fn add_review_comment_from_cli(
+        &mut self,
+        file: &str,
+        kind: ReviewTargetKind,
+        side: Option<ReviewSide>,
+        old_range: Option<ReviewRange>,
+        new_range: Option<ReviewRange>,
+        body: String,
+    ) -> Result<u64, String> {
+        let comment = self.public_comment_to_review_comment(PublicReviewComment {
+            id: None,
+            file: file.to_string(),
+            kind: Some(
+                match kind {
+                    ReviewTargetKind::PullRequest => "pr",
+                    ReviewTargetKind::File => "file",
+                    ReviewTargetKind::Line => "line",
+                    ReviewTargetKind::Hunk => "hunk",
+                }
+                .to_string(),
+            ),
+            side: side.map(|side| side.as_str().to_string()),
+            old_range,
+            old_range_camel: None,
+            new_range,
+            new_range_camel: None,
+            hunk_id: None,
+            hunk_id_camel: None,
+            author: None,
+            can_edit: None,
+            provider: None,
+            created_at: None,
+            updated_at: None,
+            body,
+        })?;
+        let id = self.review_next_comment_id;
+        self.review_next_comment_id = self.review_next_comment_id.saturating_add(1);
+        let now = now_ts();
+        let mut comment = comment;
+        comment.id = id;
+        comment.created_at = now;
+        comment.updated_at = now;
+        self.review_comments.push(comment);
+        self.touch_review_state();
+        self.persist_review_session();
+        Ok(id)
+    }
+
+    pub fn edit_review_comment_from_cli(&mut self, id: u64, body: String) -> bool {
+        let Some(comment) = self
+            .review_comments
+            .iter_mut()
+            .find(|comment| comment.id == id && !comment.deleted && comment.can_edit)
+        else {
+            return false;
+        };
+        comment.body = body;
+        if let Some(provider) = comment.provider.as_mut() {
+            provider.sync_state = "dirty".to_string();
+        }
+        comment.updated_at = now_ts();
+        self.touch_review_state();
+        self.persist_review_session();
+        true
+    }
+
+    pub fn remove_review_comment_from_cli(&mut self, id: u64) -> bool {
+        let Some(idx) = self
+            .review_comments
+            .iter()
+            .position(|comment| comment.id == id && !comment.deleted && comment.can_edit)
+        else {
+            return false;
+        };
+        self.mark_or_remove_review_comment(idx);
+        self.touch_review_state();
+        self.persist_review_session();
+        true
+    }
+
+    pub(crate) fn review_comments_for_sync(&self) -> Vec<ReviewComment> {
+        self.review_comments.clone()
+    }
+
+    pub(crate) fn mark_review_comment_synced(
+        &mut self,
+        id: u64,
+        provider: ReviewProviderComment,
+    ) -> bool {
+        let Some(idx) = self
+            .review_comments
+            .iter()
+            .position(|comment| comment.id == id)
+        else {
+            return false;
+        };
+        if self.review_comments[idx].deleted {
+            self.review_comments.remove(idx);
+        } else {
+            self.review_comments[idx].provider = Some(provider);
+            self.review_comments[idx].can_edit = true;
+        }
+        self.touch_review_state();
+        self.persist_review_session();
+        true
+    }
+
+    pub(crate) fn upsert_provider_review_comment(&mut self, mut comment: ReviewComment) -> u64 {
+        let provider_comment_id = comment.provider.as_ref().map(|provider| {
+            (
+                provider.provider.clone(),
+                provider.repo.clone(),
+                provider.pr_number,
+                provider.comment_id.clone(),
+            )
+        });
+        if let Some(provider_comment_id) = provider_comment_id {
+            if let Some(existing) = self.review_comments.iter_mut().find(|existing| {
+                existing.provider.as_ref().map(|provider| {
+                    (
+                        provider.provider.clone(),
+                        provider.repo.clone(),
+                        provider.pr_number,
+                        provider.comment_id.clone(),
+                    )
+                }) == Some(provider_comment_id.clone())
+            }) {
+                let id = existing.id;
+                let has_local_change = existing.deleted
+                    || existing.provider.as_ref().is_some_and(|provider| {
+                        matches!(provider.sync_state.as_str(), "dirty" | "deleted")
+                    });
+                if has_local_change {
+                    return id;
+                }
+                comment.id = id;
+                *existing = comment;
+                self.touch_review_state();
+                self.persist_review_session();
+                return id;
+            }
+        }
+        let id = self.review_next_comment_id;
+        self.review_next_comment_id = self.review_next_comment_id.saturating_add(1);
+        comment.id = id;
+        self.review_comments.push(comment);
+        self.touch_review_state();
+        self.persist_review_session();
+        id
+    }
+
+    pub fn apply_review_comments_from_cli(&mut self, data: &str) -> Result<Vec<u64>, String> {
+        let mut comments = self.parse_public_review_comments(data)?;
+        let mut ids = Vec::new();
+        for mut comment in comments.drain(..) {
+            if comment.id == 0 {
+                comment.id = self.review_next_comment_id;
+                self.review_next_comment_id = self.review_next_comment_id.saturating_add(1);
+            }
+            ids.push(comment.id);
+            if let Some(existing) = self
+                .review_comments
+                .iter_mut()
+                .find(|existing| existing.id == comment.id)
+            {
+                *existing = comment;
+            } else {
+                self.review_comments.push(comment);
+            }
+        }
+        self.touch_review_state();
+        self.persist_review_session();
+        Ok(ids)
+    }
+
+    pub fn abandon_review_from_cli(&mut self) -> bool {
+        let removed = self
+            .review_db_path
+            .as_ref()
+            .and_then(|path| Self::review_db(path).ok())
+            .map(|conn| {
+                let comments = conn
+                    .execute(
+                        "DELETE FROM comments WHERE diff_fingerprint = ?1",
+                        params![self.review_diff_fingerprint],
+                    )
+                    .unwrap_or(0);
+                let reviews = conn
+                    .execute(
+                        "DELETE FROM reviews WHERE diff_fingerprint = ?1",
+                        params![self.review_diff_fingerprint],
+                    )
+                    .unwrap_or(0);
+                comments > 0 || reviews > 0
+            })
+            .unwrap_or(false);
+        self.review_comments.clear();
+        self.review_editor = None;
+        self.review_mention_picker = None;
+        self.review_next_comment_id = 1;
+        self.touch_review_state();
+        removed
+    }
+
+    fn review_file_index_for_path(&self, path: &str) -> Option<usize> {
+        self.multi_diff
+            .files
+            .iter()
+            .position(|file| file.display_name == path)
+    }
+
+    fn current_diff_file_indexes(&self) -> std::collections::HashMap<String, usize> {
+        self.multi_diff
+            .files
+            .iter()
+            .enumerate()
+            .map(|(index, file)| (file.display_name.clone(), index))
+            .collect()
+    }
+
+    fn filter_review_comments_to_current_diff(&mut self) {
+        let paths = self.current_diff_file_indexes();
+        self.review_comments.retain(|comment| {
+            comment.deleted
+                || (comment.anchor.kind != ReviewTargetKind::PullRequest
+                    && paths.contains_key(&comment.anchor.file_path))
+        });
+    }
+
+    fn repair_review_comment_file_indexes(&mut self) {
+        let paths = self.current_diff_file_indexes();
+        for comment in &mut self.review_comments {
+            if let Some(index) = paths.get(&comment.anchor.file_path) {
+                comment.anchor.file_index = *index;
+            }
         }
     }
 
     fn repair_review_editor_file_index(&mut self) {
+        let Some(path) = self
+            .review_editor
+            .as_ref()
+            .map(|editor| editor.anchor.file_path.clone())
+        else {
+            return;
+        };
+        let Some(index) = self.review_file_index_for_path(&path) else {
+            return;
+        };
         if let Some(editor) = self.review_editor.as_mut() {
-            if let Some(idx) = self
-                .multi_diff
-                .files
-                .iter()
-                .position(|f| f.display_name == editor.anchor.file_path)
-            {
-                editor.anchor.file_index = idx;
-            }
+            editor.anchor.file_index = index;
         }
     }
 
@@ -2803,16 +5070,22 @@ impl App {
     }
 
     fn format_review_output(&self) -> String {
-        let mut comments = self.review_comments.clone();
+        let mut comments = self
+            .review_comments
+            .iter()
+            .filter(|comment| !comment.deleted)
+            .cloned()
+            .collect::<Vec<_>>();
         comments.sort_by(|a, b| {
             a.anchor
                 .file_path
                 .cmp(&b.anchor.file_path)
                 .then_with(|| {
                     let rank = |kind| match kind {
-                        ReviewTargetKind::File => 0,
-                        ReviewTargetKind::Line => 1,
-                        ReviewTargetKind::Hunk => 2,
+                        ReviewTargetKind::PullRequest => 0,
+                        ReviewTargetKind::File => 1,
+                        ReviewTargetKind::Line => 2,
+                        ReviewTargetKind::Hunk => 3,
                     };
                     rank(a.anchor.kind).cmp(&rank(b.anchor.kind))
                 })
@@ -2852,6 +5125,16 @@ impl App {
             "Location: {}",
             review_anchor_location_label(anchor)
         ));
+        if let Some(author) = &comment.author {
+            let mut author_label = match &author.email {
+                Some(email) if !email.trim().is_empty() => format!("{} <{}>", author.name, email),
+                _ => author.name.clone(),
+            };
+            if let Some(author_type) = review_author_type_label(author) {
+                author_label.push_str(&format!(" ({author_type})"));
+            }
+            lines.push(format!("Author: {author_label}"));
+        }
 
         lines.push("Body:".to_string());
         let body = comment.body.trim_end();
@@ -2904,8 +5187,184 @@ mod tests {
             false,
             Some("branch".to_string()),
         );
+        app.set_review_persist_enabled(false);
         app.enable_review_mode();
         app
+    }
+
+    fn provider_link(state: &str) -> ReviewProviderComment {
+        ReviewProviderComment {
+            provider: "github".to_string(),
+            remote: "origin".to_string(),
+            repo: "owner/repo".to_string(),
+            pr_number: 1,
+            comment_id: "10".to_string(),
+            thread_id: None,
+            author_username: Some("reviewer".to_string()),
+            pr_title: Some("PR".to_string()),
+            api_kind: "review".to_string(),
+            sync_state: state.to_string(),
+        }
+    }
+
+    fn line_comment() -> ReviewComment {
+        ReviewComment {
+            id: 1,
+            anchor: ReviewAnchor {
+                file_index: 0,
+                file_path: "new.txt".to_string(),
+                kind: ReviewTargetKind::Line,
+                side: Some(ReviewSide::New),
+                old_range: None,
+                new_range: Some(ReviewRange { start: 1, end: 1 }),
+                hunk_id: Some(0),
+                display_idx_hint: Some(0),
+                anchor_key: "line|new.txt|new|1".to_string(),
+            },
+            body: "please fix".to_string(),
+            author: None,
+            can_edit: true,
+            deleted: false,
+            provider: None,
+            created_at: 1,
+            updated_at: 1,
+        }
+    }
+
+    #[test]
+    fn pull_preserves_dirty_local_provider_comment() {
+        let mut app = test_app();
+        let mut local = line_comment();
+        local.body = "local edit".to_string();
+        local.provider = Some(provider_link("dirty"));
+        app.review_comments.push(local);
+
+        let mut remote = line_comment();
+        remote.body = "remote old body".to_string();
+        remote.provider = Some(provider_link("clean"));
+
+        let id = app.upsert_provider_review_comment(remote);
+
+        assert_eq!(id, 1);
+        assert_eq!(app.review_comments[0].body, "local edit");
+        assert_eq!(
+            app.review_comments[0]
+                .provider
+                .as_ref()
+                .map(|provider| provider.sync_state.as_str()),
+            Some("dirty")
+        );
+    }
+
+    #[test]
+    fn pull_preserves_deleted_local_provider_comment() {
+        let mut app = test_app();
+        let mut local = line_comment();
+        local.deleted = true;
+        local.provider = Some(provider_link("deleted"));
+        app.review_comments.push(local);
+
+        let mut remote = line_comment();
+        remote.body = "remote old body".to_string();
+        remote.deleted = false;
+        remote.provider = Some(provider_link("clean"));
+
+        let id = app.upsert_provider_review_comment(remote);
+
+        assert_eq!(id, 1);
+        assert!(app.review_comments[0].deleted);
+        assert_eq!(
+            app.review_comments[0]
+                .provider
+                .as_ref()
+                .map(|provider| provider.sync_state.as_str()),
+            Some("deleted")
+        );
+    }
+
+    #[test]
+    fn review_edit_letter_opens_visible_comment() {
+        let mut app = test_app();
+        app.review_comments.push(line_comment());
+
+        assert!(app.edit_review_comment_letter('a'));
+        assert_eq!(app.active_review_comment_id, Some(1));
+        assert!(app.review_editor_active());
+    }
+
+    #[test]
+    fn review_editor_up_down_follow_wrapped_lines() {
+        let mut app = test_app();
+        app.start_line_comment();
+        for ch in "abcdefg".chars() {
+            app.review_insert_char(ch);
+        }
+        app.set_review_editor_wrap_width(3);
+
+        app.review_move_up();
+        let editor = app.review_editor_render().unwrap();
+        assert_eq!(editor.cursor_col, 4);
+
+        app.review_move_down();
+        let editor = app.review_editor_render().unwrap();
+        assert_eq!(editor.cursor_col, 7);
+    }
+
+    #[test]
+    fn review_delete_letter_removes_visible_comment() {
+        let mut app = test_app();
+        app.review_comments.push(line_comment());
+
+        assert!(app.delete_review_comment_letter('a'));
+        assert_eq!(app.review_comment_count(), 0);
+    }
+
+    #[test]
+    fn comment_sidebar_opens_location_not_editor() {
+        let mut app = test_app();
+        app.review_comments.push(line_comment());
+        app.start_line_comment();
+
+        assert!(app.review_editor_active());
+        assert!(app.open_review_comment(0));
+        assert!(!app.review_editor_active());
+    }
+
+    #[test]
+    fn comment_sidebar_click_flashes_review_card() {
+        let mut app = test_app();
+        let comment = line_comment();
+        let key = comment.anchor.anchor_key.clone();
+        app.review_comments.push(comment);
+
+        assert!(app.open_review_comment(0));
+        assert!(app.review_preview_flash_active(&key));
+    }
+
+    #[test]
+    fn stale_preview_boxes_do_not_handle_sidebar_clicks() {
+        let mut app = test_app();
+        let comment = line_comment();
+        let key = comment.anchor.anchor_key.clone();
+        app.review_comments.push(comment);
+        app.diff_view_area = Some((10, 0, 30, 5));
+        app.add_review_preview_box(0, 0, 8, 1, key);
+
+        assert!(!app.handle_review_preview_click(1, 0));
+        assert!(!app.review_editor_active());
+    }
+
+    #[test]
+    fn comment_sidebar_groups_recent_comments_by_hour() {
+        let mut app = test_app();
+        let mut comment = line_comment();
+        comment.updated_at = now_ts().saturating_sub(5 * 60 * 60 + 30);
+        app.review_comments.push(comment);
+
+        assert_eq!(
+            app.review_comment_sidebar_bucket(0).as_deref(),
+            Some("5hr ago")
+        );
     }
 
     #[test]
@@ -2946,6 +5405,16 @@ mod tests {
                 anchor_key: "line|new.txt|new|1".to_string(),
             },
             body: "please fix".to_string(),
+            author: Some(ReviewAuthor {
+                name: "Reviewer".to_string(),
+                email: Some("reviewer@example.com".to_string()),
+                author_type: None,
+                usernames: BTreeMap::new(),
+                avatar_url: None,
+            }),
+            can_edit: true,
+            deleted: false,
+            provider: None,
             created_at: 1,
             updated_at: 1,
         });
@@ -2956,6 +5425,7 @@ mod tests {
         assert_eq!(value["diff"]["branch"], "branch");
         assert_eq!(value["review"]["comments"][0]["file"], "new.txt");
         assert_eq!(value["review"]["comments"][0]["body"], "please fix");
+        assert_eq!(value["review"]["comments"][0]["author"]["name"], "Reviewer");
     }
 
     #[test]
@@ -2966,6 +5436,7 @@ mod tests {
             vec![0, 2],
         );
         let mut app = App::new(diff, ViewMode::Preview, 0, false, None);
+        app.set_review_persist_enabled(false);
         app.enable_review_mode();
 
         assert!(app.start_file_comment());
@@ -2979,6 +5450,85 @@ mod tests {
         let json = app.review_export_json(ReviewHookEvent::ReviewReady, None);
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(value["review"]["comments"][0]["kind"], "file");
+    }
+
+    #[test]
+    fn review_files_are_written_and_loaded() {
+        let base = temp_path("files");
+        let diff = MultiFileDiff::from_file_pair(
+            "old.txt".into(),
+            "new.txt".into(),
+            "old\n".to_string(),
+            "new\n".to_string(),
+        );
+        let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+        app.set_review_base_dir(Some(base.clone()));
+        app.set_review_author(Some(ReviewAuthor {
+            name: "Reviewer".to_string(),
+            email: Some("reviewer@example.com".to_string()),
+            author_type: None,
+            usernames: BTreeMap::new(),
+            avatar_url: None,
+        }));
+        app.enable_review_mode();
+        let id = app
+            .add_review_comment_from_cli(
+                "new.txt",
+                ReviewTargetKind::Line,
+                Some(ReviewSide::New),
+                None,
+                Some(ReviewRange { start: 1, end: 1 }),
+                "check this".to_string(),
+            )
+            .unwrap();
+        assert_eq!(id, 1);
+        let paths = app.review_paths();
+        assert!(paths.db_file.unwrap().exists());
+        let public_comments: serde_json::Value =
+            serde_json::from_str(&app.review_comments_json()).unwrap();
+        assert_eq!(public_comments["comments"][0]["author"]["name"], "Reviewer");
+
+        let diff = MultiFileDiff::from_file_pair(
+            "old.txt".into(),
+            "new.txt".into(),
+            "old\n".to_string(),
+            "new\n".to_string(),
+        );
+        let mut loaded = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+        loaded.set_review_base_dir(Some(base.clone()));
+        loaded.load_review_mode();
+        assert_eq!(loaded.review_comment_count(), 1);
+        assert!(loaded.review_markdown().contains("check this"));
+
+        let diff = MultiFileDiff::from_file_pair(
+            "old.txt".into(),
+            "new.txt".into(),
+            "old\n".to_string(),
+            "new\n".to_string(),
+        );
+        let mut external = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+        external.set_review_base_dir(Some(base.clone()));
+        external.load_review_mode();
+        external
+            .add_review_comment_from_cli(
+                "new.txt",
+                ReviewTargetKind::Line,
+                Some(ReviewSide::New),
+                None,
+                Some(ReviewRange { start: 1, end: 1 }),
+                "external note".to_string(),
+            )
+            .unwrap();
+
+        loaded.last_review_db_check = Instant::now() - Duration::from_secs(2);
+        assert!(loaded.maybe_watch_reload_review_state());
+        assert_eq!(loaded.review_comment_count(), 2);
+        assert!(loaded.review_markdown().contains("external note"));
+
+        assert!(loaded.abandon_review_from_cli());
+        assert_eq!(loaded.review_comment_count(), 0);
+
+        let _ = std::fs::remove_dir_all(base);
     }
 
     #[test]

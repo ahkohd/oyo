@@ -2,9 +2,9 @@
 
 use super::{
     apply_line_bg, apply_spans_bg, clear_leading_ws_bg, diff_line_bg, expand_tabs_in_spans,
-    pad_spans_bg, pending_tail_text, render_empty_state, review_note_line_spans, slice_spans,
-    spans_to_text, spans_width, truncate_text, wrap_count_for_spans, wrap_count_for_text,
-    TAB_WIDTH,
+    pad_spans_bg, pending_tail_text, render_empty_state, render_review_note_avatar,
+    review_note_block, slice_spans, spans_to_text, spans_width, truncate_text,
+    wrap_count_for_spans, wrap_count_for_text, TAB_WIDTH,
 };
 use crate::app::{
     is_conflict_marker, is_fold_line, AnimationPhase, App, UnifiedRenderKey, UnifiedRenderModel,
@@ -319,7 +319,9 @@ fn unified_render_key(
         review_editor_active: app.review_editor_active(),
         review_revision: app.review_revision(),
         review_preview_hover: app.review_preview_hover.clone(),
+        review_preview_edit_hover: app.review_preview_edit_hover.clone(),
         review_preview_delete_hover: app.review_preview_delete_hover.clone(),
+        review_preview_flash: app.review_preview_flash_key(),
     }
 }
 
@@ -363,14 +365,17 @@ fn build_unified_render_model(
     };
     let mut primary_display_idx: Option<usize> = None;
     let mut active_display_idx: Option<usize> = None;
-    let mut review_preview_rows: Vec<(usize, usize, String)> = Vec::new();
+    let mut review_preview_rows: Vec<(usize, usize, String, u16)> = Vec::new();
+    let mut review_avatar_rows = Vec::new();
 
     let mut review_preview_before_idx: std::collections::HashMap<
         usize,
-        Vec<(String, Vec<String>)>,
+        Vec<(String, super::ReviewNoteBlock, u16)>,
     > = std::collections::HashMap::new();
-    let mut review_preview_after_idx: std::collections::HashMap<usize, Vec<(String, Vec<String>)>> =
-        std::collections::HashMap::new();
+    let mut review_preview_after_idx: std::collections::HashMap<
+        usize,
+        Vec<(String, super::ReviewNoteBlock, u16)>,
+    > = std::collections::HashMap::new();
     if app.review_mode()
         && matches!(
             app.view_mode,
@@ -378,17 +383,18 @@ fn build_unified_render_model(
         )
     {
         for overlay in app.review_comment_overlays_for_current_file() {
-            let lines = app.review_preview_note_lines(&overlay, visible_width);
+            let delete_x_offset = super::review_note_delete_x_offset(&overlay);
+            let block = review_note_block(app, &overlay, visible_width);
             if overlay.is_hunk {
                 review_preview_before_idx
                     .entry(overlay.display_idx)
                     .or_default()
-                    .push((overlay.anchor_key, lines));
+                    .push((overlay.anchor_key, block, delete_x_offset));
             } else {
                 review_preview_after_idx
                     .entry(overlay.display_idx)
                     .or_default()
-                    .push((overlay.anchor_key, lines));
+                    .push((overlay.anchor_key, block, delete_x_offset));
             }
         }
     }
@@ -579,16 +585,15 @@ fn build_unified_render_model(
         }
 
         if let Some(previews) = review_preview_before_idx.get(&idx) {
-            for (anchor_key, note_lines) in previews {
+            for (anchor_key, block, delete_x_offset) in previews {
                 let row_idx = if app.line_wrap {
                     display_len
                 } else {
                     content_lines.len()
                 };
                 let mut row_span = 0usize;
-                for note_line in note_lines {
-                    let mut virtual_spans = review_note_line_spans(app, anchor_key, note_line);
-                    virtual_spans = expand_tabs_in_spans(&virtual_spans, TAB_WIDTH);
+                for note_line in &block.lines {
+                    let virtual_spans = expand_tabs_in_spans(&note_line.spans, TAB_WIDTH);
 
                     let virtual_width = spans_width(&virtual_spans);
                     max_line_width = max_line_width.max(virtual_width);
@@ -620,7 +625,11 @@ fn build_unified_render_model(
                         }
                     }
                 }
-                review_preview_rows.push((row_idx, row_span, anchor_key.clone()));
+                if let Some(avatar) = &block.avatar {
+                    review_avatar_rows
+                        .push((row_idx.saturating_add(avatar.row_offset), avatar.clone()));
+                }
+                review_preview_rows.push((row_idx, row_span, anchor_key.clone(), *delete_x_offset));
             }
         }
 
@@ -1197,16 +1206,15 @@ fn build_unified_render_model(
         }
 
         if let Some(previews) = review_preview_after_idx.get(&idx) {
-            for (anchor_key, note_lines) in previews {
+            for (anchor_key, block, delete_x_offset) in previews {
                 let row_idx = if app.line_wrap {
                     display_len
                 } else {
                     content_lines.len()
                 };
                 let mut row_span = 0usize;
-                for note_line in note_lines {
-                    let mut virtual_spans = review_note_line_spans(app, anchor_key, note_line);
-                    virtual_spans = expand_tabs_in_spans(&virtual_spans, TAB_WIDTH);
+                for note_line in &block.lines {
+                    let virtual_spans = expand_tabs_in_spans(&note_line.spans, TAB_WIDTH);
 
                     let virtual_width = spans_width(&virtual_spans);
                     max_line_width = max_line_width.max(virtual_width);
@@ -1238,7 +1246,11 @@ fn build_unified_render_model(
                         }
                     }
                 }
-                review_preview_rows.push((row_idx, row_span, anchor_key.clone()));
+                if let Some(avatar) = &block.avatar {
+                    review_avatar_rows
+                        .push((row_idx.saturating_add(avatar.row_offset), avatar.clone()));
+                }
+                review_preview_rows.push((row_idx, row_span, anchor_key.clone(), *delete_x_offset));
             }
         }
 
@@ -1463,6 +1475,7 @@ fn build_unified_render_model(
         primary_display_idx,
         active_display_idx,
         review_preview_rows,
+        review_avatar_rows,
     }
 }
 
@@ -1657,7 +1670,19 @@ fn render_unified_model(
         {
             let viewport_start = if app.line_wrap { scroll_offset } else { 0 };
             let viewport_end = viewport_start.saturating_add(content_area.height as usize);
-            for (row_idx, row_span, anchor_key) in &model.review_preview_rows {
+            for (row_idx, avatar) in &model.review_avatar_rows {
+                if *row_idx < viewport_start || *row_idx >= viewport_end {
+                    continue;
+                }
+                render_review_note_avatar(
+                    frame,
+                    app,
+                    content_area,
+                    row_idx.saturating_sub(viewport_start),
+                    avatar,
+                );
+            }
+            for (row_idx, row_span, anchor_key, delete_x_offset) in &model.review_preview_rows {
                 let start = *row_idx;
                 let end = start.saturating_add((*row_span).max(1));
                 let visible_start = start.max(viewport_start);
@@ -1677,13 +1702,23 @@ fn render_unified_model(
                     height,
                     anchor_key.clone(),
                 );
+                let edit_width = delete_x_offset.saturating_sub(5);
                 let delete_row = end.saturating_sub(1);
                 if delete_row >= viewport_start && delete_row < viewport_end {
                     let local_delete_row = delete_row.saturating_sub(viewport_start);
+                    if edit_width > 0 {
+                        app.add_review_preview_edit_box(
+                            content_area.x.saturating_add(2),
+                            content_area.y.saturating_add(local_delete_row as u16),
+                            edit_width,
+                            1,
+                            anchor_key.clone(),
+                        );
+                    }
                     app.add_review_preview_delete_box(
-                        content_area.x.saturating_add(2),
+                        content_area.x.saturating_add(*delete_x_offset),
                         content_area.y.saturating_add(local_delete_row as u16),
-                        8,
+                        super::review_note_delete_width_default(),
                         1,
                         anchor_key.clone(),
                     );

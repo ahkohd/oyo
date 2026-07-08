@@ -22,15 +22,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::app::{diff_scrollbar_thumb, App, DiffScrollbarState};
+use crate::app::{diff_scrollbar_thumb, review::ReviewCommentOverlay, App, DiffScrollbarState};
+use crate::avatars::avatar_image;
 use crate::keybindings::{GlobalAction, NormalAction};
+use crate::markdown::markdown_preview_lines;
 use oyo_core::{LineKind, ViewLine, ViewSpan};
 use ratatui::{
-    layout::{Margin, Rect},
-    style::{Modifier, Style},
-    text::Span,
+    layout::{Margin, Rect, Size},
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
     Frame,
 };
+use ratatui_image::{Image as TerminalImage, Resize};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -39,9 +42,10 @@ pub(crate) fn review_note_line_spans(
     anchor_key: &str,
     line: &str,
 ) -> Vec<Span<'static>> {
-    let hovered = app.review_preview_hover.as_deref() == Some(anchor_key);
+    let highlighted = app.review_preview_hover.as_deref() == Some(anchor_key)
+        || app.review_preview_flash_active(anchor_key);
     let delete_hovered = app.review_preview_delete_hover.as_deref() == Some(anchor_key);
-    let border = Style::default().fg(if hovered {
+    let border = Style::default().fg(if highlighted {
         app.theme.accent
     } else {
         app.theme.warning
@@ -55,40 +59,370 @@ pub(crate) fn review_note_line_spans(
         .add_modifier(Modifier::BOLD);
     let delete = if delete_hovered {
         Style::default()
-            .fg(app.theme.accent)
+            .fg(app.theme.error)
             .add_modifier(Modifier::BOLD)
     } else {
         text
     };
 
-    if let Some(rest) = line.strip_prefix("╭ Comment") {
+    if let Some(rest) = line
+        .strip_prefix("╭ ")
+        .and_then(|line| line.strip_suffix('╮'))
+    {
         let (label, rule) = rest.rsplit_once(' ').unwrap_or((rest, ""));
         return vec![
             Span::styled("╭ ".to_string(), border),
-            Span::styled("Comment".to_string(), title),
-            Span::styled(label.to_string(), Style::default().fg(app.theme.warning)),
-            Span::styled(format!(" {rule}"), border),
+            Span::styled(label.to_string(), title),
+            Span::styled(format!(" {rule}╮"), border),
         ];
     }
-    if let Some(rest) = line.strip_prefix("╰ x delete") {
-        return vec![
-            Span::styled("╰ ".to_string(), border),
-            Span::styled("x".to_string(), key),
-            Span::styled(" delete".to_string(), delete),
-            Span::styled(rest.to_string(), border),
-        ];
-    }
-    if let Some(body) = line
-        .strip_prefix("│ ")
-        .and_then(|line| line.strip_suffix(" │"))
+    if let Some(rule) = line
+        .strip_prefix('╰')
+        .and_then(|line| line.strip_suffix('╯'))
+        .filter(|line| line.chars().all(|ch| ch == '─'))
     {
         return vec![
-            Span::styled("│ ".to_string(), border),
-            Span::styled(body.to_string(), text),
-            Span::styled(" │".to_string(), border),
+            Span::styled("╰".to_string(), border),
+            Span::styled(rule.to_string(), border),
+            Span::styled("╯".to_string(), border),
         ];
     }
+    if let Some(rest) = line
+        .strip_prefix("╰ ")
+        .and_then(|line| line.strip_suffix('╯'))
+    {
+        let (label, rule) = rest
+            .rsplit_once(' ')
+            .filter(|(_, rule)| rule.chars().all(|ch| ch == '─'))
+            .unwrap_or((rest, ""));
+        let mut spans = vec![Span::styled("╰ ".to_string(), border)];
+        for (idx, action) in label.split("   ").enumerate() {
+            if idx > 0 {
+                spans.push(Span::styled("   ".to_string(), text));
+            }
+            if let Some((action_key, action_label)) = action.split_once(' ') {
+                let is_delete = action_key.starts_with('x');
+                let edit_hovered = action_key.starts_with('i')
+                    && app.review_preview_edit_hover.as_deref() == Some(anchor_key);
+                let hovered =
+                    app.pr_comment_action_hover_key.as_deref() == Some(action_key) || edit_hovered;
+                let delete_active = is_delete && (hovered || delete_hovered);
+                let action_key_style = if delete_active {
+                    Style::default()
+                        .fg(app.theme.error)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    key
+                };
+                let action_label_style = if delete_active {
+                    action_key_style
+                } else if hovered {
+                    Style::default()
+                        .fg(app.theme.accent)
+                        .add_modifier(Modifier::BOLD)
+                } else if is_delete {
+                    delete
+                } else {
+                    text
+                };
+                spans.push(Span::styled(action_key.to_string(), action_key_style));
+                spans.push(Span::styled(format!(" {action_label}"), action_label_style));
+            } else {
+                spans.push(Span::styled(action.to_string(), text));
+            }
+        }
+        if !rule.is_empty() {
+            spans.push(Span::styled(format!(" {rule}"), border));
+        }
+        spans.push(Span::styled("╯".to_string(), border));
+        return spans;
+    }
     vec![Span::styled(line.to_string(), text)]
+}
+
+fn take_width_prefix(text: &str, max_width: usize) -> String {
+    let mut out = String::new();
+    let mut width = 0usize;
+    for ch in text.chars() {
+        let ch_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if width.saturating_add(ch_width) > max_width {
+            break;
+        }
+        width = width.saturating_add(ch_width);
+        out.push(ch);
+    }
+    out
+}
+
+fn take_width_suffix(text: &str, max_width: usize) -> String {
+    let mut out = Vec::new();
+    let mut width = 0usize;
+    for ch in text.chars().rev() {
+        let ch_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if width.saturating_add(ch_width) > max_width {
+            break;
+        }
+        width = width.saturating_add(ch_width);
+        out.push(ch);
+    }
+    out.into_iter().rev().collect()
+}
+
+fn truncate_middle_width(text: &str, max_width: usize) -> String {
+    if UnicodeWidthStr::width(text) <= max_width {
+        return text.to_string();
+    }
+    if max_width == 0 {
+        return String::new();
+    }
+    if max_width == 1 {
+        return "…".to_string();
+    }
+    let keep = max_width.saturating_sub(1);
+    let head_width = keep.div_ceil(2);
+    let tail_width = keep.saturating_sub(head_width);
+    format!(
+        "{}…{}",
+        take_width_prefix(text, head_width),
+        take_width_suffix(text, tail_width)
+    )
+}
+
+#[derive(Clone)]
+pub(crate) struct ReviewNoteAvatar {
+    pub(crate) url: Option<String>,
+    pub(crate) seed: String,
+    pub(crate) row_offset: usize,
+    pub(crate) x_offset: u16,
+    pub(crate) width: u16,
+    pub(crate) height: u16,
+}
+
+#[derive(Clone)]
+pub(crate) struct ReviewNoteBlock {
+    pub(crate) lines: Vec<Line<'static>>,
+    pub(crate) avatar: Option<ReviewNoteAvatar>,
+}
+
+fn wrap_review_card_spans(spans: Vec<Span<'static>>, width: usize) -> Vec<Vec<Span<'static>>> {
+    if width == 0 {
+        return vec![spans];
+    }
+    let mut lines = vec![Vec::new()];
+    let mut col = 0usize;
+    for span in spans {
+        let style = span.style;
+        let mut buf = String::new();
+        for grapheme in span.content.graphemes(true) {
+            let grapheme_width = UnicodeWidthStr::width(grapheme);
+            if col > 0 && col.saturating_add(grapheme_width) > width {
+                if !buf.is_empty() {
+                    lines.last_mut().unwrap().push(Span::styled(buf, style));
+                    buf = String::new();
+                }
+                lines.push(Vec::new());
+                col = 0;
+            }
+            buf.push_str(grapheme);
+            col = col.saturating_add(grapheme_width);
+        }
+        if !buf.is_empty() {
+            lines.last_mut().unwrap().push(Span::styled(buf, style));
+        }
+    }
+    lines
+}
+
+fn review_card_content_line(
+    border: Style,
+    text: Style,
+    content_width: usize,
+    content: Vec<Span<'static>>,
+) -> Line<'static> {
+    let used = spans_width(&content);
+    let mut spans = vec![Span::styled("│ ".to_string(), border)];
+    spans.extend(content);
+    if used < content_width {
+        spans.push(Span::styled(" ".repeat(content_width - used), text));
+    }
+    spans.push(Span::styled(" │".to_string(), border));
+    Line::from(spans)
+}
+
+fn review_note_block_inner(
+    app: &App,
+    overlay: &ReviewCommentOverlay,
+    visible_width: usize,
+    with_avatar: bool,
+    footer_label: Option<&str>,
+) -> ReviewNoteBlock {
+    const AVATAR_WIDTH: u16 = 2;
+    const AVATAR_HEIGHT: u16 = 2;
+
+    let max_width = visible_width.max(12);
+    let content_width = max_width.saturating_sub(4).max(1);
+    let avatar = (with_avatar && app.image_picker.is_some() && content_width > 8).then(|| {
+        ReviewNoteAvatar {
+            url: overlay.avatar_url.clone(),
+            seed: overlay.avatar_seed.clone(),
+            row_offset: 0,
+            x_offset: 2,
+            width: AVATAR_WIDTH,
+            height: AVATAR_HEIGHT,
+        }
+    });
+    let avatar_prefix_width = avatar
+        .as_ref()
+        .map(|_| AVATAR_WIDTH as usize + 1)
+        .unwrap_or(0);
+    let title = truncate_middle_width(
+        &overlay.title,
+        max_width.saturating_sub(4 + avatar_prefix_width),
+    );
+    let rule = "─".repeat(
+        max_width.saturating_sub(UnicodeWidthStr::width(title.as_str()) + 4 + avatar_prefix_width),
+    );
+    let default_footer;
+    let footer_label = footer_label.unwrap_or(if overlay.can_edit {
+        let delete_label = overlay.delete_label.as_deref().unwrap_or("x");
+        default_footer = overlay
+            .edit_label
+            .as_ref()
+            .map(|label| format!("{label} edit   {delete_label} delete"))
+            .unwrap_or_else(|| format!("{delete_label} delete"));
+        default_footer.as_str()
+    } else {
+        ""
+    });
+    let bottom_rule = if footer_label.is_empty() {
+        "─".repeat(max_width.saturating_sub(2))
+    } else {
+        "─".repeat(max_width.saturating_sub(UnicodeWidthStr::width(footer_label) + 4))
+    };
+    let key = &overlay.anchor_key;
+    let mut lines = vec![Line::from(review_note_line_spans(
+        app,
+        key,
+        &format!("╭ {}{title} {rule}╮", " ".repeat(avatar_prefix_width)),
+    ))];
+
+    let body = if overlay.body.is_empty() {
+        "(empty)"
+    } else {
+        overlay.body.as_str()
+    };
+    let mut highlight = |_lang: Option<&str>, _code: &str| None;
+    let (body_lines, _) =
+        markdown_preview_lines(body, &app.theme, content_width, None, &mut highlight, None);
+    let border = Style::default().fg(
+        if app.review_preview_hover.as_deref() == Some(key) || app.review_preview_flash_active(key)
+        {
+            app.theme.accent
+        } else {
+            app.theme.warning
+        },
+    );
+    let text = Style::default().fg(app.theme.text);
+    lines.push(review_card_content_line(
+        border,
+        text,
+        content_width,
+        Vec::new(),
+    ));
+    for line in body_lines {
+        for wrapped in wrap_review_card_spans(line.spans, content_width) {
+            lines.push(review_card_content_line(
+                border,
+                text,
+                content_width,
+                wrapped,
+            ));
+        }
+    }
+    lines.push(review_card_content_line(
+        border,
+        text,
+        content_width,
+        Vec::new(),
+    ));
+    let bottom_line = if footer_label.is_empty() {
+        format!("╰{bottom_rule}╯")
+    } else {
+        format!("╰ {footer_label} {bottom_rule}╯")
+    };
+    lines.push(Line::from(review_note_line_spans(app, key, &bottom_line)));
+    ReviewNoteBlock { lines, avatar }
+}
+
+pub(crate) fn review_note_block(
+    app: &App,
+    overlay: &ReviewCommentOverlay,
+    visible_width: usize,
+) -> ReviewNoteBlock {
+    review_note_block_inner(app, overlay, visible_width, true, None)
+}
+
+pub(crate) fn review_note_block_with_footer(
+    app: &App,
+    overlay: &ReviewCommentOverlay,
+    visible_width: usize,
+    footer_label: &str,
+) -> ReviewNoteBlock {
+    review_note_block_inner(app, overlay, visible_width, true, Some(footer_label))
+}
+
+pub(crate) fn review_note_delete_x_offset(overlay: &ReviewCommentOverlay) -> u16 {
+    let edit_width = overlay
+        .edit_label
+        .as_deref()
+        .map(|label| label.width().saturating_add(1 + "edit".width() + 3))
+        .unwrap_or(0);
+    2u16.saturating_add(edit_width as u16)
+}
+
+pub(crate) fn review_note_delete_width(overlay: &ReviewCommentOverlay) -> u16 {
+    let label = overlay.delete_label.as_deref().unwrap_or("x");
+    format!("{label} delete").width() as u16
+}
+
+pub(crate) fn review_note_delete_width_default() -> u16 {
+    "xa delete".width() as u16
+}
+
+pub(crate) fn review_note_lines(
+    app: &App,
+    overlay: &ReviewCommentOverlay,
+    visible_width: usize,
+) -> Vec<Line<'static>> {
+    review_note_block_inner(app, overlay, visible_width, false, None).lines
+}
+
+pub(crate) fn render_review_note_avatar(
+    frame: &mut Frame,
+    app: &App,
+    content_area: Rect,
+    local_row: usize,
+    avatar: &ReviewNoteAvatar,
+) {
+    let Some(picker) = app.image_picker.as_ref().cloned() else {
+        return;
+    };
+    let area = Rect::new(
+        content_area.x.saturating_add(avatar.x_offset),
+        content_area.y.saturating_add(local_row as u16),
+        avatar.width,
+        avatar.height,
+    );
+    if area.y >= content_area.y.saturating_add(content_area.height) {
+        return;
+    }
+    let image = avatar_image(avatar.url.as_deref(), &avatar.seed);
+    let Ok(protocol) =
+        picker.new_protocol(image, Size::new(area.width, area.height), Resize::Fit(None))
+    else {
+        return;
+    };
+    frame.render_widget(TerminalImage::new(&protocol).allow_clipping(true), area);
 }
 
 pub(crate) fn spans_to_text(spans: &[Span]) -> String {
@@ -723,7 +1057,7 @@ pub(crate) fn truncate_text(text: &str, max_width: usize) -> String {
 use crate::app::{AnimationPhase, ViewMode};
 use crate::color;
 use crate::config::{DiffExtentMarkerMode, DiffExtentMarkerScope, ResolvedTheme};
-use ratatui::{layout::Alignment, style::Color, text::Line, widgets::Paragraph};
+use ratatui::{layout::Alignment, widgets::Paragraph};
 
 pub(crate) fn extent_marker_style(
     app: &App,
@@ -1511,15 +1845,16 @@ fn review_file_comment_action(app: &App) -> Option<(Vec<Span<'static>>, usize)> 
     ))
 }
 
-fn review_file_comment_card(app: &App, width: usize) -> Option<(String, Vec<Line<'static>>)> {
+fn review_file_comment_card(
+    app: &App,
+    width: usize,
+) -> Option<(String, Vec<Line<'static>>, u16, u16)> {
     let overlay = app.review_file_comment_overlay()?;
     let key = overlay.anchor_key.clone();
-    let lines = app
-        .review_preview_note_lines(&overlay, width)
-        .into_iter()
-        .map(|line| Line::from(review_note_line_spans(app, &key, &line)))
-        .collect();
-    Some((key, lines))
+    let delete_x_offset = review_note_delete_x_offset(&overlay);
+    let delete_width = review_note_delete_width(&overlay);
+    let lines = review_note_lines(app, &overlay, width);
+    Some((key, lines, delete_x_offset, delete_width))
 }
 
 pub(crate) fn render_binary_empty_state(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -1555,7 +1890,7 @@ pub(crate) fn render_binary_empty_state(frame: &mut Frame, app: &mut App, area: 
             lines.push(Line::from(comment_spans.clone()));
         }
         let card_row = comment_card.as_ref().map(|_| lines.len().saturating_add(1));
-        if let Some((_, card_lines)) = comment_card.as_ref() {
+        if let Some((_, card_lines, _, _)) = comment_card.as_ref() {
             lines.push(Line::from(""));
             lines.extend(card_lines.clone());
         }
@@ -1578,7 +1913,9 @@ pub(crate) fn render_binary_empty_state(frame: &mut Frame, app: &mut App, area: 
                 )));
             }
         }
-        if let (Some(row), Some((anchor_key, card_lines))) = (card_row, comment_card.as_ref()) {
+        if let (Some(row), Some((anchor_key, card_lines, delete_x_offset, delete_width))) =
+            (card_row, comment_card.as_ref())
+        {
             if row < height as usize {
                 let visible_height = card_lines.len().min(height as usize - row) as u16;
                 app.add_review_preview_box(
@@ -1589,10 +1926,20 @@ pub(crate) fn render_binary_empty_state(frame: &mut Frame, app: &mut App, area: 
                     anchor_key.clone(),
                 );
                 if visible_height == card_lines.len() as u16 {
+                    let edit_width = delete_x_offset.saturating_sub(5);
+                    if edit_width > 0 {
+                        app.add_review_preview_edit_box(
+                            area.x.saturating_add(2),
+                            y.saturating_add(row as u16 + visible_height.saturating_sub(1)),
+                            edit_width,
+                            1,
+                            anchor_key.clone(),
+                        );
+                    }
                     app.add_review_preview_delete_box(
-                        area.x,
+                        area.x.saturating_add(*delete_x_offset),
                         y.saturating_add(row as u16 + visible_height.saturating_sub(1)),
-                        area.width,
+                        *delete_width,
                         1,
                         anchor_key.clone(),
                     );
@@ -1642,7 +1989,7 @@ pub(crate) fn render_binary_empty_state(frame: &mut Frame, app: &mut App, area: 
 
     let mut lines = vec![Line::from(spans)];
     let card_row = comment_card.as_ref().map(|_| lines.len().saturating_add(1));
-    if let Some((_, card_lines)) = comment_card.as_ref() {
+    if let Some((_, card_lines, _, _)) = comment_card.as_ref() {
         lines.push(Line::from(""));
         lines.extend(card_lines.clone());
     }
@@ -1662,7 +2009,9 @@ pub(crate) fn render_binary_empty_state(frame: &mut Frame, app: &mut App, area: 
             1,
         )));
     }
-    if let (Some(row), Some((anchor_key, card_lines))) = (card_row, comment_card.as_ref()) {
+    if let (Some(row), Some((anchor_key, card_lines, delete_x_offset, delete_width))) =
+        (card_row, comment_card.as_ref())
+    {
         if row < height as usize {
             let visible_height = card_lines.len().min(height as usize - row) as u16;
             app.add_review_preview_box(
@@ -1673,10 +2022,20 @@ pub(crate) fn render_binary_empty_state(frame: &mut Frame, app: &mut App, area: 
                 anchor_key.clone(),
             );
             if visible_height == card_lines.len() as u16 {
+                let edit_width = delete_x_offset.saturating_sub(5);
+                if edit_width > 0 {
+                    app.add_review_preview_edit_box(
+                        area.x.saturating_add(2),
+                        y.saturating_add(row as u16 + visible_height.saturating_sub(1)),
+                        edit_width,
+                        1,
+                        anchor_key.clone(),
+                    );
+                }
                 app.add_review_preview_delete_box(
-                    area.x,
+                    area.x.saturating_add(*delete_x_offset),
                     y.saturating_add(row as u16 + visible_height.saturating_sub(1)),
-                    area.width,
+                    *delete_width,
                     1,
                     anchor_key.clone(),
                 );

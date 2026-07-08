@@ -110,6 +110,7 @@ fn binary_image_empty_state_points_to_preview() {
     assert!(text.contains("ctrl-p preview"), "empty state: {text}");
     assert!(!text.contains("preview disabled"), "empty state: {text}");
 
+    app.set_review_persist_enabled(false);
     app.enable_review_mode();
     let text = buffer_text(&render_buffer(&mut app, 40, 5)).join("\n");
     assert!(text.contains("m comment"), "empty state: {text}");

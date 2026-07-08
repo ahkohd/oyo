@@ -695,7 +695,7 @@ fn topbar_files(app: &App) -> Vec<usize> {
         .iter()
         .filter_map(|tab| match tab.content {
             TopbarTabContent::File(index) => Some(index),
-            TopbarTabContent::Help => None,
+            TopbarTabContent::Help | TopbarTabContent::PrComments => None,
         })
         .collect()
 }

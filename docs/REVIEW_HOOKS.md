@@ -2,6 +2,8 @@
 
 Use review hooks to run your own commands when review comments change, or when the final review is ready.
 
+Oyo saves review state in SQLite. Use `oy review export` when a hook or script needs a file.
+
 Oyo sends a JSON payload to hooks by default. This lets you connect Oyo to other tools without adding those tools to Oyo.
 
 ## Choose a hook or an action
@@ -104,6 +106,10 @@ This adds a `ctrl-r` action in the review editor. It can also appear in the comm
 | `save_editor` | Save active editor text before running |
 | `show` | Use `review_editor`, `command_palette`, or both |
 
+## Review database and commands
+
+Read [review commands](./REVIEW.md) for `oy review`, workspace support, Git and jj targets.
+
 ## What Oyo sends
 
 Oyo sends this shape when `stdin = "json"`:
@@ -113,7 +119,7 @@ Oyo sends this shape when `stdin = "json"`:
   "version": 1,
   "event": "review_ready",
   "repo_root": "/repo",
-  "session_file": "/tmp/oyo/review/.../abc.json",
+  "review_db": "/home/me/.local/share/oyo/reviews/.../review.db",
   "diff_fingerprint": "abc",
   "diff": {
     "branch": "feature",
@@ -130,6 +136,15 @@ Oyo sends this shape when `stdin = "json"`:
         "side": "new",
         "old_range": null,
         "new_range": { "start": 42, "end": 42 },
+        "author": {
+          "name": "Ada Lovelace",
+          "email": "ada@example.com",
+          "usernames": {
+            "github": "ada"
+          }
+        },
+        "created_at": 1783478786,
+        "updated_at": 1783478786,
         "body": "Please fix this."
       }
     ]
@@ -146,7 +161,7 @@ Oyo also sets these environment variables:
 - `OYO_REVIEW_EVENT`
 - `OYO_REPO_ROOT`
 - `OYO_DIFF_FINGERPRINT`
-- `OYO_SESSION_FILE`
+- `OYO_REVIEW_DB`
 
 Hooks run from the repo root when Oyo knows it.
 

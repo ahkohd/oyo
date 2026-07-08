@@ -1099,6 +1099,27 @@ fn key_matches_config(key: KeyEvent, binding: &str) -> bool {
     key.to_keymap().ok().as_ref() == seq.first()
 }
 
+fn strip_review_card_border(line: String) -> Option<String> {
+    let trimmed = line.trim();
+    if trimmed.starts_with('╰') && trimmed.ends_with('╯') {
+        return None;
+    }
+    if let Some(inner) = trimmed
+        .strip_prefix("│ ")
+        .and_then(|line| line.strip_suffix(" │"))
+    {
+        return Some(inner.trim_end().to_string());
+    }
+    if let Some(inner) = trimmed
+        .strip_prefix("╭ ")
+        .and_then(|line| line.strip_suffix('╮'))
+    {
+        let title = inner.trim().trim_end_matches('─').trim_end().to_string();
+        return (!title.is_empty()).then_some(title);
+    }
+    Some(line)
+}
+
 fn selected_text(cells: &[Vec<String>], segments: &[(u16, u16, u16)]) -> String {
     let mut lines = Vec::new();
     for (row, start_col, end_col) in segments.iter().copied() {
@@ -1115,7 +1136,9 @@ fn selected_text(cells: &[Vec<String>], segments: &[(u16, u16, u16)]) -> String 
         while line.ends_with(' ') {
             line.pop();
         }
-        lines.push(line);
+        if let Some(line) = strip_review_card_border(line) {
+            lines.push(line);
+        }
     }
     lines.join("\n").trim_end().to_string()
 }

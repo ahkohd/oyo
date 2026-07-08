@@ -49,3 +49,4 @@ unicode-segmentation = "1.11"
 pulldown-cmark = "0.13"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
 time = { version = "0.3", features = ["std", "formatting", "parsing"] }
+rusqlite = { version = "0.32", features = ["bundled"] }

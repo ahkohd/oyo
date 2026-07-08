@@ -2,9 +2,9 @@
 
 use super::{
     apply_line_bg, apply_spans_bg, clear_leading_ws_bg, diff_line_bg, expand_tabs_in_spans,
-    pad_spans_bg, pending_tail_text, render_empty_state, review_note_line_spans, slice_spans,
-    spans_to_text, spans_width, truncate_text, view_spans_to_text, wrap_count_for_spans,
-    wrap_count_for_text, TAB_WIDTH,
+    pad_spans_bg, pending_tail_text, render_empty_state, render_review_note_avatar,
+    review_note_block, review_note_lines, slice_spans, spans_to_text, spans_width, truncate_text,
+    view_spans_to_text, wrap_count_for_spans, wrap_count_for_text, TAB_WIDTH,
 };
 use crate::app::{is_conflict_marker, is_fold_line, AnimationPhase, App};
 use crate::color;
@@ -193,8 +193,8 @@ fn push_virtual_line_new(
 
 #[allow(clippy::too_many_arguments)]
 fn push_review_note_lines_old(
-    note_lines: &[String],
-    anchor_key: &str,
+    note_lines: &[Line<'static>],
+    _anchor_key: &str,
     app: &App,
     line_number_width: u16,
     visible_width: usize,
@@ -208,8 +208,8 @@ fn push_review_note_lines_old(
     let total_width = visible_width.saturating_add(gutter_width);
     for note_line in note_lines {
         let mut spans = vec![Span::raw(" ")];
-        spans.extend(review_note_line_spans(app, anchor_key, note_line));
-        spans = expand_tabs_in_spans(&spans, TAB_WIDTH);
+        spans.extend(note_line.spans.clone());
+        let spans = expand_tabs_in_spans(&spans, TAB_WIDTH);
         *max_line_width = (*max_line_width).max(spans_width(&spans).saturating_sub(gutter_width));
         let wrap = if app.line_wrap {
             wrap_count_for_spans(&spans, total_width)
@@ -235,8 +235,8 @@ fn push_review_note_lines_old(
 
 #[allow(clippy::too_many_arguments)]
 fn push_review_note_lines_new(
-    note_lines: &[String],
-    anchor_key: &str,
+    note_lines: &[Line<'static>],
+    _anchor_key: &str,
     app: &App,
     line_number_width: u16,
     visible_width: usize,
@@ -251,8 +251,8 @@ fn push_review_note_lines_new(
     let total_width = visible_width.saturating_add(gutter_width);
     for note_line in note_lines {
         let mut spans = vec![Span::raw(" ")];
-        spans.extend(review_note_line_spans(app, anchor_key, note_line));
-        spans = expand_tabs_in_spans(&spans, TAB_WIDTH);
+        spans.extend(note_line.spans.clone());
+        let spans = expand_tabs_in_spans(&spans, TAB_WIDTH);
         *max_line_width = (*max_line_width).max(spans_width(&spans).saturating_sub(gutter_width));
         let wrap = if app.line_wrap {
             wrap_count_for_spans(&spans, total_width)
@@ -351,7 +351,7 @@ fn add_review_preview_boxes_for_rows(
     app: &mut App,
     content_area: Rect,
     scroll_offset: usize,
-    rows: &[(usize, usize, String)],
+    rows: &[(usize, usize, String, u16)],
 ) {
     if rows.is_empty() || content_area.width == 0 || content_area.height == 0 {
         return;
@@ -359,7 +359,7 @@ fn add_review_preview_boxes_for_rows(
 
     let viewport_start = if app.line_wrap { scroll_offset } else { 0 };
     let viewport_end = viewport_start.saturating_add(content_area.height as usize);
-    for (row_idx, row_span, anchor_key) in rows {
+    for (row_idx, row_span, anchor_key, delete_x_offset) in rows {
         let start = *row_idx;
         let end = start.saturating_add((*row_span).max(1));
         let visible_start = start.max(viewport_start);
@@ -379,13 +379,23 @@ fn add_review_preview_boxes_for_rows(
             height,
             anchor_key.clone(),
         );
+        let edit_width = delete_x_offset.saturating_sub(5);
         let delete_row = end.saturating_sub(1);
         if delete_row >= viewport_start && delete_row < viewport_end {
             let local_delete_row = delete_row.saturating_sub(viewport_start);
+            if edit_width > 0 {
+                app.add_review_preview_edit_box(
+                    content_area.x.saturating_add(2),
+                    content_area.y.saturating_add(local_delete_row as u16),
+                    edit_width,
+                    1,
+                    anchor_key.clone(),
+                );
+            }
             app.add_review_preview_delete_box(
-                content_area.x.saturating_add(2),
+                content_area.x.saturating_add(*delete_x_offset),
                 content_area.y.saturating_add(local_delete_row as u16),
-                8,
+                super::review_note_delete_width_default(),
                 1,
                 anchor_key.clone(),
             );
@@ -452,7 +462,8 @@ pub fn render_split(frame: &mut Frame, app: &mut App, area: Rect) {
                 } else {
                     old_width
                 };
-                app.review_preview_note_lines(
+                review_note_lines(
+                    app,
                     &overlay,
                     width
                         .saturating_add(gutter_width as usize)
@@ -746,7 +757,8 @@ fn render_old_pane(
 
     let mut gutter_lines: Vec<Line> = Vec::new();
     let mut content_lines: Vec<Line> = Vec::new();
-    let mut review_preview_rows: Vec<(usize, usize, String)> = Vec::new();
+    let mut review_preview_rows: Vec<(usize, usize, String, u16)> = Vec::new();
+    let mut review_avatar_rows = Vec::new();
     let mut line_idx = 0;
     let mut display_row = 0usize;
     let query = app.search_query().trim().to_ascii_lowercase();
@@ -755,16 +767,20 @@ fn render_old_pane(
 
     let mut review_preview_before_idx: std::collections::HashMap<
         usize,
-        Vec<(String, Vec<String>)>,
+        Vec<(String, super::ReviewNoteBlock, u16)>,
     > = std::collections::HashMap::new();
-    let mut review_preview_after_idx: std::collections::HashMap<usize, Vec<(String, Vec<String>)>> =
-        std::collections::HashMap::new();
+    let mut review_preview_after_idx: std::collections::HashMap<
+        usize,
+        Vec<(String, super::ReviewNoteBlock, u16)>,
+    > = std::collections::HashMap::new();
     if app.review_mode() && app.view_mode == crate::app::ViewMode::Split {
         for overlay in app.review_comment_overlays_for_current_file() {
             if overlay.prefer_right {
                 continue;
             }
-            let lines = app.review_preview_note_lines(
+            let delete_x_offset = super::review_note_delete_x_offset(&overlay);
+            let block = review_note_block(
+                app,
                 &overlay,
                 visible_width
                     .saturating_add(split_gutter_width(line_number_width) as usize)
@@ -774,12 +790,12 @@ fn render_old_pane(
                 review_preview_before_idx
                     .entry(overlay.display_idx)
                     .or_default()
-                    .push((overlay.anchor_key, lines));
+                    .push((overlay.anchor_key, block, delete_x_offset));
             } else {
                 review_preview_after_idx
                     .entry(overlay.display_idx)
                     .or_default()
-                    .push((overlay.anchor_key, lines));
+                    .push((overlay.anchor_key, block, delete_x_offset));
             }
         }
     }
@@ -830,10 +846,10 @@ fn render_old_pane(
         }
 
         if let Some(previews) = review_preview_before_idx.get(&idx) {
-            for (anchor_key, note_lines) in previews {
+            for (anchor_key, block, delete_x_offset) in previews {
                 let row_idx = display_row;
                 let row_span = push_review_note_lines_old(
-                    note_lines,
+                    &block.lines,
                     anchor_key,
                     app,
                     line_number_width,
@@ -843,7 +859,11 @@ fn render_old_pane(
                     &mut gutter_lines,
                     bg_lines.as_mut(),
                 );
-                review_preview_rows.push((row_idx, row_span, anchor_key.clone()));
+                if let Some(avatar) = &block.avatar {
+                    review_avatar_rows
+                        .push((row_idx.saturating_add(avatar.row_offset), avatar.clone()));
+                }
+                review_preview_rows.push((row_idx, row_span, anchor_key.clone(), *delete_x_offset));
                 display_row = display_row.saturating_add(row_span);
             }
         }
@@ -878,10 +898,10 @@ fn render_old_pane(
                 }
             }
             if let Some(previews) = review_preview_after_idx.get(&idx) {
-                for (anchor_key, note_lines) in previews {
+                for (anchor_key, block, delete_x_offset) in previews {
                     let row_idx = display_row;
                     let row_span = push_review_note_lines_old(
-                        note_lines,
+                        &block.lines,
                         anchor_key,
                         app,
                         line_number_width,
@@ -891,7 +911,16 @@ fn render_old_pane(
                         &mut gutter_lines,
                         bg_lines.as_mut(),
                     );
-                    review_preview_rows.push((row_idx, row_span, anchor_key.clone()));
+                    if let Some(avatar) = &block.avatar {
+                        review_avatar_rows
+                            .push((row_idx.saturating_add(avatar.row_offset), avatar.clone()));
+                    }
+                    review_preview_rows.push((
+                        row_idx,
+                        row_span,
+                        anchor_key.clone(),
+                        *delete_x_offset,
+                    ));
                     display_row = display_row.saturating_add(row_span);
                 }
             }
@@ -1279,10 +1308,10 @@ fn render_old_pane(
             }
 
             if let Some(previews) = review_preview_after_idx.get(&idx) {
-                for (anchor_key, note_lines) in previews {
+                for (anchor_key, block, delete_x_offset) in previews {
                     let row_idx = display_row;
                     let row_span = push_review_note_lines_old(
-                        note_lines,
+                        &block.lines,
                         anchor_key,
                         app,
                         line_number_width,
@@ -1292,7 +1321,16 @@ fn render_old_pane(
                         &mut gutter_lines,
                         bg_lines.as_mut(),
                     );
-                    review_preview_rows.push((row_idx, row_span, anchor_key.clone()));
+                    if let Some(avatar) = &block.avatar {
+                        review_avatar_rows
+                            .push((row_idx.saturating_add(avatar.row_offset), avatar.clone()));
+                    }
+                    review_preview_rows.push((
+                        row_idx,
+                        row_span,
+                        anchor_key.clone(),
+                        *delete_x_offset,
+                    ));
                     display_row = display_row.saturating_add(row_span);
                 }
             }
@@ -1496,6 +1534,19 @@ fn render_old_pane(
             content_area.height,
         );
         add_review_preview_boxes_for_rows(app, note_area, scroll_offset, &review_preview_rows);
+        let viewport_end = scroll_offset.saturating_add(note_area.height as usize);
+        for (row_idx, avatar) in &review_avatar_rows {
+            if *row_idx < scroll_offset || *row_idx >= viewport_end {
+                continue;
+            }
+            render_review_note_avatar(
+                frame,
+                app,
+                note_area,
+                row_idx.saturating_sub(scroll_offset),
+                avatar,
+            );
+        }
     }
 
     render_split_divider(frame, app, border_area);
@@ -1676,7 +1727,8 @@ fn render_new_pane(
     let mut gutter_lines: Vec<Line> = Vec::new();
     let mut content_lines: Vec<Line> = Vec::new();
     let mut marker_lines: Vec<Line> = Vec::new();
-    let mut review_preview_rows: Vec<(usize, usize, String)> = Vec::new();
+    let mut review_preview_rows: Vec<(usize, usize, String, u16)> = Vec::new();
+    let mut review_avatar_rows = Vec::new();
     let mut line_idx = 0;
     let mut display_row = 0usize;
     let query = app.search_query().trim().to_ascii_lowercase();
@@ -1685,16 +1737,20 @@ fn render_new_pane(
 
     let mut review_preview_before_idx: std::collections::HashMap<
         usize,
-        Vec<(String, Vec<String>)>,
+        Vec<(String, super::ReviewNoteBlock, u16)>,
     > = std::collections::HashMap::new();
-    let mut review_preview_after_idx: std::collections::HashMap<usize, Vec<(String, Vec<String>)>> =
-        std::collections::HashMap::new();
+    let mut review_preview_after_idx: std::collections::HashMap<
+        usize,
+        Vec<(String, super::ReviewNoteBlock, u16)>,
+    > = std::collections::HashMap::new();
     if app.review_mode() && app.view_mode == crate::app::ViewMode::Split {
         for overlay in app.review_comment_overlays_for_current_file() {
             if !overlay.prefer_right {
                 continue;
             }
-            let lines = app.review_preview_note_lines(
+            let delete_x_offset = super::review_note_delete_x_offset(&overlay);
+            let block = review_note_block(
+                app,
                 &overlay,
                 visible_width
                     .saturating_add(split_gutter_width(line_number_width) as usize)
@@ -1704,12 +1760,12 @@ fn render_new_pane(
                 review_preview_before_idx
                     .entry(overlay.display_idx)
                     .or_default()
-                    .push((overlay.anchor_key, lines));
+                    .push((overlay.anchor_key, block, delete_x_offset));
             } else {
                 review_preview_after_idx
                     .entry(overlay.display_idx)
                     .or_default()
-                    .push((overlay.anchor_key, lines));
+                    .push((overlay.anchor_key, block, delete_x_offset));
             }
         }
     }
@@ -1761,10 +1817,10 @@ fn render_new_pane(
         }
 
         if let Some(previews) = review_preview_before_idx.get(&idx) {
-            for (anchor_key, note_lines) in previews {
+            for (anchor_key, block, delete_x_offset) in previews {
                 let row_idx = display_row;
                 let row_span = push_review_note_lines_new(
-                    note_lines,
+                    &block.lines,
                     anchor_key,
                     app,
                     line_number_width,
@@ -1775,7 +1831,11 @@ fn render_new_pane(
                     &mut marker_lines,
                     bg_lines.as_mut(),
                 );
-                review_preview_rows.push((row_idx, row_span, anchor_key.clone()));
+                if let Some(avatar) = &block.avatar {
+                    review_avatar_rows
+                        .push((row_idx.saturating_add(avatar.row_offset), avatar.clone()));
+                }
+                review_preview_rows.push((row_idx, row_span, anchor_key.clone(), *delete_x_offset));
                 display_row = display_row.saturating_add(row_span);
             }
         }
@@ -1810,10 +1870,10 @@ fn render_new_pane(
                 }
             }
             if let Some(previews) = review_preview_after_idx.get(&idx) {
-                for (anchor_key, note_lines) in previews {
+                for (anchor_key, block, delete_x_offset) in previews {
                     let row_idx = display_row;
                     let row_span = push_review_note_lines_new(
-                        note_lines,
+                        &block.lines,
                         anchor_key,
                         app,
                         line_number_width,
@@ -1824,7 +1884,16 @@ fn render_new_pane(
                         &mut marker_lines,
                         bg_lines.as_mut(),
                     );
-                    review_preview_rows.push((row_idx, row_span, anchor_key.clone()));
+                    if let Some(avatar) = &block.avatar {
+                        review_avatar_rows
+                            .push((row_idx.saturating_add(avatar.row_offset), avatar.clone()));
+                    }
+                    review_preview_rows.push((
+                        row_idx,
+                        row_span,
+                        anchor_key.clone(),
+                        *delete_x_offset,
+                    ));
                     display_row = display_row.saturating_add(row_span);
                 }
             }
@@ -2216,10 +2285,10 @@ fn render_new_pane(
             }
 
             if let Some(previews) = review_preview_after_idx.get(&idx) {
-                for (anchor_key, note_lines) in previews {
+                for (anchor_key, block, delete_x_offset) in previews {
                     let row_idx = display_row;
                     let row_span = push_review_note_lines_new(
-                        note_lines,
+                        &block.lines,
                         anchor_key,
                         app,
                         line_number_width,
@@ -2230,7 +2299,16 @@ fn render_new_pane(
                         &mut marker_lines,
                         bg_lines.as_mut(),
                     );
-                    review_preview_rows.push((row_idx, row_span, anchor_key.clone()));
+                    if let Some(avatar) = &block.avatar {
+                        review_avatar_rows
+                            .push((row_idx.saturating_add(avatar.row_offset), avatar.clone()));
+                    }
+                    review_preview_rows.push((
+                        row_idx,
+                        row_span,
+                        anchor_key.clone(),
+                        *delete_x_offset,
+                    ));
                     display_row = display_row.saturating_add(row_span);
                 }
             }
@@ -2442,6 +2520,19 @@ fn render_new_pane(
             content_area.height,
         );
         add_review_preview_boxes_for_rows(app, note_area, scroll_offset, &review_preview_rows);
+        let viewport_end = scroll_offset.saturating_add(note_area.height as usize);
+        for (row_idx, avatar) in &review_avatar_rows {
+            if *row_idx < scroll_offset || *row_idx >= viewport_end {
+                continue;
+            }
+            render_review_note_avatar(
+                frame,
+                app,
+                note_area,
+                row_idx.saturating_sub(scroll_offset),
+                avatar,
+            );
+        }
     }
 
     // Render marker (no horizontal scroll)

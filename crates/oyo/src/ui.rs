@@ -1,10 +1,16 @@
 //! UI rendering for the TUI
 
 use crate::app::{
-    diff_scrollbar_thumb, App, FileContextMenuAction, FileContextMenuHit, FilePanelMode,
-    FilePanelScrollbarState, ReviewEditorToolbarAction, ReviewEditorToolbarHit, ReviewLineAddHit,
-    SelectionToolbarAction, SelectionToolbarHit, StatusModeMenuHit, TopbarTabContent, TopbarTabHit,
-    ViewMode, DIFF_VIEW_MIN_WIDTH, FILE_PANEL_MIN_WIDTH,
+    diff_scrollbar_thumb,
+    review::{
+        PrCommentHit, PrCommentHitAction, ReviewDeleteConfirmationAction,
+        ReviewDeleteConfirmationHit, ReviewRemotePickerHit, ReviewSidebarOverflowHit,
+        ReviewSyncAction,
+    },
+    App, FileContextMenuAction, FileContextMenuHit, FilePanelMode, FilePanelScrollbarState,
+    ReviewEditorToolbarAction, ReviewEditorToolbarHit, ReviewLineAddHit, SelectionToolbarAction,
+    SelectionToolbarHit, StatusModeMenuHit, TopbarTabContent, TopbarTabHit, ViewMode,
+    DIFF_VIEW_MIN_WIDTH, FILE_PANEL_MIN_WIDTH,
 };
 use crate::color;
 use crate::config::FilePanelPosition;
@@ -13,17 +19,21 @@ use crate::keybindings::{
     BindingAction, DashboardAction, DashboardFilterAction, FileFilterAction, GlobalAction,
     HelpAction, LineInputAction, NormalAction, PickerAction, ReviewEditorAction, SelectionAction,
 };
+use crate::markdown::{
+    markdown_preview_lines as render_markdown_preview_lines,
+    MarkdownChangeBars as PreviewChangeBars, PreviewLink,
+};
 use crate::structured_preview::{
     StructuredPreviewChangeBars, StructuredPreviewKind, StructuredPreviewSignature,
 };
 use crate::syntax::SyntaxSide;
 use crate::views::{
-    render_blame, render_diff_scrollbar, render_evolution, render_split, render_unified_pane,
-    reserve_diff_scrollbar_lane, review_note_line_spans,
+    render_blame, render_diff_scrollbar, render_evolution, render_review_note_avatar, render_split,
+    render_unified_pane, reserve_diff_scrollbar_lane, review_note_block_with_footer,
+    review_note_delete_width, review_note_delete_x_offset, review_note_lines,
 };
 use image::GenericImageView;
 use oyo_core::{multi::DiffStatus, multi::FileSide, ChangeKind, FileStatus, LineKind};
-use pulldown_cmark::{BlockQuoteKind, CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Margin, Rect, Size},
     style::{Color, Modifier, Style},
@@ -41,56 +51,74 @@ use std::{
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+fn take_width_prefix(text: &str, max_width: usize) -> String {
+    let mut out = String::new();
+    let mut width = 0usize;
+    for ch in text.chars() {
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if width.saturating_add(ch_width) > max_width {
+            break;
+        }
+        width = width.saturating_add(ch_width);
+        out.push(ch);
+    }
+    out
+}
+
+fn take_width_suffix(text: &str, max_width: usize) -> String {
+    let mut out = Vec::new();
+    let mut width = 0usize;
+    for ch in text.chars().rev() {
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if width.saturating_add(ch_width) > max_width {
+            break;
+        }
+        width = width.saturating_add(ch_width);
+        out.push(ch);
+    }
+    out.into_iter().rev().collect()
+}
+
 fn truncate_filename_keep_ext(name: &str, max_width: usize) -> String {
     if max_width == 0 {
         return String::new();
     }
-    if name.len() <= max_width {
+    if text_width(name) <= max_width {
         return name.to_string();
     }
-    if max_width <= 3 {
-        return ".".repeat(max_width);
+    if max_width == 1 {
+        return "…".to_string();
     }
 
     let (stem, ext) = match name.rfind('.') {
         Some(idx) if idx > 0 && idx < name.len().saturating_sub(1) => (&name[..idx], &name[idx..]),
         _ => (name, ""),
     };
-    let ext_len = ext.len();
-    if ext_len >= max_width {
-        let suffix_len = max_width.saturating_sub(3);
-        return format!("…{}", &name[name.len().saturating_sub(suffix_len)..]);
+    let ext_width = text_width(ext);
+    if ext_width.saturating_add(1) >= max_width {
+        return format!("…{}", take_width_suffix(name, max_width.saturating_sub(1)));
     }
 
-    if ext_len == 0 {
-        let stem_keep = max_width.saturating_sub(3);
-        let head_len = stem_keep.div_ceil(2);
-        let tail_len = stem_keep.saturating_sub(head_len);
-        let head = &stem[..head_len.min(stem.len())];
-        let tail = if tail_len > 0 && tail_len <= stem.len() {
-            &stem[stem.len().saturating_sub(tail_len)..]
-        } else {
-            ""
-        };
-        return format!("{head}…{tail}");
+    if ext.is_empty() {
+        let keep = max_width.saturating_sub(1);
+        let head_width = keep.div_ceil(2);
+        let tail_width = keep.saturating_sub(head_width);
+        return format!(
+            "{}…{}",
+            take_width_prefix(stem, head_width),
+            take_width_suffix(stem, tail_width)
+        );
     }
 
-    let max_stem_len = max_width.saturating_sub(ext_len);
-    if max_stem_len <= 3 {
-        let dots = ".".repeat(max_stem_len);
-        return format!("{dots}{ext}");
-    }
-
-    let stem_keep = max_stem_len.saturating_sub(3);
-    let head_len = stem_keep.div_ceil(2);
-    let tail_len = stem_keep.saturating_sub(head_len);
-    let head = &stem[..head_len.min(stem.len())];
-    let tail = if tail_len > 0 && tail_len <= stem.len() {
-        &stem[stem.len().saturating_sub(tail_len)..]
-    } else {
-        ""
-    };
-    format!("{head}…{tail}{ext}")
+    let stem_width = max_width.saturating_sub(ext_width).saturating_sub(1);
+    let head_width = stem_width.div_ceil(2);
+    let tail_width = stem_width.saturating_sub(head_width);
+    format!(
+        "{}…{}{}",
+        take_width_prefix(stem, head_width),
+        take_width_suffix(stem, tail_width),
+        ext
+    )
 }
 
 fn text_width(text: &str) -> usize {
@@ -128,6 +156,19 @@ fn truncate_to_width(text: &str, max_width: usize) -> String {
         width += ch_width;
     }
     out
+}
+
+fn truncate_with_dots(text: &str, max_width: usize) -> String {
+    if text_width(text) <= max_width {
+        return text.to_string();
+    }
+    if max_width <= 3 {
+        return ".".repeat(max_width);
+    }
+    format!(
+        "{}...",
+        truncate_to_width(text, max_width.saturating_sub(3))
+    )
 }
 
 fn wrap_editor_line(line: &str, max_width: usize) -> Vec<String> {
@@ -210,6 +251,60 @@ fn diff_spinner_frame() -> &'static str {
         / 100)
         % FRAMES.len() as u128;
     FRAMES[idx as usize]
+}
+
+fn review_sync_status_label(action: ReviewSyncAction) -> &'static str {
+    match action {
+        ReviewSyncAction::Sync => "syncing…",
+        ReviewSyncAction::Pull => "pulling…",
+        ReviewSyncAction::Push => "pushing…",
+    }
+}
+
+fn review_comment_count_label(count: usize) -> String {
+    match count {
+        0 => "no comment".to_string(),
+        1 => "1 comment".to_string(),
+        n => format!("{n} comments"),
+    }
+}
+
+fn review_status_comment_spans(app: &App, style: Style) -> Option<(Vec<Span<'static>>, usize)> {
+    let comment_count = app.review_comment_count();
+    if comment_count == 0 && !app.review_editor_active() && app.review_sync_status().is_none() {
+        return None;
+    }
+    let count_label = review_comment_count_label(comment_count);
+    let status = app.review_sync_status().map(|action| {
+        (
+            diff_spinner_frame().to_string(),
+            review_sync_status_label(action).to_string(),
+        )
+    });
+    let status_width = status
+        .as_ref()
+        .map(|(spinner, label)| text_width(spinner) + 1 + text_width(label))
+        .unwrap_or(0);
+    let width = status_width.max(text_width(&count_label)).max(10);
+    let mut spans = if let Some((spinner, label)) = status {
+        vec![
+            Span::styled(
+                spinner,
+                Style::default()
+                    .fg(app.theme.warning)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" ", style),
+            Span::styled(label, style),
+        ]
+    } else {
+        vec![Span::styled(count_label, style)]
+    };
+    let used = spans_width(&spans);
+    if used < width {
+        spans.push(Span::raw(" ".repeat(width - used)));
+    }
+    Some((spans, width))
 }
 
 fn clamp_spans_to_width<'a>(spans: &[Span<'a>], max_width: usize) -> Vec<Span<'a>> {
@@ -559,8 +654,18 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         draw_file_search_popover(frame, app);
     }
 
+    if app.comment_picker_active() {
+        draw_comment_picker_popover(frame, app);
+    }
+
     if app.theme_picker_active() {
         draw_theme_picker_popover(frame, app);
+    }
+
+    if app.review_remote_picker_active() {
+        draw_review_remote_picker(frame, app);
+    } else {
+        app.set_review_remote_picker_hits(Vec::new());
     }
 
     if app.review_mode() {
@@ -576,6 +681,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     draw_review_line_add_button(frame, app);
     draw_file_context_menu(frame, app);
     draw_status_mode_menu(frame, app);
+    if app.review_delete_confirmation_active() {
+        draw_review_delete_confirmation(frame, app);
+    } else {
+        app.set_review_delete_confirmation_hits(Vec::new());
+    }
     draw_toasts(frame, app);
 }
 
@@ -948,25 +1058,18 @@ fn draw_preview_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let mut right_spans = Vec::new();
     let mut comments_hit: Option<(usize, usize)> = None;
-    let comment_count = app.review_comment_count();
-    if comment_count > 0 || app.review_editor_active() {
-        let comments_label = match comment_count {
-            0 => "no comment".to_string(),
-            1 => "1 comment".to_string(),
-            n => format!("{n} comments"),
-        };
+    let mut comment_style = Style::default().fg(if app.status_comments_hover {
+        app.theme.accent
+    } else {
+        app.theme.text_muted
+    });
+    if app.status_comments_hover {
+        comment_style = comment_style.add_modifier(Modifier::BOLD);
+    }
+    if let Some((spans, width)) = review_status_comment_spans(app, comment_style) {
         let start = spans_width(&right_spans);
-        let width = text_width(&comments_label);
         comments_hit = Some((start, width));
-        let mut style = Style::default().fg(if app.status_comments_hover {
-            app.theme.accent
-        } else {
-            app.theme.text_muted
-        });
-        if app.status_comments_hover {
-            style = style.add_modifier(Modifier::BOLD);
-        }
-        right_spans.push(Span::styled(comments_label, style));
+        right_spans.extend(spans);
         right_spans.push(Span::raw("  "));
     }
     let file_count = app.multi_diff.file_count();
@@ -983,7 +1086,6 @@ fn draw_preview_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
         file_style = file_style.add_modifier(Modifier::BOLD);
     }
     right_spans.push(Span::styled(file_label, file_style));
-    right_spans.push(Span::raw(" "));
 
     let right_raw_width = spans_width(&right_spans);
     if right_raw_width <= right_width {
@@ -1211,26 +1313,19 @@ fn draw_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
             Style::default().fg(app.theme.warning),
         ));
     }
-    let comment_count = app.review_comment_count();
-    if comment_count > 0 || app.review_editor_active() {
+    let mut comment_style = Style::default().fg(if app.status_comments_hover {
+        app.theme.accent
+    } else {
+        app.theme.text_muted
+    });
+    if app.status_comments_hover {
+        comment_style = comment_style.add_modifier(Modifier::BOLD);
+    }
+    if let Some((spans, width)) = review_status_comment_spans(app, comment_style) {
         right_spans.push(Span::raw(" "));
-        let comments_label = match comment_count {
-            0 => "no comment".to_string(),
-            1 => "1 comment".to_string(),
-            n => format!("{n} comments"),
-        };
         let start = spans_width(&right_spans);
-        let width = text_width(&comments_label);
         comments_hit = Some((start, width));
-        let mut style = Style::default().fg(if app.status_comments_hover {
-            app.theme.accent
-        } else {
-            app.theme.text_muted
-        });
-        if app.status_comments_hover {
-            style = style.add_modifier(Modifier::BOLD);
-        }
-        right_spans.push(Span::styled(comments_label, style));
+        right_spans.extend(spans);
     }
     right_spans.push(Span::raw("  "));
     let file_label = format!("file {}", file_text);
@@ -1246,7 +1341,6 @@ fn draw_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
         file_style = file_style.add_modifier(Modifier::BOLD);
     }
     right_spans.push(Span::styled(file_label, file_style));
-    right_spans.push(Span::raw(" "));
 
     // Fixed-width footer layout: left/middle/right sections prevent shifting.
     let left_width = (available_width * 4) / 10;
@@ -1539,6 +1633,7 @@ fn preview_can_render_csv(app: &App) -> bool {
 fn preview_can_render_markdown(app: &App) -> bool {
     match app.active_topbar_content() {
         Some(TopbarTabContent::Help) => true,
+        Some(TopbarTabContent::PrComments) => false,
         Some(TopbarTabContent::File(index)) => app
             .multi_diff
             .files
@@ -1628,6 +1723,7 @@ fn topbar_tab_spans(app: &mut App, area: Rect, max_width: usize) -> Vec<Span<'st
                 (file_name, changed)
             }
             TopbarTabContent::Help => ("Help".to_string(), ""),
+            TopbarTabContent::PrComments => ("PR comments".to_string(), ""),
         };
         let closeable = app.topbar_close_allowed(tab.id);
         let show_close = closeable && app.topbar_hover_tab == Some(tab.id);
@@ -2012,6 +2108,13 @@ fn render_file_panel_scrollbar(
     }
 }
 
+const FILE_PANEL_HEADER_RIGHT_PADDING: u16 = 4;
+const COMMENT_LIST_LEFT_PADDING: u16 = 1;
+const COMMENT_LIST_RIGHT_PADDING: u16 = 4;
+const COMMENT_ACTION_LEFT_PADDING: u16 = 2;
+const COMMENT_ACTION_RIGHT_PADDING: u16 = 4;
+const COMMENTS_OVERFLOW_LABEL: &str = "\u{22EF}";
+
 fn file_panel_content_area(app: &App, area: Rect) -> Rect {
     if area.width <= 1 {
         return area;
@@ -2048,6 +2151,10 @@ fn draw_file_panel_divider(frame: &mut Frame, app: &App, area: Rect, panel_bg: O
 fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
     app.file_panel_mode_toggle_hit = None;
     app.file_panel_root_hit = None;
+    app.comments_sidebar_sync_hit = None;
+    app.comments_sidebar_discard_hit = None;
+    app.comments_sidebar_overflow_hit = None;
+    app.comments_sidebar_overflow_hits.clear();
     let panel_bg = app.theme.background_panel.or(app.theme.background);
     let content_area = file_panel_content_area(app, area);
     draw_file_panel_divider(frame, app, area, panel_bg);
@@ -2057,13 +2164,14 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
         .direction(Direction::Vertical)
         .constraints(if show_filter {
             vec![
-                Constraint::Length(4), // Header
+                Constraint::Length(5), // Header
                 Constraint::Min(0),    // List
                 Constraint::Length(3), // Filter
+                Constraint::Length(2), // Action slot
             ]
         } else {
             vec![
-                Constraint::Length(4), // Header
+                Constraint::Length(5), // Header
                 Constraint::Min(0),    // List
             ]
         })
@@ -2076,9 +2184,13 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
     } else {
         None
     };
+    let action_area = if show_filter {
+        Some(panel_chunks[3])
+    } else {
+        None
+    };
 
     let files = &app.multi_diff.files;
-    let file_count = app.multi_diff.file_count();
 
     let mut added = 0usize;
     let mut modified = 0usize;
@@ -2108,14 +2220,9 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
                 .map(|s| s.to_string())
         })
         .unwrap_or_else(|| ".".to_string());
-    let mode_toggle_text = match app.file_panel_mode {
-        FilePanelMode::Files => "comments",
-        FilePanelMode::Comments => "files",
-    };
-    let mode_toggle_width = text_width(mode_toggle_text);
     let header_max_width = header_area
         .width
-        .saturating_sub(mode_toggle_width as u16 + 3) as usize;
+        .saturating_sub(1 + FILE_PANEL_HEADER_RIGHT_PADDING) as usize;
     let range_display = app.multi_diff.git_range_display();
     let header_text = if let Some((from, to)) = range_display {
         let range_text = format!("{from}..{to}");
@@ -2123,7 +2230,7 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
         if header_max_width <= range_width {
             truncate_text(&range_text, header_max_width)
         } else {
-            let sep = " • ";
+            let sep = " › ";
             let sep_width = text_width(sep);
             let root_max_width = header_max_width.saturating_sub(range_width + sep_width + 2);
             let root_display = truncate_path(&root_path, root_max_width);
@@ -2137,7 +2244,8 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
         let root_label = "Root ";
         let root_max_width = header_area
             .width
-            .saturating_sub((root_label.len() + 1) as u16) as usize;
+            .saturating_sub((root_label.len() + 1) as u16 + FILE_PANEL_HEADER_RIGHT_PADDING)
+            as usize;
         format!(
             "{}{}",
             root_label,
@@ -2145,12 +2253,15 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
         )
     };
 
-    let root_text_width =
-        text_width(&header_text).min(header_area.width.saturating_sub(1) as usize);
+    let root_text_width = text_width(&header_text).min(
+        header_area
+            .width
+            .saturating_sub(1 + FILE_PANEL_HEADER_RIGHT_PADDING) as usize,
+    );
     if root_text_width > 0 {
         app.file_panel_root_hit = Some((
             header_area.x.saturating_add(1),
-            header_area.y,
+            header_area.y.saturating_add(1),
             root_text_width as u16,
             1,
         ));
@@ -2162,6 +2273,54 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
     } else {
         Style::default().fg(app.theme.text_muted)
     };
+    let files_active = app.file_panel_mode == FilePanelMode::Files;
+    let files_segment = if files_active { "• files" } else { "  files" };
+    let comments_segment = if files_active {
+        "  comments"
+    } else {
+        "• comments"
+    };
+    let files_width = text_width(files_segment);
+    let gap_width = 3usize;
+    let inactive_x_offset = if files_active {
+        1 + files_width + gap_width
+    } else {
+        1
+    };
+    let inactive_width = if files_active {
+        text_width(comments_segment)
+    } else {
+        text_width(files_segment)
+    };
+    if inactive_width > 0 && inactive_x_offset < header_area.width as usize {
+        app.file_panel_mode_toggle_hit = Some((
+            header_area.x.saturating_add(inactive_x_offset as u16),
+            header_area.y.saturating_add(3),
+            inactive_width.min(header_area.width as usize - inactive_x_offset) as u16,
+            1,
+        ));
+    }
+    let active_segment_style = Style::default()
+        .fg(app.theme.text)
+        .add_modifier(Modifier::BOLD);
+    let mut inactive_segment_style = Style::default().fg(if app.file_panel_mode_toggle_hover {
+        app.theme.accent
+    } else {
+        app.theme.text_muted
+    });
+    if app.file_panel_mode_toggle_hover {
+        inactive_segment_style = inactive_segment_style.add_modifier(Modifier::BOLD);
+    }
+    let files_style = if files_active {
+        active_segment_style
+    } else {
+        inactive_segment_style
+    };
+    let comments_style = if files_active {
+        inactive_segment_style
+    } else {
+        active_segment_style
+    };
     let header_lines = if app.file_panel_mode == FilePanelMode::Comments {
         let comment_count = app.review_comment_count();
         let comments_label = match comment_count {
@@ -2169,32 +2328,30 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
             n => format!("{n} comments"),
         };
         vec![
+            Line::raw(""),
             Line::from(vec![Span::raw(" "), Span::styled(header_text, root_style)]),
             Line::raw(""),
             Line::from(vec![
                 Span::raw(" "),
-                Span::styled("●", Style::default().fg(app.theme.text_muted)),
-                Span::raw(" "),
-                Span::styled(comments_label, Style::default().fg(app.theme.text)),
-                Span::raw(" "),
-                Span::styled("review", Style::default().fg(app.theme.text_muted)),
+                Span::styled(files_segment, files_style),
+                Span::raw("   "),
+                Span::styled(comments_segment, comments_style),
             ]),
-            Line::raw(""),
+            Line::from(vec![
+                Span::raw(" "),
+                Span::styled(comments_label, Style::default().fg(app.theme.text_muted)),
+            ]),
         ]
     } else {
         vec![
+            Line::raw(""),
             Line::from(vec![Span::raw(" "), Span::styled(header_text, root_style)]),
             Line::raw(""),
             Line::from(vec![
                 Span::raw(" "),
-                Span::styled("●", Style::default().fg(app.theme.text_muted)),
-                Span::raw(" "),
-                Span::styled(
-                    format!("{} files", file_count),
-                    Style::default().fg(app.theme.text),
-                ),
-                Span::raw(" "),
-                Span::styled(via_text, Style::default().fg(app.theme.text_muted)),
+                Span::styled(files_segment, files_style),
+                Span::raw("   "),
+                Span::styled(comments_segment, comments_style),
             ]),
             Line::from(vec![
                 Span::raw(" "),
@@ -2214,6 +2371,8 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
                 ),
                 Span::raw(" "),
                 Span::styled(format!("→{}", renamed), Style::default().fg(app.theme.info)),
+                Span::raw(" "),
+                Span::styled(via_text, Style::default().fg(app.theme.text_muted)),
             ]),
         ]
     };
@@ -2223,31 +2382,16 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
         header = header.style(Style::default().bg(bg));
     }
     frame.render_widget(header, header_area);
-    if header_area.width > mode_toggle_width as u16 + 1 {
-        let toggle_x = header_area.x.saturating_add(
-            header_area
-                .width
-                .saturating_sub(mode_toggle_width as u16 + 1),
-        );
-        app.file_panel_mode_toggle_hit =
-            Some((toggle_x, header_area.y, mode_toggle_width as u16, 1));
-        let mut toggle_style = Style::default().fg(if app.file_panel_mode_toggle_hover {
-            app.theme.accent
-        } else {
-            app.theme.text_muted
-        });
-        if app.file_panel_mode_toggle_hover {
-            toggle_style = toggle_style.add_modifier(Modifier::BOLD);
-        }
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(mode_toggle_text, toggle_style))),
-            Rect::new(toggle_x, header_area.y, mode_toggle_width as u16, 1),
-        );
-    }
-
     if app.file_panel_mode == FilePanelMode::Comments {
-        draw_comment_list(frame, app, list_area, filter_area, panel_bg);
+        draw_comment_list(frame, app, list_area, action_area, filter_area, panel_bg);
         return;
+    }
+    if let Some(action_area) = action_area {
+        let mut blank = Block::default();
+        if let Some(bg) = panel_bg {
+            blank = blank.style(Style::default().bg(bg));
+        }
+        frame.render_widget(blank, action_area);
     }
 
     let filtered_indices = app.filtered_file_indices();
@@ -2556,11 +2700,41 @@ fn draw_comment_list(
     frame: &mut Frame,
     app: &mut App,
     list_area: Rect,
+    action_area: Option<Rect>,
     filter_area: Option<Rect>,
     panel_bg: Option<Color>,
 ) {
-    let indices = app.filtered_review_comment_indices();
-    let total_rows = indices.len();
+    enum CommentRow {
+        Group(String),
+        Spacer,
+        ItemTitle(usize),
+        ItemPreview(usize),
+    }
+
+    let mut indices = app.filtered_review_comment_indices();
+    indices.sort_by(|a, b| {
+        app.review_comment_sidebar_sort_key(*b)
+            .cmp(&app.review_comment_sidebar_sort_key(*a))
+    });
+
+    let mut rows = Vec::new();
+    let mut current_group: Option<String> = None;
+    for comment_idx in indices.iter().copied() {
+        let Some(group) = app.review_comment_sidebar_bucket(comment_idx) else {
+            continue;
+        };
+        if current_group.as_deref() != Some(group.as_str()) {
+            if current_group.is_some() {
+                rows.push(CommentRow::Spacer);
+            }
+            rows.push(CommentRow::Group(group.clone()));
+            current_group = Some(group);
+        }
+        rows.push(CommentRow::ItemTitle(comment_idx));
+        rows.push(CommentRow::ItemPreview(comment_idx));
+    }
+
+    let total_rows = rows.len();
     let visible_rows = list_area.height.saturating_sub(2) as usize;
     let show_scrollbar = app.scrollbar_visible
         && total_rows > visible_rows
@@ -2573,69 +2747,166 @@ fn draw_comment_list(
         .min(total_rows.saturating_sub(visible_rows));
     app.file_list_scroll = row_offset;
 
+    let row_width = list_content_area
+        .width
+        .saturating_sub(COMMENT_LIST_LEFT_PADDING + COMMENT_LIST_RIGHT_PADDING)
+        as usize;
     let mut items = Vec::new();
     let mut row_map = Vec::new();
-    for comment_idx in indices.iter().skip(row_offset).take(visible_rows).copied() {
-        let Some((_file_idx, path, location, preview)) =
-            app.review_comment_sidebar_item(comment_idx)
-        else {
-            continue;
-        };
-        let is_active = app.review_comment_is_active(comment_idx);
-        let is_hovered = app.file_list_hover == Some(comment_idx);
-        let selected_bg = if is_active {
-            if app.file_list_focused {
-                app.theme.background_element.or(app.theme.background_panel)
-            } else {
-                app.theme.background_panel
+    for row in rows.iter().skip(row_offset).take(visible_rows) {
+        match row {
+            CommentRow::Group(group) => {
+                let header_max = row_width.saturating_sub(2).max(1);
+                items.push(ListItem::new(Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(
+                        truncate_to_width(group, header_max),
+                        Style::default()
+                            .fg(app.theme.text_muted)
+                            .add_modifier(Modifier::DIM),
+                    ),
+                ])));
+                row_map.push(None);
             }
-        } else {
-            None
-        };
-        let marker_style = if is_active || is_hovered {
-            Style::default()
-                .fg(app.theme.accent)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(app.theme.text_muted)
-        };
-        let marker = if is_active { "•" } else { " " };
-        let name_width = list_content_area.width.saturating_sub(12) as usize;
-        let name = truncate_path(&path, name_width);
-        let mut name_style = Style::default().fg(if is_active || is_hovered {
-            app.theme.accent
-        } else {
-            app.theme.text
-        });
-        if is_active || is_hovered {
-            name_style = name_style.add_modifier(Modifier::BOLD);
+            CommentRow::Spacer => {
+                items.push(ListItem::new(Line::raw("")));
+                row_map.push(None);
+            }
+            CommentRow::ItemTitle(comment_idx) => {
+                let Some((file_idx, path, location, _preview)) =
+                    app.review_comment_sidebar_item(*comment_idx)
+                else {
+                    continue;
+                };
+                let is_active = app.review_comment_is_active(*comment_idx);
+                let is_hovered = app.file_list_hover == Some(*comment_idx);
+                let selected_bg = if is_active {
+                    if app.file_list_focused {
+                        app.theme.background_element.or(app.theme.background_panel)
+                    } else {
+                        app.theme.background_panel
+                    }
+                } else {
+                    None
+                };
+
+                let mut marker_style = if is_active || is_hovered {
+                    Style::default()
+                        .fg(app.theme.accent)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(app.theme.text_muted)
+                };
+                let icon_color = if location.is_empty() {
+                    app.theme.text
+                } else {
+                    app.multi_diff
+                        .files
+                        .get(file_idx)
+                        .map(|file| match file.status {
+                            FileStatus::Added | FileStatus::Untracked => app.theme.success,
+                            FileStatus::Deleted => app.theme.error,
+                            FileStatus::Modified => app.theme.warning,
+                            FileStatus::Renamed => app.theme.info,
+                        })
+                        .unwrap_or(app.theme.warning)
+                };
+                let mut icon_style = Style::default().fg(icon_color);
+                let mut name_style = Style::default().fg(if is_active || is_hovered {
+                    app.theme.accent
+                } else {
+                    app.theme.text
+                });
+                if is_active || is_hovered {
+                    name_style = name_style.add_modifier(Modifier::BOLD);
+                }
+                let mut location_style = if is_active && app.file_list_focused {
+                    Style::default().fg(app.theme.warning)
+                } else {
+                    Style::default().fg(app.theme.text_muted)
+                };
+                if let Some(bg) = selected_bg {
+                    marker_style = marker_style.bg(bg);
+                    icon_style = icon_style.bg(bg);
+                    name_style = name_style.bg(bg);
+                    location_style = location_style.bg(bg);
+                }
+
+                let width = row_width;
+                let location = truncate_with_dots(&location, width.saturating_div(3).min(12));
+                let suffix_width = if location.is_empty() {
+                    0
+                } else {
+                    1 + UnicodeWidthStr::width(location.as_str())
+                };
+                let name_width = width.saturating_sub(4 + suffix_width).max(1);
+                let name = truncate_with_dots(&path, name_width);
+                let marker = if is_active { "•" } else { " " };
+
+                let mut spans = vec![
+                    Span::styled(marker, marker_style),
+                    Span::raw(" "),
+                    Span::styled("■", icon_style),
+                    Span::raw(" "),
+                    Span::styled(name, name_style),
+                ];
+                if !location.is_empty() {
+                    spans.push(Span::raw(" "));
+                    spans.push(Span::styled(location, location_style));
+                }
+                let mut item = ListItem::new(Line::from(spans));
+                if let Some(bg) = selected_bg {
+                    item = item.style(Style::default().bg(bg));
+                }
+                items.push(item);
+                row_map.push(Some(*comment_idx));
+            }
+            CommentRow::ItemPreview(comment_idx) => {
+                let Some((_file_idx, _path, _location, preview)) =
+                    app.review_comment_sidebar_item(*comment_idx)
+                else {
+                    continue;
+                };
+                let is_active = app.review_comment_is_active(*comment_idx);
+                let is_hovered = app.file_list_hover == Some(*comment_idx);
+                let selected_bg = if is_active {
+                    if app.file_list_focused {
+                        app.theme.background_element.or(app.theme.background_panel)
+                    } else {
+                        app.theme.background_panel
+                    }
+                } else {
+                    None
+                };
+                let mut preview_style = Style::default().fg(if is_active || is_hovered {
+                    app.theme.text
+                } else {
+                    app.theme.text_muted
+                });
+                if let Some(bg) = selected_bg {
+                    preview_style = preview_style.bg(bg);
+                }
+                let width = row_width.saturating_sub(4);
+                let preview = truncate_with_dots(&preview, width);
+                let mut item = ListItem::new(Line::from(vec![
+                    Span::raw("    "),
+                    Span::styled(preview, preview_style),
+                ]));
+                if let Some(bg) = selected_bg {
+                    item = item.style(Style::default().bg(bg));
+                }
+                items.push(item);
+                row_map.push(Some(*comment_idx));
+            }
         }
-        if let Some(bg) = selected_bg {
-            name_style = name_style.bg(bg);
-        }
-        let location_style = if is_active && app.file_list_focused {
-            Style::default().fg(app.theme.warning)
-        } else {
-            Style::default().fg(app.theme.text_muted)
-        };
-        let preview_width = list_content_area.width.saturating_sub(6) as usize;
-        let line = Line::from(vec![
-            Span::styled(marker, marker_style),
-            Span::raw(" "),
-            Span::styled(name, name_style),
-            Span::raw(" "),
-            Span::styled(location, location_style),
-            Span::raw(" "),
-            Span::styled(
-                truncate_to_width(&preview, preview_width),
-                Style::default().fg(app.theme.text_muted),
-            ),
-        ]);
-        items.push(ListItem::new(line));
-        row_map.push(Some(comment_idx));
     }
 
-    let mut block = Block::default().padding(ratatui::widgets::Padding::new(1, 0, 1, 0));
+    let mut block = Block::default().padding(ratatui::widgets::Padding::new(
+        COMMENT_LIST_LEFT_PADDING,
+        COMMENT_LIST_RIGHT_PADDING,
+        1,
+        0,
+    ));
     if let Some(bg) = panel_bg {
         block = block.style(Style::default().bg(bg));
     }
@@ -2665,6 +2936,101 @@ fn draw_comment_list(
             empty = empty.style(Style::default().bg(bg));
         }
         frame.render_widget(empty, list_content_area);
+    }
+
+    if let Some(action_area) = action_area {
+        let sync_label = "s sync";
+        let discard_label = "d discard";
+        let overflow_label = COMMENTS_OVERFLOW_LABEL;
+        if let Some(bg) = panel_bg {
+            frame.render_widget(
+                Paragraph::new("").style(Style::default().bg(bg)),
+                action_area,
+            );
+        }
+        let action_inner_width = action_area
+            .width
+            .saturating_sub(COMMENT_ACTION_LEFT_PADDING + COMMENT_ACTION_RIGHT_PADDING);
+        let action_inner = Rect::new(
+            action_area.x.saturating_add(COMMENT_ACTION_LEFT_PADDING),
+            action_area.y,
+            action_inner_width,
+            1,
+        );
+        let sync_x = action_inner.x;
+        let discard_x = sync_x
+            .saturating_add(text_width(sync_label) as u16)
+            .saturating_add(3);
+        app.comments_sidebar_sync_hit =
+            Some((sync_x, action_area.y, text_width(sync_label) as u16, 1));
+        app.comments_sidebar_discard_hit = Some((
+            discard_x,
+            action_area.y,
+            text_width(discard_label) as u16,
+            1,
+        ));
+        let overflow_width = text_width(overflow_label) as u16;
+        let overflow_x = action_inner
+            .x
+            .saturating_add(action_inner.width.saturating_sub(overflow_width));
+        app.comments_sidebar_overflow_hit = Some((overflow_x, action_area.y, overflow_width, 1));
+        let key_style = Style::default()
+            .fg(app.theme.accent)
+            .add_modifier(Modifier::BOLD);
+        let sync_style = Style::default().fg(if app.comments_sidebar_sync_hover {
+            app.theme.accent
+        } else {
+            app.theme.text
+        });
+        let discard_hover = app.comments_sidebar_discard_hover && app.review_session_has_changes();
+        let discard_key_style = if discard_hover {
+            Style::default()
+                .fg(app.theme.error)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            key_style
+        };
+        let mut discard_style = Style::default().fg(if app.review_session_has_changes() {
+            app.theme.text
+        } else {
+            app.theme.text_muted
+        });
+        if discard_hover {
+            discard_style = discard_style
+                .fg(app.theme.error)
+                .add_modifier(Modifier::BOLD);
+        }
+        let overflow_style = Style::default().fg(
+            if app.comments_sidebar_overflow_hover || app.comments_sidebar_overflow_open {
+                app.theme.accent
+            } else {
+                app.theme.text_muted
+            },
+        );
+        let mut line = Paragraph::new(Line::from(vec![
+            Span::styled("s", key_style),
+            Span::raw(" "),
+            Span::styled("sync", sync_style),
+            Span::raw("   "),
+            Span::styled("d", discard_key_style),
+            Span::raw(" "),
+            Span::styled("discard", discard_style),
+        ]));
+        if let Some(bg) = panel_bg {
+            line = line.style(Style::default().bg(bg));
+        }
+        frame.render_widget(line, action_inner);
+        let mut overflow = Paragraph::new(Line::from(Span::styled(overflow_label, overflow_style)));
+        if let Some(bg) = panel_bg {
+            overflow = overflow.style(Style::default().bg(bg));
+        }
+        frame.render_widget(
+            overflow,
+            Rect::new(overflow_x, action_area.y, overflow_width, 1),
+        );
+        if app.comments_sidebar_overflow_open {
+            draw_comments_sidebar_overflow_menu(frame, app, action_area, panel_bg);
+        }
     }
 
     if let Some(filter_area) = filter_area {
@@ -2708,6 +3074,79 @@ fn draw_comment_list(
             app.file_filter_clear_hover = false;
         }
     }
+}
+
+fn draw_comments_sidebar_overflow_menu(
+    frame: &mut Frame,
+    app: &mut App,
+    action_area: Rect,
+    panel_bg: Option<Color>,
+) {
+    let rows = [
+        (ReviewSyncAction::Pull, "pull"),
+        (ReviewSyncAction::Push, "push"),
+    ];
+    let width = 10u16.min(action_area.width.max(1));
+    let height = rows.len() as u16 + 2;
+    let x = action_area.x.saturating_add(
+        action_area
+            .width
+            .saturating_sub(COMMENT_ACTION_RIGHT_PADDING + width),
+    );
+    let y = action_area.y.saturating_sub(height);
+    let menu_area = Rect::new(x, y, width, height);
+
+    frame.render_widget(Clear, menu_area);
+    let mut block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(Style::default().fg(app.theme.border_active));
+    if let Some(bg) = panel_bg {
+        block = block.style(Style::default().bg(bg));
+    }
+    frame.render_widget(block.clone(), menu_area);
+
+    let inner = block.inner(menu_area);
+    let menu_bg = panel_bg;
+    let hover_bg = app
+        .theme
+        .background_element
+        .or_else(|| menu_bg.and_then(|bg| color::blend_colors(bg, app.theme.accent, 0.16)))
+        .or(menu_bg);
+    let mut hits = Vec::new();
+    for (idx, (action, label)) in rows.iter().enumerate() {
+        let row = inner.y.saturating_add(idx as u16);
+        let hover = app.comments_sidebar_overflow_menu_hover == Some(*action);
+        let mut text_style = Style::default().fg(if hover {
+            app.theme.accent
+        } else {
+            app.theme.text
+        });
+        if hover {
+            text_style = text_style.add_modifier(Modifier::BOLD);
+        }
+        let mut row_style = Style::default();
+        if let Some(bg) = if hover { hover_bg } else { menu_bg } {
+            row_style = row_style.bg(bg);
+        }
+        hits.push(ReviewSidebarOverflowHit {
+            x: inner.x,
+            y: row,
+            width: inner.width,
+            height: 1,
+            action: *action,
+        });
+        let label = format!(" {label}");
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                truncate_text(&label, inner.width as usize),
+                text_style,
+            )))
+            .style(row_style),
+            Rect::new(inner.x, row, inner.width, 1),
+        );
+    }
+    app.set_comments_sidebar_overflow_hits(hits);
 }
 
 fn file_filter_line(app: &App, has_query: bool, width: u16) -> Line<'static> {
@@ -2779,23 +3218,13 @@ struct PreviewChangeBar {
     new_line: Option<usize>,
 }
 
-struct PreviewChangeBars {
-    marker: String,
-    marker_width: usize,
-    styles: HashMap<usize, Style>,
-}
-
-impl PreviewChangeBars {
-    fn gutter_width(&self) -> usize {
-        self.marker_width + 1
-    }
-}
-
 struct PreviewFileCommentMeta {
     action_width: usize,
     card_start: Option<usize>,
     card_height: usize,
     anchor_key: Option<String>,
+    delete_x_offset: u16,
+    delete_width: u16,
 }
 
 fn review_file_comment_action_line(app: &App) -> Option<(Line<'static>, usize)> {
@@ -2837,19 +3266,19 @@ fn prepend_review_file_comment_lines(
     let mut card_start = None;
     let mut card_height = 0usize;
     let mut anchor_key = None;
+    let mut delete_x_offset = 2;
+    let mut delete_width = 0;
 
     if let Some(overlay) = app.review_file_comment_overlay() {
         let start = prefix.len();
         let key = overlay.anchor_key.clone();
-        let note_lines = app.review_preview_note_lines(&overlay, max_width);
+        delete_x_offset = review_note_delete_x_offset(&overlay);
+        delete_width = review_note_delete_width(&overlay);
+        let note_lines = review_note_lines(app, &overlay, max_width);
         card_height = note_lines.len();
         card_start = Some(start);
-        anchor_key = Some(key.clone());
-        prefix.extend(
-            note_lines
-                .into_iter()
-                .map(|line| Line::from(review_note_line_spans(app, &key, &line))),
-        );
+        anchor_key = Some(key);
+        prefix.extend(note_lines);
         prefix.push(Line::from(""));
     }
 
@@ -2861,6 +3290,8 @@ fn prepend_review_file_comment_lines(
         card_start,
         card_height,
         anchor_key,
+        delete_x_offset,
+        delete_width,
     })
 }
 
@@ -2900,10 +3331,20 @@ fn add_review_file_comment_hits(
         }
         let delete_line = card_end.saturating_sub(1);
         if delete_line >= scroll && delete_line < scroll.saturating_add(visible_lines) {
+            let edit_width = meta.delete_x_offset.saturating_sub(5);
+            if edit_width > 0 {
+                app.add_review_preview_edit_box(
+                    content_area.x.saturating_add(2),
+                    content_area.y.saturating_add((delete_line - scroll) as u16),
+                    edit_width,
+                    1,
+                    anchor_key.clone(),
+                );
+            }
             app.add_review_preview_delete_box(
-                content_area.x.saturating_add(2),
+                content_area.x.saturating_add(meta.delete_x_offset),
                 content_area.y.saturating_add((delete_line - scroll) as u16),
-                text_width("x delete") as u16,
+                meta.delete_width,
                 1,
                 anchor_key.clone(),
             );
@@ -2964,7 +3405,236 @@ fn render_terminal_image_preview(
     true
 }
 
+fn render_pr_comments_view(frame: &mut Frame, app: &mut App, area: Rect) {
+    if let Some(bg) = app.theme.background {
+        frame.render_widget(Block::default().style(Style::default().bg(bg)), area);
+    }
+    let (content_area, scrollbar_area) = reserve_diff_scrollbar_lane(app, area);
+    app.clear_preview_link_boxes();
+    app.set_pr_comment_hits(Vec::new());
+    app.set_pr_comment_add_hit(None);
+
+    let title = app.pull_request_title();
+    let has_pr_target = app.pull_request_comment_target_available();
+    let overlays = app.pull_request_comment_overlays();
+    let mut lines = Vec::<Line<'static>>::new();
+    let mut hit_rows = Vec::<(usize, u16, u16, PrCommentHitAction)>::new();
+    let mut card_rows = Vec::<(usize, usize, String)>::new();
+    let mut delete_rows = Vec::<(usize, u16, u16, String)>::new();
+    let mut avatar_rows = Vec::new();
+    let mut focus_rows = Vec::<(u64, usize)>::new();
+    lines.push(Line::from(Span::styled(
+        title,
+        Style::default()
+            .fg(app.theme.text)
+            .add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(""));
+
+    if overlays.is_empty() {
+        let message = if has_pr_target {
+            "No pull request comments."
+        } else {
+            "No pull request found."
+        };
+        lines.push(Line::from(Span::styled(
+            message,
+            Style::default()
+                .fg(app.theme.text_muted)
+                .add_modifier(Modifier::DIM),
+        )));
+        lines.push(Line::from(""));
+    }
+
+    for (id, number, overlay) in overlays {
+        let start = lines.len();
+        let reply_key = app
+            .pull_request_reply_label(id)
+            .unwrap_or_else(|| format!("r{number}"));
+        let reply = format!("{reply_key} reply");
+        let mut actions = Vec::<(String, PrCommentHitAction)>::new();
+        if overlay.can_edit {
+            let edit_key = app
+                .pull_request_edit_label(id)
+                .unwrap_or_else(|| format!("i{number}"));
+            actions.push((format!("{edit_key} edit"), PrCommentHitAction::Edit(id)));
+        }
+        if has_pr_target {
+            actions.push((reply, PrCommentHitAction::Reply(id)));
+        }
+        if overlay.can_edit {
+            let delete_key = app
+                .pull_request_delete_label(id)
+                .unwrap_or_else(|| format!("x{number}"));
+            actions.push((
+                format!("{delete_key} delete"),
+                PrCommentHitAction::Delete(id),
+            ));
+        }
+        let footer = actions
+            .iter()
+            .map(|(label, _)| label.as_str())
+            .collect::<Vec<_>>()
+            .join("   ");
+        let block =
+            review_note_block_with_footer(app, &overlay, content_area.width as usize, &footer);
+        let card_height = block.lines.len();
+        let footer_row = start.saturating_add(card_height.saturating_sub(1));
+        let anchor_key = overlay.anchor_key.clone();
+        card_rows.push((start, card_height, anchor_key.clone()));
+        if let Some(avatar) = block.avatar.clone() {
+            avatar_rows.push((start.saturating_add(avatar.row_offset), avatar));
+        }
+        lines.extend(block.lines);
+        lines.push(Line::from(""));
+        focus_rows.push((id, start));
+        if overlay.can_edit {
+            hit_rows.push((start, 0, content_area.width, PrCommentHitAction::Open(id)));
+        }
+        let mut action_x = 2;
+        for (idx, (label, action)) in actions.into_iter().enumerate() {
+            if idx > 0 {
+                action_x += 3;
+            }
+            let width = text_width(&label) as u16;
+            hit_rows.push((footer_row, action_x, width, action));
+            if matches!(action, PrCommentHitAction::Delete(_)) {
+                delete_rows.push((footer_row, action_x, width, anchor_key.clone()));
+            }
+            action_x += width;
+        }
+    }
+
+    let add_row = has_pr_target.then_some(lines.len());
+    if has_pr_target {
+        let add_hover = app.pr_comment_add_hover;
+        let add_key = Style::default()
+            .fg(app.theme.accent)
+            .add_modifier(Modifier::BOLD);
+        let add_label = if add_hover {
+            Style::default()
+                .fg(app.theme.accent)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(app.theme.text)
+        };
+        lines.push(Line::from(vec![
+            Span::styled("c", add_key),
+            Span::styled(" add comment", add_label),
+        ]));
+    }
+
+    let visible_lines = content_area.height as usize;
+    let total_lines = lines.len().max(1);
+    if let Some(focus) = app.pr_comment_focus.take() {
+        if let Some((_, row)) = focus_rows.iter().find(|(id, _)| *id == focus) {
+            app.scroll_offset = row.saturating_sub(1);
+        }
+    }
+    app.clamp_scroll(total_lines, visible_lines, false);
+    let scroll = app.scroll_offset.min(total_lines.saturating_sub(1));
+    let viewport_end = scroll.saturating_add(visible_lines);
+
+    for (row, height, anchor_key) in card_rows {
+        let end = row.saturating_add(height.max(1));
+        let visible_start = row.max(scroll);
+        let visible_end = end.min(viewport_end);
+        if visible_start >= visible_end {
+            continue;
+        }
+        app.add_review_preview_box(
+            content_area.x,
+            content_area
+                .y
+                .saturating_add(visible_start.saturating_sub(scroll) as u16),
+            content_area.width,
+            visible_end.saturating_sub(visible_start) as u16,
+            anchor_key,
+        );
+    }
+    for (row, x_offset, width, anchor_key) in delete_rows {
+        if row < scroll || row >= viewport_end {
+            continue;
+        }
+        app.add_review_preview_delete_box(
+            content_area.x.saturating_add(x_offset),
+            content_area
+                .y
+                .saturating_add(row.saturating_sub(scroll) as u16),
+            width,
+            1,
+            anchor_key,
+        );
+    }
+
+    let mut hits = Vec::new();
+    for (row, x_offset, width, action) in hit_rows {
+        if row < scroll || row >= scroll.saturating_add(visible_lines) {
+            continue;
+        }
+        hits.push(PrCommentHit {
+            x: content_area.x.saturating_add(x_offset),
+            y: content_area
+                .y
+                .saturating_add(row.saturating_sub(scroll) as u16),
+            width,
+            height: 1,
+            action,
+        });
+    }
+    app.set_pr_comment_hits(hits);
+    if let Some(add_row) =
+        add_row.filter(|row| *row >= scroll && *row < scroll.saturating_add(visible_lines))
+    {
+        app.set_pr_comment_add_hit(Some((
+            content_area.x,
+            content_area
+                .y
+                .saturating_add(add_row.saturating_sub(scroll) as u16),
+            text_width("c add comment") as u16,
+            1,
+        )));
+    }
+
+    let visible = lines
+        .into_iter()
+        .skip(scroll)
+        .take(visible_lines)
+        .collect::<Vec<_>>();
+    let mut paragraph = Paragraph::new(visible);
+    if let Some(bg) = app.theme.background {
+        paragraph = paragraph.style(Style::default().bg(bg));
+    }
+    frame.render_widget(paragraph, content_area);
+
+    for (row, avatar) in avatar_rows {
+        if row < scroll || row >= viewport_end {
+            continue;
+        }
+        render_review_note_avatar(
+            frame,
+            app,
+            content_area,
+            row.saturating_sub(scroll),
+            &avatar,
+        );
+    }
+
+    render_diff_scrollbar(
+        frame,
+        app,
+        scrollbar_area,
+        total_lines,
+        visible_lines,
+        app.scroll_offset,
+    );
+}
+
 fn render_preview(frame: &mut Frame, app: &mut App, area: Rect) {
+    if app.active_pr_comments_view() {
+        render_pr_comments_view(frame, app, area);
+        return;
+    }
     if let Some(bg) = app.theme.background {
         frame.render_widget(Block::default().style(Style::default().bg(bg)), area);
     }
@@ -3219,7 +3889,9 @@ fn preview_document(
                 image_path,
             )
         }
-        None => (String::new(), String::new(), None, false, None, None),
+        Some(TopbarTabContent::PrComments) | None => {
+            (String::new(), String::new(), None, false, None, None)
+        }
     }
 }
 
@@ -3289,7 +3961,7 @@ fn structured_preview_change_bars(
     let side = side?;
     let index = match app.active_topbar_content()? {
         TopbarTabContent::File(index) => index,
-        TopbarTabContent::Help => return None,
+        TopbarTabContent::Help | TopbarTabContent::PrComments => return None,
     };
     let (old, new) = app.multi_diff.file_contents(index)?;
     let old = parse_structured_change_value(kind, old).ok()?;
@@ -3571,7 +4243,19 @@ fn push_preview_change_gutter(
 }
 
 fn preview_change_gutter_width(bars: Option<&PreviewChangeBars>) -> usize {
-    bars.map(|bars| bars.marker_width + 1).unwrap_or(0)
+    bars.map(PreviewChangeBars::gutter_width).unwrap_or(0)
+}
+
+fn markdown_preview_lines(
+    text: &str,
+    app: &mut App,
+    width: usize,
+    base_dir: Option<&Path>,
+    change_bars: Option<&PreviewChangeBars>,
+) -> (Vec<Line<'static>>, Vec<PreviewLink>) {
+    let theme = app.theme.clone();
+    let mut highlight = |lang: Option<&str>, code: &str| app.highlight_code_block(lang, code);
+    render_markdown_preview_lines(text, &theme, width, base_dir, &mut highlight, change_bars)
 }
 
 fn structured_preview_lines(
@@ -3871,1012 +4555,6 @@ fn source_preview_lines(
     lines
 }
 
-/// Colors and derived styles used while rendering a Markdown preview.
-struct MarkdownStyles {
-    text: Style,
-    muted: Style,
-    code: Style,
-    link: Style,
-    rule: Style,
-    list_marker: Style,
-    check_done: Style,
-    check_todo: Style,
-    table_border: Style,
-    table_head: Style,
-    code_lang: Style,
-    /// Per-level heading styles (index 0 = H1 .. index 5 = H6).
-    headings: [Style; 6],
-    /// Per-level heading marker glyphs (shrinking blocks).
-    heading_marks: [&'static str; 6],
-    /// Per-level heading band, tinted with the heading's own color
-    /// (None on transparent/ANSI themes where blending isn't possible).
-    heading_bands: [Option<Color>; 6],
-    /// Depth-cycled colors for list bullet markers.
-    list_colors: [Color; 4],
-    /// Background chip behind inline code / highlights (None when transparent).
-    inline_bg: Option<Color>,
-    /// Panel background behind fenced code blocks (None on transparent themes).
-    code_bg: Option<Color>,
-}
-
-impl MarkdownStyles {
-    fn from_theme(theme: &crate::config::ResolvedTheme) -> Self {
-        let bold = Modifier::BOLD;
-        let heading_colors = [
-            theme.accent,
-            theme.info,
-            theme.success,
-            theme.warning,
-            theme.primary,
-            theme.text_muted,
-        ];
-        let headings =
-            std::array::from_fn(|i| Style::default().fg(heading_colors[i]).add_modifier(bold));
-
-        // markview draws bands/chips/panels with explicit background colors, so
-        // they show even on transparent themes. Derive a surface to blend from:
-        // the real page background when opaque, otherwise a mode-appropriate
-        // neutral inferred from the text color's luminance (light text = dark
-        // theme). Blending returns None for ANSI/named colors, which degrades
-        // gracefully to no background.
-        let dark_mode = crate::color::relative_luminance(theme.text)
-            .map(|l| l > 0.5)
-            .unwrap_or(true);
-        let surface = theme
-            .background
-            .or(theme.background_panel)
-            .or(theme.background_element)
-            .unwrap_or(if dark_mode {
-                Color::Rgb(0x1b, 0x1d, 0x22)
-            } else {
-                Color::Rgb(0xe8, 0xe9, 0xec)
-            });
-        let wash = |fg: Color, alpha: f32| crate::color::blend_colors(surface, fg, alpha);
-
-        // Per-level heading bands, tinted with each heading's own color.
-        let heading_bands = std::array::from_fn(|i| wash(heading_colors[i], 0.18));
-        // Inline chip reads clearly; the code panel is a subtler lift.
-        let inline_bg = wash(theme.text, 0.16);
-        let code_bg = wash(theme.text, 0.09);
-        MarkdownStyles {
-            text: Style::default().fg(theme.text),
-            muted: Style::default().fg(theme.text_muted),
-            code: Style::default().fg(theme.warning).bg_opt(inline_bg),
-            link: Style::default()
-                .fg(theme.info)
-                .add_modifier(Modifier::UNDERLINED),
-            rule: Style::default().fg(theme.border_subtle),
-            list_marker: Style::default().fg(theme.accent).add_modifier(bold),
-            check_done: Style::default().fg(theme.success).add_modifier(bold),
-            check_todo: Style::default().fg(theme.text_muted),
-            table_border: Style::default().fg(theme.border_subtle),
-            table_head: Style::default().fg(theme.accent).add_modifier(bold),
-            code_lang: Style::default()
-                .fg(theme.accent)
-                .add_modifier(bold)
-                .bg_opt(code_bg),
-            headings,
-            heading_marks: ["█ ", "▊ ", "▌ ", "▎ ", "▏ ", "· "],
-            heading_bands,
-            list_colors: [theme.accent, theme.success, theme.info, theme.warning],
-            inline_bg,
-            code_bg,
-        }
-    }
-}
-
-/// A GitHub-style callout (`> [!NOTE]`) rendered as a colored, titled quote.
-struct Callout {
-    icon: &'static str,
-    label: &'static str,
-    color: Color,
-}
-
-impl Callout {
-    fn from_kind(kind: BlockQuoteKind, theme: &crate::config::ResolvedTheme) -> Self {
-        match kind {
-            BlockQuoteKind::Note => Callout {
-                icon: "ℹ",
-                label: "Note",
-                color: theme.info,
-            },
-            BlockQuoteKind::Tip => Callout {
-                icon: "✎",
-                label: "Tip",
-                color: theme.success,
-            },
-            BlockQuoteKind::Important => Callout {
-                icon: "★",
-                label: "Important",
-                color: theme.primary,
-            },
-            BlockQuoteKind::Warning => Callout {
-                icon: "▲",
-                label: "Warning",
-                color: theme.warning,
-            },
-            BlockQuoteKind::Caution => Callout {
-                icon: "✖",
-                label: "Caution",
-                color: theme.error,
-            },
-        }
-    }
-}
-
-/// One active block-quote level; the border is repeated on every wrapped line.
-struct QuoteFrame {
-    border: Style,
-}
-
-#[derive(Default)]
-struct MarkdownList {
-    next: Option<u64>,
-    marker_width: usize,
-}
-
-/// A table cell holds styled spans, so inline code, emphasis, and links keep
-/// their colors instead of being flattened to plain text.
-type TableCell = Vec<Span<'static>>;
-
-#[derive(Default)]
-struct MarkdownTable {
-    rows: Vec<Vec<TableCell>>,
-    current_row: Vec<TableCell>,
-    current_cell: TableCell,
-    in_cell: bool,
-}
-
-struct MarkdownCodeBlock {
-    lang: Option<String>,
-    text: String,
-}
-
-struct MarkdownImage {
-    dest_url: String,
-    alt: String,
-}
-
-type CodeHighlighter<'a> = dyn FnMut(Option<&str>, &str) -> Option<Vec<Vec<Span<'static>>>> + 'a;
-
-/// A clickable hyperlink located in content (line/column) coordinates, produced
-/// by the renderer and later mapped to screen coordinates in `render_preview`.
-pub(crate) struct PreviewLink {
-    pub(crate) line: usize,
-    pub(crate) col: usize,
-    pub(crate) width: usize,
-    pub(crate) url: String,
-}
-
-fn markdown_preview_lines(
-    text: &str,
-    app: &mut App,
-    width: usize,
-    base_dir: Option<&Path>,
-    change_bars: Option<&PreviewChangeBars>,
-) -> (Vec<Line<'static>>, Vec<PreviewLink>) {
-    let styles = MarkdownStyles::from_theme(&app.theme);
-    let theme = app.theme.clone();
-    let mut highlight = |lang: Option<&str>, code: &str| app.highlight_code_block(lang, code);
-    let content_width = width
-        .saturating_sub(preview_change_gutter_width(change_bars))
-        .max(1);
-    let mut renderer = MarkdownRenderer::new(
-        &styles,
-        &theme,
-        content_width,
-        base_dir,
-        &mut highlight,
-        change_bars,
-    );
-    renderer.run(text);
-    renderer.finish()
-}
-
-struct MarkdownRenderer<'a> {
-    styles: &'a MarkdownStyles,
-    theme: &'a crate::config::ResolvedTheme,
-    width: usize,
-    base_dir: Option<PathBuf>,
-    highlight: &'a mut CodeHighlighter<'a>,
-    lines: Vec<Line<'static>>,
-    current: Vec<Span<'static>>,
-    style_stack: Vec<Style>,
-    lists: Vec<MarkdownList>,
-    quotes: Vec<QuoteFrame>,
-    link_urls: Vec<String>,
-    images: Vec<MarkdownImage>,
-    table: Option<MarkdownTable>,
-    code_block: Option<MarkdownCodeBlock>,
-    pending_marker: Option<Span<'static>>,
-    /// True while emitting the body of a completed task-list item.
-    done_task: bool,
-    /// Clickable links collected in content coordinates.
-    links: Vec<PreviewLink>,
-    /// (index into `current`, url) for link spans on the line being built.
-    current_link_marks: Vec<(usize, String)>,
-    change_bars: Option<&'a PreviewChangeBars>,
-    line_change_styles: Vec<Option<Style>>,
-    current_change_style: Option<Style>,
-}
-
-impl<'a> MarkdownRenderer<'a> {
-    fn new(
-        styles: &'a MarkdownStyles,
-        theme: &'a crate::config::ResolvedTheme,
-        width: usize,
-        base_dir: Option<&Path>,
-        highlight: &'a mut CodeHighlighter<'a>,
-        change_bars: Option<&'a PreviewChangeBars>,
-    ) -> Self {
-        MarkdownRenderer {
-            styles,
-            theme,
-            width: width.max(1),
-            base_dir: base_dir.map(Path::to_path_buf),
-            highlight,
-            lines: Vec::new(),
-            current: Vec::new(),
-            style_stack: vec![styles.text],
-            lists: Vec::new(),
-            quotes: Vec::new(),
-            link_urls: Vec::new(),
-            images: Vec::new(),
-            table: None,
-            code_block: None,
-            pending_marker: None,
-            done_task: false,
-            links: Vec::new(),
-            current_link_marks: Vec::new(),
-            change_bars,
-            line_change_styles: Vec::new(),
-            current_change_style: None,
-        }
-    }
-
-    fn run(&mut self, text: &str) {
-        let mut options = Options::empty();
-        options.insert(Options::ENABLE_TABLES);
-        options.insert(Options::ENABLE_TASKLISTS);
-        options.insert(Options::ENABLE_STRIKETHROUGH);
-        options.insert(Options::ENABLE_FOOTNOTES);
-        options.insert(Options::ENABLE_GFM);
-        options.insert(Options::ENABLE_DEFINITION_LIST);
-        options.insert(Options::ENABLE_HEADING_ATTRIBUTES);
-
-        // The current heading level while inside a heading (for band + level style).
-        let mut heading_level: Option<u8> = None;
-        let line_starts = markdown_line_starts(text);
-
-        for (event, range) in Parser::new_ext(text, options).into_offset_iter() {
-            self.note_change_range(&line_starts, range);
-            match event {
-                Event::Start(tag) => match tag {
-                    Tag::Paragraph => {}
-                    Tag::Heading { level, .. } => {
-                        self.blank();
-                        let idx = (level as usize).clamp(1, 6) - 1;
-                        heading_level = Some(level as u8);
-                        self.current.push(Span::styled(
-                            self.styles.heading_marks[idx].to_string(),
-                            self.styles.headings[idx],
-                        ));
-                        self.style_stack.push(self.styles.headings[idx]);
-                    }
-                    Tag::BlockQuote(kind) => {
-                        let callout = kind.map(|k| Callout::from_kind(k, self.theme));
-                        let border = match &callout {
-                            Some(c) => Style::default().fg(c.color).add_modifier(Modifier::BOLD),
-                            None => self.styles.muted,
-                        };
-                        self.quotes.push(QuoteFrame { border });
-                        if let Some(c) = callout {
-                            let title = Style::default().fg(c.color).add_modifier(Modifier::BOLD);
-                            self.current
-                                .push(Span::styled(format!("{} {}", c.icon, c.label), title));
-                            self.flush();
-                        }
-                        self.style_stack.push(self.styles.muted);
-                    }
-                    Tag::CodeBlock(kind) => {
-                        self.blank();
-                        let lang = match kind {
-                            CodeBlockKind::Fenced(lang) => {
-                                let lang = lang.trim();
-                                (!lang.is_empty()).then(|| lang.to_string())
-                            }
-                            CodeBlockKind::Indented => None,
-                        };
-                        self.code_block = Some(MarkdownCodeBlock {
-                            lang,
-                            text: String::new(),
-                        });
-                    }
-                    Tag::List(start) => {
-                        // In a tight list the parent item's text arrives before
-                        // its nested list; flush it onto its own line first.
-                        self.flush();
-                        self.lists.push(MarkdownList {
-                            next: start,
-                            marker_width: 0,
-                        });
-                    }
-                    Tag::Item => {
-                        // Each item's task state is independent; a TaskListMarker
-                        // sets it back on if this item is a completed task.
-                        self.done_task = false;
-                        let depth = self.lists.len();
-                        let marker = match self.lists.last().and_then(|l| l.next) {
-                            Some(next) => format!("{next}. "),
-                            None => markdown_bullet(depth).to_string(),
-                        };
-                        if let Some(list) = self.lists.last_mut() {
-                            list.marker_width = text_width(&marker);
-                        }
-                        // Ordered markers keep the accent color; bullets cycle
-                        // color by nesting depth like markview.
-                        let marker_style = if self.lists.last().and_then(|l| l.next).is_some() {
-                            self.styles.list_marker
-                        } else {
-                            let color = self.styles.list_colors[(depth.saturating_sub(1)) % 4];
-                            Style::default().fg(color).add_modifier(Modifier::BOLD)
-                        };
-                        self.pending_marker = Some(Span::styled(marker, marker_style));
-                    }
-                    Tag::FootnoteDefinition(label) => {
-                        self.blank();
-                        self.current
-                            .push(Span::styled(format!("[{label}] "), self.styles.muted));
-                    }
-                    Tag::DefinitionList | Tag::DefinitionListTitle => {}
-                    Tag::DefinitionListDefinition => {
-                        self.current
-                            .push(Span::styled("  ".to_string(), self.styles.muted));
-                    }
-                    Tag::Table(_) => self.table = Some(MarkdownTable::default()),
-                    Tag::TableHead | Tag::TableRow => {
-                        if let Some(table) = self.table.as_mut() {
-                            table.current_row.clear();
-                        }
-                    }
-                    Tag::TableCell => {
-                        if let Some(table) = self.table.as_mut() {
-                            table.current_cell.clear();
-                            table.in_cell = true;
-                        }
-                    }
-                    Tag::Emphasis => self
-                        .style_stack
-                        .push(self.top_style().add_modifier(Modifier::ITALIC)),
-                    Tag::Strong => self
-                        .style_stack
-                        .push(self.top_style().add_modifier(Modifier::BOLD)),
-                    Tag::Strikethrough => self
-                        .style_stack
-                        .push(self.top_style().add_modifier(Modifier::CROSSED_OUT)),
-                    Tag::Superscript | Tag::Subscript => self
-                        .style_stack
-                        .push(self.top_style().add_modifier(Modifier::DIM)),
-                    Tag::Link { dest_url, .. } => {
-                        self.link_urls.push(dest_url.to_string());
-                        self.style_stack.push(self.styles.link);
-                    }
-                    Tag::Image { dest_url, .. } => {
-                        self.images.push(MarkdownImage {
-                            dest_url: dest_url.to_string(),
-                            alt: String::new(),
-                        });
-                        self.style_stack.push(self.styles.link);
-                    }
-                    Tag::HtmlBlock | Tag::MetadataBlock(_) => {
-                        self.style_stack.push(self.styles.muted)
-                    }
-                },
-                Event::End(end) => match end {
-                    TagEnd::Paragraph => {
-                        self.flush();
-                        self.blank();
-                    }
-                    TagEnd::Heading(_) => {
-                        self.style_stack.pop();
-                        let level = heading_level.take().unwrap_or(1);
-                        self.flush_heading(level);
-                        self.blank();
-                    }
-                    TagEnd::BlockQuote(_) => {
-                        self.style_stack.pop();
-                        self.flush();
-                        // Drop the dangling border-only line the closing blank
-                        // separator left after the quote's last content line.
-                        if self.lines.last().is_some_and(markdown_line_is_quote_border) {
-                            self.lines.pop();
-                            self.line_change_styles.pop();
-                        }
-                        self.quotes.pop();
-                        self.blank();
-                    }
-                    TagEnd::CodeBlock => {
-                        if let Some(block) = self.code_block.take() {
-                            self.render_code_block(block);
-                        }
-                        self.blank();
-                    }
-                    TagEnd::List(_) => {
-                        self.lists.pop();
-                        self.blank();
-                    }
-                    TagEnd::Item => {
-                        self.flush();
-                        self.pending_marker = None;
-                        if let Some(list) = self.lists.last_mut() {
-                            if let Some(next) = list.next.as_mut() {
-                                *next = next.saturating_add(1);
-                            }
-                        }
-                    }
-                    TagEnd::FootnoteDefinition
-                    | TagEnd::DefinitionList
-                    | TagEnd::DefinitionListTitle
-                    | TagEnd::DefinitionListDefinition => {
-                        self.flush();
-                    }
-                    TagEnd::Table => {
-                        if let Some(table) = self.table.take() {
-                            self.render_table(table);
-                            self.blank();
-                        }
-                    }
-                    TagEnd::TableHead | TagEnd::TableRow => {
-                        if let Some(table) = self.table.as_mut() {
-                            table.rows.push(std::mem::take(&mut table.current_row));
-                        }
-                    }
-                    TagEnd::TableCell => {
-                        if let Some(table) = self.table.as_mut() {
-                            let cell = trim_cell_spans(std::mem::take(&mut table.current_cell));
-                            table.current_row.push(cell);
-                            table.in_cell = false;
-                        }
-                    }
-                    TagEnd::Emphasis
-                    | TagEnd::Strong
-                    | TagEnd::Strikethrough
-                    | TagEnd::Superscript
-                    | TagEnd::Subscript
-                    | TagEnd::HtmlBlock
-                    | TagEnd::MetadataBlock(_) => {
-                        self.style_stack.pop();
-                    }
-                    TagEnd::Link => {
-                        self.style_stack.pop();
-                        // Push the URL suffix while the link is still active so
-                        // it becomes part of the same clickable region.
-                        if let Some(url) = self.link_urls.last().cloned() {
-                            self.push_text(&format!(" ({url})"), self.styles.muted);
-                        }
-                        self.link_urls.pop();
-                    }
-                    TagEnd::Image => {
-                        self.style_stack.pop();
-                        if let Some(image) = self.images.pop() {
-                            self.render_image(image);
-                        }
-                    }
-                },
-                Event::Text(text) => {
-                    if let Some(image) = self.images.last_mut() {
-                        image.alt.push_str(text.as_ref());
-                    } else if let Some(block) = self.code_block.as_mut() {
-                        block.text.push_str(text.as_ref());
-                    } else {
-                        let style = self.top_style();
-                        self.push_text(text.as_ref(), style);
-                    }
-                }
-                Event::Code(text) | Event::InlineMath(text) | Event::DisplayMath(text) => {
-                    if let Some(image) = self.images.last_mut() {
-                        image.alt.push_str(text.as_ref());
-                    } else {
-                        self.push_inline_code(text.as_ref());
-                    }
-                }
-                Event::Html(text) | Event::InlineHtml(text) => {
-                    self.push_text(text.as_ref(), self.styles.muted)
-                }
-                Event::FootnoteReference(label) => {
-                    self.push_text(&format!("[{label}]"), self.styles.muted)
-                }
-                Event::SoftBreak => {
-                    if let Some(image) = self.images.last_mut() {
-                        image.alt.push(' ');
-                    } else {
-                        let style = self.top_style();
-                        self.push_text(" ", style);
-                    }
-                }
-                Event::HardBreak => self.flush(),
-                Event::Rule => {
-                    self.blank();
-                    // A centered diamond ornament on a full-width rule.
-                    let mid = self.width / 2;
-                    let left = "─".repeat(mid);
-                    let right = "─".repeat(self.width.saturating_sub(mid + 1));
-                    self.push_current_line(Line::from(Span::styled(
-                        format!("{left}◇{right}"),
-                        self.styles.rule,
-                    )));
-                    self.blank();
-                }
-                Event::TaskListMarker(done) => {
-                    // Completed items get dimmed + struck-through body text.
-                    self.done_task = done;
-                    let (glyph, style) = if done {
-                        ("▣ ", self.styles.check_done)
-                    } else {
-                        ("▢ ", self.styles.check_todo)
-                    };
-                    if self.pending_marker.is_some() {
-                        if let Some(list) = self.lists.last_mut() {
-                            list.marker_width = text_width(glyph);
-                        }
-                        self.pending_marker = Some(Span::styled(glyph.to_string(), style));
-                    } else {
-                        self.push_text(glyph, style);
-                    }
-                }
-            }
-        }
-    }
-
-    fn finish(mut self) -> (Vec<Line<'static>>, Vec<PreviewLink>) {
-        self.flush();
-        while self.lines.last().is_some_and(markdown_line_is_blank) {
-            self.lines.pop();
-            self.line_change_styles.pop();
-        }
-        if self.lines.is_empty() {
-            self.push_line(Line::from(""), None);
-        }
-        self.add_change_gutters();
-        (self.lines, self.links)
-    }
-
-    fn top_style(&self) -> Style {
-        self.style_stack.last().copied().unwrap_or_default()
-    }
-
-    fn note_change_range(&mut self, line_starts: &[usize], range: std::ops::Range<usize>) {
-        let Some(change_bars) = self.change_bars else {
-            return;
-        };
-        if range.is_empty() {
-            return;
-        }
-        let start = markdown_line_for_byte(line_starts, range.start);
-        let end = markdown_line_for_byte(line_starts, range.end.saturating_sub(1));
-        for line in start..=end {
-            if let Some(style) = change_bars.styles.get(&line) {
-                self.current_change_style.get_or_insert(*style);
-            }
-        }
-    }
-
-    fn push_line(&mut self, line: Line<'static>, style: Option<Style>) {
-        self.lines.push(line);
-        self.line_change_styles.push(style);
-    }
-
-    fn push_current_line(&mut self, line: Line<'static>) {
-        let style = self.current_change_style.take();
-        self.push_line(line, style);
-    }
-
-    fn add_change_gutters(&mut self) {
-        let Some(change_bars) = self.change_bars else {
-            return;
-        };
-        for (idx, line) in self.lines.iter_mut().enumerate() {
-            let style = self.line_change_styles.get(idx).copied().flatten();
-            let marker = match style {
-                Some(style) => Span::styled(change_bars.marker.clone(), style),
-                None => Span::raw(" ".repeat(change_bars.marker_width)),
-            };
-            let mut spans = vec![marker, Span::raw(" ")];
-            spans.extend(std::mem::take(&mut line.spans));
-            line.spans = spans;
-        }
-        let gutter = change_bars.gutter_width();
-        for link in &mut self.links {
-            link.col = link.col.saturating_add(gutter);
-        }
-    }
-
-    /// Leading spans repeated at the start of every visual line: block-quote
-    /// borders followed by the list marker (or hanging-indent padding).
-    fn line_prefix(&mut self) -> Vec<Span<'static>> {
-        let mut prefix = Vec::new();
-        for quote in &self.quotes {
-            prefix.push(Span::styled("▎ ".to_string(), quote.border));
-        }
-        let depth = self.lists.len();
-        if depth > 0 {
-            let indent = 2 * (depth - 1);
-            if let Some(marker) = self.pending_marker.take() {
-                if indent > 0 {
-                    prefix.push(Span::styled(" ".repeat(indent), self.styles.text));
-                }
-                prefix.push(marker);
-            } else {
-                let cont = indent + self.lists.last().map_or(0, |l| l.marker_width);
-                if cont > 0 {
-                    prefix.push(Span::styled(" ".repeat(cont), self.styles.text));
-                }
-            }
-        }
-        prefix
-    }
-
-    fn flush(&mut self) {
-        if self.current.is_empty() {
-            self.current_link_marks.clear();
-            return;
-        }
-        let line_idx = self.lines.len();
-        let prefix = self.line_prefix();
-        let prefix_w: usize = prefix.iter().map(|s| text_width(&s.content)).sum();
-        if !self.current_link_marks.is_empty() {
-            let mut col = prefix_w;
-            let mut cols = Vec::with_capacity(self.current.len());
-            for span in &self.current {
-                cols.push(col);
-                col += text_width(&span.content);
-            }
-            let span_w = |i: usize| self.current.get(i).map_or(0, |s| text_width(&s.content));
-            // Coalesce consecutive same-url spans into one clickable region.
-            let mut marks = std::mem::take(&mut self.current_link_marks)
-                .into_iter()
-                .peekable();
-            while let Some((idx, url)) = marks.next() {
-                let Some(&start) = cols.get(idx) else {
-                    continue;
-                };
-                let mut end = start + span_w(idx);
-                while let Some((nidx, nurl)) = marks.peek() {
-                    if *nurl == url && cols.get(*nidx) == Some(&end) {
-                        end += span_w(*nidx);
-                        marks.next();
-                    } else {
-                        break;
-                    }
-                }
-                self.links.push(PreviewLink {
-                    line: line_idx,
-                    col: start,
-                    width: end - start,
-                    url,
-                });
-            }
-        }
-        let mut line = prefix;
-        line.append(&mut self.current);
-        self.push_current_line(Line::from(line));
-    }
-
-    fn push_prefixed_line(&mut self, spans: &mut Vec<Span<'static>>, style: Option<Style>) {
-        let mut line = self.line_prefix();
-        line.append(spans);
-        self.push_line(Line::from(line), style);
-    }
-
-    /// Emit the current heading line on a full-width band tinted with the
-    /// heading's own color (markview-style colored heading bars).
-    fn flush_heading(&mut self, level: u8) {
-        // Heading links aren't tracked as clickable; drop any pending marks.
-        self.current_link_marks.clear();
-        if self.current.is_empty() {
-            return;
-        }
-        let idx = (level as usize).clamp(1, 6) - 1;
-        let mut spans = self.line_prefix();
-        spans.append(&mut self.current);
-        if let Some(band) = self.styles.heading_bands[idx] {
-            for span in &mut spans {
-                span.style = span.style.bg(band);
-            }
-            let used: usize = spans.iter().map(|s| text_width(&s.content)).sum();
-            if used < self.width {
-                spans.push(Span::styled(
-                    " ".repeat(self.width - used),
-                    Style::default().bg(band),
-                ));
-            }
-        }
-        self.push_current_line(Line::from(spans));
-    }
-
-    fn blank(&mut self) {
-        if self.quotes.is_empty() {
-            if !self.lines.last().is_some_and(markdown_line_is_blank) {
-                self.push_line(Line::from(""), None);
-            }
-        } else {
-            // Continue the quote border through the blank separator line.
-            let prefix: Vec<Span<'static>> = self
-                .quotes
-                .iter()
-                .map(|q| Span::styled("▎".to_string(), q.border))
-                .collect();
-            self.push_line(Line::from(prefix), None);
-        }
-    }
-
-    fn push_text(&mut self, text: &str, style: Style) {
-        if let Some(table) = self.table.as_mut() {
-            let cell = text.replace('\n', " ");
-            if !cell.is_empty() {
-                table.current_cell.push(Span::styled(cell, style));
-            }
-            return;
-        }
-        let style = self.done_style(style);
-        let linking = self.link_urls.last().cloned();
-        for (idx, part) in text.split('\n').enumerate() {
-            if idx > 0 {
-                self.flush();
-            }
-            if !part.is_empty() {
-                self.current.push(Span::styled(part.to_string(), style));
-                if let Some(url) = &linking {
-                    self.current_link_marks
-                        .push((self.current.len() - 1, url.clone()));
-                }
-            }
-        }
-    }
-
-    /// Fade and strike a style when inside a completed task-list item.
-    fn done_style(&self, style: Style) -> Style {
-        if self.done_task {
-            style.add_modifier(Modifier::DIM | Modifier::CROSSED_OUT)
-        } else {
-            style
-        }
-    }
-
-    /// Inline code / math as a padded background "chip" (` code `), matching
-    /// markview. In table cells the padding is dropped to keep columns tight,
-    /// but the code keeps its color/background.
-    fn push_inline_code(&mut self, text: &str) {
-        if let Some(table) = self.table.as_mut() {
-            let cell = text.replace('\n', " ");
-            if !cell.is_empty() {
-                table
-                    .current_cell
-                    .push(Span::styled(cell, self.styles.code));
-            }
-            return;
-        }
-        let chip = if self.styles.inline_bg.is_some() {
-            format!(" {} ", text.replace('\n', " "))
-        } else {
-            text.replace('\n', " ")
-        };
-        let style = self.done_style(self.styles.code);
-        self.current.push(Span::styled(chip, style));
-    }
-
-    fn render_code_block(&mut self, block: MarkdownCodeBlock) {
-        let highlighted = (self.highlight)(block.lang.as_deref(), &block.text);
-        let bg = self.styles.code_bg;
-        let code_lines: Vec<&str> = block.text.lines().collect();
-
-        // Shrink-wrap the panel to its content (like display: inline-block):
-        // the wider of the longest code line and the language label, rather than
-        // stretching to the viewport. PAD columns of inner padding each side, a
-        // minimum width (≈45% of the viewport) so short snippets still read as a
-        // panel, and a blank padded row below for vertical breathing room.
-        const PAD: usize = 2;
-        let min_width = (self.width * 45 / 100).min(self.width);
-        let label = block.lang.as_deref().unwrap_or("code");
-        let code_max = code_lines.iter().map(|l| text_width(l)).max().unwrap_or(0);
-        let width = (PAD + code_max + PAD)
-            .max(PAD + text_width(label) + PAD)
-            .max(min_width)
-            .min(self.width);
-        let change_style = self.current_change_style.take();
-        let pad_style = Style::default().bg_opt(bg);
-        let pad = |n: usize| Span::styled(" ".repeat(n), pad_style);
-
-        // Header row: language label near the right edge, with a one-column
-        // trailing space before the panel border.
-        let header = vec![
-            pad(width.saturating_sub(text_width(label) + 1)),
-            Span::styled(format!("{label} "), self.styles.code_lang),
-        ];
-        self.push_line(Line::from(header), change_style);
-
-        for (idx, raw) in code_lines.iter().enumerate() {
-            let mut spans = vec![pad(PAD)];
-            match highlighted.as_ref().and_then(|rows| rows.get(idx)) {
-                Some(row) => {
-                    for span in row {
-                        let mut style = span.style;
-                        if let Some(bg) = bg {
-                            style = style.bg(bg);
-                        }
-                        spans.push(Span::styled(span.content.to_string(), style));
-                    }
-                }
-                None => {
-                    let mut style = Style::default().fg(self.styles.code.fg.unwrap_or_default());
-                    if let Some(bg) = bg {
-                        style = style.bg(bg);
-                    }
-                    spans.push(Span::styled(raw.to_string(), style));
-                }
-            }
-            pad_row(&mut spans, width, bg);
-            self.push_line(Line::from(spans), change_style);
-        }
-        self.push_line(
-            Line::from(Span::styled(" ".repeat(width), pad_style)),
-            change_style,
-        );
-    }
-
-    fn render_image(&mut self, image: MarkdownImage) {
-        if self.table.is_some() {
-            let label = image_fallback_label(&image.alt, &image.dest_url);
-            self.push_text(&label, self.styles.muted);
-            return;
-        }
-        self.flush();
-        let change_style = self.current_change_style.take();
-        let Some(path) = self.local_image_path(&image.dest_url) else {
-            let mut line = vec![Span::styled(
-                image_fallback_label(&image.alt, &image.dest_url),
-                self.styles.muted,
-            )];
-            self.push_prefixed_line(&mut line, change_style);
-            return;
-        };
-        let bg = self
-            .theme
-            .background
-            .or(self.theme.background_panel)
-            .unwrap_or(Color::Black);
-        let Some(image_lines) = image_preview_lines(&path, self.width, 20, bg) else {
-            let mut line = vec![Span::styled(
-                image_fallback_label(&image.alt, &image.dest_url),
-                self.styles.muted,
-            )];
-            self.push_prefixed_line(&mut line, change_style);
-            return;
-        };
-        let alt = image.alt.trim();
-        if !alt.is_empty() {
-            let mut caption = vec![Span::styled(format!("image: {alt}"), self.styles.muted)];
-            self.push_prefixed_line(&mut caption, change_style);
-        }
-        for line in image_lines {
-            let mut spans = line.spans;
-            self.push_prefixed_line(&mut spans, change_style);
-        }
-        self.blank();
-    }
-
-    fn local_image_path(&self, url: &str) -> Option<PathBuf> {
-        if url.is_empty() || url.starts_with('#') || url.starts_with("data:") || url.contains("://")
-        {
-            return None;
-        }
-        let path = url
-            .split(['?', '#'])
-            .next()
-            .filter(|path| !path.is_empty())?;
-        let path = PathBuf::from(path);
-        let path = if path.is_absolute() {
-            path
-        } else {
-            self.base_dir.as_ref()?.join(path)
-        };
-        path.is_file().then_some(path)
-    }
-
-    fn render_table(&mut self, table: MarkdownTable) {
-        let change_style = self.current_change_style.take();
-        let cols = table.rows.iter().map(Vec::len).max().unwrap_or(0);
-        if cols == 0 {
-            return;
-        }
-        let mut widths = vec![0usize; cols];
-        for row in &table.rows {
-            for (idx, cell) in row.iter().enumerate() {
-                widths[idx] = widths[idx].max(cell_width(cell));
-            }
-        }
-        for width in &mut widths {
-            *width = (*width).max(1);
-        }
-
-        let border = self.styles.table_border;
-        let empty: TableCell = Vec::new();
-        self.push_line(
-            Line::from(Span::styled(table_border("╭", "┬", "╮", &widths), border)),
-            change_style,
-        );
-        for (row_idx, row) in table.rows.iter().enumerate() {
-            let is_head = row_idx == 0;
-            let mut spans = vec![Span::styled("│".to_string(), border)];
-            for (col, width) in widths.iter().enumerate().take(cols) {
-                let cell = row.get(col).unwrap_or(&empty);
-                spans.push(Span::styled(" ".to_string(), self.styles.text));
-                for span in cell {
-                    let style = self.table_cell_style(span.style, is_head);
-                    spans.push(Span::styled(span.content.to_string(), style));
-                }
-                let pad = width.saturating_sub(cell_width(cell));
-                spans.push(Span::styled(
-                    format!("{} ", " ".repeat(pad)),
-                    self.styles.text,
-                ));
-                spans.push(Span::styled("│".to_string(), border));
-            }
-            self.push_line(Line::from(spans), change_style);
-            if is_head && table.rows.len() > 1 {
-                self.push_line(
-                    Line::from(Span::styled(table_border("├", "┼", "┤", &widths), border)),
-                    change_style,
-                );
-            }
-        }
-        self.push_line(
-            Line::from(Span::styled(table_border("╰", "┴", "╯", &widths), border)),
-            change_style,
-        );
-    }
-
-    /// Style a table cell span. Header cells make plain body text accent-bold
-    /// (like a header) while leaving inline code / links their own color, and
-    /// bolden special spans so the header row still reads as a header.
-    fn table_cell_style(&self, span: Style, is_head: bool) -> Style {
-        if !is_head {
-            return span;
-        }
-        if span.fg == self.styles.text.fg {
-            self.styles.table_head.add_modifier(span.add_modifier)
-        } else {
-            span.add_modifier(Modifier::BOLD)
-        }
-    }
-}
-
-fn markdown_line_starts(text: &str) -> Vec<usize> {
-    let mut starts = vec![0];
-    for (idx, byte) in text.bytes().enumerate() {
-        if byte == b'\n' {
-            starts.push(idx + 1);
-        }
-    }
-    starts
-}
-
-fn markdown_line_for_byte(starts: &[usize], byte: usize) -> usize {
-    match starts.binary_search(&byte) {
-        Ok(index) => index + 1,
-        Err(index) => index.max(1),
-    }
-}
-
-fn image_fallback_label(alt: &str, url: &str) -> String {
-    let alt = alt.trim();
-    if alt.is_empty() {
-        format!("image: {url}")
-    } else {
-        format!("image: {alt} ({url})")
-    }
-}
-
 fn image_file_preview_lines(
     path: &Path,
     max_width: usize,
@@ -4987,92 +4665,6 @@ fn color_rgb(color: Color) -> Option<(u8, u8, u8)> {
         Color::White => Some((255, 255, 255)),
         _ => None,
     }
-}
-
-/// Total display width of a table cell's spans.
-fn cell_width(cell: &[Span<'_>]) -> usize {
-    cell.iter().map(|s| text_width(&s.content)).sum()
-}
-
-/// Trim leading/trailing whitespace across a cell's styled spans.
-fn trim_cell_spans(mut cell: TableCell) -> TableCell {
-    while let Some(first) = cell.first_mut() {
-        let trimmed = first.content.trim_start();
-        if trimmed.is_empty() {
-            cell.remove(0);
-        } else {
-            if trimmed.len() != first.content.len() {
-                first.content = trimmed.to_string().into();
-            }
-            break;
-        }
-    }
-    while let Some(last) = cell.last_mut() {
-        let trimmed = last.content.trim_end();
-        if trimmed.is_empty() {
-            cell.pop();
-        } else {
-            if trimmed.len() != last.content.len() {
-                last.content = trimmed.to_string().into();
-            }
-            break;
-        }
-    }
-    cell
-}
-
-/// Depth-aware bullet marker for unordered list items (1-based depth).
-fn markdown_bullet(depth: usize) -> &'static str {
-    match depth {
-        0 | 1 => "● ",
-        2 => "○ ",
-        3 => "◆ ",
-        _ => "▸ ",
-    }
-}
-
-/// Pad a row of spans with a trailing background block out to `width`.
-fn pad_row(spans: &mut Vec<Span<'static>>, width: usize, bg: Option<Color>) {
-    let Some(bg) = bg else { return };
-    let used: usize = spans.iter().map(|s| text_width(&s.content)).sum();
-    if used < width {
-        spans.push(Span::styled(
-            " ".repeat(width - used),
-            Style::default().bg(bg),
-        ));
-    }
-}
-
-fn markdown_line_is_blank(line: &Line<'_>) -> bool {
-    line.spans.iter().all(|span| span.content.trim().is_empty())
-}
-
-/// True when a line contains only block-quote border glyphs and whitespace
-/// (the continuation border drawn on blank lines inside a quote).
-fn markdown_line_is_quote_border(line: &Line<'_>) -> bool {
-    let mut saw_border = false;
-    for span in &line.spans {
-        for ch in span.content.chars() {
-            match ch {
-                '▎' => saw_border = true,
-                c if c.is_whitespace() => {}
-                _ => return false,
-            }
-        }
-    }
-    saw_border
-}
-
-fn table_border(left: &str, middle: &str, right: &str, widths: &[usize]) -> String {
-    let mut line = String::from(left);
-    for (idx, width) in widths.iter().enumerate() {
-        if idx > 0 {
-            line.push_str(middle);
-        }
-        line.push_str(&"─".repeat(width.saturating_add(2)));
-    }
-    line.push_str(right);
-    line
 }
 
 /// Small extension so background colors that are `Option<Color>` (transparent
@@ -5992,13 +5584,17 @@ fn draw_review_editor_overlay(frame: &mut Frame, app: &mut App) {
         .borders(Borders::ALL)
         .border_type(ratatui::widgets::BorderType::Rounded)
         .border_style(Style::default().fg(app.theme.border_active));
-    if let Some(bg) = app.theme.background_panel.or(app.theme.background) {
+    let editor_bg = app.theme.background;
+    if let Some(bg) = editor_bg {
         block = block.style(Style::default().bg(bg));
     }
 
     let inner = block.inner(popup_area);
     frame.render_widget(block, popup_area);
-    frame.render_widget(Paragraph::new(Line::from(footer_spans)), footer_area);
+    frame.render_widget(
+        Paragraph::new(Line::from(footer_spans)).style(Style::default().bg_opt(editor_bg)),
+        footer_area,
+    );
 
     let text_area = inner;
     let padded_text_area = text_area.inner(ratatui::layout::Margin {
@@ -6013,6 +5609,7 @@ fn draw_review_editor_overlay(frame: &mut Frame, app: &mut App) {
 
     let visible_lines = text_area.height.max(1) as usize;
     let wrap_width = text_area.width.max(1) as usize;
+    app.set_review_editor_wrap_width(wrap_width);
 
     let mut visual_lines: Vec<String> = Vec::new();
     let mut cursor_visual_row = 0usize;
@@ -6051,12 +5648,15 @@ fn draw_review_editor_overlay(frame: &mut Frame, app: &mut App) {
                 } else {
                     line.clone()
                 },
-                Style::default().fg(app.theme.text),
+                Style::default().fg(app.theme.text).bg_opt(editor_bg),
             ))
         })
         .collect();
 
-    frame.render_widget(Paragraph::new(text_lines), text_area);
+    frame.render_widget(
+        Paragraph::new(text_lines).style(Style::default().bg_opt(editor_bg)),
+        text_area,
+    );
 
     let cursor_screen_row = cursor_visual_row.saturating_sub(start_row);
     let cursor_x = text_area.x.saturating_add(cursor_visual_col as u16).min(
@@ -6211,6 +5811,289 @@ fn draw_zen_progress(frame: &mut Frame, app: &mut App) {
     let text = Paragraph::new(label).style(Style::default().fg(app.theme.text));
 
     frame.render_widget(text, progress_area);
+}
+
+fn review_sync_action_label(action: ReviewSyncAction) -> &'static str {
+    match action {
+        ReviewSyncAction::Sync => "Sync with remote",
+        ReviewSyncAction::Pull => "Pull from remote",
+        ReviewSyncAction::Push => "Push to remote",
+    }
+}
+
+fn draw_review_remote_picker(frame: &mut Frame, app: &mut App) {
+    let Some(picker) = app.review_remote_picker_render().cloned() else {
+        app.set_review_remote_picker_hits(Vec::new());
+        return;
+    };
+    let query = picker.query.trim().to_ascii_lowercase();
+    let filtered = picker
+        .remotes
+        .iter()
+        .enumerate()
+        .filter(|(_, remote)| {
+            query.is_empty()
+                || remote.name.to_ascii_lowercase().contains(&query)
+                || remote.label.to_ascii_lowercase().contains(&query)
+        })
+        .collect::<Vec<_>>();
+    let area = frame.area();
+    let list_width = filtered
+        .iter()
+        .map(|(_, remote)| text_width(&remote.name) + 2 + text_width(&remote.label))
+        .max()
+        .unwrap_or(20)
+        .max(text_width(review_sync_action_label(picker.action)))
+        .min(58);
+    let popup_width = (list_width as u16)
+        .saturating_add(6)
+        .min(area.width.saturating_sub(4))
+        .max(32);
+    let list_height = filtered.len().clamp(1, 8);
+    let popup_height = (list_height as u16)
+        .saturating_add(6)
+        .min(area.height.saturating_sub(2))
+        .max(7);
+    let popup_x = area
+        .x
+        .saturating_add(area.width.saturating_sub(popup_width) / 2);
+    let popup_y = area
+        .y
+        .saturating_add(area.height.saturating_sub(popup_height) / 2);
+    let popup = Rect::new(popup_x, popup_y, popup_width, popup_height);
+    frame.render_widget(Clear, popup);
+
+    let mut block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .title(format!(" {} ", review_sync_action_label(picker.action)))
+        .title_alignment(Alignment::Left)
+        .border_style(Style::default().fg(app.theme.border_active));
+    if let Some(bg) = app.theme.background {
+        block = block.style(Style::default().bg(bg));
+    }
+    frame.render_widget(block.clone(), popup);
+    let inner = block.inner(popup);
+    let padded = inner.inner(Margin {
+        vertical: 1,
+        horizontal: 1,
+    });
+    let content = if padded.width > 0 && padded.height > 0 {
+        padded
+    } else {
+        inner
+    };
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(2), Constraint::Min(1)])
+        .split(content);
+    frame.render_widget(
+        Paragraph::new(vec![picker_input_line(
+            app,
+            &picker.query,
+            "Search remotes…",
+            chunks[0].width,
+        )])
+        .alignment(Alignment::Left),
+        chunks[0],
+    );
+
+    if filtered.is_empty() {
+        app.set_review_remote_picker_hits(Vec::new());
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "No results",
+                Style::default().fg(app.theme.text_muted),
+            )))
+            .alignment(Alignment::Center),
+            chunks[1],
+        );
+        return;
+    }
+
+    let selected_pos = filtered
+        .iter()
+        .position(|(idx, _)| *idx == picker.selected)
+        .unwrap_or(0);
+    let visible_count = list_height.min(chunks[1].height as usize).max(1);
+    let start = selected_pos.saturating_add(1).saturating_sub(visible_count);
+    let end = (start + visible_count).min(filtered.len());
+    let mut hits = Vec::new();
+    let mut lines = Vec::new();
+    for (local_idx, (idx, remote)) in filtered[start..end].iter().enumerate() {
+        let row = chunks[1].y.saturating_add(local_idx as u16);
+        let selected = picker.selected == *idx || app.review_remote_picker_hover == Some(*idx);
+        let mut style = Style::default().fg(if selected {
+            app.theme.accent
+        } else {
+            app.theme.text
+        });
+        if selected {
+            style = style.add_modifier(Modifier::BOLD);
+        }
+        let label_width = chunks[1].width.saturating_sub(2) as usize;
+        let text = truncate_with_dots(&format!("{}  {}", remote.name, remote.label), label_width);
+        lines.push(Line::from(vec![
+            Span::styled(if selected { "› " } else { "  " }, style),
+            Span::styled(text, style),
+        ]));
+        hits.push(ReviewRemotePickerHit {
+            x: chunks[1].x,
+            y: row,
+            width: chunks[1].width,
+            height: 1,
+            index: *idx,
+        });
+    }
+    app.set_review_remote_picker_hits(hits);
+    frame.render_widget(Paragraph::new(lines), chunks[1]);
+}
+
+fn draw_review_delete_confirmation(frame: &mut Frame, app: &mut App) {
+    let Some(confirmation) = app.review_delete_confirmation_render() else {
+        app.set_review_delete_confirmation_hits(Vec::new());
+        return;
+    };
+    let title = confirmation.title.as_str();
+    let confirm_label = confirmation.confirm_label.as_str();
+    let body_lines = confirmation.body.lines().collect::<Vec<_>>();
+    let footer_label = format!("{confirm_label}    esc cancel");
+    let area = frame.area();
+    let content_width = body_lines
+        .iter()
+        .map(|line| text_width(line))
+        .fold(text_width(title), usize::max)
+        .max(text_width(&footer_label))
+        .min(52);
+    let popup_width = (content_width as u16)
+        .saturating_add(8)
+        .min(area.width.saturating_sub(4))
+        .max(28);
+    let body_capacity = area.height.saturating_sub(6) as usize;
+    let visible_body = body_lines.len().min(body_capacity);
+    let popup_height = (visible_body as u16)
+        .saturating_add(4)
+        .min(area.height.saturating_sub(2))
+        .max(4);
+    let popup_x = area
+        .x
+        .saturating_add(area.width.saturating_sub(popup_width) / 2);
+    let popup_y = area
+        .y
+        .saturating_add(area.height.saturating_sub(popup_height) / 2);
+    let popup_area = Rect::new(popup_x, popup_y, popup_width, popup_height);
+
+    frame.render_widget(Clear, popup_area);
+
+    let border = Style::default().fg(app.theme.error);
+    let title_style = Style::default()
+        .fg(app.theme.error)
+        .add_modifier(Modifier::BOLD);
+    let text_style = Style::default().fg(app.theme.text);
+    let key_style = Style::default()
+        .fg(app.theme.accent)
+        .add_modifier(Modifier::BOLD);
+    let confirm_hover =
+        app.review_delete_confirmation_hover == Some(ReviewDeleteConfirmationAction::Confirm);
+    let cancel_hover =
+        app.review_delete_confirmation_hover == Some(ReviewDeleteConfirmationAction::Cancel);
+    let confirm_key_style = if confirm_hover {
+        Style::default()
+            .fg(app.theme.error)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        key_style
+    };
+    let confirm_label_style = if confirm_hover {
+        Style::default()
+            .fg(app.theme.error)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        text_style
+    };
+    let cancel_label_style = if cancel_hover {
+        Style::default()
+            .fg(app.theme.accent)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        text_style
+    };
+
+    let total_width = popup_width as usize;
+    let content_width = total_width.saturating_sub(4);
+    let title = truncate_with_dots(title, total_width.saturating_sub(4));
+    let title_rule = "─".repeat(total_width.saturating_sub(text_width(&title).saturating_add(4)));
+    let mut lines = Vec::new();
+    lines.push(Line::from(vec![
+        Span::styled("╭ ".to_string(), border),
+        Span::styled(title, title_style),
+        Span::styled(format!(" {title_rule}╮"), border),
+    ]));
+
+    let content_line = |spans: Vec<Span<'static>>| {
+        let used = spans_width(&spans);
+        let mut out = vec![Span::styled("│ ".to_string(), border)];
+        out.extend(spans);
+        out.push(Span::raw(" ".repeat(content_width.saturating_sub(used))));
+        out.push(Span::styled(" │".to_string(), border));
+        Line::from(out)
+    };
+
+    lines.push(content_line(Vec::new()));
+    for line in body_lines
+        .iter()
+        .take(popup_height.saturating_sub(4) as usize)
+    {
+        lines.push(content_line(vec![Span::styled(
+            truncate_with_dots(line, content_width),
+            text_style,
+        )]));
+    }
+    lines.push(content_line(Vec::new()));
+
+    let confirm_text = confirm_label
+        .strip_prefix("d ")
+        .unwrap_or(confirm_label)
+        .to_string();
+    let confirm_width = text_width(confirm_label) as u16;
+    let cancel_label = "esc cancel";
+    let footer_width = text_width(confirm_label) + 4 + text_width(cancel_label);
+    let footer_rule = "─".repeat(total_width.saturating_sub(footer_width.saturating_add(4)));
+    lines.push(Line::from(vec![
+        Span::styled("╰ ".to_string(), border),
+        Span::styled("d".to_string(), confirm_key_style),
+        Span::raw(" "),
+        Span::styled(confirm_text, confirm_label_style),
+        Span::raw("    "),
+        Span::styled("esc".to_string(), key_style),
+        Span::raw(" "),
+        Span::styled("cancel".to_string(), cancel_label_style),
+        Span::styled(format!(" {footer_rule}╯"), border),
+    ]));
+
+    frame.render_widget(Paragraph::new(lines), popup_area);
+
+    let action_y = popup_area
+        .y
+        .saturating_add(popup_area.height.saturating_sub(1));
+    let confirm_x = popup_area.x.saturating_add(2);
+    let cancel_x = confirm_x.saturating_add(confirm_width).saturating_add(4);
+    app.set_review_delete_confirmation_hits(vec![
+        ReviewDeleteConfirmationHit {
+            x: confirm_x,
+            y: action_y,
+            width: confirm_width,
+            height: 1,
+            action: ReviewDeleteConfirmationAction::Confirm,
+        },
+        ReviewDeleteConfirmationHit {
+            x: cancel_x,
+            y: action_y,
+            width: text_width(cancel_label) as u16,
+            height: 1,
+            action: ReviewDeleteConfirmationAction::Cancel,
+        },
+    ]);
 }
 
 fn draw_help_popover(frame: &mut Frame, app: &mut App) {
@@ -6797,6 +6680,36 @@ fn draw_path_popup(frame: &mut Frame, app: &App) {
     frame.render_widget(path_block, popup_area);
 }
 
+fn picker_input_line(app: &App, query: &str, placeholder: &str, width: u16) -> Line<'static> {
+    let prompt_style = Style::default()
+        .fg(app.theme.primary)
+        .add_modifier(Modifier::BOLD);
+    let content_width = width.saturating_sub(3) as usize;
+    let (text, text_style) = if query.is_empty() {
+        (
+            truncate_text(placeholder, content_width),
+            Style::default().fg(app.theme.text_muted),
+        )
+    } else {
+        (
+            truncate_text_from_start(query, content_width),
+            Style::default().fg(app.theme.text),
+        )
+    };
+    Line::from(vec![
+        Span::styled("❯ ", prompt_style),
+        Span::styled(text, text_style),
+        Span::styled(
+            if app.file_filter_cursor_visible {
+                "│"
+            } else {
+                " "
+            },
+            prompt_style,
+        ),
+    ])
+}
+
 fn draw_command_palette_popover(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
     let popup_width = 56u16.min(area.width.saturating_sub(4));
@@ -6842,17 +6755,12 @@ fn draw_command_palette_popover(frame: &mut Frame, app: &mut App) {
         .constraints([Constraint::Length(2), Constraint::Min(1)])
         .split(content);
 
-    let query = app.command_palette_query();
-    let placeholder = "Search for commands…";
-    let (query_text, query_style) = if query.is_empty() {
-        (placeholder, Style::default().fg(app.theme.text_muted))
-    } else {
-        (query, Style::default().fg(app.theme.text))
-    };
-    let input_line = Line::from(vec![
-        Span::styled("› ", Style::default().fg(app.theme.primary)),
-        Span::styled(query_text, query_style),
-    ]);
+    let input_line = picker_input_line(
+        app,
+        app.command_palette_query(),
+        "Search for commands…",
+        chunks[0].width,
+    );
     frame.render_widget(
         Paragraph::new(vec![input_line]).alignment(Alignment::Left),
         chunks[0],
@@ -6952,17 +6860,12 @@ fn draw_theme_picker_popover(frame: &mut Frame, app: &mut App) {
         .constraints([Constraint::Length(2), Constraint::Min(1)])
         .split(content);
 
-    let query = app.theme_picker_query();
-    let placeholder = "Search for themes…";
-    let (query_text, query_style) = if query.is_empty() {
-        (placeholder, Style::default().fg(app.theme.text_muted))
-    } else {
-        (query, Style::default().fg(app.theme.text))
-    };
-    let input_line = Line::from(vec![
-        Span::styled("› ", Style::default().fg(app.theme.primary)),
-        Span::styled(query_text, query_style),
-    ]);
+    let input_line = picker_input_line(
+        app,
+        app.theme_picker_query(),
+        "Search for themes…",
+        chunks[0].width,
+    );
     frame.render_widget(
         Paragraph::new(vec![input_line]).alignment(Alignment::Left),
         chunks[0],
@@ -7068,17 +6971,12 @@ fn draw_file_search_popover(frame: &mut Frame, app: &mut App) {
         .constraints([Constraint::Length(2), Constraint::Min(1)])
         .split(content);
 
-    let query = app.file_search_query();
-    let placeholder = "Search for files…";
-    let (query_text, query_style) = if query.is_empty() {
-        (placeholder, Style::default().fg(app.theme.text_muted))
-    } else {
-        (query, Style::default().fg(app.theme.text))
-    };
-    let input_line = Line::from(vec![
-        Span::styled("› ", Style::default().fg(app.theme.primary)),
-        Span::styled(query_text, query_style),
-    ]);
+    let input_line = picker_input_line(
+        app,
+        app.file_search_query(),
+        "Search for files…",
+        chunks[0].width,
+    );
     frame.render_widget(
         Paragraph::new(vec![input_line]).alignment(Alignment::Left),
         chunks[0],
@@ -7134,11 +7032,126 @@ fn draw_file_search_popover(frame: &mut Frame, app: &mut App) {
     frame.render_stateful_widget(list, chunks[1], &mut state);
 }
 
+fn draw_comment_picker_popover(frame: &mut Frame, app: &mut App) {
+    let area = frame.area();
+    let popup_width = 72u16.min(area.width.saturating_sub(4));
+    let max_height = (area.height / 2).saturating_sub(2).max(6);
+    let indices = app.comment_picker_filtered_indices();
+    let selection = app.comment_picker_selection();
+    let item_height = 1u16;
+    let overhead = 6u16;
+    let max_list_height = max_height.saturating_sub(overhead).max(1) as usize;
+    let list_height = indices.len().max(1).min(max_list_height);
+    let popup_height = (list_height as u16)
+        .saturating_add(overhead)
+        .min(max_height);
+
+    let popup_x = (area.width.saturating_sub(popup_width)) / 2;
+    let desired_y = area.height / 4;
+    let max_y = area.height.saturating_sub(popup_height);
+    let popup_y = desired_y.min(max_y);
+    let popup_area = Rect::new(popup_x, popup_y, popup_width, popup_height);
+
+    frame.render_widget(Clear, popup_area);
+    let mut block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded);
+    block = block.border_style(Style::default().fg(app.theme.border_active));
+    if let Some(bg) = app.theme.background {
+        block = block.style(Style::default().bg(bg));
+    }
+    frame.render_widget(block.clone(), popup_area);
+    let inner = block.inner(popup_area);
+    let padded = inner.inner(Margin {
+        vertical: 1,
+        horizontal: 1,
+    });
+    let content = if padded.width > 0 && padded.height > 0 {
+        padded
+    } else {
+        inner
+    };
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(2), Constraint::Min(1)])
+        .split(content);
+
+    let input_line = picker_input_line(
+        app,
+        app.comment_picker_query(),
+        "Search for comments…",
+        chunks[0].width,
+    );
+    frame.render_widget(
+        Paragraph::new(vec![input_line]).alignment(Alignment::Left),
+        chunks[0],
+    );
+
+    if indices.is_empty() {
+        app.set_comment_picker_list_area(None, 0, 0, 1);
+        let line = Line::from(Span::styled(
+            "No comments",
+            Style::default().fg(app.theme.text_muted),
+        ));
+        frame.render_widget(
+            Paragraph::new(vec![line]).alignment(Alignment::Center),
+            chunks[1],
+        );
+        return;
+    }
+
+    let mut start = 0usize;
+    if selection >= list_height {
+        start = selection + 1 - list_height;
+    }
+    let end = (start + list_height).min(indices.len());
+    let visible = &indices[start..end];
+    let list_width = chunks[1].width.saturating_sub(2) as usize;
+    app.set_comment_picker_list_area(
+        Some((chunks[1].x, chunks[1].y, chunks[1].width, chunks[1].height)),
+        start,
+        visible.len(),
+        item_height,
+    );
+
+    let items: Vec<ListItem> = visible
+        .iter()
+        .filter_map(|idx| app.review_comment_sidebar_item(*idx))
+        .map(|(_file_index, title, location, preview)| {
+            let target = if location.is_empty() {
+                title
+            } else {
+                format!("{title} {location}")
+            };
+            let label = truncate_text(&format!("{target} - {preview}"), list_width);
+            ListItem::new(Line::from(Span::styled(
+                label,
+                Style::default().fg(app.theme.text),
+            )))
+        })
+        .collect();
+
+    let mut state = ListState::default();
+    let selection_in_view = selection.saturating_sub(start);
+    state.select(Some(selection_in_view.min(visible.len().saturating_sub(1))));
+    let mut highlight_style = Style::default().fg(app.theme.accent);
+    if let Some(bg) = app.theme.background_element.or(app.theme.background_panel) {
+        highlight_style = highlight_style.bg(bg);
+    }
+    let list = List::new(items).highlight_style(highlight_style);
+    frame.render_stateful_widget(list, chunks[1], &mut state);
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{counted_binding_label, MarkdownRenderer, MarkdownStyles};
+    use super::counted_binding_label;
     use crate::app::{App, SelectionToolbarAction, ViewMode};
     use crate::config::ResolvedTheme;
+    use crate::markdown::{
+        markdown_line_is_quote_border, markdown_preview_lines as render_markdown_preview_lines,
+        MarkdownChangeBars, PreviewLink,
+    };
     use crate::structured_preview::StructuredPreviewKind;
     use crate::syntax::SyntaxSide;
     use oyo_core::MultiFileDiff;
@@ -7163,13 +7176,9 @@ mod tests {
         md: &str,
         width: usize,
         theme: ResolvedTheme,
-    ) -> (Vec<Line<'static>>, Vec<super::PreviewLink>) {
-        let styles = MarkdownStyles::from_theme(&theme);
+    ) -> (Vec<Line<'static>>, Vec<PreviewLink>) {
         let mut highlight = |_lang: Option<&str>, _code: &str| None;
-        let mut renderer =
-            MarkdownRenderer::new(&styles, &theme, width, None, &mut highlight, None);
-        renderer.run(md);
-        renderer.finish()
+        render_markdown_preview_lines(md, &theme, width, None, &mut highlight, None)
     }
 
     /// An opaque RGB theme so background-dependent features (heading bands,
@@ -7437,6 +7446,7 @@ mod tests {
             "new\n".to_string(),
         );
         let mut app = App::new(multi, ViewMode::UnifiedPane, 50, false, None);
+        app.set_review_persist_enabled(false);
         app.enable_review_mode();
         app.start_line_comment();
         app.review_insert_char('x');
@@ -7471,6 +7481,7 @@ mod tests {
             vec![0, 2],
         );
         let mut app = App::new(multi, ViewMode::Preview, 50, false, None);
+        app.set_review_persist_enabled(false);
         app.enable_review_mode();
         assert!(app.start_file_comment());
         app.review_insert_char('o');
@@ -7495,6 +7506,196 @@ mod tests {
         assert!(app.review_file_comment_hit.is_some());
     }
 
+    fn draw_diff_snapshot(app: &mut App) -> (Vec<String>, Vec<Vec<Style>>) {
+        let backend = TestBackend::new(80, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| super::draw_diff_view(frame, app, Rect::new(0, 0, 80, 12)))
+            .unwrap();
+        let area = terminal.backend().buffer().area;
+        let mut lines = Vec::new();
+        let mut styles = Vec::new();
+        for y in 0..area.height {
+            let mut line = String::new();
+            let mut row_styles = Vec::new();
+            for x in 0..area.width {
+                let cell = &terminal.backend().buffer()[(x, y)];
+                let symbol = cell.symbol();
+                if symbol.is_ascii() {
+                    line.push_str(symbol);
+                } else {
+                    line.push(' ');
+                }
+                row_styles.push(cell.style());
+            }
+            lines.push(line);
+            styles.push(row_styles);
+        }
+        (lines, styles)
+    }
+
+    fn rendered_diff_with_comment(mode: ViewMode) -> (App, Vec<String>) {
+        let multi = MultiFileDiff::from_file_pair(
+            std::path::PathBuf::from("README.md"),
+            std::path::PathBuf::from("README.md"),
+            "old\n".to_string(),
+            "new\n".to_string(),
+        );
+        let mut app = App::new(multi, mode, 80, false, None);
+        app.set_review_persist_enabled(false);
+        app.enable_review_mode();
+        app.start_line_comment();
+        for ch in "hello".chars() {
+            app.review_insert_char(ch);
+        }
+        app.review_save_editor();
+
+        let (lines, _) = draw_diff_snapshot(&mut app);
+        (app, lines)
+    }
+
+    fn text_pos(lines: &[String], needle: &str) -> Option<(u16, u16)> {
+        lines
+            .iter()
+            .enumerate()
+            .find_map(|(y, line)| line.find(needle).map(|x| (x as u16, y as u16)))
+    }
+
+    fn mark_pr_target(app: &mut App) {
+        app.set_review_target_metadata(Some(crate::app::review::ReviewTargetMetadata {
+            label: "PR".to_string(),
+            vcs: "git".to_string(),
+            jj_change_id: None,
+            jj_commit_id: None,
+            git_base_ref: None,
+            git_head_ref: None,
+            git_base_commit: None,
+            git_head_commit: None,
+            branch: None,
+            pr_provider: Some("github".to_string()),
+            pr_repo: Some("owner/repo".to_string()),
+            pr_number: Some(1),
+            author: None,
+            timestamp: None,
+            bookmarks: None,
+        }));
+    }
+
+    fn assert_review_card_action_hover(mode: ViewMode) {
+        let (mut app, lines) = rendered_diff_with_comment(mode);
+        let text = lines.join("\n");
+        assert!(text.contains("ia edit"), "diff text: {text:?}");
+        assert!(text.contains("xa delete"), "diff text: {text:?}");
+
+        let (edit_x, edit_y) = text_pos(&lines, "ia edit").expect("edit label");
+        assert!(app.update_topbar_hover(edit_x + 3, edit_y));
+        let (hover_lines, hover_styles) = draw_diff_snapshot(&mut app);
+        let (edit_x, edit_y) = text_pos(&hover_lines, "ia edit").expect("edit label");
+        assert_eq!(
+            hover_styles[edit_y as usize][edit_x as usize + 3].fg,
+            Some(app.theme.accent)
+        );
+
+        let (delete_x, delete_y) = text_pos(&hover_lines, "xa delete").expect("delete label");
+        assert!(app.update_topbar_hover(delete_x + 3, delete_y));
+        let (hover_lines, hover_styles) = draw_diff_snapshot(&mut app);
+        let (delete_x, delete_y) = text_pos(&hover_lines, "xa delete").expect("delete label");
+        assert_eq!(
+            hover_styles[delete_y as usize][delete_x as usize + 3].fg,
+            Some(app.theme.error)
+        );
+    }
+
+    #[test]
+    fn unified_review_card_shows_edit_action() {
+        assert_review_card_action_hover(ViewMode::UnifiedPane);
+    }
+
+    #[test]
+    fn split_review_card_shows_edit_action() {
+        assert_review_card_action_hover(ViewMode::Split);
+    }
+
+    #[test]
+    fn pr_comment_view_shows_edit_action_for_editable_comments() {
+        let multi = MultiFileDiff::from_file_pair(
+            std::path::PathBuf::from("README.md"),
+            std::path::PathBuf::from("README.md"),
+            "old\n".to_string(),
+            "new\n".to_string(),
+        );
+        let mut app = App::new(multi, ViewMode::Preview, 80, false, None);
+        app.set_review_persist_enabled(false);
+        app.enable_review_mode();
+        mark_pr_target(&mut app);
+        app.start_pull_request_comment();
+        for ch in "hello".chars() {
+            app.review_insert_char(ch);
+        }
+        app.review_save_editor();
+        app.open_pr_comments_in_current_tab(None);
+
+        let backend = TestBackend::new(80, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| super::render_preview(frame, &mut app, Rect::new(0, 0, 80, 10)))
+            .unwrap();
+        let text = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(text.contains("ia edit"), "preview text: {text:?}");
+        assert!(text.contains("xa delete"), "preview text: {text:?}");
+        assert!(text.contains("ra reply"), "preview text: {text:?}");
+        let edit_hit = app
+            .pr_comment_hits
+            .iter()
+            .find(|hit| matches!(hit.action, crate::app::review::PrCommentHitAction::Edit(_)))
+            .copied()
+            .expect("edit hit");
+        assert!(app.update_topbar_hover(edit_hit.x, edit_hit.y));
+        assert_eq!(app.pr_comment_action_hover_key.as_deref(), Some("ia"));
+    }
+
+    #[test]
+    fn pr_comment_view_without_pr_hides_add_comment() {
+        let multi = MultiFileDiff::from_file_pair(
+            std::path::PathBuf::from("README.md"),
+            std::path::PathBuf::from("README.md"),
+            "old\n".to_string(),
+            "new\n".to_string(),
+        );
+        let mut app = App::new(multi, ViewMode::Preview, 80, false, None);
+        app.set_review_persist_enabled(false);
+        app.enable_review_mode();
+        app.open_pr_comments_in_current_tab(None);
+
+        let backend = TestBackend::new(80, 6);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| super::render_preview(frame, &mut app, Rect::new(0, 0, 80, 6)))
+            .unwrap();
+        let text = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(
+            text.contains("No pull request found."),
+            "preview text: {text:?}"
+        );
+        assert!(!text.contains("add comment"), "preview text: {text:?}");
+        assert!(app.pr_comment_add_hit.is_none());
+        assert!(!app.start_pull_request_comment());
+    }
+
     #[test]
     fn preview_selection_toolbar_hides_comment_action() {
         let multi = MultiFileDiff::from_file_pair(
@@ -7504,6 +7705,7 @@ mod tests {
             "new\n".to_string(),
         );
         let mut app = App::new(multi, ViewMode::Preview, 50, false, None);
+        app.set_review_persist_enabled(false);
         app.enable_review_mode();
         app.diff_view_area = Some((0, 0, 50, 5));
         app.set_diff_selection_cells(vec![vec!["x".to_string(); 50]; 5]);
@@ -7633,17 +7835,20 @@ mod tests {
     #[test]
     fn markdown_preview_can_show_change_bars() {
         let theme = rgb_theme();
-        let styles = MarkdownStyles::from_theme(&theme);
-        let bars = super::PreviewChangeBars {
+        let bars = MarkdownChangeBars {
             marker: "|".to_string(),
             marker_width: 1,
             styles: HashMap::from([(1, Style::default().fg(theme.accent))]),
         };
         let mut highlight = |_lang: Option<&str>, _code: &str| None;
-        let mut renderer =
-            MarkdownRenderer::new(&styles, &theme, 80, None, &mut highlight, Some(&bars));
-        renderer.run("# Changed\n\nPlain\n");
-        let (lines, _) = renderer.finish();
+        let (lines, _) = render_markdown_preview_lines(
+            "# Changed\n\nPlain\n",
+            &theme,
+            80,
+            None,
+            &mut highlight,
+            Some(&bars),
+        );
         let changed = flatten(&lines)
             .lines()
             .find(|line| line.contains("Changed"))
@@ -8040,9 +8245,9 @@ mod tests {
     fn block_quote_has_no_trailing_border() {
         let lines = render_md("> one\n>\n> two\n", 40);
         // Border continues between paragraphs but not past the last line.
-        assert!(super::markdown_line_is_quote_border(
+        assert!(markdown_line_is_quote_border(
             &lines[1] // the blank separator inside the quote
         ));
-        assert!(!super::markdown_line_is_quote_border(lines.last().unwrap()));
+        assert!(!markdown_line_is_quote_border(lines.last().unwrap()));
     }
 }

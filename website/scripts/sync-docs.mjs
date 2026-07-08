@@ -21,9 +21,12 @@ const PAGES = [
   { file: "CONFIG.md",        slug: "config",        title: "Configuration",         group: "guide", order: 1 },
   { file: "THEME.md",         slug: "theming",       title: "Theming",               group: "guide", order: 2 },
   { file: "KEYBINDINGS.md",   slug: "keybindings",   title: "Keybindings",           group: "guide", order: 3 },
-  { file: "REVIEW_HOOKS.md",  slug: "review-hooks",  title: "Review hooks",          group: "guide", order: 4 },
-  { file: "DIFF_VIEWER.md",   slug: "diff-viewer",   title: "Diff viewer behaviour", group: "ref",   order: 1 },
-  { file: "DIFF_PREVIEWS.md", slug: "diff-styling",  title: "Diff styling previews", group: "ref",   order: 2 },
+  { file: "REVIEW.md",        slug: "review",        title: "Review CLI",              group: "guide", order: 4 },
+  { file: "AGENT.md",         slug: "agents",        title: "Working with agents",   group: "guide", order: 5 },
+  { file: "SKILL.md",         source: "../crates/oyo/docs/SKILL.md", slug: "agent-skill", title: "Oyo code review skill", group: "guide", order: 6 },
+  { file: "REVIEW_HOOKS.md",  slug: "hooks",         title: "Hooks",                 group: "guide", order: 7 },
+  { file: "DIFF_VIEWER.md",   slug: "diff-viewer",   title: "Diff Viewer Behaviour", group: "ref",   order: 1 },
+  { file: "DIFF_PREVIEWS.md", slug: "diff-styling",  title: "Diff Styling Previews", group: "ref",   order: 2 },
 ];
 
 const slugByFile = new Map(PAGES.map((p) => [p.file, p.slug]));
@@ -38,6 +41,8 @@ function rewrite(md) {
       return `](../${slug}/${anchor})`;
     },
   );
+  // Skill link: [text](../crates/oyo/docs/SKILL.md) -> [text](../agent-skill/)
+  md = md.replace(/\]\(\.\.\/crates\/oyo\/docs\/SKILL\.md\)/g, "](../agent-skill/)");
   // Screenshot images: ![alt](../assets/x.png) -> co-located ![alt](./assets/x.png)
   md = md.replace(/\]\(\.\.\/assets\//g, "](./assets/");
   return md;
@@ -53,7 +58,7 @@ fs.mkdirSync(outDir, { recursive: true });
 
 let needAssets = false;
 for (const page of PAGES) {
-  const srcPath = path.join(docsDir, page.file);
+  const srcPath = page.source ? path.resolve(docsDir, page.source) : path.join(docsDir, page.file);
   if (!fs.existsSync(srcPath)) {
     console.warn(`sync-docs: missing ${page.file}, skipping`);
     continue;

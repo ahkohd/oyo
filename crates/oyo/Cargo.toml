@@ -42,3 +42,4 @@ pulldown-cmark = { workspace = true }
 image = { workspace = true }
 time = { workspace = true }
 rustc-hash = { workspace = true }
+rusqlite = { workspace = true }

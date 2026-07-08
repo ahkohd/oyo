@@ -1602,9 +1602,52 @@ impl Default for ReviewActionConfig {
     }
 }
 
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+#[allow(dead_code)]
+pub struct ReviewProviderCommandConfig {
+    pub command: String,
+    pub args: Vec<String>,
+    #[serde(default = "default_hook_timeout_ms")]
+    pub timeout_ms: u64,
+}
+
+impl Default for ReviewProviderCommandConfig {
+    fn default() -> Self {
+        Self {
+            command: String::new(),
+            args: Vec::new(),
+            timeout_ms: default_hook_timeout_ms(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+#[serde(default)]
+#[allow(dead_code)]
+pub struct ReviewProviderCommandsConfig {
+    pub whoami: Option<ReviewProviderCommandConfig>,
+    pub pr_find: Option<ReviewProviderCommandConfig>,
+    pub pr_get: Option<ReviewProviderCommandConfig>,
+    pub comments_list: Option<ReviewProviderCommandConfig>,
+    pub comments_create: Option<ReviewProviderCommandConfig>,
+    pub comments_update: Option<ReviewProviderCommandConfig>,
+    pub comments_delete: Option<ReviewProviderCommandConfig>,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+#[serde(default)]
+#[allow(dead_code)]
+pub struct ReviewProviderConfig {
+    pub hosts: Vec<String>,
+    pub commands: ReviewProviderCommandsConfig,
+}
+
 #[derive(Debug, Deserialize, Clone, Default)]
 #[serde(default)]
 pub struct ReviewConfig {
+    pub dir: Option<PathBuf>,
+    pub providers: BTreeMap<String, ReviewProviderConfig>,
     pub hooks: Vec<ReviewHookConfig>,
     pub actions: Vec<ReviewActionConfig>,
 }
@@ -1937,6 +1980,37 @@ preview_change_bars = false
         )
         .unwrap();
         assert!(!config.ui.diff.preview_change_bars);
+    }
+
+    #[test]
+    fn review_provider_contract_config_parses() {
+        let config: Config = toml::from_str(
+            r#"
+[review.providers.example]
+hosts = ["git.example.com"]
+
+[review.providers.example.commands.whoami]
+command = "example-oyo-provider"
+args = ["whoami"]
+
+[review.providers.example.commands.comments_list]
+command = "example-oyo-provider"
+args = ["comments", "list"]
+timeout_ms = 10000
+"#,
+        )
+        .unwrap();
+
+        let provider = config.review.providers.get("example").unwrap();
+        assert_eq!(provider.hosts, vec!["git.example.com"]);
+        assert_eq!(
+            provider.commands.whoami.as_ref().unwrap().command,
+            "example-oyo-provider"
+        );
+        assert_eq!(
+            provider.commands.comments_list.as_ref().unwrap().timeout_ms,
+            10000
+        );
     }
 
     #[test]

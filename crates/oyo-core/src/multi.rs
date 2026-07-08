@@ -33,6 +33,18 @@ pub struct FileEntry {
     pub binary: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct RawFileDiff {
+    pub path: PathBuf,
+    pub old_path: Option<PathBuf>,
+    pub old_source_path: Option<PathBuf>,
+    pub new_source_path: Option<PathBuf>,
+    pub status: FileStatus,
+    pub old_content: String,
+    pub new_content: String,
+    pub binary: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileSide {
     Old,
@@ -109,7 +121,8 @@ static DIFF_MAX_BYTES: AtomicU64 = AtomicU64::new(DEFAULT_DIFF_MAX_BYTES);
 static FULL_CONTEXT_MAX_BYTES: AtomicU64 = AtomicU64::new(DEFAULT_FULL_CONTEXT_MAX_BYTES);
 static DIFF_DEFER: AtomicBool = AtomicBool::new(true);
 
-pub const DEFAULT_SCAN_IGNORE_GLOBS: &[&str] = &[".git/**", ".jj/**", ".hg/**", ".svn/**"];
+pub const DEFAULT_SCAN_IGNORE_GLOBS: &[&str] =
+    &[".git/**", ".jj/**", ".hg/**", ".svn/**", ".oyo/reviews/**"];
 
 #[derive(Debug, Clone)]
 pub struct DirectoryScanOptions {
@@ -324,6 +337,55 @@ impl MultiFileDiff {
             );
         }
         (old_content, new_content, None, DiffStatus::Ready)
+    }
+
+    /// Create from already loaded file contents.
+    pub fn from_raw_files(repo_root: Option<PathBuf>, raw_files: Vec<RawFileDiff>) -> Self {
+        let mut files = Vec::new();
+        let mut old_contents = Vec::new();
+        let mut new_contents = Vec::new();
+        let mut precomputed_diffs = Vec::new();
+        let mut diff_statuses = Vec::new();
+
+        for raw in raw_files {
+            let binary = raw.binary;
+            let (insertions, deletions) =
+                Self::diff_stats(&raw.old_content, &raw.new_content, binary);
+            let (old_content, new_content, precomputed, diff_status) =
+                Self::maybe_defer_diff(raw.old_content, raw.new_content, binary);
+
+            files.push(FileEntry {
+                display_name: raw.path.display().to_string(),
+                path: raw.path,
+                old_path: raw.old_path,
+                old_source_path: raw.old_source_path,
+                new_source_path: raw.new_source_path,
+                status: raw.status,
+                insertions,
+                deletions,
+                binary,
+            });
+            old_contents.push(Arc::from(old_content));
+            new_contents.push(Arc::from(new_content));
+            precomputed_diffs.push(precomputed);
+            diff_statuses.push(diff_status);
+        }
+
+        let navigators: Vec<Option<DiffNavigator>> = (0..files.len()).map(|_| None).collect();
+        let navigator_is_placeholder = vec![false; files.len()];
+        Self {
+            files,
+            selected_index: 0,
+            navigators,
+            navigator_is_placeholder,
+            repo_root,
+            git_mode: None,
+            source_roots: None,
+            old_contents,
+            new_contents,
+            precomputed_diffs,
+            diff_statuses,
+        }
     }
 
     /// Create from a list of changed files (git mode)

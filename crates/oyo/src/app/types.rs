@@ -216,7 +216,9 @@ pub(crate) struct UnifiedRenderKey {
     pub(crate) review_editor_active: bool,
     pub(crate) review_revision: u64,
     pub(crate) review_preview_hover: Option<String>,
+    pub(crate) review_preview_edit_hover: Option<String>,
     pub(crate) review_preview_delete_hover: Option<String>,
+    pub(crate) review_preview_flash: Option<String>,
 }
 
 pub(crate) struct UnifiedRenderModel {
@@ -228,8 +230,10 @@ pub(crate) struct UnifiedRenderModel {
     pub(crate) max_line_width: usize,
     pub(crate) primary_display_idx: Option<usize>,
     pub(crate) active_display_idx: Option<usize>,
-    /// Preview rows for review comments: (row_idx, row_span, anchor_key)
-    pub(crate) review_preview_rows: Vec<(usize, usize, String)>,
+    /// Preview rows for review comments: (row_idx, row_span, anchor_key, delete_x_offset)
+    pub(crate) review_preview_rows: Vec<(usize, usize, String, u16)>,
+    /// Avatar rows for review comments: (row_idx, avatar)
+    pub(crate) review_avatar_rows: Vec<(usize, crate::views::ReviewNoteAvatar)>,
 }
 
 #[derive(Clone, Debug)]

@@ -16,6 +16,8 @@ pub(crate) enum PaletteAction {
     ToggleAutoplayReverse,
     OpenDashboard,
     OpenThemePicker,
+    OpenCommentPicker,
+    OpenPrComments,
     Quit,
     RefreshCurrentFile,
     RefreshAllFiles,
@@ -29,14 +31,21 @@ pub(crate) struct PaletteEntry {
 }
 
 impl App {
+    fn reset_picker_cursor(&mut self) {
+        self.file_filter_cursor_visible = true;
+        self.file_filter_cursor_last_blink = std::time::Instant::now();
+    }
+
     pub fn start_command_palette(&mut self) {
         self.command_palette_active = true;
         self.command_palette_query.clear();
         self.command_palette_selection = 0;
+        self.reset_picker_cursor();
         self.file_filter_active = false;
         self.clear_search();
         self.clear_goto();
         self.stop_file_search();
+        self.stop_comment_picker();
         self.stop_theme_picker();
     }
 
@@ -59,16 +68,19 @@ impl App {
     pub fn push_command_palette_char(&mut self, ch: char) {
         self.command_palette_query.push(ch);
         self.command_palette_selection = 0;
+        self.reset_picker_cursor();
     }
 
     pub fn pop_command_palette_char(&mut self) {
         self.command_palette_query.pop();
         self.command_palette_selection = 0;
+        self.reset_picker_cursor();
     }
 
     pub fn clear_command_palette_text(&mut self) {
         self.command_palette_query.clear();
         self.command_palette_selection = 0;
+        self.reset_picker_cursor();
     }
 
     pub fn move_command_palette_selection(&mut self, delta: isize) {
@@ -239,6 +251,14 @@ impl App {
         }
 
         if self.review_mode {
+            entries.push(PaletteEntry {
+                label: "Comment picker".to_string(),
+                action: PaletteAction::OpenCommentPicker,
+            });
+            entries.push(PaletteEntry {
+                label: "Pull request comments".to_string(),
+                action: PaletteAction::OpenPrComments,
+            });
             for (idx, action) in self.review_actions.iter().enumerate() {
                 let show = action.show.is_empty()
                     || action.show.iter().any(|item| item == "command_palette");
@@ -273,6 +293,8 @@ impl App {
                 PaletteAction::ToggleHelp
                     | PaletteAction::OpenDashboard
                     | PaletteAction::OpenThemePicker
+                    | PaletteAction::OpenCommentPicker
+                    | PaletteAction::OpenPrComments
                     | PaletteAction::Quit
                     | PaletteAction::RefreshAllFiles
             )
@@ -293,6 +315,8 @@ impl App {
             PaletteAction::ToggleAutoplayReverse => self.toggle_autoplay_reverse(),
             PaletteAction::OpenDashboard => self.open_dashboard = true,
             PaletteAction::OpenThemePicker => self.start_theme_picker(),
+            PaletteAction::OpenCommentPicker => self.start_comment_picker(),
+            PaletteAction::OpenPrComments => self.open_pr_comments_in_current_tab(None),
             PaletteAction::Quit => self.should_quit = true,
             PaletteAction::RefreshCurrentFile => self.refresh_current_file(),
             PaletteAction::RefreshAllFiles => self.refresh_all_files(),
@@ -304,10 +328,12 @@ impl App {
         self.file_search_active = true;
         self.file_search_query.clear();
         self.file_search_selection = 0;
+        self.reset_picker_cursor();
         self.file_filter_active = false;
         self.clear_search();
         self.clear_goto();
         self.stop_command_palette();
+        self.stop_comment_picker();
         self.stop_theme_picker();
     }
 
@@ -330,16 +356,19 @@ impl App {
     pub fn push_file_search_char(&mut self, ch: char) {
         self.file_search_query.push(ch);
         self.file_search_selection = 0;
+        self.reset_picker_cursor();
     }
 
     pub fn pop_file_search_char(&mut self) {
         self.file_search_query.pop();
         self.file_search_selection = 0;
+        self.reset_picker_cursor();
     }
 
     pub fn clear_file_search_text(&mut self) {
         self.file_search_query.clear();
         self.file_search_selection = 0;
+        self.reset_picker_cursor();
     }
 
     pub fn move_file_search_selection(&mut self, delta: isize) {
@@ -412,12 +441,134 @@ impl App {
         indices
     }
 
+    pub fn start_comment_picker(&mut self) {
+        self.comment_picker_active = true;
+        self.comment_picker_query.clear();
+        self.comment_picker_selection = 0;
+        self.reset_picker_cursor();
+        self.file_filter_active = false;
+        self.clear_search();
+        self.clear_goto();
+        self.stop_command_palette();
+        self.stop_file_search();
+        self.stop_theme_picker();
+    }
+
+    pub fn stop_comment_picker(&mut self) {
+        self.comment_picker_active = false;
+    }
+
+    pub fn comment_picker_active(&self) -> bool {
+        self.comment_picker_active
+    }
+
+    pub fn comment_picker_query(&self) -> &str {
+        &self.comment_picker_query
+    }
+
+    pub fn comment_picker_selection(&self) -> usize {
+        self.comment_picker_selection
+    }
+
+    pub fn push_comment_picker_char(&mut self, ch: char) {
+        self.comment_picker_query.push(ch);
+        self.comment_picker_selection = 0;
+        self.reset_picker_cursor();
+    }
+
+    pub fn pop_comment_picker_char(&mut self) {
+        self.comment_picker_query.pop();
+        self.comment_picker_selection = 0;
+        self.reset_picker_cursor();
+    }
+
+    pub fn clear_comment_picker_text(&mut self) {
+        self.comment_picker_query.clear();
+        self.comment_picker_selection = 0;
+        self.reset_picker_cursor();
+    }
+
+    pub fn move_comment_picker_selection(&mut self, delta: isize) {
+        let indices = self.comment_picker_filtered_indices();
+        let total = indices.len();
+        if total == 0 {
+            self.comment_picker_selection = 0;
+            return;
+        }
+        let current = self.comment_picker_selection.min(total.saturating_sub(1)) as isize;
+        let next = (current + delta).clamp(0, total.saturating_sub(1) as isize);
+        self.comment_picker_selection = next as usize;
+    }
+
+    pub fn apply_comment_picker_selection(&mut self) {
+        let indices = self.comment_picker_filtered_indices();
+        if indices.is_empty() {
+            return;
+        }
+        let idx = self
+            .comment_picker_selection
+            .min(indices.len().saturating_sub(1));
+        let comment_idx = indices[idx];
+        self.show_comments_sidebar();
+        let _ = self.open_review_comment(comment_idx);
+        self.stop_comment_picker();
+    }
+
+    pub fn set_comment_picker_list_area(
+        &mut self,
+        area: Option<(u16, u16, u16, u16)>,
+        start: usize,
+        count: usize,
+        item_height: u16,
+    ) {
+        self.comment_picker_list_area = area;
+        self.comment_picker_list_start = start;
+        self.comment_picker_list_count = count;
+        self.comment_picker_item_height = item_height.max(1);
+    }
+
+    pub fn handle_comment_picker_click(&mut self, column: u16, row: u16) -> bool {
+        let Some((x, y, width, height)) = self.comment_picker_list_area else {
+            return false;
+        };
+        if row < y || row >= y.saturating_add(height) {
+            return false;
+        }
+        if column < x || column >= x.saturating_add(width) {
+            return false;
+        }
+        let item_height = self.comment_picker_item_height.max(1);
+        let offset = row.saturating_sub(y) / item_height;
+        let offset = offset as usize;
+        if offset >= self.comment_picker_list_count {
+            return false;
+        }
+        self.comment_picker_selection = self.comment_picker_list_start.saturating_add(offset);
+        self.apply_comment_picker_selection();
+        true
+    }
+
+    pub(crate) fn comment_picker_filtered_indices(&mut self) -> Vec<usize> {
+        let mut indices = self.review_comment_indices_for_query(&self.comment_picker_query);
+        indices.sort_by(|a, b| {
+            self.review_comment_sidebar_sort_key(*b)
+                .cmp(&self.review_comment_sidebar_sort_key(*a))
+        });
+        if indices.is_empty() {
+            self.comment_picker_selection = 0;
+        } else if self.comment_picker_selection >= indices.len() {
+            self.comment_picker_selection = indices.len().saturating_sub(1);
+        }
+        indices
+    }
+
     pub fn start_theme_picker(&mut self) {
         if !self.theme_picker_active {
             self.theme_picker_restore = Some((self.theme.clone(), self.ui_theme_name.clone()));
         }
         self.theme_picker_active = true;
         self.theme_picker_query.clear();
+        self.reset_picker_cursor();
         self.theme_picker_selection = self
             .ui_theme_name
             .as_ref()
@@ -428,6 +579,7 @@ impl App {
         self.clear_goto();
         self.stop_command_palette();
         self.stop_file_search();
+        self.stop_comment_picker();
     }
 
     pub fn stop_theme_picker(&mut self) {
@@ -453,18 +605,21 @@ impl App {
     pub fn push_theme_picker_char(&mut self, ch: char) {
         self.theme_picker_query.push(ch);
         self.theme_picker_selection = 0;
+        self.reset_picker_cursor();
         self.preview_theme_picker_selection();
     }
 
     pub fn pop_theme_picker_char(&mut self) {
         self.theme_picker_query.pop();
         self.theme_picker_selection = 0;
+        self.reset_picker_cursor();
         self.preview_theme_picker_selection();
     }
 
     pub fn clear_theme_picker_text(&mut self) {
         self.theme_picker_query.clear();
         self.theme_picker_selection = 0;
+        self.reset_picker_cursor();
         self.preview_theme_picker_selection();
     }
 

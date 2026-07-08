@@ -12,6 +12,7 @@ pub(crate) enum KeybindingMode {
     ReviewEditor,
     CommandPalette,
     FileSearch,
+    CommentPicker,
     ThemePicker,
     FileFilter,
     Goto,
@@ -30,6 +31,7 @@ impl KeybindingMode {
             Self::ReviewEditor => "review_editor",
             Self::CommandPalette => "command_palette",
             Self::FileSearch => "file_search",
+            Self::CommentPicker => "comment_picker",
             Self::ThemePicker => "theme_picker",
             Self::FileFilter => "file_filter",
             Self::Goto => "goto",
@@ -46,6 +48,7 @@ impl KeybindingMode {
 pub(crate) enum GlobalAction {
     OpenCommandPalette,
     OpenFileSearch,
+    OpenCommentPicker,
     OpenThemePicker,
 }
 
@@ -118,6 +121,7 @@ pub(crate) enum NormalAction {
     ToggleHelp,
     OpenCommandPalette,
     OpenFileSearch,
+    OpenCommentPicker,
     OpenThemePicker,
 }
 
@@ -261,11 +265,12 @@ macro_rules! binding_action {
 binding_action!(GlobalAction, [
     OpenCommandPalette => ("open_command_palette", "Command palette", ["ctrl-p"]),
     OpenFileSearch => ("open_file_search", "Quick file search", ["ctrl-shift-p"]),
+    OpenCommentPicker => ("open_comment_picker", "Comment picker", ["ctrl-shift-c"]),
     OpenThemePicker => ("open_theme_picker", "Theme picker", ["ctrl-t"]),
 ]);
 
 binding_action!(NormalAction, [
-    Quit => ("quit", "Quit (prints comments if any)", ["q", "esc"]),
+    Quit => ("quit", "Quit", ["q", "esc"]),
     StepDown => ("step_down", "Step forward", ["j", "down"]),
     StepUp => ("step_up", "Step backward", ["k", "up"]),
     NextHunk => ("next_hunk", "Next hunk", ["l", "right"]),
@@ -332,6 +337,7 @@ binding_action!(NormalAction, [
     ToggleHelp => ("toggle_help", "Toggle help", ["?"]),
     OpenCommandPalette => ("open_command_palette", "Command palette", ["ctrl-p"]),
     OpenFileSearch => ("open_file_search", "Quick file search", ["ctrl-shift-p"]),
+    OpenCommentPicker => ("open_comment_picker", "Comment picker", ["g c"]),
     OpenThemePicker => ("open_theme_picker", "Theme picker", ["ctrl-t"]),
 ]);
 
@@ -437,6 +443,7 @@ pub(crate) struct Keybindings {
     review_editor: ModeBindings<ReviewEditorAction>,
     command_palette: ModeBindings<PickerAction>,
     file_search: ModeBindings<PickerAction>,
+    comment_picker: ModeBindings<PickerAction>,
     theme_picker: ModeBindings<PickerAction>,
     file_filter: ModeBindings<FileFilterAction>,
     goto: ModeBindings<LineInputAction>,
@@ -487,6 +494,7 @@ impl Keybindings {
             review_editor: ModeBindings::build(KeybindingMode::ReviewEditor, config, warnings),
             command_palette: ModeBindings::build(KeybindingMode::CommandPalette, config, warnings),
             file_search: ModeBindings::build(KeybindingMode::FileSearch, config, warnings),
+            comment_picker: ModeBindings::build(KeybindingMode::CommentPicker, config, warnings),
             theme_picker: ModeBindings::build(KeybindingMode::ThemePicker, config, warnings),
             file_filter: ModeBindings::build(KeybindingMode::FileFilter, config, warnings),
             goto: ModeBindings::build(KeybindingMode::Goto, config, warnings),
@@ -510,6 +518,7 @@ impl Keybindings {
             Some(KeybindingMode::ReviewEditor) => self.review_editor.clear_sequence(),
             Some(KeybindingMode::CommandPalette) => self.command_palette.clear_sequence(),
             Some(KeybindingMode::FileSearch) => self.file_search.clear_sequence(),
+            Some(KeybindingMode::CommentPicker) => self.comment_picker.clear_sequence(),
             Some(KeybindingMode::ThemePicker) => self.theme_picker.clear_sequence(),
             Some(KeybindingMode::FileFilter) => self.file_filter.clear_sequence(),
             Some(KeybindingMode::Goto) => self.goto.clear_sequence(),
@@ -553,6 +562,15 @@ impl Keybindings {
     pub(crate) fn file_search(&mut self, key: KeyEvent) -> Dispatch<PickerAction> {
         self.prepare_mode(KeybindingMode::FileSearch);
         dispatch_mode(&mut self.active_sequence_mode, &mut self.file_search, key)
+    }
+
+    pub(crate) fn comment_picker(&mut self, key: KeyEvent) -> Dispatch<PickerAction> {
+        self.prepare_mode(KeybindingMode::CommentPicker);
+        dispatch_mode(
+            &mut self.active_sequence_mode,
+            &mut self.comment_picker,
+            key,
+        )
     }
 
     pub(crate) fn theme_picker(&mut self, key: KeyEvent) -> Dispatch<PickerAction> {

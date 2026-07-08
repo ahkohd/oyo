@@ -202,6 +202,36 @@ impl App {
             return true;
         }
 
+        if self.handle_comments_sidebar_overflow_click(column, row) {
+            return true;
+        }
+
+        if self
+            .comments_sidebar_sync_hit
+            .is_some_and(|(x, y, width, height)| {
+                column >= x
+                    && column < x.saturating_add(width)
+                    && row >= y
+                    && row < y.saturating_add(height)
+            })
+        {
+            self.run_comments_sidebar_sync();
+            return true;
+        }
+
+        if self
+            .comments_sidebar_discard_hit
+            .is_some_and(|(x, y, width, height)| {
+                column >= x
+                    && column < x.saturating_add(width)
+                    && row >= y
+                    && row < y.saturating_add(height)
+            })
+        {
+            self.request_discard_review_session_changes();
+            return true;
+        }
+
         if self
             .file_filter_clear_hit
             .is_some_and(|(x, y, width, height)| {

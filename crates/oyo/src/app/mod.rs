@@ -35,7 +35,7 @@ mod files;
 mod navigation;
 mod palette;
 mod playback;
-mod review;
+pub(crate) mod review;
 mod search;
 mod selection;
 mod syntax;
@@ -141,6 +141,7 @@ pub(crate) struct StatusModeMenuHit {
 pub(crate) enum TopbarTabContent {
     File(usize),
     Help,
+    PrComments,
 }
 
 #[derive(Clone, Debug)]
@@ -279,6 +280,8 @@ pub struct App {
     pub multi_diff: MultiFileDiff,
     /// Current view mode
     pub view_mode: ViewMode,
+    /// Current view is preview because the active content cannot use diff views.
+    pub(crate) preview_forced_by_content: bool,
     /// Animation speed in milliseconds
     pub animation_speed: u64,
     /// Whether autoplay is enabled
@@ -692,6 +695,20 @@ pub struct App {
     file_search_list_count: usize,
     /// Quick file search list item height (rows per item)
     file_search_item_height: u16,
+    /// Comment picker query
+    comment_picker_query: String,
+    /// True when comment picker is active
+    comment_picker_active: bool,
+    /// Selected comment picker entry
+    comment_picker_selection: usize,
+    /// Comment picker list area (x, y, width, height)
+    comment_picker_list_area: Option<(u16, u16, u16, u16)>,
+    /// Comment picker list start index
+    comment_picker_list_start: usize,
+    /// Comment picker visible list count
+    comment_picker_list_count: usize,
+    /// Comment picker list item height (rows per item)
+    comment_picker_item_height: u16,
     /// Theme picker query
     theme_picker_query: String,
     /// True when theme picker is active
@@ -712,30 +729,100 @@ pub struct App {
     review_mode: bool,
     /// Collected review comments for current session
     review_comments: Vec<review::ReviewComment>,
+    /// Review comments as loaded at session start.
+    review_session_baseline: Vec<review::ReviewComment>,
+    /// Comment selected from the comments sidebar.
+    active_review_comment_id: Option<u64>,
     /// Active inline comment editor state
     review_editor: Option<review::ReviewEditorState>,
-    /// Autosave path for current review session
-    review_session_path: Option<PathBuf>,
+    /// Last rendered editor wrap width, used for arrow navigation.
+    review_editor_wrap_width: usize,
+    /// Directory for current review database.
+    review_dir_path: Option<PathBuf>,
+    /// SQLite database path for the current review workspace.
+    review_db_path: Option<PathBuf>,
+    /// Last seen review database file stamp.
+    review_db_stamp: FileDiskStamp,
+    /// Last time the review database was checked for external changes.
+    last_review_db_check: Instant,
+    /// Base directory override for review files.
+    review_base_dir_override: Option<PathBuf>,
+    /// Workspace root override for review identity.
+    review_workspace_root_override: Option<PathBuf>,
     /// Whether review comments/session state should be loaded/saved across runs.
     review_persist_enabled: bool,
-    /// If true, start review with a clean session (ignores/removes any saved state).
-    review_clear_session_on_start: bool,
+    /// Whether loaded comments should be limited to files in the current diff.
+    review_filter_to_current_diff: bool,
     /// Diff fingerprint used for resume/autosave matching
     review_diff_fingerprint: String,
     /// Repository root key used in review session metadata
     review_repo_root: Option<String>,
+    /// Target metadata saved with review state.
+    review_target_metadata: Option<review::ReviewTargetMetadata>,
+    /// Author copied from Git or jj config for new comments.
+    review_author: Option<review::ReviewAuthor>,
     /// Session creation timestamp for persisted review state
     review_session_created_at: u64,
     /// Next comment id for this session
     review_next_comment_id: u64,
-    /// Review output prepared on submit+quit
-    review_submission_output: Option<String>,
     /// Click hitboxes for rendered review comment previews
     review_preview_boxes: Vec<review::ReviewPreviewBox>,
     /// Hovered rendered review comment preview.
     pub(crate) review_preview_hover: Option<String>,
+    /// Hovered edit action on a rendered review comment preview.
+    pub(crate) review_preview_edit_hover: Option<String>,
     /// Hovered delete action on a rendered review comment preview.
     pub(crate) review_preview_delete_hover: Option<String>,
+    /// Review card to flash after sidebar navigation.
+    review_preview_flash: Option<(String, Instant)>,
+    /// Pending review deletion confirmation.
+    review_delete_confirmation: Option<review::ReviewDeleteConfirmation>,
+    /// Click hitboxes for review deletion confirmation.
+    pub(crate) review_delete_confirmation_hits: Vec<review::ReviewDeleteConfirmationHit>,
+    /// Hovered review deletion confirmation action.
+    pub(crate) review_delete_confirmation_hover: Option<review::ReviewDeleteConfirmationAction>,
+    /// Comments sidebar sync button hitbox.
+    pub(crate) comments_sidebar_sync_hit: Option<(u16, u16, u16, u16)>,
+    /// Comments sidebar discard button hitbox.
+    pub(crate) comments_sidebar_discard_hit: Option<(u16, u16, u16, u16)>,
+    /// Comments sidebar sync button hover.
+    pub(crate) comments_sidebar_sync_hover: bool,
+    /// Comments sidebar discard button hover.
+    pub(crate) comments_sidebar_discard_hover: bool,
+    /// Comments sidebar overflow hitbox.
+    pub(crate) comments_sidebar_overflow_hit: Option<(u16, u16, u16, u16)>,
+    /// Comments sidebar overflow button hover.
+    pub(crate) comments_sidebar_overflow_hover: bool,
+    /// Comments sidebar overflow menu is open.
+    pub(crate) comments_sidebar_overflow_open: bool,
+    /// Comments sidebar overflow menu hits.
+    pub(crate) comments_sidebar_overflow_hits: Vec<review::ReviewSidebarOverflowHit>,
+    /// Comments sidebar overflow menu hover.
+    pub(crate) comments_sidebar_overflow_menu_hover: Option<review::ReviewSyncAction>,
+    /// Remote picker state for review sync.
+    review_remote_picker: Option<review::ReviewRemotePickerState>,
+    /// Remote picker hits.
+    pub(crate) review_remote_picker_hits: Vec<review::ReviewRemotePickerHit>,
+    /// Remote picker hover index.
+    pub(crate) review_remote_picker_hover: Option<usize>,
+    /// Pull request comment selected in the virtual PR comments view.
+    pub(crate) pr_comment_focus: Option<u64>,
+    /// Click hitboxes for pull request comment view actions.
+    pub(crate) pr_comment_hits: Vec<review::PrCommentHit>,
+    /// Click hitbox for the add pull request comment row.
+    pub(crate) pr_comment_add_hit: Option<(u16, u16, u16, u16)>,
+    /// Pull request comment action currently hovered.
+    pub(crate) pr_comment_action_hover: Option<review::PrCommentHitAction>,
+    /// Pull request comment action key currently hovered.
+    pub(crate) pr_comment_action_hover_key: Option<String>,
+    /// Add pull request comment row is hovered.
+    pub(crate) pr_comment_add_hover: bool,
+    /// Waiting for a pull request reply key.
+    pub(crate) pr_reply_prefix: bool,
+    /// Waiting for a review edit key.
+    pub(crate) review_edit_prefix: bool,
+    /// Waiting for a review delete key.
+    pub(crate) review_delete_prefix: bool,
     /// Click hitboxes for review editor actions.
     pub(crate) review_editor_toolbar_hits: Vec<ReviewEditorToolbarHit>,
     /// Review editor action area.
@@ -768,6 +855,10 @@ pub struct App {
     pub review_hooks: Vec<ReviewHookConfig>,
     /// User-visible review commands.
     pub review_actions: Vec<ReviewActionConfig>,
+    /// Built-in review sync requested from the UI.
+    review_sync_requested: Option<review::ReviewSyncRequest>,
+    /// Review comment provider work shown in the footer.
+    review_sync_status: Option<review::ReviewSyncAction>,
     /// User-visible selection commands.
     pub selection_actions: Vec<SelectionActionConfig>,
     /// Non-fatal review hook warnings to print after TUI exits.
@@ -878,6 +969,7 @@ impl App {
         let mut app = Self {
             multi_diff,
             view_mode,
+            preview_forced_by_content: false,
             animation_speed,
             autoplay,
             autoplay_reverse: false,
@@ -1125,6 +1217,13 @@ impl App {
             file_search_list_start: 0,
             file_search_list_count: 0,
             file_search_item_height: 1,
+            comment_picker_query: String::new(),
+            comment_picker_active: false,
+            comment_picker_selection: 0,
+            comment_picker_list_area: None,
+            comment_picker_list_start: 0,
+            comment_picker_list_count: 0,
+            comment_picker_item_height: 1,
             theme_picker_query: String::new(),
             theme_picker_active: false,
             theme_picker_selection: 0,
@@ -1135,18 +1234,53 @@ impl App {
             theme_picker_restore: None,
             review_mode: false,
             review_comments: Vec::new(),
+            review_session_baseline: Vec::new(),
+            active_review_comment_id: None,
             review_editor: None,
-            review_session_path: None,
+            review_editor_wrap_width: 0,
+            review_dir_path: None,
+            review_db_path: None,
+            review_db_stamp: FileDiskStamp::default(),
+            last_review_db_check: Instant::now(),
+            review_base_dir_override: None,
+            review_workspace_root_override: None,
             review_persist_enabled: true,
-            review_clear_session_on_start: false,
+            review_filter_to_current_diff: false,
             review_diff_fingerprint: String::new(),
             review_repo_root: None,
+            review_target_metadata: None,
+            review_author: None,
             review_session_created_at: 0,
             review_next_comment_id: 1,
-            review_submission_output: None,
             review_preview_boxes: Vec::new(),
             review_preview_hover: None,
+            review_preview_edit_hover: None,
             review_preview_delete_hover: None,
+            review_preview_flash: None,
+            review_delete_confirmation: None,
+            review_delete_confirmation_hits: Vec::new(),
+            review_delete_confirmation_hover: None,
+            comments_sidebar_sync_hit: None,
+            comments_sidebar_discard_hit: None,
+            comments_sidebar_sync_hover: false,
+            comments_sidebar_discard_hover: false,
+            comments_sidebar_overflow_hit: None,
+            comments_sidebar_overflow_hover: false,
+            comments_sidebar_overflow_open: false,
+            comments_sidebar_overflow_hits: Vec::new(),
+            comments_sidebar_overflow_menu_hover: None,
+            review_remote_picker: None,
+            review_remote_picker_hits: Vec::new(),
+            review_remote_picker_hover: None,
+            pr_comment_focus: None,
+            pr_comment_hits: Vec::new(),
+            pr_comment_add_hit: None,
+            pr_comment_action_hover: None,
+            pr_comment_action_hover_key: None,
+            pr_comment_add_hover: false,
+            pr_reply_prefix: false,
+            review_edit_prefix: false,
+            review_delete_prefix: false,
             review_editor_toolbar_hits: Vec::new(),
             review_editor_toolbar_rect: None,
             review_editor_toolbar_scroll: 0,
@@ -1163,6 +1297,8 @@ impl App {
             review_revision: 0,
             review_hooks: Vec::new(),
             review_actions: Vec::new(),
+            review_sync_requested: None,
+            review_sync_status: None,
             selection_actions: Vec::new(),
             review_hook_warnings: Vec::new(),
             search_last_target: None,
@@ -2339,6 +2475,7 @@ impl App {
             || self.syntax_warmup_pending()
             || self.step_edge_hint.is_some()
             || self.hunk_edge_hint.is_some()
+            || self.review_sync_status.is_some()
         {
             Duration::from_millis(100)
         } else {
@@ -2364,11 +2501,29 @@ impl App {
             }
         }
 
-        if self.file_filter_active
+        let text_cursor_active = self.file_filter_active
+            || self.command_palette_active
+            || self.file_search_active
+            || self.theme_picker_active
+            || self.review_remote_picker.is_some();
+        if text_cursor_active
             && now.duration_since(self.file_filter_cursor_last_blink) >= Duration::from_millis(500)
         {
             self.file_filter_cursor_visible = !self.file_filter_cursor_visible;
             self.file_filter_cursor_last_blink = now;
+            dirty = true;
+        }
+
+        if self.review_sync_status.is_some() {
+            dirty = true;
+        }
+
+        if self
+            .review_preview_flash
+            .as_ref()
+            .is_some_and(|(_, until)| now >= *until)
+        {
+            self.review_preview_flash = None;
             dirty = true;
         }
 
@@ -2378,6 +2533,7 @@ impl App {
         dirty |= self.maybe_check_file_changes();
         dirty |= self.maybe_watch_refresh_git_files();
         dirty |= self.maybe_watch_refresh_changed_files();
+        dirty |= self.maybe_watch_reload_review_state();
 
         if self.multi_diff.file_count() == 0 {
             return dirty;

@@ -351,6 +351,80 @@ file_scope = "repo"
 finder = "auto"
 ```
 
+## Review database and sync
+
+Use `[review]` to set where Oyo saves the review database.
+
+```toml
+[review]
+dir = ".oyo/reviews"
+```
+
+| Key | Values | Default | What it does |
+| --- | --- | --- | --- |
+| `dir` | path | platform app data directory | Sets the base directory for review databases |
+
+Relative paths resolve from the current workspace root. This supports Git worktrees and jj workspaces.
+
+GitHub sync uses the built-in `gh` adapter. Use provider config when you need to define another provider command interface.
+
+Pass a remote name to `oy review pull` or `oy review push` when you do not want the default remote.
+
+### Provider command interface
+
+Add custom providers under `[review.providers.<id>]`.
+
+```toml
+[review.providers.example]
+hosts = ["git.example.com"]
+
+[review.providers.example.commands.whoami]
+command = "example-oyo-provider"
+args = ["whoami"]
+
+[review.providers.example.commands.pr_get]
+command = "example-oyo-provider"
+args = ["pr", "get", "{repo}", "{target}"]
+
+[review.providers.example.commands.comments_list]
+command = "example-oyo-provider"
+args = ["comments", "list", "{repo}", "{number}"]
+
+[review.providers.example.commands.comments_create]
+command = "example-oyo-provider"
+args = ["comments", "create", "{repo}", "{number}"]
+
+[review.providers.example.commands.comments_update]
+command = "example-oyo-provider"
+args = ["comments", "update", "{repo}", "{number}"]
+
+[review.providers.example.commands.comments_delete]
+command = "example-oyo-provider"
+args = ["comments", "delete", "{repo}", "{number}"]
+```
+
+Provider command keys are:
+
+- `whoami`
+- `pr_find`
+- `pr_get`
+- `comments_list`
+- `comments_create`
+- `comments_update`
+- `comments_delete`
+
+Each command supports:
+
+| Key | Values | Default | What it does |
+| --- | --- | --- | --- |
+| `command` | string | none | Sets the executable |
+| `args` | list of strings | `[]` | Sets command arguments |
+| `timeout_ms` | number | `30000` | Sets the command timeout |
+
+Provider commands return Oyo-shaped JSON. Mutation commands read Oyo-shaped JSON from standard input.
+
+See [provider command contract](./REVIEW.md#provider-command-contract).
+
 ## Review hooks and actions
 
 Use `[[review.hooks]]` to run commands after review events.

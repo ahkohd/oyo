@@ -66,7 +66,7 @@ You can also press `s` in the TUI, or set `stepping = true` in config.
 - animated transitions
 - autoplay
 - Git integration
-- History view with `oy view`
+- History view with `oy log`
 - built-in themes and `.tmTheme` syntax themes
 - XDG config file support
 
@@ -160,42 +160,8 @@ oy old.rs new.rs --step --speed 100
 ### Open History
 
 ```sh
-oy view
+oy log
 ```
-
-## Review comments
-
-Add comments while reviewing. Oyo prints them when you quit.
-
-```sh
-oy
-```
-
-Write comments to a file:
-
-```sh
-oy --review-output-file /tmp/oy-review.txt
-```
-
-Write comments only to a file:
-
-```sh
-oy --review-output-file /tmp/oy-review.txt --no-print-review
-```
-
-Disable persisted review sessions:
-
-```sh
-oy --no-review-persist
-```
-
-Start a fresh persisted review session:
-
-```sh
-oy --clear-review-session
-```
-
-Review hooks are documented in [review hooks](./docs/REVIEW_HOOKS.md).
 
 ## Use with Git
 
@@ -235,9 +201,68 @@ diff-args = ["$left", "$right"]
 d = ["diff", "--tool", "oy"]
 ```
 
-Then run `jj d` (or `jj diff --tool oy`). This keeps your pager for
-`jj diff`, `jj log` and everything else — don't set `oy` as the global
-`ui.diff-formatter`.
+Then run `jj d` or `jj diff --tool oy`.
+
+You can also open jj targets directly:
+
+```sh
+oy @
+oy feature
+oy 'trunk()..@'
+```
+
+Keep your pager for `jj diff`, `jj log` and everything else. Do not set `oy` as the global `ui.diff-formatter`.
+
+## Review comments
+
+Press `m` while reviewing to add a comment.
+
+```sh
+oy
+```
+
+Oyo saves review state for the current diff target.
+
+Show review status:
+
+```sh
+oy review status
+oy review status --json
+```
+
+Show comments:
+
+```sh
+oy review comment
+oy review comment feature
+```
+
+In Git, `status` and `comment` default to the working tree, like `oy`. Pass a branch, commit or range for branch review comments. Use an explicit base for stacked branches, for example `oy review status development...feature`. jj defaults to `@`, unless `@` has one bookmark. In that case, Oyo treats the bookmark like a branch.
+
+Use a jj revset to review a stack:
+
+```sh
+oy 'trunk()..@'
+oy review comment 'trunk()..@'
+```
+
+Push or pull GitHub pull request comments with `gh`:
+
+```sh
+oy review pull
+oy review push
+```
+
+Export or apply comments as JSON:
+
+```sh
+oy review export --format json > comments.json
+oy review comment apply comments.json
+```
+
+For the full review workflow, see [review commands](./docs/REVIEW.md).
+
+Review hooks are documented in [review hooks](./docs/REVIEW_HOOKS.md).
 
 ## Keybindings
 
@@ -325,6 +350,7 @@ Use these docs for full configuration:
 - [config reference](./docs/CONFIG.md)
 - [theme configuration](./docs/THEME.md)
 - [keybinding actions](./docs/KEYBINDINGS.md)
+- [review commands](./docs/REVIEW.md)
 - [review hooks](./docs/REVIEW_HOOKS.md)
 - [diff behaviour](./docs/DIFF_VIEWER.md)
 - [diff styling previews](./docs/DIFF_PREVIEWS.md)

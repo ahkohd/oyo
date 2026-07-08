@@ -122,6 +122,20 @@ pub fn get_repo_root(path: &Path) -> Result<PathBuf, GitError> {
     Ok(PathBuf::from(root))
 }
 
+fn is_oyo_review_path(path: &Path) -> bool {
+    path.starts_with(".oyo/reviews")
+}
+
+fn drop_oyo_review_changes(changes: &mut Vec<ChangedFile>) {
+    changes.retain(|change| {
+        !is_oyo_review_path(&change.path)
+            && change
+                .old_path
+                .as_ref()
+                .is_none_or(|old_path| !is_oyo_review_path(old_path))
+    });
+}
+
 /// Get list of uncommitted changed files (staged and unstaged)
 pub fn get_uncommitted_changes(repo_path: &Path) -> Result<Vec<ChangedFile>, GitError> {
     let mut changes = Vec::new();
@@ -173,6 +187,8 @@ pub fn get_uncommitted_changes(repo_path: &Path) -> Result<Vec<ChangedFile>, Git
         }
     }
 
+    drop_oyo_review_changes(&mut changes);
+
     // Deduplicate by path
     changes.sort_by(|a, b| a.path.cmp(&b.path));
     changes.dedup_by(|a, b| a.path == b.path);
@@ -198,6 +214,7 @@ pub fn get_staged_changes(repo_path: &Path) -> Result<Vec<ChangedFile>, GitError
 
     let mut changes = Vec::new();
     parse_name_status(&String::from_utf8_lossy(&output.stdout), &mut changes);
+    drop_oyo_review_changes(&mut changes);
     Ok(changes)
 }
 
@@ -253,6 +270,7 @@ pub fn get_changes_between_index(
 
     let mut changes = Vec::new();
     parse_name_status(&String::from_utf8_lossy(&output.stdout), &mut changes);
+    drop_oyo_review_changes(&mut changes);
     Ok(changes)
 }
 
@@ -515,5 +533,26 @@ mod tests {
         assert_eq!(changes[0].status, FileStatus::Modified);
         assert_eq!(changes[1].status, FileStatus::Added);
         assert_eq!(changes[2].status, FileStatus::Deleted);
+    }
+
+    #[test]
+    fn drops_oyo_review_db_changes() {
+        let mut changes = vec![
+            ChangedFile {
+                path: PathBuf::from(".oyo/reviews/workspace/review.db"),
+                status: FileStatus::Untracked,
+                old_path: None,
+            },
+            ChangedFile {
+                path: PathBuf::from("src/main.rs"),
+                status: FileStatus::Modified,
+                old_path: None,
+            },
+        ];
+
+        drop_oyo_review_changes(&mut changes);
+
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].path, PathBuf::from("src/main.rs"));
     }
 }

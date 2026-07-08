@@ -1,4 +1,4 @@
-use crate::app::{App, TopbarTabContent, ViewMode};
+use crate::app::{App, FilePanelMode, TopbarTabContent, ViewMode};
 use crate::config;
 use crate::keybindings::{
     Dispatch, FileFilterAction, GlobalAction, HelpAction, LineInputAction, NormalAction,
@@ -21,6 +21,16 @@ pub(crate) fn handle_app_key(
 ) -> Result<()> {
     if app.show_help {
         handle_help_key(app, key);
+        return Ok(());
+    }
+
+    if app.review_remote_picker_active() {
+        app.handle_review_remote_picker_key(key);
+        return Ok(());
+    }
+
+    if app.review_delete_confirmation_active() {
+        app.handle_review_delete_confirmation_key(key);
         return Ok(());
     }
 
@@ -59,6 +69,11 @@ pub(crate) fn handle_app_key(
         return Ok(());
     }
 
+    if app.comment_picker_active() {
+        handle_comment_picker_key(app, key);
+        return Ok(());
+    }
+
     if app.theme_picker_active() {
         handle_theme_picker_key(app, key);
         return Ok(());
@@ -80,6 +95,13 @@ pub(crate) fn handle_app_key(
     }
 
     if app.diff_selection_mode_active() && handle_selection_key(app, key) {
+        return Ok(());
+    }
+
+    if app.file_panel_mode == FilePanelMode::Comments
+        && app.file_list_focused
+        && app.handle_comments_sidebar_action_key(key)
+    {
         return Ok(());
     }
 
@@ -151,6 +173,18 @@ fn handle_global_key(app: &mut App, key: KeyEvent) -> bool {
                 app.stop_file_search();
             } else {
                 app.start_file_search();
+            }
+            true
+        }
+        Dispatch::Matched(GlobalAction::OpenCommentPicker) => {
+            if !app.review_mode() {
+                return false;
+            }
+            app.reset_count();
+            if app.comment_picker_active() {
+                app.stop_comment_picker();
+            } else {
+                app.start_comment_picker();
             }
             true
         }
@@ -317,6 +351,29 @@ fn handle_file_search_key(app: &mut App, key: KeyEvent) {
     }
 }
 
+fn handle_comment_picker_key(app: &mut App, key: KeyEvent) {
+    match app.keybindings.comment_picker(key) {
+        Dispatch::Matched(PickerAction::Cancel) => app.stop_comment_picker(),
+        Dispatch::Matched(PickerAction::Accept) => app.apply_comment_picker_selection(),
+        Dispatch::Matched(PickerAction::Backspace) => {
+            if app.comment_picker_query().is_empty() {
+                app.stop_comment_picker();
+            } else {
+                app.pop_comment_picker_char();
+            }
+        }
+        Dispatch::Matched(PickerAction::Clear) => app.clear_comment_picker_text(),
+        Dispatch::Matched(PickerAction::SelectNext) => app.move_comment_picker_selection(1),
+        Dispatch::Matched(PickerAction::SelectPrev) => app.move_comment_picker_selection(-1),
+        Dispatch::Pending => {}
+        Dispatch::Unmatched => {
+            if let Some(c) = printable_char(key) {
+                app.push_comment_picker_char(c);
+            }
+        }
+    }
+}
+
 fn handle_file_filter_key(app: &mut App, key: KeyEvent) {
     match app.keybindings.file_filter(key) {
         Dispatch::Matched(FileFilterAction::Close) => app.stop_file_filter(),
@@ -415,6 +472,84 @@ fn handle_normal_key(
     terminal: &mut TuiTerminal,
     editor_config: &config::EditorConfig,
 ) -> Result<()> {
+    if app.review_mode() && key.modifiers.is_empty() {
+        if app.active_pr_comments_view() && app.pr_reply_prefix {
+            app.pr_reply_prefix = false;
+            match key.code {
+                KeyCode::Char(c @ 'a'..='z') => {
+                    app.reply_to_pull_request_comment_letter(c);
+                    return Ok(());
+                }
+                KeyCode::Char(c @ '1'..='9') => {
+                    app.reply_to_pull_request_comment_number((c as u8 - b'0') as usize);
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
+        if app.review_edit_prefix {
+            app.review_edit_prefix = false;
+            match key.code {
+                KeyCode::Char(c @ 'a'..='z') => {
+                    app.edit_review_comment_letter(c);
+                    return Ok(());
+                }
+                KeyCode::Char(c @ '1'..='9') => {
+                    app.edit_review_comment_number((c as u8 - b'0') as usize);
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
+        if app.review_delete_prefix {
+            app.review_delete_prefix = false;
+            match key.code {
+                KeyCode::Char(c @ 'a'..='z') => {
+                    app.delete_review_comment_letter(c);
+                    return Ok(());
+                }
+                KeyCode::Char(c @ '1'..='9') => {
+                    app.delete_review_comment_number((c as u8 - b'0') as usize);
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
+        if app.active_pr_comments_view() {
+            match key.code {
+                KeyCode::Char('c') => {
+                    app.start_pull_request_comment();
+                    return Ok(());
+                }
+                KeyCode::Char('r') => {
+                    app.pr_reply_prefix = true;
+                    app.review_edit_prefix = false;
+                    app.review_delete_prefix = false;
+                    app.keybindings.clear_sequence();
+                    app.reset_count();
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
+        if matches!(key.code, KeyCode::Char('i')) {
+            app.review_edit_prefix = true;
+            app.review_delete_prefix = false;
+            app.pr_reply_prefix = false;
+            app.keybindings.clear_sequence();
+            app.reset_count();
+            return Ok(());
+        }
+        if matches!(key.code, KeyCode::Char('x')) && app.review_comment_count() > 0 {
+            app.review_delete_prefix = true;
+            app.review_edit_prefix = false;
+            app.pr_reply_prefix = false;
+            app.keybindings.clear_sequence();
+            app.reset_count();
+            return Ok(());
+        }
+    }
+
     if let Some(digit) = count_digit(key, app.pending_count.is_some()) {
         app.clear_diff_selection();
         app.keybindings.clear_sequence();
@@ -447,6 +582,7 @@ fn dispatch_normal_action(
             NormalAction::Quit
                 | NormalAction::Refresh
                 | NormalAction::ToggleHelp
+                | NormalAction::OpenCommentPicker
                 | NormalAction::OpenThemePicker
         )
     {
@@ -918,6 +1054,14 @@ fn dispatch_normal_action(
                 app.stop_file_search();
             } else {
                 app.start_file_search();
+            }
+        }
+        NormalAction::OpenCommentPicker => {
+            app.reset_count();
+            if app.comment_picker_active() {
+                app.stop_comment_picker();
+            } else {
+                app.start_comment_picker();
             }
         }
         NormalAction::OpenThemePicker => {

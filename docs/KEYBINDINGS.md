@@ -12,6 +12,7 @@ If you do not set an action, Oyo uses the default keys. Set an action to an empt
 [keybindings.global]
 open_command_palette = ["ctrl-p"]
 open_file_search = ["ctrl-shift-p"]
+open_comment_picker = ["ctrl-shift-c"]
 open_theme_picker = ["ctrl-t"]
 
 [keybindings.normal]
@@ -59,7 +60,7 @@ In `normal` mode, plain `1` to `9` are reserved for counts. Plain `0` means `lin
 
 `global` runs before most input modes. It does not run before `help` or `review_editor`.
 
-`normal.open_command_palette`, `normal.open_file_search` and `normal.open_theme_picker` still work in normal mode. Use `global` if you want shortcuts to work while a picker, search box or filter is active.
+`normal.open_command_palette`, `normal.open_file_search`, `normal.open_comment_picker` and `normal.open_theme_picker` still work in normal mode. Use `global` if you want shortcuts to work while a picker, search box or filter is active.
 
 ## Mouse interactions
 
@@ -71,8 +72,9 @@ Mouse actions use built-in behaviour and cannot be changed with keybindings.
 | Click a selection action | Copy, comment, cancel or run a configured command |
 | Scroll a selection action row | Move through hidden selection actions |
 | Click ` + ` on a diff line | Add or update a line comment |
-| Click a comment card | Edit that comment |
-| Click `x delete` on a comment card | Delete that comment |
+| Click a comment card or `ia edit` | Edit that comment |
+| Click `xa delete` on a comment card | Delete that comment |
+| Click `ra reply` on a pull request comment | Reply to that comment |
 | Click a comment editor action | Save, cancel, mention or run a configured command |
 | Scroll a comment editor action row | Move through hidden comment actions |
 | Click the sidebar toggle | Show or hide the sidebar |
@@ -85,6 +87,8 @@ Mouse actions use built-in behaviour and cannot be changed with keybindings.
 | Right-click a file in the sidebar | Open the file context menu |
 | Click a sidebar file context menu action | Open, open in a new tab or copy the path |
 | Click a comment in the sidebar | Open it for editing |
+| Click the comments sidebar overflow menu | Pull or push review comments |
+| Click a comment picker item | Jump to that review comment |
 | Click an item in History | Open it |
 | Control-click an item in History | Mark the range start |
 | Right-click an item in History | Open the range context menu |
@@ -115,6 +119,7 @@ Use each mode as `[keybindings.<mode>]`.
 | `review_editor` | `[keybindings.review_editor]` | Inline comment editor |
 | `command_palette` | `[keybindings.command_palette]` | Command palette picker |
 | `file_search` | `[keybindings.file_search]` | Quick file search picker |
+| `comment_picker` | `[keybindings.comment_picker]` | Comment picker |
 | `theme_picker` | `[keybindings.theme_picker]` | Theme picker |
 | `file_filter` | `[keybindings.file_filter]` | File panel filter |
 | `goto` | `[keybindings.goto]` | Go to prompt |
@@ -129,6 +134,7 @@ Use each mode as `[keybindings.<mode>]`.
 | --- | --- | --- |
 | `open_command_palette` | `ctrl-p` | Open the command palette |
 | `open_file_search` | `ctrl-shift-p` | Open quick file search |
+| `open_comment_picker` | `ctrl-shift-c` | Open comment picker |
 | `open_theme_picker` | `ctrl-t` | Open theme picker |
 
 ## Normal mode
@@ -202,6 +208,7 @@ Use each mode as `[keybindings.<mode>]`.
 | `toggle_help` | `?` | Show or hide help |
 | `open_command_palette` | `ctrl-p` | Open the command palette in normal mode |
 | `open_file_search` | `ctrl-shift-p` | Open quick file search in normal mode |
+| `open_comment_picker` | `g c` | Open comment picker in normal mode |
 | `open_theme_picker` | `ctrl-t` | Open theme picker in normal mode |
 
 ## Help mode
@@ -253,6 +260,17 @@ Use each mode as `[keybindings.<mode>]`.
 | `clear` | `ctrl-u` | Clear the query |
 | `select_next` | `down` | Select the next item |
 | `select_prev` | `up` | Select the previous item |
+
+## Comment picker mode
+
+| Action | Default keys | What it does |
+| --- | --- | --- |
+| `cancel` | `esc` | Cancel |
+| `accept` | `enter` | Open the comment |
+| `backspace` | `backspace` | Delete the previous character |
+| `clear` | `ctrl-u` | Clear the query |
+| `select_next` | `down` | Select the next comment |
+| `select_prev` | `up` | Select the previous comment |
 
 ## Theme picker mode
 

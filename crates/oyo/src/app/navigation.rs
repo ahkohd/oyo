@@ -2527,6 +2527,7 @@ impl App {
     }
 
     pub fn toggle_view_mode(&mut self) {
+        self.preview_forced_by_content = false;
         let allow_blame = self.blame_enabled;
         if !self.stepping {
             // In no-step mode, skip Evolution view as it requires stepping
@@ -2558,6 +2559,7 @@ impl App {
     }
 
     pub fn set_view_mode(&mut self, target: ViewMode) {
+        self.preview_forced_by_content = false;
         if target == ViewMode::Blame && !self.blame_enabled {
             return;
         }
@@ -2583,6 +2585,7 @@ impl App {
     }
 
     pub fn toggle_view_mode_reverse(&mut self) {
+        self.preview_forced_by_content = false;
         let allow_blame = self.blame_enabled;
         if !self.stepping {
             // In no-step mode, skip Evolution view as it requires stepping
