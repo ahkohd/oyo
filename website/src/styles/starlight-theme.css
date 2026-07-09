@@ -3,8 +3,10 @@
    under [data-theme='light']. Accent is aqua; grays ramp toward everforest. */
 
 :root {
-  --sl-font-mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code",
-    "Fira Code", Menlo, Consolas, monospace;
+  --sl-font-mono: "Geist Mono Variable", ui-monospace, "SF Mono", "JetBrains Mono",
+    "Cascadia Code", "Fira Code", Menlo, Consolas, monospace;
+  --sl-font: "Geist Mono Variable", ui-monospace, "SF Mono", "JetBrains Mono",
+    "Cascadia Code", "Fira Code", Menlo, Consolas, monospace;
 
   /* accent: aqua */
   --sl-color-accent-low: #16342a;
@@ -69,8 +71,7 @@
    `.oy-header` (max-width 72rem) carries the 1.5rem side padding, matching the
    landing's `.nav-in` exactly. */
 .page > .header {
-  background: color-mix(in srgb, var(--sl-color-bg) 82%, transparent);
-  backdrop-filter: blur(10px);
+  background: var(--sl-color-bg);
   border-bottom: 1px solid var(--sl-color-hairline);
   padding: 0;
 }
@@ -88,7 +89,7 @@ site-search > button {
   gap: 0.5rem;
   padding: 0.42rem 0.7rem;
   border: 1px solid var(--sl-color-hairline);
-  border-radius: 8px;
+  border-radius: 0;
   background: color-mix(in srgb, var(--sl-color-bg) 55%, transparent);
   color: var(--sl-color-gray-2);
   transition:
@@ -115,5 +116,5 @@ mobile-starlight-toc nav {
 /* Screenshots on the previews page read better boxed. */
 .sl-markdown-content img {
   border: 1px solid var(--sl-color-hairline);
-  border-radius: 8px;
+  border-radius: 0;
 }

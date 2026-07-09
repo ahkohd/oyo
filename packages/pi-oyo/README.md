@@ -1,6 +1,10 @@
 # pi-oyo
 
-Pi package that adds `oy`-backed `/diff` and `/review` commands.
+Pi package that points the agent at the Oyo code-review skill.
+
+When enabled, it appends a short instruction to the agent's system prompt telling it to
+read the installed Oyo skill (`oy skill path`) and use `oy` / `oy review` for reviews and
+Oyo comments. That is all — the agent drives `oy` itself.
 
 ## Install
 
@@ -22,11 +26,9 @@ pi install ./packages/pi-oyo
 
 ## Commands
 
-- `/diff [oy args...]`
-  - Opens `oy` and returns to Pi
-- `/review [oy args...]`
-  - Opens `oy`, captures comments on quit, and pastes them into the editor
-- `/review temp [oy args...]`
-  - Same as `/review`, but runs an ephemeral session (`--no-review-persist`)
-- `/review new [oy args...]`
-  - Same as `/review`, but clears saved session state first (`--clear-review-session`)
+- `/oyo [on|off|status]`
+  - `on` (default): inject the Oyo skill instruction into the agent's system prompt
+  - `off`: stop injecting it
+  - `status`: report the current mode
+
+The mode persists across a session; the default is `on`.

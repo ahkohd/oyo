@@ -24,13 +24,13 @@
 
   --shadow: 0 24px 60px -28px rgba(60,72,77,.35);
 
-  --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code",
-          "Fira Code", Menlo, Consolas, monospace;
-  --sans: ui-sans-serif, -apple-system, "Segoe UI", system-ui, "Helvetica Neue",
-          sans-serif;
+  --mono: "Geist Mono Variable", ui-monospace, "SF Mono", "JetBrains Mono",
+          "Cascadia Code", "Fira Code", Menlo, Consolas, monospace;
+  --sans: "Geist Mono Variable", ui-monospace, "SF Mono", "JetBrains Mono",
+          "Cascadia Code", "Fira Code", Menlo, Consolas, monospace;
 
   --maxw: 72rem;
-  --radius: 12px;
+  --radius: 0;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -93,21 +93,9 @@ body {
   text-rendering: optimizeLegibility;
 }
 
-/* faint dotted terminal-grid backdrop */
-body::before {
-  content: "";
-  position: fixed;
-  inset: 0;
-  pointer-events: none;
-  background-image: radial-gradient(var(--border) 1px, transparent 1px);
-  background-size: 26px 26px;
-  opacity: .35;
-  z-index: 0;
-}
-
 a { color: inherit; text-decoration: none; }
 ::selection { background: var(--accent); color: var(--bg); }
-:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 4px; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 0; }
 
 .wrap { max-width: var(--maxw); margin: 0 auto; padding: 0 1.5rem; }
 .mono { font-family: var(--mono); }
@@ -115,8 +103,7 @@ a { color: inherit; text-decoration: none; }
 /* ---------- nav ---------- */
 header.nav {
   position: sticky; top: 0; z-index: 20;
-  backdrop-filter: blur(10px);
-  background: color-mix(in srgb, var(--bg) 82%, transparent);
+  background: var(--bg);
   border-bottom: 1px solid var(--border);
 }
 .nav-in {
@@ -131,7 +118,7 @@ header.nav {
 .brand .prompt { color: var(--accent); }
 .brand .cur {
   display: inline-block; width: .55ch; height: 1.05em; margin-left: .15rem;
-  background: var(--accent); transform: translateY(.15em);
+  background: var(--accent); transform: translateY(.02em);
   animation: blink 1.1s steps(1) infinite;
 }
 @keyframes blink { 50% { opacity: 0; } }
@@ -143,14 +130,14 @@ header.nav {
 .nav-links a:hover { color: var(--accent); }
 .nav-cta {
   font-family: var(--mono); font-size: .82rem;
-  border: 1px solid var(--border-2); border-radius: 8px;
+  border: 1px solid var(--border-2); border-radius: 0;
   padding: .35rem .7rem; color: var(--fg-strong) !important;
   transition: border-color .15s, color .15s;
 }
 .nav-cta:hover { border-color: var(--accent); color: var(--accent) !important; }
 .theme-toggle {
   font-family: var(--mono); font-size: .95rem; cursor: pointer;
-  background: transparent; border: 1px solid var(--border-2); border-radius: 8px;
+  background: transparent; border: 1px solid var(--border-2); border-radius: 0;
   width: 2rem; height: 2rem; color: var(--muted); line-height: 1;
   display: grid; place-items: center; transition: color .15s, border-color .15s;
 }
@@ -173,7 +160,7 @@ section { position: relative; z-index: 1; }
 }
 .divider .hash { color: var(--accent); }
 h2 {
-  font-family: var(--mono); font-weight: 700; color: var(--fg-strong);
+  font-family: var(--mono); font-weight: 500; color: var(--fg-strong);
   font-size: clamp(1.5rem, 3vw, 2.1rem); line-height: 1.15;
   letter-spacing: -.02em; margin: 0 0 .6rem; text-wrap: balance;
 }
@@ -182,10 +169,10 @@ h2 {
 /* ---------- hero ---------- */
 .hero { padding: clamp(3rem, 8vw, 5.5rem) 0 2.5rem; }
 .hero h1 {
-  font-family: var(--mono); font-weight: 700;
-  font-size: clamp(2.1rem, 6.2vw, 4rem); line-height: 1.02;
-  letter-spacing: -.035em; word-spacing: -.35em; color: var(--fg-strong);
-  margin: 1rem 0 0; text-wrap: balance; max-width: 16ch;
+  font-family: var(--mono); font-weight: 500;
+  font-size: clamp(1.5rem, 3.7vw, 2.3rem); line-height: 1.12;
+  letter-spacing: -.02em; color: var(--fg-strong);
+  margin: 1rem 0 1.4rem; text-wrap: balance; max-width: 28ch;
 }
 .hero h1 .hl { color: var(--accent); }
 .hero-sub {
@@ -195,12 +182,12 @@ h2 {
 .hero-actions { display: flex; flex-wrap: wrap; gap: .8rem; align-items: center; }
 .btn {
   display: inline-flex; align-items: center;
-  font-family: var(--mono); font-size: .9rem; font-weight: 600;
-  padding: .7rem 1.15rem; border-radius: 9px; cursor: pointer;
+  font-family: var(--mono); font-size: .82rem; font-weight: 400;
+  padding: .5rem .95rem; border-radius: 0; cursor: pointer;
   border: 1px solid transparent;
   transition: transform .12s, box-shadow .12s, border-color .15s, background .15s;
 }
-.btn-primary { background: var(--accent); color: var(--bg); }
+.btn-primary { background: var(--accent); color: #0c1a14; }
 .btn-primary:hover { background: color-mix(in srgb, var(--accent) 86%, #000); }
 .btn-ghost { border-color: var(--border-2); color: var(--fg-strong); background: transparent; }
 .btn-ghost:hover { border-color: var(--accent); color: var(--accent); }
@@ -218,7 +205,6 @@ h2 {
   background: var(--bg-inset);
   border: 1px solid var(--border-2);
   border-radius: var(--radius);
-  box-shadow: var(--shadow);
   overflow: hidden;
 }
 .term-tabs {
@@ -274,6 +260,9 @@ h2 {
 /* Clip the scaled-up terminal (see the ResizeObserver crop in index.astro) so
    its border is pushed outside the visible area and the demo sits flush. */
 .term-body--player .ap-player { overflow: hidden; }
+/* Drop asciinema-player's hardcoded 4px radius so the demo sits flush in the
+   chrome; the outer chrome supplies the corner rounding. */
+.term-body--player .ap-player { border-radius: 0 !important; }
 /* Static fallback (reduced-motion / no-JS) keeps the original padded layout. */
 .term-fallback { padding: 1rem 1.1rem; }
 .dl { display: grid; grid-template-columns: 2.4rem 1fr; white-space: pre; }
@@ -294,7 +283,7 @@ h2 {
 }
 .term-foot .pill {
   color: var(--bg); background: var(--accent);
-  padding: .05rem .5rem; border-radius: 5px; font-weight: 600;
+  padding: .05rem .5rem; border-radius: 0; font-weight: 600;
 }
 .term-foot .sep { color: var(--faint); }
 .term-foot .g { color: var(--add); } .term-foot .r { color: var(--del); }
@@ -309,15 +298,17 @@ h2 {
 
 /* ---------- two modes ---------- */
 .modes { padding: 4.5rem 0 1.5rem; }
-.modes-grid { display: grid; grid-template-columns: 1fr 1fr; align-items: start; gap: 1.4rem; margin-top: 1.5rem; }
+.modes-grid { display: grid; grid-template-columns: 1fr 1fr; align-items: stretch; gap: 1.4rem; margin-top: 1.5rem; }
 .mode {
   display: flex; flex-direction: column;
   border: 1px solid var(--border); border-radius: var(--radius);
   background: var(--bg-elev); overflow: hidden;
 }
+.mode .show-text { padding: 1.4rem 1.5rem 1.2rem; }
+.mode .show-demo { border: 0; border-top: 1px solid var(--border); margin-top: auto; }
 .mode-head { padding: .65rem 1.3rem .35rem; }
 .mode-head .k { color: var(--accent); font-weight: 600; }
-.mode-head h3 { font-family: var(--mono); margin: .3rem 0 .25rem; color: var(--fg-strong); font-size: 1.08rem; }
+.mode-head h3 { font-family: var(--mono); font-weight: 500; margin: .3rem 0 .25rem; color: var(--fg-strong); font-size: 1.08rem; }
 .mode-head p { margin: .12rem 0 .6rem; color: var(--muted); font-size: .92rem; }
 .mini {
   font-family: var(--mono); font-size: .74rem; line-height: 1.7;
@@ -339,6 +330,7 @@ h2 {
 .mini-player .ap-term { border-color: #1d2428 !important; }
 /* Clip the scaled-up terminal (flush treatment, see index.astro). */
 .mini-player .ap-player { overflow: hidden; }
+.mini-player .ap-player { border-radius: 0 !important; }
 
 /* ---------- features ---------- */
 .features { padding: 4.5rem 0 1.5rem; }
@@ -347,14 +339,44 @@ h2 {
   background: var(--border); border: 1px solid var(--border);
   border-radius: var(--radius); overflow: hidden; margin-top: 1.5rem;
 }
-.feat { background: var(--bg-elev); padding: 1.5rem 1.4rem; transition: background .15s; }
-.feat:hover { background: var(--bg-inset); }
+.feat { background: var(--bg-elev); padding: 1.5rem 1.4rem; }
 .feat h3 {
   font-family: var(--mono); font-size: 1rem; color: var(--fg-strong);
-  margin: 0 0 .4rem; font-weight: 600;
+  margin: 0 0 .4rem; font-weight: 400;
 }
 .feat p { margin: 0; color: var(--muted); font-size: .9rem; line-height: 1.55; }
 .lead .mono { font-family: var(--mono); }
+
+/* ---------- review showcase ---------- */
+.review { padding: 4.5rem 0 1.5rem; }
+.showcase { display: grid; gap: 1.5rem; margin-top: 2rem; }
+.show-row {
+  display: grid; grid-template-columns: 1fr 1fr; align-items: stretch;
+  border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--bg-elev); overflow: hidden;
+}
+.show-row:nth-child(even) .show-text { order: 2; }
+.show-row .show-text { padding: 1.7rem 1.8rem; align-self: center; }
+.show-text .k {
+  color: var(--accent); font-weight: 400; font-size: .78rem;
+  letter-spacing: .01em; text-transform: none;
+}
+.show-text h3 { font-weight: 500; margin: .5rem 0; color: var(--fg-strong); font-size: 1.2rem; line-height: 1.32; }
+.show-text p { margin: 0; color: var(--muted); font-size: .95rem; line-height: 1.62; }
+.show-demo { overflow: hidden; }
+/* Terminal render floats in its half of the card with padding around it (not flush).
+   Beats `.mini-player { padding:0 !important }`; bg is the card colour so the
+   padding is visible while the player itself stays dark (its own rules). */
+.show-row .show-demo {
+  align-self: stretch; border: 0; background: var(--bg-elev) !important;
+  padding: 10px !important; display: grid; align-content: center; overflow: hidden;
+}
+/* All embedded asciinema demos render in the site font (Geist Mono). */
+.ap-term { font-family: var(--mono) !important; }
+@media (max-width: 800px) {
+  .show-row { grid-template-columns: 1fr; }
+  .show-row:nth-child(even) .show-text { order: 0; }
+}
 
 /* ---------- install ---------- */
 .install { padding: 4.5rem 0 1.5rem; }
@@ -362,7 +384,7 @@ h2 {
 .tabs button {
   font-family: var(--mono); font-size: .82rem; cursor: pointer;
   background: transparent; color: var(--muted);
-  border: 1px solid var(--border); border-radius: 8px; padding: .4rem .85rem;
+  border: 1px solid var(--border); border-radius: 0; padding: .4rem .85rem;
   transition: color .15s, border-color .15s, background .15s;
 }
 .tabs button:hover { color: var(--fg-strong); }
@@ -373,14 +395,14 @@ h2 {
 .cmd {
   margin-top: 1rem; display: flex; align-items: center; justify-content: space-between;
   gap: 1rem; background: var(--bg-inset); border: 1px solid var(--border);
-  border-radius: 10px; padding: .95rem 1.1rem; font-family: var(--mono);
+  border-radius: 0; padding: .95rem 1.1rem; font-family: var(--mono);
   font-size: .92rem; overflow-x: auto;
 }
 .cmd code { color: var(--fg-strong); white-space: pre; }
 .cmd .dollar { color: var(--accent); margin-right: .7rem; user-select: none; }
 .copy {
   font-family: var(--mono); font-size: .72rem; cursor: pointer; flex-shrink: 0;
-  background: transparent; border: 1px solid var(--border-2); border-radius: 6px;
+  background: transparent; border: 1px solid var(--border-2); border-radius: 0;
   padding: .3rem .55rem; color: var(--muted); transition: color .15s, border-color .15s;
 }
 .copy:hover { color: var(--accent); border-color: var(--accent); }
@@ -419,8 +441,8 @@ footer {
 .foot-brand .brand { font-size: 1.2rem; }
 .foot-brand p { color: var(--muted); font-size: .9rem; max-width: 30ch; margin: .8rem 0 0; }
 .foot-col h4 {
-  font-family: var(--mono); font-size: .74rem; text-transform: uppercase;
-  letter-spacing: .14em; color: var(--faint); margin: 0 0 1rem;
+  font-family: var(--mono); font-size: .74rem; font-weight: 400; text-transform: none;
+  letter-spacing: .02em; color: var(--faint); margin: 0 0 1rem;
 }
 .foot-col a { display: block; color: var(--muted); font-size: .9rem; padding: .28rem 0; transition: color .15s; }
 .foot-col a:hover { color: var(--accent); }

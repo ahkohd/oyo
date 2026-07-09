@@ -35,21 +35,19 @@ Ask the agent to:
 1. read the Oyo skill
 2. confirm the review target
 3. open the diff with `oy`, `oy --staged`, `oy --range main...HEAD` or the jj target
-4. add comments with `oy review comment new` when useful
-5. use `--author-type agent` for agent comments
+4. set agent identity with `OYO_REVIEW_AUTHOR_TYPE=agent`
+5. add comments with `oy review comment new` when useful
 6. report the target reviewed and the checks run
 
-Example agent comment:
+Example agent identity and comment:
 
 ```sh
+export OYO_REVIEW_AUTHOR_TYPE=agent
+export OYO_REVIEW_AUTHOR_NAME="Agent name"
 oy review comment new \
   --file src/lib.rs \
   --new-line 42 \
-  --body "Handle empty input." \
-  --author-type agent \
-  --author-name "Agent name" \
-  --author-email "agent@example.com" \
-  --author-username agent
+  --body "Handle empty input."
 ```
 
 ### Agent works on comments
@@ -60,11 +58,23 @@ Ask the agent to:
 
 1. read the Oyo skill
 2. run `oy review status` to see the comment summary
-3. run `oy review comment` to read full comment bodies
-4. treat the comments as the task list
+3. run `oy review comment --unresolved` to read full comment bodies
+4. treat the returned comments as the task list; this filter excludes outdated comments
 5. edit the referenced files
 6. run the smallest useful checks
-7. report what changed and which comments are still unresolved
+7. run `oy review comment resolve <id>` for comments you addressed
+8. report what changed and which comments are still unresolved
+
+Oyo marks a comment outdated when its anchored line changed or vanished as the diff evolved. It hides outdated comments from live inline overlays. Re-anchored comments follow their code without becoming outdated.
+
+`--unresolved` excludes outdated comments by default because stale anchors are not actionable. Agents can inspect stale unresolved comments with:
+
+```sh
+oy review status --unresolved --outdated
+oy review comment --unresolved --outdated
+```
+
+Use `--outdated` alone to show only outdated comments. Use `--no-outdated` to hide them explicitly. Filtered JSON counts only matching comments. With `--since`, an outdated-state transition has `changeType: "updated"` and a deleted comment has `changeType: "removed"`.
 
 ## Pick the right target
 

@@ -118,9 +118,9 @@ Oyo sends this shape when `stdin = "json"`:
 {
   "version": 1,
   "event": "review_ready",
-  "repo_root": "/repo",
-  "review_db": "/home/me/.local/share/oyo/reviews/.../review.db",
-  "diff_fingerprint": "abc",
+  "repoRoot": "/repo",
+  "reviewDb": "/home/me/.local/share/oyo/reviews/.../review.db",
+  "diffFingerprint": "abc",
   "diff": {
     "branch": "feature",
     "range": ["main", "HEAD"],
@@ -134,8 +134,8 @@ Oyo sends this shape when `stdin = "json"`:
         "file": "src/lib.rs",
         "kind": "line",
         "side": "new",
-        "old_range": null,
-        "new_range": { "start": 42, "end": 42 },
+        "oldRange": null,
+        "newRange": { "start": 42, "end": 42 },
         "author": {
           "name": "Ada Lovelace",
           "email": "ada@example.com",
@@ -143,8 +143,9 @@ Oyo sends this shape when `stdin = "json"`:
             "github": "ada"
           }
         },
-        "created_at": 1783478786,
-        "updated_at": 1783478786,
+        "resolved": false,
+        "createdAt": 1783478786,
+        "updatedAt": 1783478786,
         "body": "Please fix this."
       }
     ]
@@ -154,7 +155,7 @@ Oyo sends this shape when `stdin = "json"`:
 
 The payload is versioned. Check `version` before you depend on the payload shape. Oyo will bump the version if it makes a breaking payload change.
 
-`side` is `old` or `new`. Hunk comments may include both `old_range` and `new_range`.
+`side` is `old` or `new`. Hunk comments may include both `oldRange` and `newRange`.
 
 Oyo also sets these environment variables:
 

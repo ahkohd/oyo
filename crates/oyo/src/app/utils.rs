@@ -1,9 +1,10 @@
-use super::{AnimationPhase, ViewMode};
+use super::{AnimationPhase, FoldContextExpansion, FoldContextKey, FoldContextRegion, ViewMode};
 use crate::config::FoldContextMode;
 use oyo_core::{Change, ChangeKind, LineKind, StepDirection, ViewLine, ViewSpan, ViewSpanKind};
-use ratatui::style::Color;
+use ratatui::style::{Color, Modifier};
 use ratatui::text::Span;
 use regex::Regex;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::io::Write;
 use std::process::{Command, Stdio};
 
@@ -183,6 +184,7 @@ pub(crate) fn apply_highlight_spans(
     ranges: &[(usize, usize)],
     bg: Color,
     fg: Option<Color>,
+    modifier: Modifier,
 ) -> Vec<Span<'static>> {
     if ranges.is_empty() {
         return spans;
@@ -221,7 +223,10 @@ pub(crate) fn apply_highlight_spans(
                 if let Some(fg) = fg {
                     style = style.fg(fg);
                 }
-                out.push(Span::styled(slice.to_string(), style));
+                out.push(Span::styled(
+                    slice.to_string(),
+                    style.add_modifier(modifier),
+                ));
             }
             cursor = highlight_end;
             if r_end <= span_end {
@@ -275,21 +280,52 @@ pub fn display_metrics(
 
 const FOLD_CONTEXT_MIN_LINES: usize = 8;
 
-pub(crate) fn fold_context_view(view: Vec<ViewLine>, mode: FoldContextMode) -> Vec<ViewLine> {
-    if !mode.is_enabled() {
-        return view;
+pub(crate) fn fold_context_label(hidden_lines: usize) -> String {
+    let unit = if hidden_lines == 1 { "line" } else { "lines" };
+    format!(" {hidden_lines} unchanged {unit} ")
+}
+
+fn folded_context_line(text: String, change_id: usize) -> ViewLine {
+    ViewLine {
+        content: text.clone(),
+        spans: vec![ViewSpan {
+            text,
+            kind: ViewSpanKind::Equal,
+        }],
+        kind: LineKind::Context,
+        old_line: None,
+        new_line: None,
+        is_active: false,
+        is_active_change: false,
+        is_primary_active: false,
+        show_hunk_extent: false,
+        change_id,
+        hunk_index: None,
+        has_changes: false,
     }
-    if view.is_empty() {
-        return view;
+}
+
+pub(crate) fn fold_context_view(
+    view: Vec<ViewLine>,
+    mode: FoldContextMode,
+    file_index: usize,
+    context_lines: usize,
+    expansions: &FxHashMap<FoldContextKey, FoldContextExpansion>,
+    comment_anchors: &FxHashSet<usize>,
+) -> (Vec<ViewLine>, Vec<FoldContextRegion>) {
+    if !mode.is_enabled() || view.is_empty() {
+        return (view, Vec::new());
     }
-    let mut out: Vec<ViewLine> = Vec::with_capacity(view.len());
+    let mut out = Vec::with_capacity(view.len());
+    let mut regions = Vec::new();
     let mut idx = 0usize;
     while idx < view.len() {
         let line = &view[idx];
-        let is_context = matches!(line.kind, LineKind::Context);
-        let is_outside_hunk = line.hunk_index.is_none();
-        let is_plain = !line.has_changes;
-        if is_context && is_outside_hunk && is_plain {
+        if matches!(line.kind, LineKind::Context)
+            && line.hunk_index.is_none()
+            && !line.has_changes
+            && !comment_anchors.contains(&line.change_id)
+        {
             let start = idx;
             let mut end = idx + 1;
             while end < view.len() {
@@ -297,6 +333,7 @@ pub(crate) fn fold_context_view(view: Vec<ViewLine>, mode: FoldContextMode) -> V
                 if matches!(next.kind, LineKind::Context)
                     && next.hunk_index.is_none()
                     && !next.has_changes
+                    && !comment_anchors.contains(&next.change_id)
                 {
                     end += 1;
                 } else {
@@ -305,29 +342,41 @@ pub(crate) fn fold_context_view(view: Vec<ViewLine>, mode: FoldContextMode) -> V
             }
             let count = end - start;
             if count >= FOLD_CONTEXT_MIN_LINES {
-                let text = if mode.show_counts() {
-                    let label = if count == 1 { "line" } else { "lines" };
-                    format!("… {count} {label}")
-                } else {
-                    "…".to_string()
+                let key = FoldContextKey {
+                    file_index,
+                    start_change_id: view[start].change_id,
+                    end_change_id: view[end - 1].change_id,
                 };
-                out.push(ViewLine {
-                    content: text.clone(),
-                    spans: vec![ViewSpan {
-                        text,
-                        kind: ViewSpanKind::Equal,
-                    }],
-                    kind: LineKind::Context,
-                    old_line: None,
-                    new_line: None,
-                    is_active: false,
-                    is_active_change: false,
-                    is_primary_active: false,
-                    show_hunk_extent: false,
-                    change_id: 0,
-                    hunk_index: None,
-                    has_changes: false,
-                });
+                let base_top = context_lines.min(count);
+                let base_bottom = context_lines.min(count.saturating_sub(base_top));
+                let base_hidden = count.saturating_sub(base_top).saturating_sub(base_bottom);
+                if base_hidden < FOLD_CONTEXT_MIN_LINES {
+                    out.extend(view[start..end].iter().cloned());
+                    idx = end;
+                    continue;
+                }
+                let expansion = expansions.get(&key).copied().unwrap_or_default();
+                let top = base_top.saturating_add(expansion.top).min(count);
+                let bottom = base_bottom
+                    .saturating_add(expansion.bottom)
+                    .min(count.saturating_sub(top));
+                let hidden = count.saturating_sub(top).saturating_sub(bottom);
+                if hidden == 0 {
+                    out.extend(view[start..end].iter().cloned());
+                } else {
+                    out.extend(view[start..start + top].iter().cloned());
+                    out.push(folded_context_line(
+                        format!("↑{}↓", fold_context_label(hidden)),
+                        key.start_change_id,
+                    ));
+                    out.extend(view[end - bottom..end].iter().cloned());
+                    regions.push(FoldContextRegion {
+                        key,
+                        hidden_lines: hidden,
+                        scope_line: view[start + top].new_line,
+                        scope_hint: None,
+                    });
+                }
                 idx = end;
                 continue;
             }
@@ -335,7 +384,7 @@ pub(crate) fn fold_context_view(view: Vec<ViewLine>, mode: FoldContextMode) -> V
         out.push(view[idx].clone());
         idx += 1;
     }
-    out
+    (out, regions)
 }
 
 pub(crate) fn is_fold_line(line: &ViewLine) -> bool {
@@ -470,7 +519,27 @@ pub(crate) fn split_display_metrics(
 
 #[cfg(test)]
 mod tests {
-    use super::base64_encode;
+    use super::*;
+
+    fn context_line(change_id: usize) -> ViewLine {
+        ViewLine {
+            content: format!("line {change_id}"),
+            spans: vec![ViewSpan {
+                text: format!("line {change_id}"),
+                kind: ViewSpanKind::Equal,
+            }],
+            kind: LineKind::Context,
+            old_line: Some(change_id + 1),
+            new_line: Some(change_id + 1),
+            is_active: false,
+            is_active_change: false,
+            is_primary_active: false,
+            show_hunk_extent: false,
+            change_id,
+            hunk_index: None,
+            has_changes: false,
+        }
+    }
 
     #[test]
     fn base64_encode_pads_short_chunks() {
@@ -479,5 +548,122 @@ mod tests {
         assert_eq!(base64_encode(b"fo"), "Zm8=");
         assert_eq!(base64_encode(b"foo"), "Zm9v");
         assert_eq!(base64_encode(b"hello world"), "aGVsbG8gd29ybGQ=");
+    }
+
+    #[test]
+    fn expandable_context_fold_keeps_edges_and_expands_from_both_sides() {
+        let view = (0..30).map(context_line).collect::<Vec<_>>();
+        let mut expansions = FxHashMap::default();
+        let comment_anchors = FxHashSet::default();
+
+        let (folded, regions) = fold_context_view(
+            view.clone(),
+            FoldContextMode::Expandable,
+            0,
+            3,
+            &expansions,
+            &comment_anchors,
+        );
+        assert_eq!(folded.len(), 7);
+        assert_eq!(folded[3].content, "↑ 24 unchanged lines ↓");
+        assert_eq!(regions[0].hidden_lines, 24);
+
+        expansions.insert(regions[0].key, FoldContextExpansion { top: 20, bottom: 0 });
+        let (folded, regions) = fold_context_view(
+            view.clone(),
+            FoldContextMode::Expandable,
+            0,
+            3,
+            &expansions,
+            &comment_anchors,
+        );
+        assert_eq!(folded.len(), 27);
+        assert_eq!(folded[23].content, "↑ 4 unchanged lines ↓");
+
+        expansions.insert(regions[0].key, FoldContextExpansion { top: 23, bottom: 0 });
+        let (folded, regions) = fold_context_view(
+            view.clone(),
+            FoldContextMode::Expandable,
+            0,
+            3,
+            &expansions,
+            &comment_anchors,
+        );
+        assert_eq!(folded[26].content, "↑ 1 unchanged line ↓");
+
+        expansions.insert(regions[0].key, FoldContextExpansion { top: 20, bottom: 4 });
+        let (folded, regions) = fold_context_view(
+            view,
+            FoldContextMode::Expandable,
+            0,
+            3,
+            &expansions,
+            &comment_anchors,
+        );
+        assert_eq!(folded.len(), 30);
+        assert!(regions.is_empty());
+    }
+
+    #[test]
+    fn comment_anchors_split_folds_and_keep_edge_context() {
+        let view = (0..60).map(context_line).collect::<Vec<_>>();
+        let comment_anchors = FxHashSet::from_iter([20, 40]);
+        let (folded, regions) = fold_context_view(
+            view,
+            FoldContextMode::Expandable,
+            0,
+            3,
+            &FxHashMap::default(),
+            &comment_anchors,
+        );
+
+        assert_eq!(regions.len(), 3);
+        for anchor in [20, 40] {
+            let index = folded
+                .iter()
+                .position(|line| line.change_id == anchor && !is_fold_line(line))
+                .unwrap();
+            assert_eq!(folded[index - 3].change_id, anchor - 3);
+            assert_eq!(folded[index + 3].change_id, anchor + 3);
+        }
+    }
+
+    #[test]
+    fn off_and_small_gaps_stay_open_and_zero_context_is_maximally_compact() {
+        let expansions = FxHashMap::default();
+        let comment_anchors = FxHashSet::default();
+        let (full, regions) = fold_context_view(
+            (0..30).map(context_line).collect(),
+            FoldContextMode::Off,
+            0,
+            3,
+            &expansions,
+            &comment_anchors,
+        );
+        assert_eq!(full.len(), 30);
+        assert!(regions.is_empty());
+
+        let (small, regions) = fold_context_view(
+            (0..13).map(context_line).collect(),
+            FoldContextMode::Expandable,
+            0,
+            3,
+            &expansions,
+            &comment_anchors,
+        );
+        assert_eq!(small.len(), 13);
+        assert!(regions.is_empty());
+
+        let (compact, regions) = fold_context_view(
+            (0..8).map(context_line).collect(),
+            FoldContextMode::Expandable,
+            0,
+            0,
+            &expansions,
+            &comment_anchors,
+        );
+        assert_eq!(compact.len(), 1);
+        assert_eq!(compact[0].content, "↑ 8 unchanged lines ↓");
+        assert_eq!(regions[0].hidden_lines, 8);
     }
 }

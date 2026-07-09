@@ -276,6 +276,70 @@ impl App {
         Some((display_idx, label))
     }
 
+    pub(crate) fn rebuild_current_syntax_cache_after_reload(&mut self) {
+        let idx = self.multi_diff.selected_index;
+        if idx >= self.multi_diff.file_count() {
+            return;
+        }
+        if self.syntax_caches.len() != self.multi_diff.file_count() {
+            self.syntax_caches = (0..self.multi_diff.file_count()).map(|_| None).collect();
+        } else {
+            self.syntax_caches[idx] = None;
+        }
+        if self.fold_scope_caches.len() != self.multi_diff.file_count() {
+            self.fold_scope_caches = vec![None; self.multi_diff.file_count()];
+        } else {
+            self.fold_scope_caches[idx] = None;
+        }
+        self.syntax_scope_cache = None;
+        self.syntax_warmup_target = None;
+        self.syntax_warmup_target_applied = None;
+        self.syntax_warmup_target_at = None;
+        self.syntax_warmup_frame_old = None;
+        self.syntax_warmup_frame_new = None;
+
+        let budget = self
+            .syntax_warmup_idle_lines
+            .max(self.last_viewport_height.saturating_mul(4))
+            .max(1);
+        if let Some(cache) = self.ensure_syntax_cache() {
+            cache.warm_checkpoints(budget);
+        }
+    }
+
+    pub(crate) fn ensure_current_fold_scope_cache(&mut self) {
+        let idx = self.multi_diff.selected_index;
+        if idx >= self.multi_diff.file_count() {
+            return;
+        }
+        if self.fold_scope_caches.len() != self.multi_diff.file_count() {
+            self.fold_scope_caches = vec![None; self.multi_diff.file_count()];
+        }
+        if self.fold_scope_caches[idx].is_some() {
+            return;
+        }
+
+        let Some(file_name) = self
+            .multi_diff
+            .current_file()
+            .map(|file| file.display_name.clone())
+        else {
+            return;
+        };
+        let Some((_, new_content)) = self.multi_diff.file_contents_arc(idx) else {
+            return;
+        };
+        if self.syntax_engine.is_none() {
+            self.syntax_engine = Some(SyntaxEngine::new(&self.syntax_theme, self.theme_is_light));
+        }
+        let ranges = self
+            .syntax_engine
+            .as_ref()
+            .map(|engine| engine.enclosing_scope_ranges(new_content.as_ref(), &file_name))
+            .unwrap_or_default();
+        self.fold_scope_caches[idx] = Some(ranges);
+    }
+
     pub(crate) fn ensure_syntax_cache(&mut self) -> Option<&mut SyntaxCache> {
         if !self.syntax_enabled() {
             return None;

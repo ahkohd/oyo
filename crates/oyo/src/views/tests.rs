@@ -1,16 +1,25 @@
 use std::path::PathBuf;
 
-use crate::app::{AnimationPhase, App, ViewMode};
+use crate::app::{
+    review::{ReviewRange, ReviewSide, ReviewTargetKind},
+    AnimationPhase, App, ViewMode,
+};
 use crate::config::{
     DiffForegroundMode, DiffHighlightMode, EvoSyntaxMode, ModifiedStepMode, SyntaxMode,
 };
 use crate::test_utils::TestApp;
 use crate::views::{
-    extent_marker_text, render_blame, render_diff_scrollbar, render_evolution, render_split,
-    render_unified_pane, show_extent_marker,
+    extent_marker_text, fold_context_band, render_blame, render_diff_scrollbar, render_evolution,
+    render_split, render_unified_pane, review_note_block, show_extent_marker,
 };
 use oyo_core::{AnimationFrame, LineKind, MultiFileDiff, ViewLine};
-use ratatui::{backend::TestBackend, buffer::Buffer, style::Color, Terminal};
+use ratatui::{
+    backend::TestBackend,
+    buffer::Buffer,
+    style::{Color, Modifier},
+    Terminal,
+};
+use unicode_width::UnicodeWidthStr;
 
 fn make_app(old: &str, new: &str, view_mode: ViewMode) -> TestApp {
     TestApp::new_default(|| {
@@ -31,6 +40,25 @@ fn make_app(old: &str, new: &str, view_mode: ViewMode) -> TestApp {
     })
 }
 
+fn make_fold_scope_app(view_mode: ViewMode) -> App {
+    let mut lines = vec!["fn inner_scope() {".to_string()];
+    lines.extend((1..=60).map(|line| format!("    let value_{line} = {line};")));
+    lines.push("}".to_string());
+    let old = format!("{}\n", lines.join("\n"));
+    lines[30] = "    let value_29 = 999;".to_string();
+    let new = format!("{}\n", lines.join("\n"));
+    let diff = MultiFileDiff::from_file_pair(
+        PathBuf::from("scope.rs"),
+        PathBuf::from("scope.rs"),
+        old,
+        new,
+    );
+    let mut app = App::new(diff, view_mode, 200, false, None);
+    app.syntax_mode = SyntaxMode::Off;
+    app.next_step();
+    app
+}
+
 fn render_buffer(app: &mut App, width: u16, height: u16) -> Buffer {
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).expect("terminal");
@@ -47,6 +75,156 @@ fn render_buffer(app: &mut App, width: u16, height: u16) -> Buffer {
         })
         .expect("draw");
     terminal.backend().buffer().clone()
+}
+
+#[test]
+fn split_search_marks_the_current_match_bold_and_wraps() {
+    let old = (1..=80)
+        .map(|line| {
+            if matches!(line, 20 | 70) {
+                format!("needle old {line}")
+            } else {
+                format!("line {line}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let new = (1..=80)
+        .map(|line| {
+            if matches!(line, 20 | 70) {
+                format!("needle new {line}")
+            } else {
+                format!("line {line}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut app = make_app(&old, &new, ViewMode::Split);
+    app.start_search();
+    for ch in "needle".chars() {
+        app.push_search_char(ch);
+    }
+    app.search_next();
+    let first = app.search_target().unwrap();
+
+    let buffer = render_buffer(&mut app, 100, 20);
+    let active_cells = (0..buffer.area.height)
+        .flat_map(|y| (0..buffer.area.width).map(move |x| (x, y)))
+        .filter(|&(x, y)| {
+            let cell = &buffer[(x, y)];
+            cell.bg == app.theme.accent && cell.modifier.contains(Modifier::BOLD)
+        })
+        .count();
+    assert!(active_cells > 0);
+
+    app.search_next();
+    let second = app.search_target().unwrap();
+    assert_ne!(second, first);
+    let buffer = render_buffer(&mut app, 100, 20);
+    assert!((0..buffer.area.height)
+        .flat_map(|y| (0..buffer.area.width).map(move |x| (x, y)))
+        .any(|(x, y)| {
+            let cell = &buffer[(x, y)];
+            cell.bg == app.theme.accent && cell.modifier.contains(Modifier::BOLD)
+        }));
+    app.search_next();
+    assert_eq!(app.search_target(), Some(first));
+}
+
+#[test]
+fn evolution_search_marks_a_match_below_fold_context_active() {
+    let old = (1..=80)
+        .map(|line| format!("line {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let new = (1..=80)
+        .map(|line| {
+            if line == 70 {
+                "needle".to_string()
+            } else {
+                format!("line {line}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut app = make_app(&old, &new, ViewMode::Evolution);
+    app.goto_last_step();
+    app.start_search();
+    for ch in "needle".chars() {
+        app.push_search_char(ch);
+    }
+    app.search_next();
+
+    let buffer = render_buffer(&mut app, 100, 20);
+
+    assert!((0..buffer.area.height)
+        .flat_map(|y| (0..buffer.area.width).map(move |x| (x, y)))
+        .any(|(x, y)| {
+            let cell = &buffer[(x, y)];
+            cell.bg == app.theme.accent && cell.modifier.contains(Modifier::BOLD)
+        }));
+}
+
+#[test]
+fn fold_scope_hint_needs_room_for_text_and_ellipsis() {
+    assert_eq!(super::fold_scope_hint("function", 4), None);
+    assert_eq!(
+        super::fold_scope_hint("function", 5).as_deref(),
+        Some("   f…")
+    );
+}
+
+#[test]
+fn fold_context_band_drops_scope_hint_before_controls() {
+    let mut app = make_fold_scope_app(ViewMode::UnifiedPane);
+    let fold_line = app
+        .current_view_with_frame(AnimationFrame::Idle)
+        .iter()
+        .find(|line| crate::app::is_fold_line(line))
+        .cloned()
+        .unwrap();
+
+    let wide = fold_context_band(&app, &fold_line, 80, Some(0)).unwrap();
+    let wide_text = wide
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+    assert!(wide_text.ends_with("   fn inner_scope() {"));
+    assert!(wide
+        .spans
+        .last()
+        .unwrap()
+        .style
+        .add_modifier
+        .contains(Modifier::DIM));
+
+    let narrow = fold_context_band(&app, &fold_line, 40, Some(0)).unwrap();
+    let narrow_text = narrow
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+    assert!(narrow_text.ends_with('…'));
+    assert!(!narrow_text.ends_with("fn inner_scope() {"));
+    assert!(narrow_text.width() <= 40);
+}
+
+#[test]
+fn fold_context_scope_hint_renders_in_unified_and_split_views() {
+    for mode in [ViewMode::UnifiedPane, ViewMode::Split] {
+        let mut app = make_fold_scope_app(mode);
+        let buffer = render_buffer(&mut app, 120, 20);
+        let text = buffer
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(
+            text.contains("fn inner_scope() {"),
+            "missing scope in {mode:?}"
+        );
+    }
 }
 
 #[test]
@@ -95,6 +273,139 @@ fn buffer_text(buf: &Buffer) -> Vec<String> {
 
 fn count_occurrences(haystack: &str, needle: &str) -> usize {
     haystack.match_indices(needle).count()
+}
+
+fn resolved_review_app() -> TestApp {
+    let mut app = make_app("old\n", "new\n", ViewMode::UnifiedPane);
+    app.set_review_persist_enabled(false);
+    app.enable_review_mode();
+    let id = app
+        .add_review_comment_from_cli(
+            "new.txt",
+            ReviewTargetKind::Line,
+            Some(ReviewSide::New),
+            None,
+            Some(ReviewRange { start: 1, end: 1 }),
+            "check this".to_string(),
+        )
+        .unwrap();
+    assert!(app.set_review_comment_resolved_from_cli(id, true));
+    app
+}
+
+#[test]
+fn resolved_review_card_dims_content_border() {
+    let mut app = resolved_review_app();
+    let overlay = app.review_comment_overlays_for_current_file().remove(0);
+    let block = review_note_block(&mut app, &overlay, 40);
+
+    assert_eq!(block.lines[1].spans[0].style.fg, Some(app.theme.text_muted));
+}
+
+#[test]
+fn review_actions_stay_on_card_border_lines() {
+    let mut app = resolved_review_app();
+    let overlay = app.review_comment_overlays_for_current_file().remove(0);
+    let block = review_note_block(&mut app, &overlay, 40);
+    let lines = block
+        .lines
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>();
+
+    let footer = lines
+        .iter()
+        .find(|line| line.starts_with("╰ ia edit"))
+        .unwrap();
+    assert!(footer.contains("ra reply"));
+    assert!(footer.contains("va unresolve"));
+    assert!(footer.contains("xa delete"));
+    assert!(!lines.iter().any(|line| line.starts_with('├')));
+}
+
+#[test]
+fn narrow_review_action_footer_does_not_wrap_hitbox_rows() {
+    let mut app = resolved_review_app();
+    let overlay = app.review_comment_overlays_for_current_file().remove(0);
+    let block = review_note_block(&mut app, &overlay, 20);
+    let footer = block.lines.last().unwrap();
+
+    assert!(footer.width() > 20);
+    assert_eq!(super::review_note_wrap_count(&footer.spans, 20), 1);
+    let fitted = super::fit_review_note_footer(footer.spans.clone(), 20);
+    assert_eq!(super::spans_width(&fitted), 20);
+    assert_eq!(fitted.last().unwrap().content, "╯");
+}
+
+#[test]
+fn resolved_review_unresolve_action_only_highlights_on_hover() {
+    let mut app = resolved_review_app();
+    let overlay = app.review_comment_overlays_for_current_file().remove(0);
+    let block = review_note_block(&mut app, &overlay, 40);
+    let label = block
+        .lines
+        .iter()
+        .flat_map(|line| &line.spans)
+        .find(|span| span.content.contains("unresolve"))
+        .unwrap();
+    assert_eq!(label.style.fg, Some(app.theme.text_muted));
+
+    app.review_preview_resolve_hover = Some(overlay.anchor_key.clone());
+    let block = review_note_block(&mut app, &overlay, 40);
+    let label = block
+        .lines
+        .iter()
+        .flat_map(|line| &line.spans)
+        .find(|span| span.content.contains("unresolve"))
+        .unwrap();
+    assert_eq!(label.style.fg, Some(app.theme.accent));
+}
+
+#[test]
+fn local_reply_thread_is_flat_with_a_connector() {
+    let mut app = make_app("old\n", "new\n", ViewMode::UnifiedPane);
+    app.set_review_persist_enabled(false);
+    app.enable_review_mode();
+    let parent_id = app
+        .add_review_comment_from_cli(
+            "new.txt",
+            ReviewTargetKind::Line,
+            Some(ReviewSide::New),
+            None,
+            Some(ReviewRange { start: 1, end: 1 }),
+            "Parent".to_string(),
+        )
+        .unwrap();
+    app.add_review_reply_from_cli(parent_id, "Child".to_string())
+        .unwrap();
+    let overlays = app.review_comment_overlays_for_current_file();
+    let parent = overlays
+        .iter()
+        .find(|overlay| !overlay.anchor_key.starts_with("reply|"))
+        .unwrap();
+    let parent_block = review_note_block(&mut app, parent, 40);
+    assert_eq!(
+        parent_block
+            .lines
+            .last()
+            .unwrap()
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>(),
+        " │"
+    );
+    let reply = overlays
+        .iter()
+        .find(|overlay| overlay.anchor_key.starts_with("reply|"))
+        .unwrap();
+    let reply_block = review_note_block(&mut app, reply, 40);
+    assert_eq!(reply_block.lines[0].spans[0].content, "╭ ");
 }
 
 #[test]

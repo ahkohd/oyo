@@ -215,25 +215,37 @@ impl App {
         if index >= self.multi_diff.file_count() {
             return;
         }
-        let was_pr_comments = self.active_topbar_content() == Some(TopbarTabContent::PrComments);
+        self.clear_review_action_prefixes();
+        let was_comment_view = matches!(
+            self.active_topbar_content(),
+            Some(TopbarTabContent::PrComments | TopbarTabContent::OutdatedComments)
+        );
         self.save_active_topbar_tab_state();
-        if was_pr_comments {
-            self.clear_pr_comment_view_state();
+        if was_comment_view {
+            self.clear_virtual_comment_view_state();
         }
         self.replace_active_topbar_tab_file(index);
         self.select_file_in_active_tab(index);
     }
 
-    fn clear_pr_comment_view_state(&mut self) {
+    fn clear_review_action_prefixes(&mut self) {
+        self.pr_reply_prefix = false;
+        self.review_edit_prefix = false;
+        self.review_reply_prefix = false;
+        self.review_resolve_prefix = false;
+        self.review_delete_prefix = false;
+        self.review_overflow_prefix = false;
+    }
+
+    fn clear_virtual_comment_view_state(&mut self) {
         self.pr_comment_focus = None;
+        self.outdated_comment_focus = None;
         self.pr_comment_hits.clear();
         self.pr_comment_add_hit = None;
         self.pr_comment_action_hover = None;
         self.pr_comment_action_hover_key = None;
         self.pr_comment_add_hover = false;
-        self.pr_reply_prefix = false;
-        self.review_edit_prefix = false;
-        self.review_delete_prefix = false;
+        self.clear_review_action_prefixes();
         self.clear_review_preview_boxes();
         if self.review_editor_active() {
             self.review_cancel_editor();
@@ -255,7 +267,7 @@ impl App {
             .unwrap_or(self.view_mode);
         let preview_only = match self.active_topbar_content() {
             Some(TopbarTabContent::File(index)) => self.file_is_preview_only(index),
-            Some(TopbarTabContent::PrComments) => true,
+            Some(TopbarTabContent::PrComments | TopbarTabContent::OutdatedComments) => true,
             Some(TopbarTabContent::Help) | None => false,
         };
         if preview_only && saved_mode != ViewMode::Preview {
@@ -299,7 +311,9 @@ impl App {
             self.topbar_tabs.retain(|tab| {
                 matches!(
                     tab.content,
-                    TopbarTabContent::Help | TopbarTabContent::PrComments
+                    TopbarTabContent::Help
+                        | TopbarTabContent::PrComments
+                        | TopbarTabContent::OutdatedComments
                 )
             });
             self.active_topbar_tab = self
@@ -311,7 +325,9 @@ impl App {
         }
         self.topbar_tabs.retain(|tab| match tab.content {
             TopbarTabContent::File(index) => index < count,
-            TopbarTabContent::Help | TopbarTabContent::PrComments => true,
+            TopbarTabContent::Help
+            | TopbarTabContent::PrComments
+            | TopbarTabContent::OutdatedComments => true,
         });
         let live_ids: Vec<usize> = self.topbar_tabs.iter().map(|tab| tab.id).collect();
         self.structured_previews
@@ -405,6 +421,7 @@ impl App {
             TopbarTabContent::File(_) => TopbarTabContent::File(self.multi_diff.selected_index),
             TopbarTabContent::Help => TopbarTabContent::Help,
             TopbarTabContent::PrComments => TopbarTabContent::PrComments,
+            TopbarTabContent::OutdatedComments => TopbarTabContent::OutdatedComments,
         };
         let view_mode = if self.preview_forced_by_content {
             self.topbar_tabs
@@ -421,7 +438,9 @@ impl App {
         let horizontal_scroll = self.horizontal_scroll;
         let navigator_state = match content {
             TopbarTabContent::File(_) => Some(self.multi_diff.current_navigator().state().clone()),
-            TopbarTabContent::Help | TopbarTabContent::PrComments => None,
+            TopbarTabContent::Help
+            | TopbarTabContent::PrComments
+            | TopbarTabContent::OutdatedComments => None,
         };
         if let Some(tab) = self.topbar_tabs.iter_mut().find(|tab| tab.id == active) {
             tab.content = content;
@@ -474,6 +493,12 @@ impl App {
                 .topbar_tabs
                 .iter()
                 .any(|tab| tab.id == tab_id && tab.content == TopbarTabContent::Help)
+    }
+
+    pub(crate) fn close_active_topbar_tab(&mut self) {
+        if let Some(tab_id) = self.active_topbar_tab {
+            self.close_topbar_tab(tab_id);
+        }
     }
 
     fn close_topbar_tab(&mut self, tab_id: usize) {
@@ -530,14 +555,19 @@ impl App {
         let old_content = self.active_topbar_content();
         let target_file = match tab.content {
             TopbarTabContent::File(index) => Some(index),
-            TopbarTabContent::Help | TopbarTabContent::PrComments => None,
+            TopbarTabContent::Help
+            | TopbarTabContent::PrComments
+            | TopbarTabContent::OutdatedComments => None,
         };
         if target_file != Some(old_index) && self.review_editor_active() {
             self.review_cancel_editor();
         }
         self.save_active_topbar_tab_state();
-        if old_content == Some(TopbarTabContent::PrComments) {
-            self.clear_pr_comment_view_state();
+        if matches!(
+            old_content,
+            Some(TopbarTabContent::PrComments | TopbarTabContent::OutdatedComments)
+        ) {
+            self.clear_virtual_comment_view_state();
         }
         if !self.stepping {
             self.save_no_step_state_snapshot(old_index);
@@ -580,7 +610,7 @@ impl App {
                 self.preview_forced_by_content = false;
                 self.clear_diff_selection();
             }
-            TopbarTabContent::PrComments => {
+            TopbarTabContent::PrComments | TopbarTabContent::OutdatedComments => {
                 self.view_mode = ViewMode::Preview;
                 self.preview_forced_by_content = tab.view_mode != ViewMode::Preview;
                 self.clear_diff_selection();
@@ -588,25 +618,34 @@ impl App {
         }
     }
 
-    pub(crate) fn open_pr_comments_in_current_tab(&mut self, focus: Option<u64>) {
-        self.pr_comment_focus = focus;
-        self.clear_review_preview_boxes();
-        if self.review_editor_active() {
-            self.review_cancel_editor();
+    fn set_virtual_comment_focus(&mut self, content: TopbarTabContent, focus: Option<u64>) {
+        match content {
+            TopbarTabContent::PrComments => self.pr_comment_focus = focus,
+            TopbarTabContent::OutdatedComments => self.outdated_comment_focus = focus,
+            TopbarTabContent::File(_) | TopbarTabContent::Help => {}
         }
+    }
+
+    fn open_virtual_comments_in_current_tab(
+        &mut self,
+        content: TopbarTabContent,
+        focus: Option<u64>,
+    ) {
+        self.clear_virtual_comment_view_state();
+        self.set_virtual_comment_focus(content, focus);
         self.save_active_topbar_tab_state();
         let mut saved_mode = ViewMode::Preview;
         if let Some(id) = self.active_topbar_tab {
             if let Some(tab) = self.topbar_tabs.iter_mut().find(|tab| tab.id == id) {
                 saved_mode = tab.view_mode;
-                tab.content = TopbarTabContent::PrComments;
+                tab.content = content;
                 tab.scroll_offset = 0;
                 tab.horizontal_scroll = 0;
                 tab.preview_rendered = true;
                 tab.navigator_state = None;
             }
         } else {
-            self.open_pr_comments_tab(focus);
+            self.open_virtual_comments_tab(content, focus);
             return;
         }
         self.view_mode = ViewMode::Preview;
@@ -616,21 +655,19 @@ impl App {
         self.clear_diff_selection();
     }
 
-    pub(crate) fn open_pr_comments_tab(&mut self, focus: Option<u64>) {
-        self.pr_comment_focus = focus;
-        self.clear_review_preview_boxes();
-        if self.review_editor_active() {
-            self.review_cancel_editor();
-        }
+    fn open_virtual_comments_tab(&mut self, content: TopbarTabContent, focus: Option<u64>) {
+        self.clear_virtual_comment_view_state();
         if let Some(id) = self
             .topbar_tabs
             .iter()
-            .find(|tab| tab.content == TopbarTabContent::PrComments)
+            .find(|tab| tab.content == content)
             .map(|tab| tab.id)
         {
             self.select_topbar_tab(id);
+            self.set_virtual_comment_focus(content, focus);
             return;
         }
+        self.set_virtual_comment_focus(content, focus);
         self.save_active_topbar_tab_state();
         let saved_mode = if self.preview_forced_by_content {
             self.active_topbar_tab
@@ -644,7 +681,7 @@ impl App {
         self.next_topbar_tab_id = self.next_topbar_tab_id.saturating_add(1);
         self.topbar_tabs.push(TopbarTab {
             id,
-            content: TopbarTabContent::PrComments,
+            content,
             view_mode: saved_mode,
             step_view_mode: self.step_view_mode,
             stepping: self.stepping,
@@ -659,6 +696,22 @@ impl App {
         self.scroll_offset = 0;
         self.horizontal_scroll = 0;
         self.clear_diff_selection();
+    }
+
+    pub(crate) fn open_pr_comments_in_current_tab(&mut self, focus: Option<u64>) {
+        self.open_virtual_comments_in_current_tab(TopbarTabContent::PrComments, focus);
+    }
+
+    pub(crate) fn open_pr_comments_tab(&mut self, focus: Option<u64>) {
+        self.open_virtual_comments_tab(TopbarTabContent::PrComments, focus);
+    }
+
+    pub(crate) fn open_outdated_comments_in_current_tab(&mut self, focus: Option<u64>) {
+        self.open_virtual_comments_in_current_tab(TopbarTabContent::OutdatedComments, focus);
+    }
+
+    pub(crate) fn open_outdated_comments_tab(&mut self, focus: Option<u64>) {
+        self.open_virtual_comments_tab(TopbarTabContent::OutdatedComments, focus);
     }
 
     pub(crate) fn open_help_tab(&mut self) {
@@ -1094,7 +1147,7 @@ impl App {
                     && row < y.saturating_add(height)
             });
         if hit {
-            self.should_quit = true;
+            self.request_quit();
         }
         hit
     }
@@ -1133,6 +1186,7 @@ impl App {
             return false;
         }
         self.close_file_context_menu();
+        self.close_review_comment_context_menu();
         self.status_mode_menu = Some(StatusModeMenu { x: column, y: row });
         self.status_mode_menu_hover = None;
         true
@@ -1466,22 +1520,51 @@ impl App {
                     && row < hit.y.saturating_add(hit.height)
             })
             .map(|hit| hit.action);
+        let fold_context_hover = self
+            .fold_context_hits
+            .iter()
+            .find(|hit| {
+                column >= hit.x
+                    && column < hit.x.saturating_add(hit.width)
+                    && row >= hit.y
+                    && row < hit.y.saturating_add(hit.height)
+            })
+            .map(|hit| (hit.key, hit.direction));
         let (review_line_add_row, review_line_add_hover) =
             self.review_line_add_hover_at(column, row);
         let review_preview_hit = self.review_preview_boxes.iter().rev().find_map(|hit| {
             let end_x = hit.x.saturating_add(hit.width);
             let end_y = hit.y.saturating_add(hit.height);
-            (column >= hit.x && column < end_x && row >= hit.y && row < end_y)
-                .then(|| (hit.anchor_key.clone(), hit.edit, hit.delete))
+            (column >= hit.x && column < end_x && row >= hit.y && row < end_y).then(|| {
+                (
+                    hit.comment_id,
+                    hit.anchor_key.clone(),
+                    hit.edit,
+                    hit.reply,
+                    hit.resolve,
+                    hit.delete,
+                    hit.overflow,
+                )
+            })
         });
+        let review_preview_hover_id = review_preview_hit.as_ref().and_then(|(id, ..)| *id);
         let review_preview_hover = review_preview_hit
             .as_ref()
-            .map(|(anchor_key, _, _)| anchor_key.clone());
+            .map(|(_, anchor_key, _, _, _, _, _)| anchor_key.clone());
         let review_preview_edit_hover = review_preview_hit
             .as_ref()
-            .and_then(|(anchor_key, edit, _)| edit.then(|| anchor_key.clone()));
-        let review_preview_delete_hover =
-            review_preview_hit.and_then(|(anchor_key, _, delete)| delete.then_some(anchor_key));
+            .and_then(|(_, anchor_key, edit, _, _, _, _)| edit.then(|| anchor_key.clone()));
+        let review_preview_reply_hover = review_preview_hit
+            .as_ref()
+            .and_then(|(_, anchor_key, _, reply, _, _, _)| reply.then(|| anchor_key.clone()));
+        let review_preview_resolve_hover = review_preview_hit
+            .as_ref()
+            .and_then(|(_, anchor_key, _, _, resolve, _, _)| resolve.then(|| anchor_key.clone()));
+        let review_preview_delete_hover = review_preview_hit
+            .as_ref()
+            .and_then(|(_, anchor_key, _, _, _, delete, _)| delete.then(|| anchor_key.clone()));
+        let review_preview_overflow_hover = review_preview_hit
+            .and_then(|(_, anchor_key, _, _, _, _, overflow)| overflow.then_some(anchor_key));
         let pr_comment_action_hover = self
             .pr_comment_hits
             .iter()
@@ -1541,11 +1624,16 @@ impl App {
             && self.comments_sidebar_overflow_hover == comments_sidebar_overflow_hover
             && self.comments_sidebar_overflow_menu_hover == comments_sidebar_overflow_menu_hover
             && self.selection_toolbar_hover == selection_hover
+            && self.fold_context_hover == fold_context_hover
             && self.review_line_add_row == review_line_add_row
             && self.review_line_add_hover == review_line_add_hover
             && self.review_preview_hover == review_preview_hover
+            && self.review_preview_hover_id == review_preview_hover_id
             && self.review_preview_edit_hover == review_preview_edit_hover
+            && self.review_preview_reply_hover == review_preview_reply_hover
+            && self.review_preview_resolve_hover == review_preview_resolve_hover
             && self.review_preview_delete_hover == review_preview_delete_hover
+            && self.review_preview_overflow_hover == review_preview_overflow_hover
             && self.pr_comment_action_hover == pr_comment_action_hover
             && self.pr_comment_action_hover_key == pr_comment_action_hover_key
             && self.pr_comment_add_hover == pr_comment_add_hover
@@ -1554,11 +1642,16 @@ impl App {
             return false;
         }
         self.selection_toolbar_hover = selection_hover;
+        self.fold_context_hover = fold_context_hover;
         self.review_line_add_row = review_line_add_row;
         self.review_line_add_hover = review_line_add_hover;
         self.review_preview_hover = review_preview_hover;
+        self.review_preview_hover_id = review_preview_hover_id;
         self.review_preview_edit_hover = review_preview_edit_hover;
+        self.review_preview_reply_hover = review_preview_reply_hover;
+        self.review_preview_resolve_hover = review_preview_resolve_hover;
         self.review_preview_delete_hover = review_preview_delete_hover;
+        self.review_preview_overflow_hover = review_preview_overflow_hover;
         self.pr_comment_action_hover = pr_comment_action_hover;
         self.pr_comment_action_hover_key = pr_comment_action_hover_key;
         self.pr_comment_add_hover = pr_comment_add_hover;
@@ -1885,7 +1978,13 @@ impl App {
             return "Help".to_string();
         }
         if self.active_topbar_content() == Some(TopbarTabContent::PrComments) {
-            return "Pull request comments".to_string();
+            return format!(
+                "{} comments",
+                self.review_provider_kind().long_review_noun()
+            );
+        }
+        if self.active_topbar_content() == Some(TopbarTabContent::OutdatedComments) {
+            return "Outdated comments".to_string();
         }
         self.multi_diff
             .current_file()
@@ -2041,6 +2140,9 @@ impl App {
             if idx < self.syntax_caches.len() {
                 self.syntax_caches[idx] = None;
             }
+            if idx < self.fold_scope_caches.len() {
+                self.fold_scope_caches[idx] = None;
+            }
             self.refresh_file_disk_baseline_for(idx);
         }
         self.recompute_file_change_state();
@@ -2121,10 +2223,8 @@ impl App {
         }
 
         let idx = self.multi_diff.selected_index;
-        if idx < self.syntax_caches.len() {
-            self.syntax_caches[idx] = None;
-        }
-        self.ensure_syntax_cache();
+        self.invalidate_fold_context_view();
+        self.rebuild_current_syntax_cache_after_reload();
 
         self.refresh_file_disk_baseline_for(idx);
         self.recompute_file_change_state();
@@ -2144,6 +2244,7 @@ impl App {
             self.no_step_visited = vec![false; file_count];
             self.files_visited = vec![false; file_count];
             self.syntax_caches = vec![None; file_count];
+            self.fold_scope_caches = vec![None; file_count];
             self.step_state_snapshots = vec![None; file_count];
             self.no_step_state_snapshots = vec![None; file_count];
             self.scroll_offset = 0;
@@ -2151,6 +2252,8 @@ impl App {
             self.needs_scroll_to_active = true;
             self.centered_once = false;
             self.handle_file_enter();
+            self.invalidate_fold_context_view();
+            self.rebuild_current_syntax_cache_after_reload();
 
             self.rebuild_file_disk_baseline();
             self.git_index_baseline = self.git_index_stamp();

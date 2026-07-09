@@ -28,7 +28,6 @@ view_mode = "unified"
 stepping = false
 watch = true
 line_wrap = false
-fold_context = "off"
 
 [ui.diff]
 fg = "syntax"
@@ -55,19 +54,25 @@ Use `[ui]` for general display and navigation defaults.
 | `auto_center` | `true`, `false` | `true` | Keeps the active change centred while stepping |
 | `watch` | `true`, `false` | `true` | Refreshes changed files on disk |
 | `overscroll` | `true`, `false` | `false` | Allows extra end-of-file scroll while centring |
+| `confirm_quit` | `true`, `false` | `true` | Asks for confirmation before quitting the TUI |
 | `view_mode` | `unified`, `split`, `evolution`, `blame`, `preview` | `unified` | Sets the default view mode |
 | `line_wrap` | `true`, `false` | `false` | Wraps long lines instead of horizontal scrolling |
-| `fold_context` | `off`, `on`, `counts` | `off` | Folds long unchanged blocks |
+| `fold_context` | `off`, `expandable` | `expandable` | Sets whether Oyo folds long unchanged blocks |
+| `fold_context_lines` | non-negative integer | `3` | Keeps this many context lines on each side of a fold |
 | `scrollbar` | `true`, `false` | `true` | Shows the diff and file panel scrollbars |
 | `strikethrough_deletions` | `true`, `false` | `false` | Strikes through deleted text |
 | `gutter_signs` | `true`, `false` | `true` | Shows added and removed signs in unified and evolution views |
-| `stepping` | `true`, `false` | `false` | Starts in step-through mode |
+| `stepping` | `true`, `false` | `false` | Starts in step mode |
 | `primary_marker` | string | built in | Sets the active-line marker for the left pane or unified view |
 | `primary_marker_right` | string | built in | Sets the active-line marker for the right pane |
 | `extent_marker_left` | string | built in | Sets the hunk extent marker for the left pane or unified view |
 | `extent_marker_right` | string | built in | Sets the hunk extent marker for the right pane |
 | `extent_marker_deleted` | string | built in | Sets the hunk extent marker for deleted lines |
 | `extent_marker` | string | built in | Legacy name for `extent_marker_left` |
+
+Long unchanged blocks are expandable by default. Oyo creates a fold when at least 8 lines remain hidden after preserving edge context. Set `fold_context = "off"` to show full context by default. Set `fold_context_lines = 0` for the most compact expandable view. The older `on` value remains an alias for `expandable`.
+
+Press `f` to toggle full and folded context. Search checks rendered lines. Press `F` to expand all folds before searching hidden context.
 
 ```toml
 [ui]
@@ -76,9 +81,11 @@ topbar = true
 auto_center = true
 watch = true
 overscroll = false
+confirm_quit = true
 view_mode = "unified"
 line_wrap = false
-fold_context = "off"
+fold_context = "expandable"
+fold_context_lines = 3
 scrollbar = true
 strikethrough_deletions = false
 gutter_signs = true
@@ -86,6 +93,9 @@ stepping = false
 extent_marker_left = "┃"
 extent_marker_right = "▐"
 extent_marker_deleted = "╏"
+
+# Use "off" to show full context by default.
+# Use fold_context_lines = 0 for maximum compaction.
 
 [ui.toasts]
 enabled = true
@@ -513,7 +523,7 @@ toggle_help = ["?"]
 
 [keybindings.review_editor]
 save = ["ctrl-s"]
-clear = ["ctrl-u", "ctrl-c"]
+clear = ["ctrl-u"]
 
 [keybindings.selection]
 copy = ["y"]

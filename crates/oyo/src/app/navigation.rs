@@ -2509,6 +2509,7 @@ impl App {
         };
 
         if let Some(idx) = target_idx {
+            let cursor_target = view.get(idx).map(|line| (line.hunk_index, line.change_id));
             let viewport_height = self.last_viewport_height.max(1);
             if self.auto_center {
                 let half_viewport = viewport_height / 2;
@@ -2521,7 +2522,17 @@ impl App {
             self.needs_scroll_to_active = false;
             self.multi_diff.current_navigator().set_hunk_scope(false);
             if !self.stepping {
-                self.set_cursor_for_current_scroll();
+                match cursor_target {
+                    Some((Some(hidx), change_id)) => self
+                        .multi_diff
+                        .current_navigator()
+                        .set_cursor_hunk(hidx, Some(change_id)),
+                    Some((None, change_id)) => self
+                        .multi_diff
+                        .current_navigator()
+                        .set_cursor_change(Some(change_id)),
+                    None => self.multi_diff.current_navigator().clear_cursor_change(),
+                }
             }
         }
     }

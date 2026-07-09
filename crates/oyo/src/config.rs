@@ -86,7 +86,7 @@
 //!
 //! [keybindings.review_editor]
 //! save = ["ctrl-s"]
-//! clear = ["ctrl-u", "ctrl-c"]
+//! clear = ["ctrl-u"]
 //!
 //! [keybindings.selection]
 //! copy = ["y"]
@@ -732,12 +732,16 @@ pub struct UiConfig {
     pub watch: bool,
     /// Allow overscroll near EOF when centering
     pub overscroll: bool,
+    /// Confirm before quitting the TUI
+    pub confirm_quit: bool,
     /// Default view mode: "unified", "split", or "evolution"
     pub view_mode: Option<String>,
     /// Enable line wrapping (default: false, uses horizontal scroll instead)
     pub line_wrap: bool,
-    /// Collapse long unchanged (context) blocks ("off", "on", or "counts")
+    /// Collapse long unchanged blocks ("off" or "expandable")
     pub fold_context: FoldContextMode,
+    /// Context lines kept on each side of an expandable fold
+    pub fold_context_lines: usize,
     /// Show diff and file panel scrollbars (default: true)
     pub scrollbar: bool,
     /// Show strikethrough on deleted text
@@ -794,9 +798,11 @@ impl Default for UiConfig {
             auto_center: true,
             watch: true,
             overscroll: false,
+            confirm_quit: true,
             view_mode: None,
             line_wrap: false,
-            fold_context: FoldContextMode::Off,
+            fold_context: FoldContextMode::Expandable,
+            fold_context_lines: 3,
             scrollbar: true,
             strikethrough_deletions: false,
             gutter_signs: true,
@@ -1052,21 +1058,23 @@ fn diff_preview_change_bars_default() -> bool {
 #[serde(rename_all = "snake_case")]
 pub enum FoldContextMode {
     /// No folding
-    #[default]
     Off,
-    /// Fold with a minimal marker
-    On,
-    /// Fold with a line count marker
-    Counts,
+    /// Expandable folds with surrounding context
+    #[default]
+    #[serde(alias = "on")]
+    Expandable,
 }
 
 impl FoldContextMode {
     pub fn is_enabled(self) -> bool {
-        !matches!(self, FoldContextMode::Off)
+        matches!(self, Self::Expandable)
     }
 
-    pub fn show_counts(self) -> bool {
-        matches!(self, FoldContextMode::Counts)
+    pub fn next(self) -> Self {
+        match self {
+            Self::Off => Self::Expandable,
+            Self::Expandable => Self::Off,
+        }
     }
 }
 /// Evolution view syntax scope
@@ -1903,6 +1911,37 @@ mod tests {
     #[test]
     fn ui_shows_scrollbar_by_default() {
         assert!(Config::default().ui.scrollbar);
+    }
+
+    #[test]
+    fn quit_confirmation_defaults_on_and_can_be_disabled() {
+        assert!(Config::default().ui.confirm_quit);
+        let config: Config = toml::from_str("[ui]\nconfirm_quit = false\n").unwrap();
+        assert!(!config.ui.confirm_quit);
+    }
+
+    #[test]
+    fn context_folding_defaults_on_and_has_no_dense_mode() {
+        assert_eq!(
+            Config::default().ui.fold_context,
+            FoldContextMode::Expandable
+        );
+        for (value, expected) in [
+            ("off", FoldContextMode::Off),
+            ("expandable", FoldContextMode::Expandable),
+            ("on", FoldContextMode::Expandable),
+        ] {
+            let config: Config =
+                toml::from_str(&format!("[ui]\nfold_context = \"{value}\"\n")).unwrap();
+            assert_eq!(config.ui.fold_context, expected);
+        }
+        for value in ["dense", "counts"] {
+            assert!(
+                toml::from_str::<Config>(&format!("[ui]\nfold_context = \"{value}\"\n")).is_err()
+            );
+        }
+        let config: Config = toml::from_str("[ui]\nfold_context_lines = 0\n").unwrap();
+        assert_eq!(config.ui.fold_context_lines, 0);
     }
 
     #[test]

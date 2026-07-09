@@ -10,7 +10,7 @@ use crate::config::{
 use crate::csv_preview::CsvPreviewState;
 use crate::keybindings::Keybindings;
 use crate::structured_preview::StructuredPreviewState;
-use crate::syntax::{SyntaxCache, SyntaxEngine};
+use crate::syntax::{EnclosingScopeRange, SyntaxCache, SyntaxEngine};
 use crate::time_format::TimeFormatter;
 use crate::toasts::{toast_builder, ToastEvent};
 use oyo_core::{
@@ -43,16 +43,18 @@ mod types;
 mod utils;
 
 pub(crate) use types::{
-    AnimationPhase, BlameDisplay, BlameRenderCache, BlameRenderKey, PeekMode, PeekScope, PeekState,
-    UnifiedRenderKey, UnifiedRenderModel, ViewMode, DIFF_VIEW_MIN_WIDTH, FILE_PANEL_MIN_WIDTH,
+    AnimationPhase, BlameDisplay, BlameRenderCache, BlameRenderKey, FoldContextDirection,
+    FoldContextHit, FoldContextKey, FoldContextRegion, FoldContextRenderRow, PeekMode, PeekScope,
+    PeekState, UnifiedRenderKey, UnifiedRenderModel, ViewMode, DIFF_VIEW_MIN_WIDTH,
+    FILE_PANEL_MIN_WIDTH,
 };
 use types::{
     BlameCacheKey, BlamePrefetchKey, BlamePrefetchRange, BlameRequest, BlameResponse,
-    BlameStepHint, DiffRequest, DiffResponse, HunkBounds, HunkEdge, HunkEdgeHint, HunkStart,
-    NoStepState, StepEdge, StepEdgeHint, SyntaxScopeCache,
+    BlameStepHint, DiffRequest, DiffResponse, FoldContextExpansion, HunkBounds, HunkEdge,
+    HunkEdgeHint, HunkStart, NoStepState, StepEdge, StepEdgeHint, SyntaxScopeCache,
 };
 use utils::{allow_overscroll_state, copy_to_clipboard, max_scroll};
-pub(crate) use utils::{display_metrics, is_conflict_marker, is_fold_line};
+pub(crate) use utils::{display_metrics, fold_context_label, is_conflict_marker, is_fold_line};
 
 type UnifiedHunkCacheKey = (usize, ViewMode, FoldContextMode, bool, usize, usize, usize);
 type SplitHunkCacheKey = (usize, FoldContextMode, bool, bool, usize, usize, usize);
@@ -107,6 +109,31 @@ impl FileContextMenuAction {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReviewCommentContextMenuAction {
+    Body,
+    Id,
+    FileLine,
+    Url,
+    MarkdownQuote,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ReviewCommentContextMenu {
+    pub comment_id: u64,
+    pub x: u16,
+    pub y: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ReviewCommentContextMenuHit {
+    pub action: ReviewCommentContextMenuAction,
+    pub x: u16,
+    pub y: u16,
+    pub width: u16,
+    pub height: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct FileContextMenu {
     pub file_index: usize,
     pub x: u16,
@@ -142,6 +169,7 @@ pub(crate) enum TopbarTabContent {
     File(usize),
     Help,
     PrComments,
+    OutdatedComments,
 }
 
 #[derive(Clone, Debug)]
@@ -300,6 +328,8 @@ pub struct App {
     files_visited: Vec<bool>,
     /// Whether to quit
     pub should_quit: bool,
+    /// Whether quitting requires confirmation
+    pub confirm_quit: bool,
     /// Runtime keyboard bindings and sequence state
     pub(crate) keybindings: Keybindings,
     /// Whether to open History.
@@ -444,10 +474,24 @@ pub struct App {
     max_line_widths_no_step: Vec<usize>,
     /// Line wrap mode (when true, horizontal scroll is ignored)
     pub line_wrap: bool,
-    /// Collapse long unchanged (context) blocks
+    /// Collapse long unchanged blocks
     pub fold_context: FoldContextMode,
-    /// Default fold context mode (restored when toggling)
-    fold_context_default: FoldContextMode,
+    /// Context lines kept on each side of an expandable fold
+    pub(crate) fold_context_lines: usize,
+    /// Per-gap expansion state
+    fold_context_expansions: FxHashMap<FoldContextKey, FoldContextExpansion>,
+    /// Expandable gaps in the current rendered view
+    fold_context_regions: Vec<FoldContextRegion>,
+    /// Mouse targets for expandable fold controls
+    pub(crate) fold_context_hits: Vec<FoldContextHit>,
+    /// Visible screen rows occupied by fold affordances
+    pub(crate) fold_context_screen_rows: Vec<u16>,
+    /// Hovered expandable fold control
+    pub(crate) fold_context_hover: Option<(FoldContextKey, FoldContextDirection)>,
+    /// Pending contextual fold action prefix
+    pub(crate) fold_context_prefix: Option<FoldContextDirection>,
+    /// Invalidates views after fold expansion changes
+    fold_context_revision: u64,
     /// Cached wrapped display length (for line wrap centering)
     last_wrap_display_len: Option<usize>,
     /// Cached wrapped active display index (for line wrap centering)
@@ -649,6 +693,8 @@ pub struct App {
     syntax_engine: Option<SyntaxEngine>,
     /// Per-file syntax cache (old/new spans)
     syntax_caches: Vec<Option<SyntaxCache>>,
+    /// Per-file named syntax scopes used by folded context bands
+    fold_scope_caches: Vec<Option<Vec<EnclosingScopeRange>>>,
     /// Show syntax scope debug label in the status bar
     show_syntax_scopes: bool,
     /// Cached syntax scope label for the active line
@@ -667,6 +713,24 @@ pub struct App {
     search_query: String,
     /// True when search input is active
     search_active: bool,
+    /// Search input cursor blink state.
+    pub(crate) search_cursor_visible: bool,
+    /// Last search cursor blink update.
+    search_cursor_last_blink: Instant,
+    /// Floating search bar hitbox.
+    pub(crate) search_bar_hit: Option<(u16, u16, u16, u16)>,
+    /// Previous match button hitbox.
+    pub(crate) search_prev_hit: Option<(u16, u16, u16, u16)>,
+    /// Next match button hitbox.
+    pub(crate) search_next_hit: Option<(u16, u16, u16, u16)>,
+    /// Clear search button hitbox.
+    pub(crate) search_clear_hit: Option<(u16, u16, u16, u16)>,
+    /// Previous match button hover state.
+    pub(crate) search_prev_hover: bool,
+    /// Next match button hover state.
+    pub(crate) search_next_hover: bool,
+    /// Clear search button hover state.
+    pub(crate) search_clear_hover: bool,
     /// Command palette query
     command_palette_query: String,
     /// True when command palette is active
@@ -725,6 +789,14 @@ pub struct App {
     theme_picker_item_height: u16,
     /// Theme to restore if the theme picker is cancelled.
     theme_picker_restore: Option<(ResolvedTheme, Option<String>)>,
+    /// Name of the local control session, if one is running.
+    control_session_name: Option<String>,
+    /// Session rename prompt text.
+    session_rename_query: String,
+    /// True when session rename input is active.
+    session_rename_active: bool,
+    /// Pending session name to apply to the control session.
+    pending_session_rename: Option<String>,
     /// Comment capture state enabled for the current app session
     review_mode: bool,
     /// Collected review comments for current session
@@ -753,12 +825,16 @@ pub struct App {
     review_persist_enabled: bool,
     /// Whether loaded comments should be limited to files in the current diff.
     review_filter_to_current_diff: bool,
-    /// Diff fingerprint used for resume/autosave matching
+    /// Diff fingerprint used for export and hook metadata.
     review_diff_fingerprint: String,
+    /// Stable key used for review storage.
+    review_storage_key: String,
     /// Repository root key used in review session metadata
     review_repo_root: Option<String>,
     /// Target metadata saved with review state.
     review_target_metadata: Option<review::ReviewTargetMetadata>,
+    /// Pull request discovered for a branch or worktree review.
+    review_pull_request_target: Option<review::ReviewPullRequestTarget>,
     /// Author copied from Git or jj config for new comments.
     review_author: Option<review::ReviewAuthor>,
     /// Session creation timestamp for persisted review state
@@ -769,12 +845,27 @@ pub struct App {
     review_preview_boxes: Vec<review::ReviewPreviewBox>,
     /// Hovered rendered review comment preview.
     pub(crate) review_preview_hover: Option<String>,
+    pub(crate) review_preview_hover_id: Option<u64>,
     /// Hovered edit action on a rendered review comment preview.
     pub(crate) review_preview_edit_hover: Option<String>,
+    /// Hovered reply action on a rendered review comment preview.
+    pub(crate) review_preview_reply_hover: Option<String>,
+    /// Hovered resolve action on a rendered review comment preview.
+    pub(crate) review_preview_resolve_hover: Option<String>,
     /// Hovered delete action on a rendered review comment preview.
     pub(crate) review_preview_delete_hover: Option<String>,
+    /// Hovered overflow action on a rendered review comment preview.
+    pub(crate) review_preview_overflow_hover: Option<String>,
+    /// Review comment overflow menu.
+    pub(crate) review_comment_context_menu: Option<ReviewCommentContextMenu>,
+    /// Review comment overflow menu hits.
+    pub(crate) review_comment_context_menu_hits: Vec<ReviewCommentContextMenuHit>,
+    /// Hovered review comment overflow action.
+    pub(crate) review_comment_context_menu_hover: Option<ReviewCommentContextMenuAction>,
     /// Review card to flash after sidebar navigation.
     review_preview_flash: Option<(String, Instant)>,
+    /// Pending quit confirmation.
+    quit_confirmation: bool,
     /// Pending review deletion confirmation.
     review_delete_confirmation: Option<review::ReviewDeleteConfirmation>,
     /// Click hitboxes for review deletion confirmation.
@@ -807,6 +898,8 @@ pub struct App {
     pub(crate) review_remote_picker_hover: Option<usize>,
     /// Pull request comment selected in the virtual PR comments view.
     pub(crate) pr_comment_focus: Option<u64>,
+    /// Outdated comment selected in the virtual outdated comments view.
+    pub(crate) outdated_comment_focus: Option<u64>,
     /// Click hitboxes for pull request comment view actions.
     pub(crate) pr_comment_hits: Vec<review::PrCommentHit>,
     /// Click hitbox for the add pull request comment row.
@@ -821,8 +914,14 @@ pub struct App {
     pub(crate) pr_reply_prefix: bool,
     /// Waiting for a review edit key.
     pub(crate) review_edit_prefix: bool,
+    /// Waiting for a review reply key.
+    pub(crate) review_reply_prefix: bool,
+    /// Waiting for a review resolve key.
+    pub(crate) review_resolve_prefix: bool,
     /// Waiting for a review delete key.
     pub(crate) review_delete_prefix: bool,
+    /// Waiting for a review overflow key.
+    pub(crate) review_overflow_prefix: bool,
     /// Click hitboxes for review editor actions.
     pub(crate) review_editor_toolbar_hits: Vec<ReviewEditorToolbarHit>,
     /// Review editor action area.
@@ -871,6 +970,8 @@ pub struct App {
     search_target: Option<usize>,
     /// Cached search regex (case-insensitive)
     search_regex: Option<Regex>,
+    /// Monotonic revision for search state changes (cache invalidation)
+    search_revision: u64,
     /// Current preview lines, updated by the renderer for search.
     preview_search_lines: Vec<String>,
     /// Goto query (":" command)
@@ -918,6 +1019,9 @@ struct ViewCacheKey {
     show_hunk_extent_while_stepping: bool,
     placeholder_view: bool,
     fold_context: FoldContextMode,
+    fold_context_revision: u64,
+    fold_comment_revision: u64,
+    search_revision: u64,
     viewport_height: usize,
     windowed: bool,
     window_start: usize,
@@ -979,6 +1083,7 @@ impl App {
             no_step_visited: vec![false; file_count],
             files_visited: vec![false; file_count],
             should_quit: false,
+            confirm_quit: true,
             keybindings: Keybindings::default(),
             open_dashboard: false,
             animation_phase: AnimationPhase::Idle,
@@ -1055,8 +1160,15 @@ impl App {
             max_line_widths_step: vec![0; file_count],
             max_line_widths_no_step: vec![0; file_count],
             line_wrap: false,
-            fold_context: FoldContextMode::Off,
-            fold_context_default: FoldContextMode::Off,
+            fold_context: FoldContextMode::default(),
+            fold_context_lines: 3,
+            fold_context_expansions: FxHashMap::default(),
+            fold_context_regions: Vec::new(),
+            fold_context_hits: Vec::new(),
+            fold_context_screen_rows: Vec::new(),
+            fold_context_hover: None,
+            fold_context_prefix: None,
+            fold_context_revision: 0,
             last_wrap_display_len: None,
             last_wrap_active_idx: None,
             scrollbar_visible: true,
@@ -1194,6 +1306,7 @@ impl App {
             syntax_warmup_target_at: None,
             syntax_engine: None,
             syntax_caches: vec![None; file_count],
+            fold_scope_caches: vec![None; file_count],
             show_syntax_scopes: false,
             syntax_scope_cache: None,
             peek_state: None,
@@ -1203,6 +1316,15 @@ impl App {
             step_view_mode: view_mode,
             search_query: String::new(),
             search_active: false,
+            search_cursor_visible: true,
+            search_cursor_last_blink: Instant::now(),
+            search_bar_hit: None,
+            search_prev_hit: None,
+            search_next_hit: None,
+            search_clear_hit: None,
+            search_prev_hover: false,
+            search_next_hover: false,
+            search_clear_hover: false,
             command_palette_query: String::new(),
             command_palette_active: false,
             command_palette_selection: 0,
@@ -1232,6 +1354,10 @@ impl App {
             theme_picker_list_count: 0,
             theme_picker_item_height: 1,
             theme_picker_restore: None,
+            control_session_name: None,
+            session_rename_query: String::new(),
+            session_rename_active: false,
+            pending_session_rename: None,
             review_mode: false,
             review_comments: Vec::new(),
             review_session_baseline: Vec::new(),
@@ -1247,16 +1373,26 @@ impl App {
             review_persist_enabled: true,
             review_filter_to_current_diff: false,
             review_diff_fingerprint: String::new(),
+            review_storage_key: String::new(),
             review_repo_root: None,
             review_target_metadata: None,
+            review_pull_request_target: None,
             review_author: None,
             review_session_created_at: 0,
             review_next_comment_id: 1,
             review_preview_boxes: Vec::new(),
             review_preview_hover: None,
+            review_preview_hover_id: None,
             review_preview_edit_hover: None,
+            review_preview_reply_hover: None,
+            review_preview_resolve_hover: None,
             review_preview_delete_hover: None,
+            review_preview_overflow_hover: None,
+            review_comment_context_menu: None,
+            review_comment_context_menu_hits: Vec::new(),
+            review_comment_context_menu_hover: None,
             review_preview_flash: None,
+            quit_confirmation: false,
             review_delete_confirmation: None,
             review_delete_confirmation_hits: Vec::new(),
             review_delete_confirmation_hover: None,
@@ -1273,6 +1409,7 @@ impl App {
             review_remote_picker_hits: Vec::new(),
             review_remote_picker_hover: None,
             pr_comment_focus: None,
+            outdated_comment_focus: None,
             pr_comment_hits: Vec::new(),
             pr_comment_add_hit: None,
             pr_comment_action_hover: None,
@@ -1280,7 +1417,10 @@ impl App {
             pr_comment_add_hover: false,
             pr_reply_prefix: false,
             review_edit_prefix: false,
+            review_reply_prefix: false,
+            review_resolve_prefix: false,
             review_delete_prefix: false,
+            review_overflow_prefix: false,
             review_editor_toolbar_hits: Vec::new(),
             review_editor_toolbar_rect: None,
             review_editor_toolbar_scroll: 0,
@@ -1305,6 +1445,7 @@ impl App {
             needs_scroll_to_search: false,
             search_target: None,
             search_regex: None,
+            search_revision: 0,
             preview_search_lines: Vec::new(),
             goto_query: String::new(),
             goto_active: false,
@@ -1322,6 +1463,61 @@ impl App {
         app.rebuild_file_disk_baseline();
         app.git_index_baseline = app.git_index_stamp();
         app
+    }
+
+    pub(crate) fn request_quit(&mut self) {
+        if !self.confirm_quit {
+            self.submit_review_and_quit();
+            return;
+        }
+        self.quit_confirmation = true;
+        self.review_delete_confirmation_hits.clear();
+        self.review_delete_confirmation_hover = None;
+    }
+
+    pub(crate) fn force_quit(&mut self) {
+        self.should_quit = true;
+    }
+
+    pub(crate) fn quit_confirmation_active(&self) -> bool {
+        self.quit_confirmation
+    }
+
+    pub(crate) fn cancel_quit_confirmation(&mut self) {
+        self.quit_confirmation = false;
+        self.review_delete_confirmation_hits.clear();
+        self.review_delete_confirmation_hover = None;
+    }
+
+    fn confirm_pending_quit(&mut self) {
+        self.cancel_quit_confirmation();
+        self.submit_review_and_quit();
+    }
+
+    pub(crate) fn handle_quit_confirmation_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
+        match key.code {
+            crossterm::event::KeyCode::Enter
+            | crossterm::event::KeyCode::Char('y' | 'Y' | 'q' | 'Q') => self.confirm_pending_quit(),
+            _ => self.cancel_quit_confirmation(),
+        }
+        true
+    }
+
+    pub(crate) fn handle_quit_confirmation_click(&mut self, column: u16, row: u16) -> bool {
+        let Some(action) = self.review_delete_confirmation_hits.iter().find_map(|hit| {
+            (column >= hit.x
+                && column < hit.x.saturating_add(hit.width)
+                && row >= hit.y
+                && row < hit.y.saturating_add(hit.height))
+            .then_some(hit.action)
+        }) else {
+            return true;
+        };
+        match action {
+            review::ReviewDeleteConfirmationAction::Confirm => self.confirm_pending_quit(),
+            review::ReviewDeleteConfirmationAction::Cancel => self.cancel_quit_confirmation(),
+        }
+        true
     }
 
     /// Add a digit to the pending count (vim-style command counts)
@@ -1748,25 +1944,211 @@ impl App {
         self.centered_once = false;
     }
 
-    pub fn toggle_fold_context(&mut self) {
-        if self.fold_context.is_enabled() {
-            self.fold_context = FoldContextMode::Off;
-        } else if self.fold_context_default.is_enabled() {
-            self.fold_context = self.fold_context_default;
-        } else {
-            self.fold_context = FoldContextMode::On;
-        }
+    fn invalidate_fold_context_view(&mut self) {
+        self.fold_context_revision = self.fold_context_revision.wrapping_add(1);
+        self.fold_context_regions.clear();
+        self.fold_context_hits.clear();
+        self.fold_context_screen_rows.clear();
+        self.fold_context_hover = None;
+        self.fold_context_prefix = None;
+        self.view_cache = None;
+        self.unified_render_cache = None;
+        self.hunk_starts_unified_cache = None;
+        self.hunk_bounds_unified_cache = None;
+        self.hunk_starts_split_cache = None;
+        self.hunk_bounds_split_cache = None;
         self.last_wrap_display_len = None;
         self.last_wrap_active_idx = None;
+        self.reset_search_for_file_switch();
         self.needs_scroll_to_active = true;
         self.centered_once = false;
         self.blame_render_cache = None;
-        self.notify(ToastEvent::FoldContext(self.fold_context.is_enabled()));
+    }
+
+    pub fn toggle_fold_context(&mut self) {
+        self.fold_context = self.fold_context.next();
+        self.fold_context_expansions.clear();
+        self.invalidate_fold_context_view();
+        self.notify(ToastEvent::FoldContext(self.fold_context));
     }
 
     pub fn set_fold_context_mode(&mut self, mode: FoldContextMode) {
         self.fold_context = mode;
-        self.fold_context_default = mode;
+        self.fold_context_expansions.clear();
+        self.invalidate_fold_context_view();
+    }
+
+    pub(crate) fn set_fold_context_lines(&mut self, lines: usize) {
+        self.fold_context_lines = lines;
+        self.invalidate_fold_context_view();
+    }
+
+    pub(crate) fn fold_context_region_for_line(
+        &self,
+        line: &ViewLine,
+    ) -> Option<FoldContextRegion> {
+        if !self.fold_context.is_enabled() || !is_fold_line(line) {
+            return None;
+        }
+        self.fold_context_regions
+            .iter()
+            .find(|region| {
+                region.key.file_index == self.multi_diff.selected_index
+                    && region.key.start_change_id == line.change_id
+            })
+            .cloned()
+    }
+
+    pub(crate) fn clear_fold_context_hits(&mut self) {
+        self.fold_context_hits.clear();
+        self.fold_context_screen_rows.clear();
+    }
+
+    pub(crate) fn add_fold_context_render_rows(
+        &mut self,
+        area: ratatui::layout::Rect,
+        rows: &[FoldContextRenderRow],
+        viewport_start: usize,
+    ) {
+        let viewport_end = viewport_start.saturating_add(area.height as usize);
+        for row in rows {
+            if row.row < viewport_start || row.row >= viewport_end {
+                continue;
+            }
+            let y = area
+                .y
+                .saturating_add(row.row.saturating_sub(viewport_start) as u16);
+            if !self.fold_context_screen_rows.contains(&y) {
+                self.fold_context_screen_rows.push(y);
+            }
+            for (x, width, direction) in [
+                (row.top_x, row.top_width, FoldContextDirection::Top),
+                (row.bottom_x, row.bottom_width, FoldContextDirection::Bottom),
+            ] {
+                if x >= area.width {
+                    continue;
+                }
+                self.fold_context_hits.push(FoldContextHit {
+                    x: area.x.saturating_add(x),
+                    y,
+                    width: width.min(area.width.saturating_sub(x)),
+                    height: 1,
+                    key: row.key,
+                    direction,
+                });
+            }
+        }
+    }
+
+    pub(crate) fn handle_fold_context_click(&mut self, column: u16, row: u16) -> bool {
+        let Some(hit) = self
+            .fold_context_hits
+            .iter()
+            .find(|hit| {
+                column >= hit.x
+                    && column < hit.x.saturating_add(hit.width)
+                    && row >= hit.y
+                    && row < hit.y.saturating_add(hit.height)
+            })
+            .copied()
+        else {
+            return false;
+        };
+        self.expand_context_fold(hit.key, hit.direction)
+    }
+
+    fn expand_context_fold(
+        &mut self,
+        key: FoldContextKey,
+        direction: FoldContextDirection,
+    ) -> bool {
+        let Some(hidden_lines) = self
+            .fold_context_regions
+            .iter()
+            .find(|region| region.key == key)
+            .map(|region| region.hidden_lines)
+        else {
+            return false;
+        };
+        let amount = hidden_lines.min(20);
+        let expansion = self.fold_context_expansions.entry(key).or_default();
+        match direction {
+            FoldContextDirection::Top => {
+                expansion.top = expansion.top.saturating_add(amount);
+                self.scroll_offset = self.scroll_offset.saturating_add(amount);
+            }
+            FoldContextDirection::Bottom => {
+                expansion.bottom = expansion.bottom.saturating_add(amount);
+            }
+        }
+        self.invalidate_fold_context_view();
+        self.needs_scroll_to_active = false;
+        true
+    }
+
+    fn visible_context_fold_keys(&self) -> Vec<FoldContextKey> {
+        let mut keys = Vec::new();
+        for hit in &self.fold_context_hits {
+            if !keys.contains(&hit.key) {
+                keys.push(hit.key);
+            }
+        }
+        keys
+    }
+
+    pub(crate) fn has_visible_context_folds(&self) -> bool {
+        !self.fold_context_hits.is_empty()
+    }
+
+    fn expand_visible_context_fold(&mut self, idx: usize, direction: FoldContextDirection) -> bool {
+        let Some(key) = self.visible_context_fold_keys().get(idx).copied() else {
+            return false;
+        };
+        self.expand_context_fold(key, direction)
+    }
+
+    pub(crate) fn expand_visible_context_fold_letter(
+        &mut self,
+        letter: char,
+        direction: FoldContextDirection,
+    ) -> bool {
+        let letter = letter.to_ascii_lowercase();
+        if !letter.is_ascii_lowercase() {
+            return false;
+        }
+        self.expand_visible_context_fold((letter as u8 - b'a') as usize, direction)
+    }
+
+    pub(crate) fn expand_visible_context_fold_number(
+        &mut self,
+        number: usize,
+        direction: FoldContextDirection,
+    ) -> bool {
+        if number == 0 {
+            return false;
+        }
+        self.expand_visible_context_fold(number - 1, direction)
+    }
+
+    pub(crate) fn expand_all_context_folds(&mut self) -> bool {
+        if !self.fold_context.is_enabled() {
+            return false;
+        }
+        self.current_view_with_frame(AnimationFrame::Idle);
+        if self.fold_context_regions.is_empty() {
+            return false;
+        }
+        for region in self.fold_context_regions.clone() {
+            self.fold_context_expansions.insert(
+                region.key,
+                FoldContextExpansion {
+                    top: usize::MAX,
+                    bottom: 0,
+                },
+            );
+        }
+        self.invalidate_fold_context_view();
+        true
     }
 
     pub fn toggle_strikethrough_deletions(&mut self) {
@@ -1959,6 +2341,7 @@ impl App {
         window_start: usize,
     ) -> ViewCacheKey {
         let idx = self.multi_diff.selected_index;
+        let fold_comment_revision = self.review_fold_anchor_revision();
         let state = self.multi_diff.current_navigator().state();
         ViewCacheKey {
             file_index: idx,
@@ -1976,6 +2359,9 @@ impl App {
             show_hunk_extent_while_stepping: state.show_hunk_extent_while_stepping,
             placeholder_view: self.multi_diff.current_navigator_is_placeholder(),
             fold_context: self.fold_context,
+            fold_context_revision: self.fold_context_revision,
+            fold_comment_revision,
+            search_revision: self.search_revision,
             viewport_height: self.last_viewport_height,
             windowed,
             window_start,
@@ -2028,7 +2414,7 @@ impl App {
     }
 
     fn compute_view_window(&mut self) -> Option<ViewWindow> {
-        if self.line_wrap {
+        if self.line_wrap || self.fold_context.is_enabled() {
             return None;
         }
         if !self.multi_diff.current_file_is_large() {
@@ -2235,7 +2621,31 @@ impl App {
                 }
             }
         }
-        let view = utils::fold_context_view(view, self.fold_context);
+        let fold_comment_anchors = self.review_fold_anchor_change_ids(&view);
+        let (view, mut fold_context_regions) = utils::fold_context_view(
+            view,
+            self.fold_context,
+            self.multi_diff.selected_index,
+            self.fold_context_lines,
+            &self.fold_context_expansions,
+            &fold_comment_anchors,
+        );
+        if !fold_context_regions.is_empty() {
+            self.ensure_current_fold_scope_cache();
+            if let Some(ranges) = self
+                .fold_scope_caches
+                .get(self.multi_diff.selected_index)
+                .and_then(|cache| cache.as_deref())
+            {
+                for region in &mut fold_context_regions {
+                    region.scope_hint = region.scope_line.and_then(|line| {
+                        crate::syntax::enclosing_scope_definition(ranges, line.saturating_sub(1))
+                            .map(str::to_string)
+                    });
+                }
+            }
+        }
+        self.fold_context_regions = fold_context_regions;
         let lines = std::sync::Arc::new(view);
         let applied_start = window_start_override.unwrap_or(window_start);
         let applied_total = window_total_override.or(window.map(|w| w.total_len));
@@ -2275,11 +2685,15 @@ impl App {
     }
 
     /// Ensure active change is visible if needed (called from views after stepping)
-    pub fn ensure_active_visible_if_needed(&mut self, viewport_height: usize) {
+    pub fn ensure_active_visible_if_needed(
+        &mut self,
+        viewport_height: usize,
+        viewport_width: usize,
+    ) {
         if !self.current_file_diff_ready() {
             return;
         }
-        if self.handle_search_scroll_if_needed(viewport_height) {
+        if self.handle_search_scroll_if_needed(viewport_height, viewport_width) {
             return;
         }
         if !self.needs_scroll_to_active {
@@ -2504,13 +2918,22 @@ impl App {
         let text_cursor_active = self.file_filter_active
             || self.command_palette_active
             || self.file_search_active
+            || self.comment_picker_active
             || self.theme_picker_active
+            || self.session_rename_active
             || self.review_remote_picker.is_some();
         if text_cursor_active
             && now.duration_since(self.file_filter_cursor_last_blink) >= Duration::from_millis(500)
         {
             self.file_filter_cursor_visible = !self.file_filter_cursor_visible;
             self.file_filter_cursor_last_blink = now;
+            dirty = true;
+        }
+        if self.search_active
+            && now.duration_since(self.search_cursor_last_blink) >= Duration::from_millis(500)
+        {
+            self.search_cursor_visible = !self.search_cursor_visible;
+            self.search_cursor_last_blink = now;
             dirty = true;
         }
 

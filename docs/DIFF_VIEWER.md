@@ -171,6 +171,27 @@ In no-step mode:
 - stepping is disabled
 - hunk preview is disabled
 
+## Context folds
+
+Oyo folds long unchanged blocks by default. It keeps 3 lines on each side and only
+adds a fold when at least 8 lines remain hidden. When syntax data identifies an
+enclosing function, method, class or section, Oyo shows its definition line dimmed
+on the right of the fold. Narrow views truncate the line before removing fold
+controls. Markdown sections use the nearest enclosing heading. Files over 512 KiB
+omit scope hints to keep folding responsive.
+
+Use the contextual shortcut beside an arrow, such as `ua` or `da`, or click the
+shortcut and arrow button to reveal 20 lines from that side. Use `F` to expand all
+folds. Use `f` to toggle between folded and full context.
+
+Fold rows are interface controls. Visual selection skips them, and copied text does
+not include them. Inline review comments keep their line and nearby context open,
+including resolved comments. Outdated comments do not open folded context. Search
+only checks rendered lines, so expand folds before searching hidden context.
+
+Set `ui.fold_context = "off"` to start with full context. Set
+`ui.fold_context_lines = 0` for the most compact expandable view.
+
 ## Scrollbar
 
 Use `ui.scrollbar` to show or hide scrollbars.

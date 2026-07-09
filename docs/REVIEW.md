@@ -64,13 +64,16 @@ oy review status
 oy review status --json
 ```
 
-Plain `status` hides the internal database path. `status --json` includes it and includes comment IDs for scripts:
+Plain `status` hides the internal database path and shows comment IDs. `status --json` includes the database path and stable fields for scripts:
 
 ```json
 {
   "workspaceRoot": "/repo-worktree",
   "target": "@  feature",
+  "label": "@  feature",
+  "pr": null,
   "diffFingerprint": "abc123",
+  "reviewKey": "jj:change:...",
   "reviewDir": "...",
   "reviewDb": ".../review.db",
   "commentCount": 3,
@@ -89,12 +92,16 @@ Plain `status` hides the internal database path. `status --json` includes it and
 
 A review target follows the current VCS.
 
-In Git, `status` and `comment` default to the working tree, like `oy`:
+In Git, every review command prefers the current branch's existing local pull request review. It falls back to the working tree:
 
 ```sh
 oy review status
 oy review comment
+oy review status -t @
+oy review comment -t @
 ```
+
+Oyo derives the default from the current branch and local review database. It does not store an active target or contact the provider.
 
 Use staged changes:
 
@@ -108,20 +115,20 @@ Use a commit, branch, ref, commit hash or range:
 ```sh
 oy feature
 oy --range main...feature
-oy review status HEAD
-oy review status feature
-oy review status a1b2c3d
-oy review status main..feature
-oy review status main...feature
-oy review status development...feature
-oy review comment development...feature
+oy review status -t HEAD
+oy review status -t feature
+oy review status -t a1b2c3d
+oy review status -t main..feature
+oy review status -t main...feature
+oy review status -t development...feature
+oy review comment -t development...feature
 ```
 
 Use `base...feature` for a pull request-shaped review. The base can be any branch. The 3-dot form compares the feature branch from its merge base with the base branch.
 
 Oyo stores the branch label and the resolved commits. If the branch moves, Oyo can still load the latest saved comments for that branch review.
 
-Pull and push default to the current branch because they sync with a pull request.
+Pull, read, resolve and push use the same PR-aware default. Use `--json` to check `reviewKey`, `label` and `pr`. Use `-t/--target` to pin a target for scripts and agents.
 
 In jj, review commands and `oy` default to `@` unless `@` has exactly one bookmark. If `@` has one bookmark, Oyo treats that bookmark like a branch and opens the bookmark stack.
 
@@ -160,7 +167,7 @@ oy review comment 'trunk()..@'
 
 For multi-change jj revsets, Oyo expands the revset and shows the latest saved comments for each change ID.
 
-Branches and bookmarks are labels, not the only storage key. Oyo stores stable Git commits or jj change IDs as well as the current diff fingerprint.
+Branches, bookmarks and worktrees are labels, not diff fingerprints. Oyo stores reviews under a stable review key, such as a jj change ID, Git branch target or Git worktree root.
 
 ## Worktrees and workspaces
 
@@ -195,9 +202,9 @@ oy --range main...feature
 oy 'trunk()..@'
 ```
 
-When you pass a target, the TUI uses the same target rules as the CLI. Saved comments load from the stable branch, bookmark, commit or change metadata, even when the current diff fingerprint has changed.
+When you pass a target, the TUI uses the same target rules as the CLI. Saved comments load from the stable review key, even when the current diff fingerprint has changed.
 
-Review cards in unified and split mode show `ia edit`, `ib edit` and so on for editable comments. They also show `xa delete`, `xb delete` and so on.
+Review cards in unified and split mode show `ia edit`, `ra reply`, `xa delete` and so on. Thread roots also show `va resolve`; reply cards do not because resolved state belongs to the thread. Every inline comment can have replies. Local replies stay in Oyo; replies to pulled provider comments sync to their provider thread. Replies render as a flat chronological thread, linked by a connector between cards. Resolved root cards show `unresolve` instead of `resolve`. Pull request conversation cards do not show resolve actions.
 
 Use the comments sidebar to read and move through comments. Use the comment picker to search comments and jump to one:
 
@@ -267,6 +274,60 @@ oy review comment new \
 
 Use `--author-email` or repeat `--author-username`. Pass `provider=username` only when you need a provider-specific identity.
 
+Agents can set their identity once per session instead of passing flags every time.
+
+```sh
+export OYO_REVIEW_AUTHOR_TYPE=agent
+export OYO_REVIEW_AUTHOR_NAME="Agent name"
+export OYO_REVIEW_AUTHOR_EMAIL="agent@example.com"
+export OYO_REVIEW_AUTHOR_USERNAME=agent
+```
+
+Filter the task list:
+
+```sh
+oy review status --unresolved
+oy review status --outdated
+oy review status --no-outdated
+oy review status --unresolved --outdated
+oy review status --id 7 --json
+oy review status --since 1783478786 --json
+oy review comment --unresolved
+oy review comment --outdated
+oy review comment --no-outdated
+oy review comment --unresolved --outdated
+oy review comment --id 7
+oy review comment --since 1783478786 --json
+oy review comment --author-type human
+oy review comment --author ada
+```
+
+### Understand outdated comments
+
+When the diff changes, Oyo tries to move each comment with its anchored code. A comment follows the code without a warning when Oyo can re-anchor it safely. Oyo marks the comment outdated only when the anchored line changed or vanished. Outdated comments are hidden from live inline overlays.
+
+Both `status` and `comment` support these filters:
+
+- `--outdated` shows only outdated comments
+- `--no-outdated` hides outdated comments
+- `--unresolved` excludes outdated comments by default because a stale anchor is not actionable
+- `--unresolved --outdated` shows comments that are both unresolved and outdated
+
+`commentCount` reflects the active filters. Human comment blocks show `Status: unresolved (outdated)` when both states apply.
+
+Press `g o` or choose Outdated comments from the command palette to open the dedicated tab. Clicking an outdated comment in the sidebar opens the same tab and focuses that comment. Each card shows the original file and line, comment body and captured anchor snapshot. You can edit, resolve, reopen or delete comments from this view.
+
+`--since` returns comments changed at or after the Unix timestamp. JSON output includes `changeType` as `added`, `updated` or `removed`. An outdated-state transition appears as `updated`. A deleted comment appears as `removed`.
+
+Reply to a local or pulled inline comment:
+
+```sh
+oy review comment reply 1 --body "Fixed in the latest change."
+oy review comment reply -t feature 1 --body "Fixed in the latest change." --json
+```
+
+The new comment keeps the parent anchor and thread. Replies to local inline comments stay local. `oy review push` posts replies to pulled GitHub comments in that review thread. Conversation and file-level comments use their existing actions instead.
+
 Edit or remove a comment:
 
 ```sh
@@ -280,6 +341,17 @@ Pass a target when the comment belongs to a saved branch, bookmark or range revi
 oy review comment edit main...feature 1 --body "Handle empty input before parsing."
 oy review comment rm main...feature 1 --yes
 ```
+
+Removing a thread root also removes its editable replies. Oyo asks for confirmation in the TUI and reports the reply count in the CLI. Removing a reply leaves its parent and siblings unchanged.
+
+Resolve or unresolve a comment:
+
+```sh
+oy review comment resolve 1
+oy review comment unresolve 1
+```
+
+`reopen` is kept as an alias for agents that already use it. Resolve or reopen the parent comment; replies inherit the thread state and cannot be resolved separately.
 
 ## Push and pull pull request comments
 
@@ -401,24 +473,31 @@ Oyo imports these comments by default:
 
 Oyo skips pull request conversation comments from other users. This keeps bot and drive-by comments out of the local review unless the account is part of the review set.
 
-Other users' comments are read-only. Oyo only pushes comments you can edit.
+Other users' comment bodies are read-only. GitHub inline review comments also
+import their review thread's resolved state.
 
 ### What `push` sends
 
-Oyo sends only comments you can edit.
+Oyo sends comment changes only for comments you can edit.
 
 For your comments, push can:
 
 - create new inline comments
+- reply in local inline threads and pulled GitHub inline review threads
 - create new pull request comments
 - update comments that already exist on the provider
 - delete comments you removed locally
+- resolve or unresolve linked GitHub inline review threads
 
-Oyo does not push other users' comments.
+Resolve changes are sent once per review thread. Pull request conversation comments
+and local-only comments keep their resolved state locally because they have no
+provider review thread.
 
-### Pull request comments in the TUI
+### Pull request and merge request comments in the TUI
 
-Pull request comments appear in the comments sidebar with this format:
+Oyo uses PR and pull request for GitHub and Forgejo. It uses MR and merge request for GitLab.
+
+Pull request or merge request comments appear in the comments sidebar with this format:
 
 ```text
 Bob, 10s ago - Pull request title
@@ -430,7 +509,9 @@ The pull request comments view lists comments in time order. Use `m` or the add 
 
 Editable comments show `ia edit`, `ib edit` and so on. They also show `xa delete`, `xb delete` and so on. Press or click the edit action, or click the card, to edit the comment. Read-only comments do not show edit or delete actions.
 
-Use the reply action under a comment to quote it in a new comment. Oyo uses Markdown blockquotes for the quoted text.
+Use the reply action under a pull request conversation comment to quote it in a new comment. Oyo uses Markdown blockquotes for the quoted text.
+
+Every inline comment shows a separate `ra reply` action. This opens an empty reply editor and keeps the saved reply in a flat chronological thread under its parent. Local replies stay local. Replies to pulled GitHub review-thread comments sync into the same provider thread.
 
 ## Export comments
 
@@ -478,7 +559,7 @@ Use this JSON shape for inline comments:
       "file": "src/lib.rs",
       "kind": "line",
       "side": "new",
-      "new_range": { "start": 42, "end": 42 },
+      "newRange": { "start": 42, "end": 42 },
       "author": {
         "name": "Ada Lovelace",
         "email": "ada@example.com",
@@ -486,9 +567,10 @@ Use this JSON shape for inline comments:
           "github": "ada"
         }
       },
-      "can_edit": true,
-      "created_at": 1783478786,
-      "updated_at": 1783478786,
+      "canEdit": true,
+      "resolved": false,
+      "createdAt": 1783478786,
+      "updatedAt": 1783478786,
       "body": "Handle empty input before parsing."
     }
   ]
@@ -501,7 +583,7 @@ Oyo assigns an `id` when the comment does not include one. If a comment includes
 
 Oyo adds `author` from Git or jj config when a new comment does not include one. It uses `user.name`, `user.email`, `github.user` and `usernames.<provider>`.
 
-Oyo stores `created_at` and `updated_at` as Unix timestamps in seconds. Pulled provider comments also include provider sync data.
+Oyo stores `createdAt` and `updatedAt` as Unix timestamps in seconds. Pulled provider comments also include provider sync data.
 
 ## Abandon a review
 

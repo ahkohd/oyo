@@ -1,3 +1,4 @@
+use crate::config::FoldContextMode;
 use ratatui::style::Color;
 use ratatui_comfy_toaster::{ToastBorderMode, ToastBuilder, ToastType};
 use std::time::Duration;
@@ -9,6 +10,7 @@ pub(crate) enum ToastEvent {
     CopiedHunk,
     CopiedPatch,
     CopiedPath,
+    CopiedSessionName,
     CopiedToast,
     CopyFailed,
     LineWrap(bool),
@@ -17,13 +19,14 @@ pub(crate) enum ToastEvent {
     Animation(bool),
     Stepping(bool),
     Strikethrough(bool),
-    FoldContext(bool),
+    FoldContext(FoldContextMode),
     EvoSyntaxFull(bool),
     PreviewRendered(bool),
     CommentSaved,
     CommentDeleted,
     CommentsCleared,
     ReviewSubmitted,
+    SessionRenamed,
     SelectionActionStarted(String),
     SelectionActionFailed(String),
 }
@@ -36,6 +39,7 @@ impl ToastEvent {
             Self::CopiedHunk => "Hunk copied".to_string(),
             Self::CopiedPatch => "Patch copied".to_string(),
             Self::CopiedPath => "Path copied".to_string(),
+            Self::CopiedSessionName => "Session name copied".to_string(),
             Self::CopiedToast => "Toast copied".to_string(),
             Self::CopyFailed => "Could not copy to clipboard".to_string(),
             Self::LineWrap(true) => "Line wrap on".to_string(),
@@ -46,12 +50,14 @@ impl ToastEvent {
             Self::Zen(false) => "Zen mode off".to_string(),
             Self::Animation(true) => "Animation on".to_string(),
             Self::Animation(false) => "Animation off".to_string(),
-            Self::Stepping(true) => "Step-through mode on".to_string(),
+            Self::Stepping(true) => "Step mode on".to_string(),
             Self::Stepping(false) => "Scroll mode on".to_string(),
             Self::Strikethrough(true) => "Deleted text strikethrough on".to_string(),
             Self::Strikethrough(false) => "Deleted text strikethrough off".to_string(),
-            Self::FoldContext(true) => "Context folding on".to_string(),
-            Self::FoldContext(false) => "Context folding off".to_string(),
+            Self::FoldContext(FoldContextMode::Off) => "Full context".to_string(),
+            Self::FoldContext(FoldContextMode::Expandable) => {
+                "Expandable context folds".to_string()
+            }
             Self::EvoSyntaxFull(true) => "Full evolution syntax on".to_string(),
             Self::EvoSyntaxFull(false) => "Context evolution syntax on".to_string(),
             Self::PreviewRendered(true) => "Preview mode".to_string(),
@@ -60,6 +66,7 @@ impl ToastEvent {
             Self::CommentDeleted => "Comment deleted".to_string(),
             Self::CommentsCleared => "Comments cleared".to_string(),
             Self::ReviewSubmitted => "Review ready".to_string(),
+            Self::SessionRenamed => "Session renamed".to_string(),
             Self::SelectionActionStarted(message) if message.trim().is_empty() => {
                 "Selection action started".to_string()
             }
@@ -80,9 +87,11 @@ impl ToastEvent {
             | Self::CopiedHunk
             | Self::CopiedPatch
             | Self::CopiedPath
+            | Self::CopiedSessionName
             | Self::CopiedToast
             | Self::CommentSaved
             | Self::ReviewSubmitted
+            | Self::SessionRenamed
             | Self::SelectionActionStarted(_) => ToastType::Success,
             _ => ToastType::Info,
         }

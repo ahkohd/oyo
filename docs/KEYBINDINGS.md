@@ -54,6 +54,8 @@ Use these rules when you write keys:
 - modifiers use hyphens, for example `ctrl-p`, `ctrl-shift-p`, `alt-x`, `cmd-p`
 - named keys include `esc`, `enter`, `tab`, `backtab`, `space`, `up`, `down`, `left`, `right`, `home`, `end`, `pagedown`, `pageup`, `backspace` and `delete`
 
+Oyo requests enhanced keyboard reporting so supported terminals can distinguish `ctrl-shift-p` from `ctrl-p`. Other terminals may report them as the same key. Use `g f` for files or `g c` for comments when this happens.
+
 Duplicate bindings or prefix conflicts make that whole mode fall back to defaults. Oyo prints a warning.
 
 In `normal` mode, plain `1` to `9` are reserved for counts. Plain `0` means `line_start` unless a count is already pending. Modified digits such as `ctrl-1` are allowed.
@@ -61,6 +63,8 @@ In `normal` mode, plain `1` to `9` are reserved for counts. Plain `0` means `lin
 `global` runs before most input modes. It does not run before `help` or `review_editor`.
 
 `normal.open_command_palette`, `normal.open_file_search`, `normal.open_comment_picker` and `normal.open_theme_picker` still work in normal mode. Use `global` if you want shortcuts to work while a picker, search box or filter is active.
+
+In review mode, `r`, `v`, `x` and `o` are contextual when the current file shows inline comments. Use indexed actions such as `ra reply`, `va resolve` on a thread root, `xa delete` and `oa overflow`. Reply cards omit the resolve action because resolved state belongs to the thread. These prefixes take priority over their normal-mode actions while review cards are visible.
 
 ## Mouse interactions
 
@@ -73,8 +77,9 @@ Mouse actions use built-in behaviour and cannot be changed with keybindings.
 | Scroll a selection action row | Move through hidden selection actions |
 | Click ` + ` on a diff line | Add or update a line comment |
 | Click a comment card or `ia edit` | Edit that comment |
+| Click `ra reply` on an inline review comment | Reply in that local or provider thread |
 | Click `xa delete` on a comment card | Delete that comment |
-| Click `ra reply` on a pull request comment | Reply to that comment |
+| Click `ra reply` on a pull request conversation comment | Quote it in a new comment |
 | Click a comment editor action | Save, cancel, mention or run a configured command |
 | Scroll a comment editor action row | Move through hidden comment actions |
 | Click the sidebar toggle | Show or hide the sidebar |
@@ -95,8 +100,8 @@ Mouse actions use built-in behaviour and cannot be changed with keybindings.
 | Click a History context menu action | Open, mark start or mark end |
 | Click an action in the History footer | Open, mark the range, clear the range or quit |
 | Click the sidebar header mode label | Switch between files and comments |
-| Click the footer mode label | Cycle view mode |
-| Control-click the footer mode label | Cycle view mode backwards |
+| Click the footer mode label | Cycle view modes |
+| Control-click the footer mode label | Cycle view modes backwards |
 | Right-click the footer mode label | Pick a view mode from a context menu |
 | Click the empty-state `ctrl-r history` action | Open History |
 | Click the footer file count | Open the sidebar in files mode |
@@ -139,9 +144,11 @@ Use each mode as `[keybindings.<mode>]`.
 
 ## Normal mode
 
+`esc` closes the active picker, overlay, sub-view or find bar.
+
 | Action | Default keys | What it does |
 | --- | --- | --- |
-| `quit` | `q`, `esc` | Quit |
+| `quit` | `q` | Quit |
 | `step_down` | `j`, `down` | Step forward |
 | `step_up` | `k`, `up` | Step backward |
 | `next_hunk` | `l`, `right` | Go to the next hunk |
@@ -168,8 +175,8 @@ Use each mode as `[keybindings.<mode>]`.
 | `next_file` | `]` | Go to the next file |
 | `toggle_autoplay` | `space` | Start or stop forward autoplay |
 | `toggle_autoplay_reverse` | `B` | Start or stop reverse autoplay |
-| `toggle_view_mode` | `tab` | Cycle view mode |
-| `toggle_view_mode_reverse` | `backtab` | Cycle view mode in reverse |
+| `toggle_view_mode` | `tab` | Cycle view modes |
+| `toggle_view_mode_reverse` | `backtab` | Cycle view modes in reverse |
 | `open_dashboard` | `ctrl-r` | Open History |
 | `scroll_up` | `K` | Scroll up |
 | `scroll_down` | `J` | Scroll down |
@@ -182,7 +189,7 @@ Use each mode as `[keybindings.<mode>]`.
 | `toggle_line_wrap` | `w` | Turn line wrap on or off |
 | `toggle_syntax` | `t` | Turn syntax highlighting on or off |
 | `toggle_evo_syntax` | `E` | Toggle evolution syntax mode |
-| `toggle_stepping` | `s` | Turn stepping on or off |
+| `toggle_stepping` | `s` | Turn step mode on or off |
 | `toggle_strikethrough` | `S` | Turn deletion strikethrough on or off |
 | `scroll_left` | `H` | Scroll left |
 | `scroll_right` | `L` | Scroll right |
@@ -193,11 +200,14 @@ Use each mode as `[keybindings.<mode>]`.
 | `replay_step` | `r` | Replay the last step |
 | `refresh` | `R` | Refresh files |
 | `toggle_file_panel` | `ctrl-f` | Show or hide the file panel |
-| `toggle_fold_context` | `f` | Fold or unfold context |
+| `toggle_fold_context` | `f` | Toggle full and expandable context |
+| `expand_all_folds` | `F` | Expand every context fold |
 | `open_search_or_file_filter` | `/` | Search the diff, or filter files when the file list is focused |
 | `open_goto` | `:` | Go to a line, hunk or step |
 | `search_next` | `n` | Go to the next match |
 | `search_prev` | `N` | Go to the previous match |
+| `focus_next_comment` | `}` | Focus the next review comment |
+| `focus_prev_comment` | `{` | Focus the previous review comment |
 | `next_conflict` | `c` | Go to the next conflict |
 | `prev_conflict` | `C` | Go to the previous conflict |
 | `line_comment` | `m` | Add or update a line comment |
@@ -207,9 +217,14 @@ Use each mode as `[keybindings.<mode>]`.
 | `remove_hunk_comment` | `X` | Remove a hunk comment |
 | `toggle_help` | `?` | Show or hide help |
 | `open_command_palette` | `ctrl-p` | Open the command palette in normal mode |
-| `open_file_search` | `ctrl-shift-p` | Open quick file search in normal mode |
+| `open_file_search` | `ctrl-shift-p`, `g f` | Open quick file search in normal mode |
 | `open_comment_picker` | `g c` | Open comment picker in normal mode |
+| `open_outdated_comments` | `g o` | Open outdated comments in normal mode |
 | `open_theme_picker` | `ctrl-t` | Open theme picker in normal mode |
+
+Visible expandable folds show contextual shortcuts such as `ua` and `da`. Use the
+shortcut beside an arrow to reveal 20 lines from that side. Use `F` to expand all
+folds.
 
 ## Help mode
 
@@ -235,7 +250,7 @@ Use each mode as `[keybindings.<mode>]`.
 | `down` | `down` | Move down |
 | `home` | `home` | Move to the start of the line |
 | `end` | `end` | Move to the end of the line |
-| `clear` | `ctrl-u`, `ctrl-c` | Clear text |
+| `clear` | `ctrl-u` | Clear text |
 | `mention_next` | `ctrl-n` | Select the next mention candidate |
 | `mention_prev` | `ctrl-p` | Select the previous mention candidate |
 

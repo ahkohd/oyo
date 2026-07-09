@@ -36,9 +36,9 @@ pub fn render_blame(frame: &mut Frame, app: &mut App, area: Rect) {
         app.clamp_horizontal_scroll_cached(wrap_width);
     }
     if app.line_wrap {
-        app.handle_search_scroll_if_needed(visible_height);
+        app.handle_search_scroll_if_needed(visible_height, wrap_width);
     } else {
-        app.ensure_active_visible_if_needed(visible_height);
+        app.ensure_active_visible_if_needed(visible_height, wrap_width);
     }
 
     let animation_frame = app.animation_frame();

@@ -8,9 +8,9 @@ use crate::app::{
         ReviewSyncAction,
     },
     App, FileContextMenuAction, FileContextMenuHit, FilePanelMode, FilePanelScrollbarState,
-    ReviewEditorToolbarAction, ReviewEditorToolbarHit, ReviewLineAddHit, SelectionToolbarAction,
-    SelectionToolbarHit, StatusModeMenuHit, TopbarTabContent, TopbarTabHit, ViewMode,
-    DIFF_VIEW_MIN_WIDTH, FILE_PANEL_MIN_WIDTH,
+    ReviewCommentContextMenuHit, ReviewEditorToolbarAction, ReviewEditorToolbarHit,
+    ReviewLineAddHit, SelectionToolbarAction, SelectionToolbarHit, StatusModeMenuHit,
+    TopbarTabContent, TopbarTabHit, ViewMode, DIFF_VIEW_MIN_WIDTH, FILE_PANEL_MIN_WIDTH,
 };
 use crate::color;
 use crate::config::FilePanelPosition;
@@ -30,7 +30,9 @@ use crate::syntax::SyntaxSide;
 use crate::views::{
     render_blame, render_diff_scrollbar, render_evolution, render_review_note_avatar, render_split,
     render_unified_pane, reserve_diff_scrollbar_lane, review_note_block_with_footer,
-    review_note_delete_width, review_note_delete_x_offset, review_note_lines,
+    review_note_delete_width, review_note_delete_x_offset, review_note_edit_width,
+    review_note_lines, review_note_resolve_width, review_note_resolve_x_offset, review_preview_row,
+    ReviewNoteActionHits,
 };
 use image::GenericImageView;
 use oyo_core::{multi::DiffStatus, multi::FileSide, ChangeKind, FileStatus, LineKind};
@@ -574,6 +576,7 @@ fn draw_no_changes(frame: &mut Frame, app: &mut App, area: Rect) {
 /// Main drawing function
 pub fn draw(frame: &mut Frame, app: &mut App) {
     app.clear_review_preview_boxes();
+    app.clear_fold_context_hits();
     app.begin_scrollbar_frame();
     app.topbar_tab_hits.clear();
     app.topbar_plus_hit = None;
@@ -597,6 +600,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         draw_no_changes(frame, app, frame.area());
         if app.theme_picker_active() {
             draw_theme_picker_popover(frame, app);
+        }
+        if app.quit_confirmation_active() {
+            draw_confirmation(frame, app, true);
+        } else {
+            app.set_review_delete_confirmation_hits(Vec::new());
         }
         draw_toasts(frame, app);
         return;
@@ -680,13 +688,185 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     draw_review_line_add_button(frame, app);
     draw_file_context_menu(frame, app);
+    draw_review_comment_context_menu(frame, app);
     draw_status_mode_menu(frame, app);
-    if app.review_delete_confirmation_active() {
-        draw_review_delete_confirmation(frame, app);
+    if app.session_rename_active() {
+        draw_session_rename_modal(frame, app);
+    }
+    if app.quit_confirmation_active() {
+        draw_confirmation(frame, app, true);
+    } else if app.review_delete_confirmation_active() {
+        draw_confirmation(frame, app, false);
     } else {
         app.set_review_delete_confirmation_hits(Vec::new());
     }
     draw_toasts(frame, app);
+    if app.search_bar_visible() {
+        draw_find_bar(frame, app);
+    } else {
+        app.set_search_bar_hits(None, None, None, None);
+    }
+}
+
+fn rects_overlap(left: Rect, right: Rect) -> bool {
+    left.x < right.x.saturating_add(right.width)
+        && left.x.saturating_add(left.width) > right.x
+        && left.y < right.y.saturating_add(right.height)
+        && left.y.saturating_add(left.height) > right.y
+}
+
+fn active_search_match_rect(frame: &mut Frame, app: &App) -> Option<Rect> {
+    let row = app.search_target_screen_row()?;
+    let (x, _, width, _) = app.diff_view_area?;
+    let mut first = None;
+    let mut last = None;
+    for column in x..x.saturating_add(width) {
+        if frame
+            .buffer_mut()
+            .cell((column, row))
+            .is_some_and(|cell| cell.bg == app.theme.accent)
+        {
+            first.get_or_insert(column);
+            last = Some(column);
+        }
+    }
+    match (first, last) {
+        (Some(first), Some(last)) => Some(Rect::new(
+            first,
+            row,
+            last.saturating_sub(first).saturating_add(1),
+            1,
+        )),
+        _ => Some(Rect::new(x, row, width, 1)),
+    }
+}
+
+fn find_bar_area(app: &App, width: u16, match_rect: Option<Rect>) -> Option<Rect> {
+    let (x, y, view_width, view_height) = app.diff_view_area?;
+    let scrollbar_width = u16::from(app.scrollbar_visible && view_width > 0);
+    let content_width = view_width.saturating_sub(scrollbar_width);
+    if content_width < 15 || view_height < 3 {
+        return None;
+    }
+    let width = width.min(content_width);
+    let height = 3;
+    let right = x.saturating_add(content_width.saturating_sub(width));
+    let bottom = y.saturating_add(view_height.saturating_sub(height));
+    let candidates = [
+        Rect::new(right, y, width, height),
+        Rect::new(x, y, width, height),
+        Rect::new(right, bottom, width, height),
+        Rect::new(x, bottom, width, height),
+    ];
+    candidates
+        .iter()
+        .copied()
+        .find(|area| match_rect.is_none_or(|match_rect| !rects_overlap(*area, match_rect)))
+        .or_else(|| candidates.first().copied())
+}
+
+fn find_bar_action_style(app: &App, hovered: bool) -> Style {
+    let mut style = Style::default().fg(if hovered {
+        app.theme.accent
+    } else {
+        app.theme.text_muted
+    });
+    if hovered {
+        style = style.add_modifier(Modifier::BOLD);
+    }
+    style
+}
+
+fn draw_find_bar(frame: &mut Frame, app: &mut App) {
+    let (current, total) = app.search_match_position();
+    let count = format!("{current}/{total}");
+    let match_rect = active_search_match_rect(frame, app);
+    let Some(area) = find_bar_area(app, 44, match_rect) else {
+        app.set_search_bar_hits(None, None, None, None);
+        return;
+    };
+
+    frame.render_widget(Clear, area);
+    let panel_bg = app.theme.background;
+    let mut block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(Style::default().fg(app.theme.border_active));
+    if let Some(bg) = panel_bg {
+        block = block.style(Style::default().bg(bg));
+    }
+    frame.render_widget(block.clone(), area);
+    let inner = block.inner(area);
+    let inner_width = inner.width as usize;
+    let spacious = inner_width >= 30;
+    let lead_gap = if spacious { 2 } else { 1 };
+    let action_gap = if spacious { 2 } else { 1 };
+    let clear_gap = if spacious { 3 } else { 1 };
+    let fixed_without_count = 2usize
+        .saturating_add(1)
+        .saturating_add(lead_gap)
+        .saturating_add(action_gap)
+        .saturating_add(1)
+        .saturating_add(action_gap)
+        .saturating_add(1)
+        .saturating_add(clear_gap)
+        .saturating_add(2);
+    let count = truncate_text(&count, inner_width.saturating_sub(fixed_without_count));
+    let count_width = text_width(&count);
+    let fixed_width = fixed_without_count.saturating_add(count_width);
+    let query_width = inner_width.saturating_sub(fixed_width);
+    let query = truncate_text_from_start(app.search_query(), query_width);
+    let query_display_width = text_width(&query);
+    let query_pad = query_width.saturating_sub(query_display_width);
+    let cursor = if app.search_active() && app.search_cursor_visible {
+        "│"
+    } else {
+        " "
+    };
+    let prompt_style = Style::default()
+        .fg(app.theme.primary)
+        .add_modifier(Modifier::BOLD);
+    let prev_style = find_bar_action_style(app, app.search_prev_hover);
+    let next_style = find_bar_action_style(app, app.search_next_hover);
+    let clear_style = find_bar_action_style(app, app.search_clear_hover);
+    let line = Line::from(vec![
+        Span::styled("❯ ", prompt_style),
+        Span::styled(query, Style::default().fg(app.theme.text)),
+        Span::styled(cursor, prompt_style),
+        Span::raw(" ".repeat(query_pad)),
+        Span::raw(" ".repeat(lead_gap)),
+        Span::styled(count, Style::default().fg(app.theme.text_muted)),
+        Span::raw(" ".repeat(action_gap)),
+        Span::styled("‹", prev_style),
+        Span::raw(" ".repeat(action_gap)),
+        Span::styled("›", next_style),
+        Span::raw(" ".repeat(clear_gap)),
+        Span::styled("✕", clear_style),
+        Span::raw(" "),
+    ]);
+    let mut paragraph = Paragraph::new(line);
+    if let Some(bg) = panel_bg {
+        paragraph = paragraph.style(Style::default().bg(bg));
+    }
+    frame.render_widget(paragraph, inner);
+
+    let count_x = inner
+        .x
+        .saturating_add((2 + query_width + 1 + lead_gap) as u16);
+    let prev_x = count_x.saturating_add((count_width + action_gap) as u16);
+    let next_x = prev_x.saturating_add((1 + action_gap) as u16);
+    let clear_x = next_x.saturating_add((1 + clear_gap) as u16);
+    app.set_search_bar_hits(
+        Some((area.x, area.y, area.width, area.height)),
+        Some((prev_x, inner.y, 1, 1)),
+        Some((next_x, inner.y, 1, 1)),
+        Some((
+            clear_x,
+            inner.y,
+            inner.x.saturating_add(inner.width).saturating_sub(clear_x),
+            1,
+        )),
+    );
 }
 
 fn file_context_menu_label(action: FileContextMenuAction) -> &'static str {
@@ -771,6 +951,91 @@ fn draw_file_context_menu(frame: &mut Frame, app: &mut App) {
             height: 1,
         });
         let label = format!(" {}", file_context_menu_label(action));
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                truncate_text(&label, inner.width as usize),
+                text_style,
+            )))
+            .style(row_style),
+            Rect::new(inner.x, row, inner.width, 1),
+        );
+    }
+}
+
+fn draw_review_comment_context_menu(frame: &mut Frame, app: &mut App) {
+    app.review_comment_context_menu_hits.clear();
+    let Some(menu) = app.review_comment_context_menu else {
+        return;
+    };
+    let actions = app.review_comment_context_menu_actions();
+    if actions.is_empty() {
+        app.close_review_comment_context_menu();
+        return;
+    }
+    let area = frame.area();
+    if area.width < 10 || area.height < actions.len() as u16 + 2 {
+        return;
+    }
+    let labels = actions
+        .iter()
+        .map(|action| (*action, app.review_comment_context_menu_label(*action)))
+        .collect::<Vec<_>>();
+    let label_width = labels
+        .iter()
+        .map(|(_, label)| label.width())
+        .max()
+        .unwrap_or(10);
+    let width = (label_width as u16).saturating_add(2).min(area.width);
+    let height = actions.len() as u16 + 2;
+    let x = menu
+        .x
+        .min(area.x.saturating_add(area.width.saturating_sub(width)));
+    let y = menu
+        .y
+        .min(area.y.saturating_add(area.height.saturating_sub(height)));
+    let menu_area = Rect::new(x, y, width, height);
+
+    frame.render_widget(Clear, menu_area);
+    let mut block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(Style::default().fg(app.theme.border_active));
+    if let Some(bg) = app.theme.background_panel.or(app.theme.background) {
+        block = block.style(Style::default().bg(bg));
+    }
+    frame.render_widget(block.clone(), menu_area);
+
+    let inner = block.inner(menu_area);
+    let menu_bg = app.theme.background_panel.or(app.theme.background);
+    let hover_bg = app
+        .theme
+        .background_element
+        .or_else(|| menu_bg.and_then(|bg| color::blend_colors(bg, app.theme.accent, 0.16)))
+        .or(menu_bg);
+    for (idx, (action, label_text)) in labels.into_iter().enumerate() {
+        let row = inner.y.saturating_add(idx as u16);
+        let hover = app.review_comment_context_menu_hover == Some(action);
+        let mut text_style = Style::default().fg(if hover {
+            app.theme.accent
+        } else {
+            app.theme.text
+        });
+        if hover {
+            text_style = text_style.add_modifier(Modifier::BOLD);
+        }
+        let mut row_style = Style::default();
+        if let Some(bg) = if hover { hover_bg } else { menu_bg } {
+            row_style = row_style.bg(bg);
+        }
+        app.review_comment_context_menu_hits
+            .push(ReviewCommentContextMenuHit {
+                action,
+                x: inner.x,
+                y: row,
+                width: inner.width,
+                height: 1,
+            });
+        let label = format!(" {label_text}");
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 truncate_text(&label, inner.width as usize),
@@ -1121,8 +1386,6 @@ fn draw_preview_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
 fn line_input_status_spans(app: &App) -> Option<Vec<Span<'static>>> {
     let (prefix, query, placeholder) = if app.goto_active() {
         (":", app.goto_query(), "Go to")
-    } else if app.search_active() {
-        ("/", app.search_query(), "Search")
     } else {
         return None;
     };
@@ -1633,7 +1896,7 @@ fn preview_can_render_csv(app: &App) -> bool {
 fn preview_can_render_markdown(app: &App) -> bool {
     match app.active_topbar_content() {
         Some(TopbarTabContent::Help) => true,
-        Some(TopbarTabContent::PrComments) => false,
+        Some(TopbarTabContent::PrComments | TopbarTabContent::OutdatedComments) => false,
         Some(TopbarTabContent::File(index)) => app
             .multi_diff
             .files
@@ -1723,7 +1986,14 @@ fn topbar_tab_spans(app: &mut App, area: Rect, max_width: usize) -> Vec<Span<'st
                 (file_name, changed)
             }
             TopbarTabContent::Help => ("Help".to_string(), ""),
-            TopbarTabContent::PrComments => ("PR comments".to_string(), ""),
+            TopbarTabContent::PrComments => (
+                format!(
+                    "{} comments",
+                    app.review_provider_kind().long_review_noun_title()
+                ),
+                "",
+            ),
+            TopbarTabContent::OutdatedComments => ("Outdated comments".to_string(), ""),
         };
         let closeable = app.topbar_close_allowed(tab.id);
         let show_close = closeable && app.topbar_hover_tab == Some(tab.id);
@@ -2773,11 +3043,18 @@ fn draw_comment_list(
                 row_map.push(None);
             }
             CommentRow::ItemTitle(comment_idx) => {
-                let Some((file_idx, path, location, _preview)) =
+                let Some((file_idx, path, mut location, _preview, outdated, resolved)) =
                     app.review_comment_sidebar_item(*comment_idx)
                 else {
                     continue;
                 };
+                if outdated {
+                    location = if location.is_empty() {
+                        "Outdated".to_string()
+                    } else {
+                        format!("{location} Outdated")
+                    };
+                }
                 let is_active = app.review_comment_is_active(*comment_idx);
                 let is_hovered = app.file_list_hover == Some(*comment_idx);
                 let selected_bg = if is_active {
@@ -2814,13 +3091,23 @@ fn draw_comment_list(
                 let mut icon_style = Style::default().fg(icon_color);
                 let mut name_style = Style::default().fg(if is_active || is_hovered {
                     app.theme.accent
+                } else if outdated || resolved {
+                    app.theme.text_muted
                 } else {
                     app.theme.text
                 });
                 if is_active || is_hovered {
                     name_style = name_style.add_modifier(Modifier::BOLD);
                 }
-                let mut location_style = if is_active && app.file_list_focused {
+                if outdated || resolved {
+                    icon_style = icon_style.add_modifier(Modifier::DIM);
+                    name_style = name_style.add_modifier(Modifier::DIM);
+                }
+                let mut location_style = if outdated {
+                    Style::default()
+                        .fg(app.theme.warning)
+                        .add_modifier(Modifier::DIM)
+                } else if is_active && app.file_list_focused {
                     Style::default().fg(app.theme.warning)
                 } else {
                     Style::default().fg(app.theme.text_muted)
@@ -2862,7 +3149,7 @@ fn draw_comment_list(
                 row_map.push(Some(*comment_idx));
             }
             CommentRow::ItemPreview(comment_idx) => {
-                let Some((_file_idx, _path, _location, preview)) =
+                let Some((_file_idx, _path, _location, preview, outdated, resolved)) =
                     app.review_comment_sidebar_item(*comment_idx)
                 else {
                     continue;
@@ -2883,6 +3170,9 @@ fn draw_comment_list(
                 } else {
                     app.theme.text_muted
                 });
+                if outdated || resolved {
+                    preview_style = preview_style.add_modifier(Modifier::DIM);
+                }
                 if let Some(bg) = selected_bg {
                     preview_style = preview_style.bg(bg);
                 }
@@ -3220,11 +3510,11 @@ struct PreviewChangeBar {
 
 struct PreviewFileCommentMeta {
     action_width: usize,
+    comment_id: Option<u64>,
     card_start: Option<usize>,
     card_height: usize,
     anchor_key: Option<String>,
-    delete_x_offset: u16,
-    delete_width: u16,
+    actions: ReviewNoteActionHits,
 }
 
 fn review_file_comment_action_line(app: &App) -> Option<(Line<'static>, usize)> {
@@ -3265,17 +3555,17 @@ fn prepend_review_file_comment_lines(
     let mut prefix = vec![action, Line::from("")];
     let mut card_start = None;
     let mut card_height = 0usize;
+    let mut comment_id = None;
     let mut anchor_key = None;
-    let mut delete_x_offset = 2;
-    let mut delete_width = 0;
+    let mut actions = ReviewNoteActionHits::default();
 
     if let Some(overlay) = app.review_file_comment_overlay() {
         let start = prefix.len();
         let key = overlay.anchor_key.clone();
-        delete_x_offset = review_note_delete_x_offset(&overlay);
-        delete_width = review_note_delete_width(&overlay);
         let note_lines = review_note_lines(app, &overlay, max_width);
         card_height = note_lines.len();
+        comment_id = Some(overlay.id);
+        actions = review_preview_row(start, card_height, key.clone(), &overlay).actions;
         card_start = Some(start);
         anchor_key = Some(key);
         prefix.extend(note_lines);
@@ -3287,11 +3577,11 @@ fn prepend_review_file_comment_lines(
 
     Some(PreviewFileCommentMeta {
         action_width,
+        comment_id,
         card_start,
         card_height,
         anchor_key,
-        delete_x_offset,
-        delete_width,
+        actions,
     })
 }
 
@@ -3314,40 +3604,88 @@ fn add_review_file_comment_hits(
             1,
         )));
     }
-    if let (Some(card_start), Some(anchor_key)) = (meta.card_start, meta.anchor_key.as_ref()) {
+    if let (Some(card_start), Some(comment_id), Some(anchor_key)) =
+        (meta.card_start, meta.comment_id, meta.anchor_key.as_ref())
+    {
         let card_end = card_start.saturating_add(meta.card_height);
         let visible_start = card_start.max(scroll);
         let visible_end = card_end.min(scroll.saturating_add(visible_lines));
         if visible_start < visible_end {
-            app.add_review_preview_box(
+            app.add_review_comment_preview_box(
                 content_area.x,
                 content_area
                     .y
                     .saturating_add((visible_start - scroll) as u16),
                 content_area.width,
                 (visible_end - visible_start) as u16,
+                comment_id,
                 anchor_key.clone(),
             );
         }
-        let delete_line = card_end.saturating_sub(1);
-        if delete_line >= scroll && delete_line < scroll.saturating_add(visible_lines) {
-            let edit_width = meta.delete_x_offset.saturating_sub(5);
-            if edit_width > 0 {
+        if let Some((offset, x, width)) = meta.actions.edit {
+            let action_row = card_start.saturating_add(offset);
+            if action_row >= scroll && action_row < scroll.saturating_add(visible_lines) {
                 app.add_review_preview_edit_box(
-                    content_area.x.saturating_add(2),
-                    content_area.y.saturating_add((delete_line - scroll) as u16),
-                    edit_width,
+                    content_area.x.saturating_add(x),
+                    content_area.y.saturating_add((action_row - scroll) as u16),
+                    width,
                     1,
+                    comment_id,
                     anchor_key.clone(),
                 );
             }
-            app.add_review_preview_delete_box(
-                content_area.x.saturating_add(meta.delete_x_offset),
-                content_area.y.saturating_add((delete_line - scroll) as u16),
-                meta.delete_width,
-                1,
-                anchor_key.clone(),
-            );
+        }
+        if let Some((offset, x, width)) = meta.actions.reply {
+            let action_row = card_start.saturating_add(offset);
+            if action_row >= scroll && action_row < scroll.saturating_add(visible_lines) {
+                app.add_review_preview_reply_box(
+                    content_area.x.saturating_add(x),
+                    content_area.y.saturating_add((action_row - scroll) as u16),
+                    width,
+                    1,
+                    comment_id,
+                    anchor_key.clone(),
+                );
+            }
+        }
+        if let Some((offset, x, width)) = meta.actions.resolve {
+            let action_row = card_start.saturating_add(offset);
+            if action_row >= scroll && action_row < scroll.saturating_add(visible_lines) {
+                app.add_review_preview_resolve_box(
+                    content_area.x.saturating_add(x),
+                    content_area.y.saturating_add((action_row - scroll) as u16),
+                    width,
+                    1,
+                    comment_id,
+                    anchor_key.clone(),
+                );
+            }
+        }
+        if let Some((offset, x, width)) = meta.actions.delete {
+            let action_row = card_start.saturating_add(offset);
+            if action_row >= scroll && action_row < scroll.saturating_add(visible_lines) {
+                app.add_review_preview_delete_box(
+                    content_area.x.saturating_add(x),
+                    content_area.y.saturating_add((action_row - scroll) as u16),
+                    width,
+                    1,
+                    comment_id,
+                    anchor_key.clone(),
+                );
+            }
+        }
+        if let Some((offset, x, width)) = meta.actions.overflow {
+            let action_row = card_start.saturating_add(offset);
+            if action_row >= scroll && action_row < scroll.saturating_add(visible_lines) {
+                app.add_review_preview_overflow_box(
+                    content_area.x.saturating_add(x),
+                    content_area.y.saturating_add((action_row - scroll) as u16),
+                    width,
+                    1,
+                    comment_id,
+                    anchor_key.clone(),
+                );
+            }
         }
     }
 }
@@ -3405,6 +3743,222 @@ fn render_terminal_image_preview(
     true
 }
 
+fn render_outdated_comments_view(frame: &mut Frame, app: &mut App, area: Rect) {
+    if let Some(bg) = app.theme.background {
+        frame.render_widget(Block::default().style(Style::default().bg(bg)), area);
+    }
+    let (content_area, scrollbar_area) = reserve_diff_scrollbar_lane(app, area);
+    app.clear_preview_link_boxes();
+    app.clear_review_preview_boxes();
+    app.set_pr_comment_hits(Vec::new());
+    app.set_pr_comment_add_hit(None);
+
+    let comments = app.outdated_comment_overlays();
+    let mut lines = vec![
+        Line::from(Span::styled(
+            "Outdated comments",
+            Style::default()
+                .fg(app.theme.text)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+    ];
+    let mut cards = Vec::new();
+    let mut avatars = Vec::new();
+    let mut focus_rows = Vec::new();
+
+    if comments.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "No outdated comments.",
+            Style::default()
+                .fg(app.theme.text_muted)
+                .add_modifier(Modifier::DIM),
+        )));
+        lines.push(Line::from(""));
+    }
+
+    for comment in comments {
+        let start = lines.len();
+        let mut footer_actions = Vec::new();
+        if let Some(label) = comment.overlay.edit_label.as_ref() {
+            footer_actions.push(format!("{label} edit"));
+        }
+        if let Some(label) = comment.overlay.resolve_label.as_ref() {
+            footer_actions.push(format!(
+                "{label} {}",
+                if comment.overlay.resolved {
+                    "unresolve"
+                } else {
+                    "resolve"
+                }
+            ));
+        }
+        if let Some(label) = comment.overlay.delete_label.as_ref() {
+            footer_actions.push(format!("{label} delete"));
+        }
+        let block = review_note_block_with_footer(
+            app,
+            &comment.overlay,
+            content_area.width as usize,
+            &footer_actions.join("   "),
+        );
+        let height = block.lines.len();
+        let footer_row = start.saturating_add(height.saturating_sub(1));
+        let snapshot_rows = block.snapshot_rows;
+        let anchor_key = comment.overlay.anchor_key.clone();
+        let edit_width = review_note_edit_width(&comment.overlay);
+        let resolve_x = review_note_resolve_x_offset(&comment.overlay);
+        let resolve_width = review_note_resolve_width(&comment.overlay);
+        let delete_x = review_note_delete_x_offset(&comment.overlay);
+        let delete_width = review_note_delete_width(&comment.overlay);
+        if let Some(avatar) = block.avatar.clone() {
+            avatars.push((start.saturating_add(avatar.row_offset), avatar));
+        }
+        lines.extend(block.lines);
+        lines.push(Line::from(""));
+        cards.push((
+            comment.id,
+            start,
+            height,
+            footer_row,
+            snapshot_rows,
+            anchor_key,
+            edit_width,
+            resolve_x,
+            resolve_width,
+            delete_x,
+            delete_width,
+        ));
+        focus_rows.push((comment.id, start));
+    }
+
+    let visible_lines = content_area.height as usize;
+    let total_lines = lines.len().max(1);
+    if let Some(focus) = app.outdated_comment_focus.take() {
+        if let Some((_, row)) = focus_rows.iter().find(|(id, _)| *id == focus) {
+            app.scroll_offset = row.saturating_sub(1);
+        }
+    }
+    app.clamp_scroll(total_lines, visible_lines, false);
+    let scroll = app.scroll_offset.min(total_lines.saturating_sub(1));
+    let viewport_end = scroll.saturating_add(visible_lines);
+
+    for (
+        comment_id,
+        row,
+        height,
+        footer_row,
+        snapshot_rows,
+        anchor_key,
+        edit_width,
+        resolve_x,
+        resolve_width,
+        delete_x,
+        delete_width,
+    ) in cards
+    {
+        let end = row.saturating_add(height.max(1));
+        let visible_start = row.max(scroll);
+        let visible_end = end.min(viewport_end);
+        if visible_start < visible_end {
+            app.add_review_comment_preview_box(
+                content_area.x,
+                content_area
+                    .y
+                    .saturating_add(visible_start.saturating_sub(scroll) as u16),
+                content_area.width,
+                visible_end.saturating_sub(visible_start) as u16,
+                comment_id,
+                anchor_key.clone(),
+            );
+        }
+        if let Some((snapshot_start, snapshot_end)) = snapshot_rows {
+            let snapshot_start = row.saturating_add(snapshot_start).max(scroll);
+            let snapshot_end = row.saturating_add(snapshot_end).min(viewport_end);
+            if snapshot_start < snapshot_end {
+                app.add_review_preview_passive_box(
+                    content_area.x.saturating_add(2),
+                    content_area
+                        .y
+                        .saturating_add(snapshot_start.saturating_sub(scroll) as u16),
+                    content_area.width.saturating_sub(4),
+                    snapshot_end.saturating_sub(snapshot_start) as u16,
+                    anchor_key.clone(),
+                );
+            }
+        }
+        if footer_row < scroll || footer_row >= viewport_end {
+            continue;
+        }
+        let y = content_area
+            .y
+            .saturating_add(footer_row.saturating_sub(scroll) as u16);
+        if edit_width > 0 {
+            app.add_review_preview_edit_box(
+                content_area.x.saturating_add(2),
+                y,
+                edit_width,
+                1,
+                comment_id,
+                anchor_key.clone(),
+            );
+        }
+        if resolve_width > 0 {
+            app.add_review_preview_resolve_box(
+                content_area.x.saturating_add(resolve_x),
+                y,
+                resolve_width,
+                1,
+                comment_id,
+                anchor_key.clone(),
+            );
+        }
+        if delete_width > 0 {
+            app.add_review_preview_delete_box(
+                content_area.x.saturating_add(delete_x),
+                y,
+                delete_width,
+                1,
+                comment_id,
+                anchor_key,
+            );
+        }
+    }
+
+    let visible = lines
+        .into_iter()
+        .skip(scroll)
+        .take(visible_lines)
+        .collect::<Vec<_>>();
+    let mut paragraph = Paragraph::new(visible);
+    if let Some(bg) = app.theme.background {
+        paragraph = paragraph.style(Style::default().bg(bg));
+    }
+    frame.render_widget(paragraph, content_area);
+
+    for (row, avatar) in avatars {
+        if row < scroll || row >= viewport_end {
+            continue;
+        }
+        render_review_note_avatar(
+            frame,
+            app,
+            content_area,
+            row.saturating_sub(scroll),
+            &avatar,
+        );
+    }
+
+    render_diff_scrollbar(
+        frame,
+        app,
+        scrollbar_area,
+        total_lines,
+        visible_lines,
+        app.scroll_offset,
+    );
+}
+
 fn render_pr_comments_view(frame: &mut Frame, app: &mut App, area: Rect) {
     if let Some(bg) = app.theme.background {
         frame.render_widget(Block::default().style(Style::default().bg(bg)), area);
@@ -3414,13 +3968,15 @@ fn render_pr_comments_view(frame: &mut Frame, app: &mut App, area: Rect) {
     app.set_pr_comment_hits(Vec::new());
     app.set_pr_comment_add_hit(None);
 
+    let provider = app.review_provider_kind();
+    let review_noun = provider.long_review_noun();
     let title = app.pull_request_title();
     let has_pr_target = app.pull_request_comment_target_available();
     let overlays = app.pull_request_comment_overlays();
     let mut lines = Vec::<Line<'static>>::new();
     let mut hit_rows = Vec::<(usize, u16, u16, PrCommentHitAction)>::new();
-    let mut card_rows = Vec::<(usize, usize, String)>::new();
-    let mut delete_rows = Vec::<(usize, u16, u16, String)>::new();
+    let mut card_rows = Vec::<(u64, usize, usize, String)>::new();
+    let mut delete_rows = Vec::<(u64, usize, u16, u16, String)>::new();
     let mut avatar_rows = Vec::new();
     let mut focus_rows = Vec::<(u64, usize)>::new();
     lines.push(Line::from(Span::styled(
@@ -3433,9 +3989,9 @@ fn render_pr_comments_view(frame: &mut Frame, app: &mut App, area: Rect) {
 
     if overlays.is_empty() {
         let message = if has_pr_target {
-            "No pull request comments."
+            format!("No {review_noun} comments.")
         } else {
-            "No pull request found."
+            format!("No {review_noun} found.")
         };
         lines.push(Line::from(Span::styled(
             message,
@@ -3481,7 +4037,7 @@ fn render_pr_comments_view(frame: &mut Frame, app: &mut App, area: Rect) {
         let card_height = block.lines.len();
         let footer_row = start.saturating_add(card_height.saturating_sub(1));
         let anchor_key = overlay.anchor_key.clone();
-        card_rows.push((start, card_height, anchor_key.clone()));
+        card_rows.push((id, start, card_height, anchor_key.clone()));
         if let Some(avatar) = block.avatar.clone() {
             avatar_rows.push((start.saturating_add(avatar.row_offset), avatar));
         }
@@ -3499,7 +4055,7 @@ fn render_pr_comments_view(frame: &mut Frame, app: &mut App, area: Rect) {
             let width = text_width(&label) as u16;
             hit_rows.push((footer_row, action_x, width, action));
             if matches!(action, PrCommentHitAction::Delete(_)) {
-                delete_rows.push((footer_row, action_x, width, anchor_key.clone()));
+                delete_rows.push((id, footer_row, action_x, width, anchor_key.clone()));
             }
             action_x += width;
         }
@@ -3535,24 +4091,25 @@ fn render_pr_comments_view(frame: &mut Frame, app: &mut App, area: Rect) {
     let scroll = app.scroll_offset.min(total_lines.saturating_sub(1));
     let viewport_end = scroll.saturating_add(visible_lines);
 
-    for (row, height, anchor_key) in card_rows {
+    for (id, row, height, anchor_key) in card_rows {
         let end = row.saturating_add(height.max(1));
         let visible_start = row.max(scroll);
         let visible_end = end.min(viewport_end);
         if visible_start >= visible_end {
             continue;
         }
-        app.add_review_preview_box(
+        app.add_review_comment_preview_box(
             content_area.x,
             content_area
                 .y
                 .saturating_add(visible_start.saturating_sub(scroll) as u16),
             content_area.width,
             visible_end.saturating_sub(visible_start) as u16,
+            id,
             anchor_key,
         );
     }
-    for (row, x_offset, width, anchor_key) in delete_rows {
+    for (id, row, x_offset, width, anchor_key) in delete_rows {
         if row < scroll || row >= viewport_end {
             continue;
         }
@@ -3563,6 +4120,7 @@ fn render_pr_comments_view(frame: &mut Frame, app: &mut App, area: Rect) {
                 .saturating_add(row.saturating_sub(scroll) as u16),
             width,
             1,
+            id,
             anchor_key,
         );
     }
@@ -3633,6 +4191,10 @@ fn render_pr_comments_view(frame: &mut Frame, app: &mut App, area: Rect) {
 fn render_preview(frame: &mut Frame, app: &mut App, area: Rect) {
     if app.active_pr_comments_view() {
         render_pr_comments_view(frame, app, area);
+        return;
+    }
+    if app.active_outdated_comments_view() {
+        render_outdated_comments_view(frame, app, area);
         return;
     }
     if let Some(bg) = app.theme.background {
@@ -3889,7 +4451,7 @@ fn preview_document(
                 image_path,
             )
         }
-        Some(TopbarTabContent::PrComments) | None => {
+        Some(TopbarTabContent::PrComments | TopbarTabContent::OutdatedComments) | None => {
             (String::new(), String::new(), None, false, None, None)
         }
     }
@@ -3961,7 +4523,9 @@ fn structured_preview_change_bars(
     let side = side?;
     let index = match app.active_topbar_content()? {
         TopbarTabContent::File(index) => index,
-        TopbarTabContent::Help | TopbarTabContent::PrComments => return None,
+        TopbarTabContent::Help
+        | TopbarTabContent::PrComments
+        | TopbarTabContent::OutdatedComments => return None,
     };
     let (old, new) = app.multi_diff.file_contents(index)?;
     let old = parse_structured_change_value(kind, old).ok()?;
@@ -4867,6 +5431,7 @@ fn capture_diff_selection_cells(frame: &mut Frame, app: &mut App) {
         .saturating_add(height)
         .min(frame_area.y.saturating_add(frame_area.height));
     let excluded = app.diff_selection_excluded_cols();
+    let excluded_rows = app.diff_selection_excluded_rows();
     let content_ranges = app.diff_selection_content_ranges();
     let cells = {
         let buffer = frame.buffer_mut();
@@ -4875,9 +5440,10 @@ fn capture_diff_selection_cells(frame: &mut Frame, app: &mut App) {
                 let mut cells = (x..max_x)
                     .map(|col| {
                         let local_col = col.saturating_sub(x);
-                        if excluded
-                            .iter()
-                            .any(|(start, end)| local_col >= *start && local_col < *end)
+                        if excluded_rows.contains(&row.saturating_sub(y))
+                            || excluded
+                                .iter()
+                                .any(|(start, end)| local_col >= *start && local_col < *end)
                         {
                             String::new()
                         } else {
@@ -5949,20 +6515,136 @@ fn draw_review_remote_picker(frame: &mut Frame, app: &mut App) {
     frame.render_widget(Paragraph::new(lines), chunks[1]);
 }
 
-fn draw_review_delete_confirmation(frame: &mut Frame, app: &mut App) {
-    let Some(confirmation) = app.review_delete_confirmation_render() else {
-        app.set_review_delete_confirmation_hits(Vec::new());
-        return;
+fn draw_session_rename_modal(frame: &mut Frame, app: &mut App) {
+    let area = frame.area();
+    let title = "Rename session";
+    let body = "Enter a session name.";
+    let footer_label = "enter save    esc cancel";
+    let query = app.session_rename_query();
+    let content_width = [
+        text_width(title),
+        text_width(body),
+        text_width(query).max(text_width("Session name")),
+        text_width(footer_label),
+    ]
+    .into_iter()
+    .max()
+    .unwrap_or(0)
+    .min(52);
+    let popup_width = (content_width as u16)
+        .saturating_add(8)
+        .max(32)
+        .min(area.width.saturating_sub(2).max(1));
+    let popup_height = 6u16.min(area.height.saturating_sub(2).max(1));
+    let popup_x = area
+        .x
+        .saturating_add(area.width.saturating_sub(popup_width) / 2);
+    let popup_y = area
+        .y
+        .saturating_add(area.height.saturating_sub(popup_height) / 2);
+    let popup_area = Rect::new(popup_x, popup_y, popup_width, popup_height);
+
+    frame.render_widget(Clear, popup_area);
+
+    let border = Style::default().fg(app.theme.accent);
+    let title_style = Style::default()
+        .fg(app.theme.accent)
+        .add_modifier(Modifier::BOLD);
+    let text_style = Style::default().fg(app.theme.text);
+    let dim_style = Style::default().fg(app.theme.text_muted);
+    let prompt_style = Style::default()
+        .fg(app.theme.primary)
+        .add_modifier(Modifier::BOLD);
+    let total_width = popup_width as usize;
+    let content_width = total_width.saturating_sub(4);
+    let title = truncate_with_dots(title, total_width.saturating_sub(4));
+    let title_rule = "─".repeat(total_width.saturating_sub(text_width(&title).saturating_add(4)));
+
+    let content_line = |spans: Vec<Span<'static>>| {
+        let used = spans_width(&spans);
+        let mut out = vec![Span::styled("│ ".to_string(), border)];
+        out.extend(spans);
+        out.push(Span::raw(" ".repeat(content_width.saturating_sub(used))));
+        out.push(Span::styled(" │".to_string(), border));
+        Line::from(out)
     };
-    let title = confirmation.title.as_str();
-    let confirm_label = confirmation.confirm_label.as_str();
-    let body_lines = confirmation.body.lines().collect::<Vec<_>>();
+
+    let query_width = content_width.saturating_sub(4);
+    let query_text = if query.is_empty() {
+        "Session name".to_string()
+    } else {
+        truncate_text_from_start(query, query_width)
+    };
+    let query_style = if query.is_empty() {
+        dim_style
+    } else {
+        text_style
+    };
+    let mut lines = vec![Line::from(vec![
+        Span::styled("╭ ".to_string(), border),
+        Span::styled(title, title_style),
+        Span::styled(format!(" {title_rule}╮"), border),
+    ])];
+    lines.push(content_line(Vec::new()));
+    lines.push(content_line(vec![Span::styled(
+        body.to_string(),
+        text_style,
+    )]));
+    lines.push(content_line(vec![
+        Span::styled("❯ ".to_string(), prompt_style),
+        Span::styled(query_text, query_style),
+        Span::styled(
+            if app.file_filter_cursor_visible {
+                "│".to_string()
+            } else {
+                " ".to_string()
+            },
+            prompt_style,
+        ),
+    ]));
+    lines.push(content_line(Vec::new()));
+
+    let footer_width = text_width(footer_label);
+    let footer_rule = "─".repeat(total_width.saturating_sub(footer_width.saturating_add(4)));
+    lines.push(Line::from(vec![
+        Span::styled("╰ ".to_string(), border),
+        Span::styled("enter".to_string(), prompt_style),
+        Span::raw(" save    "),
+        Span::styled("esc".to_string(), prompt_style),
+        Span::raw(" cancel"),
+        Span::styled(format!(" {footer_rule}╯"), border),
+    ]));
+
+    frame.render_widget(Paragraph::new(lines), popup_area);
+}
+
+fn draw_confirmation(frame: &mut Frame, app: &mut App, quit: bool) {
+    let (title, body, confirm_label, tone) = if quit {
+        (
+            "Quit".to_string(),
+            "Are you sure you want to quit?".to_string(),
+            "enter quit".to_string(),
+            app.theme.warning,
+        )
+    } else {
+        let Some(confirmation) = app.review_delete_confirmation_render() else {
+            app.set_review_delete_confirmation_hits(Vec::new());
+            return;
+        };
+        (
+            confirmation.title,
+            confirmation.body,
+            confirmation.confirm_label,
+            app.theme.error,
+        )
+    };
+    let body_lines = body.lines().collect::<Vec<_>>();
     let footer_label = format!("{confirm_label}    esc cancel");
     let area = frame.area();
     let content_width = body_lines
         .iter()
         .map(|line| text_width(line))
-        .fold(text_width(title), usize::max)
+        .fold(text_width(&title), usize::max)
         .max(text_width(&footer_label))
         .min(52);
     let popup_width = (content_width as u16)
@@ -5985,10 +6667,8 @@ fn draw_review_delete_confirmation(frame: &mut Frame, app: &mut App) {
 
     frame.render_widget(Clear, popup_area);
 
-    let border = Style::default().fg(app.theme.error);
-    let title_style = Style::default()
-        .fg(app.theme.error)
-        .add_modifier(Modifier::BOLD);
+    let border = Style::default().fg(tone);
+    let title_style = Style::default().fg(tone).add_modifier(Modifier::BOLD);
     let text_style = Style::default().fg(app.theme.text);
     let key_style = Style::default()
         .fg(app.theme.accent)
@@ -5998,16 +6678,12 @@ fn draw_review_delete_confirmation(frame: &mut Frame, app: &mut App) {
     let cancel_hover =
         app.review_delete_confirmation_hover == Some(ReviewDeleteConfirmationAction::Cancel);
     let confirm_key_style = if confirm_hover {
-        Style::default()
-            .fg(app.theme.error)
-            .add_modifier(Modifier::BOLD)
+        Style::default().fg(tone).add_modifier(Modifier::BOLD)
     } else {
         key_style
     };
     let confirm_label_style = if confirm_hover {
-        Style::default()
-            .fg(app.theme.error)
-            .add_modifier(Modifier::BOLD)
+        Style::default().fg(tone).add_modifier(Modifier::BOLD)
     } else {
         text_style
     };
@@ -6021,7 +6697,7 @@ fn draw_review_delete_confirmation(frame: &mut Frame, app: &mut App) {
 
     let total_width = popup_width as usize;
     let content_width = total_width.saturating_sub(4);
-    let title = truncate_with_dots(title, total_width.saturating_sub(4));
+    let title = truncate_with_dots(&title, total_width.saturating_sub(4));
     let title_rule = "─".repeat(total_width.saturating_sub(text_width(&title).saturating_add(4)));
     let mut lines = Vec::new();
     lines.push(Line::from(vec![
@@ -6051,19 +6727,18 @@ fn draw_review_delete_confirmation(frame: &mut Frame, app: &mut App) {
     }
     lines.push(content_line(Vec::new()));
 
-    let confirm_text = confirm_label
-        .strip_prefix("d ")
-        .unwrap_or(confirm_label)
-        .to_string();
-    let confirm_width = text_width(confirm_label) as u16;
+    let (confirm_key, confirm_text) = confirm_label
+        .split_once(' ')
+        .unwrap_or((confirm_label.as_str(), ""));
+    let confirm_width = text_width(&confirm_label) as u16;
     let cancel_label = "esc cancel";
-    let footer_width = text_width(confirm_label) + 4 + text_width(cancel_label);
+    let footer_width = text_width(&confirm_label) + 4 + text_width(cancel_label);
     let footer_rule = "─".repeat(total_width.saturating_sub(footer_width.saturating_add(4)));
     lines.push(Line::from(vec![
         Span::styled("╰ ".to_string(), border),
-        Span::styled("d".to_string(), confirm_key_style),
+        Span::styled(confirm_key.to_string(), confirm_key_style),
         Span::raw(" "),
-        Span::styled(confirm_text, confirm_label_style),
+        Span::styled(confirm_text.to_string(), confirm_label_style),
         Span::raw("    "),
         Span::styled("esc".to_string(), key_style),
         Span::raw(" "),
@@ -6123,6 +6798,11 @@ fn draw_help_popover(frame: &mut Frame, app: &mut App) {
         paired(&normal, NormalAction::SearchNext, NormalAction::SearchPrev),
         paired(
             &normal,
+            NormalAction::FocusNextComment,
+            NormalAction::FocusPrevComment,
+        ),
+        paired(
+            &normal,
             NormalAction::NextConflict,
             NormalAction::PrevConflict,
         ),
@@ -6154,6 +6834,11 @@ fn draw_help_popover(frame: &mut Frame, app: &mut App) {
         normal(NormalAction::OpenEditor),
         normal(NormalAction::CenterActive),
         normal(NormalAction::ToggleLineWrap),
+        paired(
+            &normal,
+            NormalAction::ToggleFoldContext,
+            NormalAction::ExpandAllFolds,
+        ),
         normal(NormalAction::ToggleSyntax),
         normal(NormalAction::ToggleStepping),
         normal(NormalAction::ToggleStrikethrough),
@@ -6369,6 +7054,15 @@ fn draw_help_popover(frame: &mut Frame, app: &mut App) {
         &mut lines,
         &paired(
             &normal,
+            NormalAction::FocusNextComment,
+            NormalAction::FocusPrevComment,
+        ),
+        "Next/prev review comment",
+    );
+    push_help_line(
+        &mut lines,
+        &paired(
+            &normal,
             NormalAction::NextConflict,
             NormalAction::PrevConflict,
         ),
@@ -6456,8 +7150,12 @@ fn draw_help_popover(frame: &mut Frame, app: &mut App) {
     );
     push_help_line(
         &mut lines,
-        &normal(NormalAction::ToggleFoldContext),
-        "Toggle context folding",
+        &paired(
+            &normal,
+            NormalAction::ToggleFoldContext,
+            NormalAction::ExpandAllFolds,
+        ),
+        "Toggle/expand all folds",
     );
     push_help_line(
         &mut lines,
@@ -6474,7 +7172,7 @@ fn draw_help_popover(frame: &mut Frame, app: &mut App) {
     push_help_line(
         &mut lines,
         &normal(NormalAction::ToggleStepping),
-        "Toggle stepping",
+        "Toggle step mode",
     );
     push_help_line(
         &mut lines,
@@ -6531,12 +7229,12 @@ fn draw_help_popover(frame: &mut Frame, app: &mut App) {
     push_help_line(
         &mut lines,
         &normal(NormalAction::ToggleViewMode),
-        "Cycle view mode",
+        "Cycle view modes",
     );
     push_help_line(
         &mut lines,
         &normal(NormalAction::ToggleViewModeReverse),
-        "Cycle view mode (reverse)",
+        "Cycle view modes (reverse)",
     );
     push_help_line(&mut lines, &normal(NormalAction::ToggleZen), "Zen mode");
     push_help_line(
@@ -6696,18 +7394,21 @@ fn picker_input_line(app: &App, query: &str, placeholder: &str, width: u16) -> L
             Style::default().fg(app.theme.text),
         )
     };
-    Line::from(vec![
-        Span::styled("❯ ", prompt_style),
-        Span::styled(text, text_style),
-        Span::styled(
-            if app.file_filter_cursor_visible {
-                "│"
-            } else {
-                " "
-            },
-            prompt_style,
-        ),
-    ])
+    let prompt = Span::styled("❯ ", prompt_style);
+    let text = Span::styled(text, text_style);
+    let cursor = Span::styled(
+        if app.file_filter_cursor_visible {
+            "│"
+        } else {
+            " "
+        },
+        prompt_style,
+    );
+    if query.is_empty() {
+        Line::from(vec![prompt, cursor, text])
+    } else {
+        Line::from(vec![prompt, text, cursor])
+    }
 }
 
 fn draw_command_palette_popover(frame: &mut Frame, app: &mut App) {
@@ -7118,18 +7819,25 @@ fn draw_comment_picker_popover(frame: &mut Frame, app: &mut App) {
     let items: Vec<ListItem> = visible
         .iter()
         .filter_map(|idx| app.review_comment_sidebar_item(*idx))
-        .map(|(_file_index, title, location, preview)| {
-            let target = if location.is_empty() {
-                title
-            } else {
-                format!("{title} {location}")
-            };
-            let label = truncate_text(&format!("{target} - {preview}"), list_width);
-            ListItem::new(Line::from(Span::styled(
-                label,
-                Style::default().fg(app.theme.text),
-            )))
-        })
+        .map(
+            |(_file_index, title, location, preview, outdated, resolved)| {
+                let target = if location.is_empty() {
+                    title
+                } else {
+                    format!("{title} {location}")
+                };
+                let label = truncate_text(&format!("{target} - {preview}"), list_width);
+                let mut style = Style::default().fg(if outdated || resolved {
+                    app.theme.text_muted
+                } else {
+                    app.theme.text
+                });
+                if outdated || resolved {
+                    style = style.add_modifier(Modifier::DIM);
+                }
+                ListItem::new(Line::from(Span::styled(label, style)))
+            },
+        )
         .collect();
 
     let mut state = ListState::default();
@@ -7146,8 +7854,8 @@ fn draw_comment_picker_popover(frame: &mut Frame, app: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::counted_binding_label;
-    use crate::app::{App, SelectionToolbarAction, ViewMode};
-    use crate::config::ResolvedTheme;
+    use crate::app::{App, FoldContextDirection, SelectionToolbarAction, ViewMode};
+    use crate::config::{FoldContextMode, ResolvedTheme, SyntaxMode};
     use crate::markdown::{
         markdown_line_is_quote_border, markdown_preview_lines as render_markdown_preview_lines,
         MarkdownChangeBars, PreviewLink,
@@ -7282,6 +7990,43 @@ mod tests {
     }
 
     #[test]
+    fn picker_cursor_precedes_placeholder_and_follows_query() {
+        let multi = MultiFileDiff::from_file_pair(
+            std::path::PathBuf::from("a.txt"),
+            std::path::PathBuf::from("a.txt"),
+            "old".to_string(),
+            "new".to_string(),
+        );
+        let mut app = App::new(multi, ViewMode::UnifiedPane, 50, false, None);
+        let text = |line: ratatui::text::Line<'_>| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        };
+
+        assert_eq!(
+            text(super::picker_input_line(&app, "", "Search for files…", 30)),
+            "❯ │Search for files…"
+        );
+        assert_eq!(
+            text(super::picker_input_line(
+                &app,
+                "abc",
+                "Search for files…",
+                30
+            )),
+            "❯ abc│"
+        );
+
+        app.file_filter_cursor_visible = false;
+        assert_eq!(
+            text(super::picker_input_line(&app, "", "Search for files…", 30)),
+            "❯  Search for files…"
+        );
+    }
+
+    #[test]
     fn file_filter_active_text_uses_prompt_and_ibeam() {
         let multi = MultiFileDiff::from_file_pair(
             std::path::PathBuf::from("a.txt"),
@@ -7382,7 +8127,7 @@ mod tests {
     }
 
     #[test]
-    fn search_prompt_is_available_for_preview_status_bar() {
+    fn search_prompt_is_not_in_status_bar() {
         let multi = MultiFileDiff::from_file_pair(
             std::path::PathBuf::from("README.md"),
             std::path::PathBuf::from("README.md"),
@@ -7391,12 +8136,7 @@ mod tests {
         );
         let mut app = App::new(multi, ViewMode::Preview, 50, false, None);
         app.start_search();
-        let text: String = super::line_input_status_spans(&app)
-            .unwrap()
-            .iter()
-            .map(|span| span.content.as_ref())
-            .collect();
-        assert_eq!(text, "/ Search");
+        assert!(super::line_input_status_spans(&app).is_none());
     }
 
     #[test]
@@ -7474,6 +8214,342 @@ mod tests {
     }
 
     #[test]
+    fn find_bar_renders_controls_and_avoids_active_match() {
+        let multi = MultiFileDiff::from_file_pair(
+            std::path::PathBuf::from("search.txt"),
+            std::path::PathBuf::from("search.txt"),
+            String::new(),
+            "........................................target\none\ntwo\nthree\ntarget\n".to_string(),
+        );
+        let mut app = App::new(multi, ViewMode::UnifiedPane, 0, false, None);
+        app.file_panel_visible = false;
+        app.toggle_stepping();
+        app.start_search();
+        for ch in "target".chars() {
+            app.push_search_char(ch);
+        }
+        app.search_next();
+        app.search_prev();
+
+        let backend = TestBackend::new(60, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| super::draw(frame, &mut app)).unwrap();
+        let (view_x, view_y, view_width, _) = app.diff_view_area.unwrap();
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(view_x, view_y)].symbol(), "╭");
+        let text = buffer
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(text.contains("❯ target│"), "find bar text: {text:?}");
+        assert!(text.contains("1/2"), "find bar text: {text:?}");
+        assert!(text.contains('│'), "find bar text: {text:?}");
+        assert!(text.contains('‹'), "find bar text: {text:?}");
+        assert!(text.contains('›'), "find bar text: {text:?}");
+        assert!(text.contains('✕'), "find bar text: {text:?}");
+
+        let (prev_x, prev_y, _, _) = app.search_prev_hit.expect("previous hit");
+        assert!(app.update_search_bar_hover(prev_x, prev_y));
+        assert!(app.search_prev_hover);
+        let (next_x, next_y, _, _) = app.search_next_hit.expect("next hit");
+        assert!(app.handle_search_bar_click(next_x, next_y));
+        assert_eq!(app.search_target(), Some(4));
+        terminal.draw(|frame| super::draw(frame, &mut app)).unwrap();
+        let content_width = view_width.saturating_sub(u16::from(app.scrollbar_visible));
+        let right_x = view_x.saturating_add(content_width.saturating_sub(44));
+        assert_eq!(terminal.backend().buffer()[(right_x, view_y)].symbol(), "╭");
+
+        let (bar_x, bar_y, _, _) = app.search_bar_hit.expect("find bar hit");
+        assert!(app.handle_search_bar_click(bar_x, bar_y));
+        assert!(app.search_active());
+
+        let (clear_x, clear_y, clear_width, _) = app.search_clear_hit.expect("clear hit");
+        assert!(app.handle_search_bar_click(
+            clear_x.saturating_add(clear_width.saturating_sub(1)),
+            clear_y,
+        ));
+        assert!(!app.search_active());
+        assert!(app.search_query().is_empty());
+        assert!(!app.search_bar_visible());
+    }
+
+    #[test]
+    fn expandable_fold_renders_and_expands_by_mouse_in_unified_and_split() {
+        let _guard = crate::test_utils::DiffSettingsGuard::default();
+        let content = (1..=40)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for mode in [ViewMode::UnifiedPane, ViewMode::Split] {
+            let multi = MultiFileDiff::from_file_pair(
+                std::path::PathBuf::from("fold.txt"),
+                std::path::PathBuf::from("fold.txt"),
+                content.clone(),
+                content.clone(),
+            );
+            let mut app = App::new(multi, mode, 0, false, None);
+            app.file_panel_visible = false;
+            app.theme = rgb_theme();
+            app.set_fold_context_mode(FoldContextMode::Expandable);
+
+            let backend = TestBackend::new(100, 18);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal.draw(|frame| super::draw(frame, &mut app)).unwrap();
+            let text = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>();
+            assert!(
+                text.contains("ua ↑ 34 unchanged lines da ↓"),
+                "fold text: {text:?}"
+            );
+            assert_eq!(
+                app.fold_context_hits.len(),
+                if mode == ViewMode::Split { 4 } else { 2 }
+            );
+            let top = app
+                .fold_context_hits
+                .iter()
+                .find(|hit| hit.direction == FoldContextDirection::Top)
+                .copied()
+                .unwrap();
+            let initial_bottom = app
+                .fold_context_hits
+                .iter()
+                .find(|hit| hit.direction == FoldContextDirection::Bottom)
+                .copied()
+                .unwrap();
+            let top_arrow_x = top.x.saturating_add(top.width.saturating_sub(1));
+            let bottom_arrow_x = initial_bottom
+                .x
+                .saturating_add(initial_bottom.width.saturating_sub(1));
+            let up_key = &terminal.backend().buffer()[(top.x, top.y)];
+            let down_key = &terminal.backend().buffer()[(initial_bottom.x, initial_bottom.y)];
+            assert_eq!(up_key.fg, app.theme.text_muted);
+            assert_eq!(down_key.fg, app.theme.text_muted);
+            assert!(!up_key.modifier.contains(Modifier::BOLD));
+            assert!(!down_key.modifier.contains(Modifier::BOLD));
+            let top_arrow = &terminal.backend().buffer()[(top_arrow_x, top.y)];
+            assert_eq!(top_arrow.fg, app.theme.text_muted);
+            assert!(!top_arrow.modifier.contains(Modifier::BOLD));
+
+            assert!(app.update_topbar_hover(top.x, top.y));
+            terminal.draw(|frame| super::draw(frame, &mut app)).unwrap();
+            let top_arrow = &terminal.backend().buffer()[(top_arrow_x, top.y)];
+            assert_eq!(top_arrow.fg, app.theme.accent);
+            assert!(top_arrow.modifier.contains(Modifier::BOLD));
+            let up_key = &terminal.backend().buffer()[(top.x, top.y)];
+            let down_key = &terminal.backend().buffer()[(initial_bottom.x, initial_bottom.y)];
+            assert_eq!(up_key.symbol(), "u");
+            assert_eq!(up_key.fg, app.theme.accent);
+            assert!(up_key.modifier.contains(Modifier::BOLD));
+            assert_eq!(down_key.fg, app.theme.text_muted);
+            assert!(!down_key.modifier.contains(Modifier::BOLD));
+            let fold_bg = crate::views::fold_context_background(&app);
+            let (view_x, _, view_width, _) = app.diff_view_area.unwrap();
+            assert_eq!(terminal.backend().buffer()[(view_x, top.y)].bg, fold_bg);
+            assert_eq!(
+                terminal.backend().buffer()
+                    [(view_x.saturating_add(view_width.saturating_sub(2)), top.y)]
+                    .bg,
+                fold_bg
+            );
+
+            assert!(app.update_topbar_hover(bottom_arrow_x, initial_bottom.y));
+            terminal.draw(|frame| super::draw(frame, &mut app)).unwrap();
+            let up_key = &terminal.backend().buffer()[(top.x, top.y)];
+            let down_key = &terminal.backend().buffer()[(initial_bottom.x, initial_bottom.y)];
+            assert!(!up_key.modifier.contains(Modifier::BOLD));
+            assert!(down_key.modifier.contains(Modifier::BOLD));
+            assert!(
+                terminal.backend().buffer()[(bottom_arrow_x, initial_bottom.y)]
+                    .modifier
+                    .contains(Modifier::BOLD)
+            );
+
+            assert!(app.handle_fold_context_click(top.x, top.y));
+            terminal.draw(|frame| super::draw(frame, &mut app)).unwrap();
+            let text = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>();
+            assert!(
+                text.contains("ua ↑ 14 unchanged lines da ↓"),
+                "fold text: {text:?}"
+            );
+
+            let bottom = app
+                .fold_context_hits
+                .iter()
+                .find(|hit| hit.direction == FoldContextDirection::Bottom)
+                .copied()
+                .unwrap();
+            assert!(app.handle_fold_context_click(
+                bottom.x.saturating_add(bottom.width.saturating_sub(1)),
+                bottom.y,
+            ));
+            terminal.draw(|frame| super::draw(frame, &mut app)).unwrap();
+            assert!(app.fold_context_hits.is_empty());
+        }
+    }
+
+    #[test]
+    fn visual_selection_skips_fold_bands() {
+        let _guard = crate::test_utils::DiffSettingsGuard::default();
+        let content = (1..=40)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for mode in [ViewMode::UnifiedPane, ViewMode::Split] {
+            let multi = MultiFileDiff::from_file_pair(
+                std::path::PathBuf::from("fold.txt"),
+                std::path::PathBuf::from("fold.txt"),
+                content.clone(),
+                content.clone(),
+            );
+            let mut app = App::new(multi, mode, 0, false, None);
+            app.file_panel_visible = false;
+            app.theme = rgb_theme();
+            app.set_fold_context_mode(FoldContextMode::Expandable);
+
+            let backend = TestBackend::new(100, 18);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal.draw(|frame| super::draw(frame, &mut app)).unwrap();
+            let fold_hit = app.fold_context_hits.first().copied().unwrap();
+            let (view_x, view_y, _, _) = app.diff_view_area.unwrap();
+            let fold_row = fold_hit.y.saturating_sub(view_y);
+            let content_x = view_x + app.diff_selection_content_ranges()[0].0;
+
+            assert!(!app.start_diff_selection(content_x, fold_hit.y));
+            assert!(app.start_diff_selection(content_x, fold_hit.y.saturating_sub(1)));
+            assert!(app.drag_diff_selection(content_x.saturating_add(6), fold_hit.y));
+            assert_eq!(
+                app.control_selection_json()["end"]["row"].as_u64(),
+                Some(fold_row.saturating_add(1) as u64)
+            );
+            let selected = app.selected_diff_text();
+            assert_eq!(selected, "line 3\nline 38", "mode: {mode:?}");
+            assert!(app.move_diff_selection(0, -1));
+            assert_eq!(
+                app.control_selection_json()["end"]["row"].as_u64(),
+                Some(fold_row.saturating_sub(1) as u64)
+            );
+            assert!(app.move_diff_selection(0, 1));
+            assert_eq!(
+                app.control_selection_json()["end"]["row"].as_u64(),
+                Some(fold_row.saturating_add(1) as u64)
+            );
+
+            terminal.draw(|frame| super::draw(frame, &mut app)).unwrap();
+            let fold_hit = app.fold_context_hits.first().copied().unwrap();
+            assert_eq!(
+                terminal.backend().buffer()[(fold_hit.x, fold_hit.y)].bg,
+                crate::views::fold_context_background(&app)
+            );
+        }
+    }
+
+    #[test]
+    fn visible_folds_get_contextual_direction_keys() {
+        let _guard = crate::test_utils::DiffSettingsGuard::default();
+        let old = (1..=60)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut new_lines = old.lines().map(str::to_string).collect::<Vec<_>>();
+        new_lines[29] = "changed line".to_string();
+        let multi = MultiFileDiff::from_file_pair(
+            std::path::PathBuf::from("fold.txt"),
+            std::path::PathBuf::from("fold.txt"),
+            format!("{old}\n"),
+            format!("{}\n", new_lines.join("\n")),
+        );
+        let mut app = App::new(multi, ViewMode::UnifiedPane, 0, false, None);
+        app.file_panel_visible = false;
+        app.set_fold_context_mode(FoldContextMode::Expandable);
+        app.next_step();
+
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| super::draw(frame, &mut app)).unwrap();
+        let text = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(text.contains("ua ↑"), "fold text: {text:?}");
+        assert!(text.contains("da ↓"), "fold text: {text:?}");
+        assert!(text.contains("ub ↑"), "fold text: {text:?}");
+        assert!(text.contains("db ↓"), "fold text: {text:?}");
+    }
+
+    #[test]
+    fn expandable_fold_hitboxes_follow_wrapped_context() {
+        let _guard = crate::test_utils::DiffSettingsGuard::default();
+        let content = (1..=40)
+            .map(|line| {
+                if line <= 3 {
+                    "x".repeat(120)
+                } else {
+                    format!("line {line}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        for mode in [ViewMode::UnifiedPane, ViewMode::Split] {
+            let multi = MultiFileDiff::from_file_pair(
+                std::path::PathBuf::from("fold.txt"),
+                std::path::PathBuf::from("fold.txt"),
+                content.clone(),
+                content.clone(),
+            );
+            let mut app = App::new(multi, mode, 0, false, None);
+            app.file_panel_visible = false;
+            app.line_wrap = true;
+            app.set_fold_context_mode(FoldContextMode::Expandable);
+
+            let backend = TestBackend::new(40, 80);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal.draw(|frame| super::draw(frame, &mut app)).unwrap();
+            let expected_hits = if mode == ViewMode::Split { 2 } else { 1 };
+            for (direction, symbol) in [
+                (FoldContextDirection::Top, "↑"),
+                (FoldContextDirection::Bottom, "↓"),
+            ] {
+                let hits = app
+                    .fold_context_hits
+                    .iter()
+                    .filter(|hit| hit.direction == direction)
+                    .collect::<Vec<_>>();
+                assert_eq!(hits.len(), expected_hits);
+                for hit in hits {
+                    let arrow_x = hit.x.saturating_add(hit.width.saturating_sub(1));
+                    assert_eq!(
+                        terminal.backend().buffer()[(arrow_x, hit.y)].symbol(),
+                        symbol
+                    );
+                }
+            }
+            let bottom = app
+                .fold_context_hits
+                .iter()
+                .find(|hit| hit.direction == FoldContextDirection::Bottom)
+                .copied()
+                .unwrap();
+            assert!(app.handle_fold_context_click(bottom.x, bottom.y));
+        }
+    }
+
+    #[test]
     fn binary_preview_shows_file_comment_action_and_comment() {
         let multi = MultiFileDiff::from_file_pair_bytes(
             std::path::PathBuf::from("file.bin"),
@@ -7506,11 +8582,52 @@ mod tests {
         assert!(app.review_file_comment_hit.is_some());
     }
 
-    fn draw_diff_snapshot(app: &mut App) -> (Vec<String>, Vec<Vec<Style>>) {
-        let backend = TestBackend::new(80, 12);
+    #[test]
+    fn preview_file_comment_actions_use_their_drawn_hitboxes() {
+        let path = std::path::PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/assets/preview.png"
+        ));
+        let image = std::fs::read(&path).unwrap();
+        let multi = MultiFileDiff::from_file_pair_bytes(path, Vec::new(), image);
+        let mut app = App::new(multi, ViewMode::Preview, 80, false, None);
+        app.set_review_persist_enabled(false);
+        app.enable_review_mode();
+        app.diff_view_area = Some((0, 0, 80, 20));
+        assert!(app.start_file_comment());
+        for ch in "Review this file".chars() {
+            app.review_insert_char(ch);
+        }
+        app.review_save_editor();
+        let backend = TestBackend::new(80, 20);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|frame| super::draw_diff_view(frame, app, Rect::new(0, 0, 80, 12)))
+            .draw(|frame| super::render_preview(frame, &mut app, Rect::new(0, 0, 80, 20)))
+            .unwrap();
+        let lines = ascii_buffer_lines(&terminal);
+
+        let (resolve_x, resolve_y) = text_pos(&lines, "va resolve").unwrap();
+        assert!(app.handle_review_preview_click(resolve_x + 2, resolve_y));
+        let comments: serde_json::Value =
+            serde_json::from_str(&app.review_comments_json()).unwrap();
+        assert_eq!(comments["comments"][0]["resolved"], true);
+        assert!(!app.review_editor_active());
+
+        let (overflow_x, overflow_y) = text_pos(&lines, "oa").unwrap();
+        assert!(app.handle_review_preview_click(overflow_x + 1, overflow_y));
+        assert!(app.review_comment_context_menu.is_some());
+    }
+
+    fn draw_diff_snapshot(app: &mut App) -> (Vec<String>, Vec<Vec<Style>>) {
+        let width = if app.view_mode == ViewMode::Split {
+            140
+        } else {
+            80
+        };
+        let backend = TestBackend::new(width, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| super::draw_diff_view(frame, app, Rect::new(0, 0, width, 12)))
             .unwrap();
         let area = terminal.backend().buffer().area;
         let mut lines = Vec::new();
@@ -7585,6 +8702,8 @@ mod tests {
         let (mut app, lines) = rendered_diff_with_comment(mode);
         let text = lines.join("\n");
         assert!(text.contains("ia edit"), "diff text: {text:?}");
+        assert!(text.contains("ra reply"), "diff text: {text:?}");
+        assert!(text.contains("va resolve"), "diff text: {text:?}");
         assert!(text.contains("xa delete"), "diff text: {text:?}");
 
         let (edit_x, edit_y) = text_pos(&lines, "ia edit").expect("edit label");
@@ -7593,6 +8712,24 @@ mod tests {
         let (edit_x, edit_y) = text_pos(&hover_lines, "ia edit").expect("edit label");
         assert_eq!(
             hover_styles[edit_y as usize][edit_x as usize + 3].fg,
+            Some(app.theme.accent)
+        );
+
+        let (reply_x, reply_y) = text_pos(&hover_lines, "ra reply").expect("reply label");
+        assert!(app.update_topbar_hover(reply_x + 3, reply_y));
+        let (hover_lines, hover_styles) = draw_diff_snapshot(&mut app);
+        let (reply_x, reply_y) = text_pos(&hover_lines, "ra reply").expect("reply label");
+        assert_eq!(
+            hover_styles[reply_y as usize][reply_x as usize + 3].fg,
+            Some(app.theme.accent)
+        );
+
+        let (overflow_x, overflow_y) = text_pos(&hover_lines, "oa").expect("overflow label");
+        assert!(app.update_topbar_hover(overflow_x + 1, overflow_y));
+        let (hover_lines, hover_styles) = draw_diff_snapshot(&mut app);
+        let (overflow_x, overflow_y) = text_pos(&hover_lines, "oa").expect("overflow label");
+        assert_eq!(
+            hover_styles[overflow_y as usize][overflow_x as usize + 1].fg,
             Some(app.theme.accent)
         );
 
@@ -7614,6 +8751,281 @@ mod tests {
     #[test]
     fn split_review_card_shows_edit_action() {
         assert_review_card_action_hover(ViewMode::Split);
+    }
+
+    fn ascii_buffer_lines(terminal: &Terminal<TestBackend>) -> Vec<String> {
+        let area = terminal.backend().buffer().area;
+        (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| {
+                        let symbol = terminal.backend().buffer()[(x, y)].symbol();
+                        if symbol.is_ascii() {
+                            symbol.to_string()
+                        } else {
+                            " ".repeat(unicode_width::UnicodeWidthStr::width(symbol).max(1))
+                        }
+                    })
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn quit_confirmation_modal_renders_mouse_actions() {
+        let multi = MultiFileDiff::from_file_pair(
+            std::path::PathBuf::from("old.txt"),
+            std::path::PathBuf::from("new.txt"),
+            "old\n".to_string(),
+            "new\n".to_string(),
+        );
+        let mut app = App::new(multi, ViewMode::UnifiedPane, 0, false, None);
+        app.request_quit();
+        let backend = TestBackend::new(60, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| super::draw(frame, &mut app)).unwrap();
+        let lines = ascii_buffer_lines(&terminal);
+        let text = lines.join("\n");
+
+        assert!(text.contains("Quit"), "screen text: {text:?}");
+        assert!(
+            text.contains("Are you sure you want to quit?"),
+            "screen text: {text:?}"
+        );
+        assert!(text.contains("enter quit"), "screen text: {text:?}");
+        assert!(text.contains("esc cancel"), "screen text: {text:?}");
+        let (cancel_x, cancel_y) = text_pos(&lines, "esc cancel").unwrap();
+        assert!(app.handle_quit_confirmation_click(cancel_x, cancel_y));
+        assert!(!app.quit_confirmation_active());
+        assert!(!app.should_quit);
+    }
+
+    fn outdated_comments_app_with_snapshot(line_text: &str) -> App {
+        let multi = MultiFileDiff::from_file_pair(
+            std::path::PathBuf::from("src/lib.rs"),
+            std::path::PathBuf::from("src/lib.rs"),
+            "old\n".to_string(),
+            "new\n".to_string(),
+        );
+        let mut app = App::new(multi, ViewMode::Preview, 80, false, None);
+        app.set_review_persist_enabled(false);
+        app.enable_review_mode();
+        app.apply_review_comments_from_cli(
+            &serde_json::json!({
+                "version": 1,
+                "comments": [{
+                    "id": 7,
+                    "file": "src/lib.rs",
+                    "kind": "line",
+                    "side": "new",
+                    "newRange": { "start": 1, "end": 1 },
+                    "anchorSnapshot": {
+                        "side": "new",
+                        "lineNumber": 42,
+                        "lineText": line_text,
+                        "contextBefore": ["fn answer() {"],
+                        "contextAfter": ["}"]
+                    },
+                    "outdated": true,
+                    "body": "Update the answer."
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        app.open_outdated_comments_in_current_tab(Some(7));
+        app
+    }
+
+    fn outdated_comments_app() -> App {
+        outdated_comments_app_with_snapshot("let answer = 41;")
+    }
+
+    #[test]
+    fn outdated_comments_view_shows_snapshot_and_actions() {
+        let mut app = outdated_comments_app();
+        app.diff_view_area = Some((0, 0, 100, 20));
+        let backend = TestBackend::new(100, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| super::render_preview(frame, &mut app, Rect::new(0, 0, 100, 20)))
+            .unwrap();
+        let lines = ascii_buffer_lines(&terminal);
+        let text = lines.join("\n");
+
+        assert!(text.contains("Outdated"), "preview text: {text:?}");
+        assert!(text.contains("src/lib.rs:42"), "preview text: {text:?}");
+        assert!(!text.contains("Original"), "preview text: {text:?}");
+        assert!(
+            text.contains("Update the answer."),
+            "preview text: {text:?}"
+        );
+        assert!(text.contains("let answer = 41;"), "preview text: {text:?}");
+        assert!(text.contains("fn answer()"), "preview text: {text:?}");
+        assert!(text.contains("Snapshot"), "preview text: {text:?}");
+        assert!(
+            !text.contains("Captured snapshot:"),
+            "preview text: {text:?}"
+        );
+        assert!(text.contains("ia edit"), "preview text: {text:?}");
+        assert!(text.contains("va resolve"), "preview text: {text:?}");
+        assert!(text.contains("xa delete"), "preview text: {text:?}");
+
+        let buffer = terminal.backend().buffer();
+        let (_, edit_y) = text_pos(&lines, "ia edit").unwrap();
+        let (_, resolve_y) = text_pos(&lines, "va resolve").unwrap();
+        assert_eq!(edit_y, resolve_y);
+        assert_eq!(buffer[(0, resolve_y)].symbol(), "╰");
+        assert_eq!(buffer[(0, 2)].symbol(), "╭");
+        assert_eq!(buffer[(0, 2)].fg, app.theme.text_muted);
+        let (snapshot_x, snapshot_y) = text_pos(&lines, "Snapshot").unwrap();
+        let (location_x, location_y) = text_pos(&lines, "src/lib.rs:42").unwrap();
+        assert_eq!(location_y, snapshot_y);
+        assert_eq!(buffer[(snapshot_x, snapshot_y)].fg, app.theme.text_muted);
+        assert!(!buffer[(snapshot_x, snapshot_y)]
+            .modifier
+            .contains(Modifier::DIM));
+        assert_eq!(buffer[(location_x, location_y)].fg, app.theme.warning);
+        assert!(!buffer[(location_x, location_y)]
+            .modifier
+            .contains(Modifier::DIM));
+        let (let_x, arrow_y) = text_pos(&lines, "let answer").unwrap();
+        let arrow_x = let_x - 2;
+        assert_eq!(buffer[(arrow_x, arrow_y)].symbol(), "→");
+        assert_eq!(buffer[(arrow_x, arrow_y)].fg, app.theme.accent);
+        assert!(buffer[(arrow_x, arrow_y)].modifier.contains(Modifier::BOLD));
+        let let_cell = &buffer[(let_x, arrow_y)];
+        assert_ne!(let_cell.fg, app.theme.diff_context);
+        assert_ne!(let_cell.fg, app.theme.warning);
+        assert!(app.handle_review_preview_click(let_x, arrow_y));
+        assert!(!app.review_editor_active());
+        let (body_x, body_y) = text_pos(&lines, "Update the answer.").unwrap();
+        assert!(app.handle_review_preview_click(body_x, body_y));
+        assert!(app.review_editor_active());
+        app.review_cancel_editor();
+
+        let (resolve_x, resolve_y) = text_pos(&lines, "va resolve").unwrap();
+        assert!(app.handle_review_preview_click(resolve_x + 2, resolve_y));
+        let comments: serde_json::Value =
+            serde_json::from_str(&app.review_comments_json()).unwrap();
+        assert_eq!(comments["comments"][0]["resolved"], true);
+        let (delete_x, delete_y) = text_pos(&lines, "xa delete").unwrap();
+        assert!(app.handle_review_preview_click(delete_x + 2, delete_y));
+        let comments: serde_json::Value =
+            serde_json::from_str(&app.review_comments_json()).unwrap();
+        assert!(comments["comments"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn snapshot_identifier_inside_code_stays_passive() {
+        let mut app = outdated_comments_app_with_snapshot("Snapshot");
+        app.diff_view_area = Some((0, 0, 80, 20));
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| super::render_preview(frame, &mut app, Rect::new(0, 0, 80, 20)))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let (arrow_x, arrow_y) = (0..buffer.area.height)
+            .find_map(|y| {
+                (0..buffer.area.width)
+                    .find(|x| buffer[(*x, y)].symbol() == "→")
+                    .map(|x| (x, y))
+            })
+            .unwrap();
+
+        assert!(app.handle_review_preview_click(arrow_x + 2, arrow_y));
+        assert!(!app.review_editor_active());
+    }
+
+    #[test]
+    fn outdated_snapshot_uses_diff_text_color_when_syntax_is_off() {
+        let mut app = outdated_comments_app();
+        app.syntax_mode = SyntaxMode::Off;
+        let backend = TestBackend::new(100, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| super::render_preview(frame, &mut app, Rect::new(0, 0, 100, 20)))
+            .unwrap();
+        let lines = ascii_buffer_lines(&terminal);
+        let (line_x, line_y) = text_pos(&lines, "let answer = 41;").unwrap();
+
+        assert_eq!(
+            terminal.backend().buffer()[(line_x, line_y)].fg,
+            app.theme.diff_context
+        );
+    }
+
+    #[test]
+    fn wrapped_snapshot_code_background_fills_the_continuation_row() {
+        let mut app = outdated_comments_app_with_snapshot(
+            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnopqrstuvwxyzEND",
+        );
+        app.theme = rgb_theme();
+        app.syntax_mode = SyntaxMode::Off;
+        app.line_wrap = true;
+        app.scrollbar_visible = false;
+        app.diff_view_area = Some((0, 0, 50, 20));
+        let backend = TestBackend::new(50, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| super::render_preview(frame, &mut app, Rect::new(0, 0, 50, 20)))
+            .unwrap();
+        let lines = ascii_buffer_lines(&terminal);
+        let (code_x, row) = text_pos(&lines, "END").unwrap();
+        let buffer = terminal.backend().buffer();
+        let code_bg = buffer[(code_x, row)].bg;
+
+        assert_ne!(code_bg, app.theme.background.unwrap());
+        assert_eq!(buffer[(47, row)].symbol(), " ");
+        assert_eq!(buffer[(47, row)].bg, code_bg);
+        assert!(app.handle_review_preview_click(code_x, row));
+        assert!(!app.review_editor_active());
+        let (context_x, context_y) = text_pos(&lines, "}").unwrap();
+        assert!(app.handle_review_preview_click(context_x, context_y));
+        assert!(!app.review_editor_active());
+
+        let mut short = outdated_comments_app();
+        short.theme = rgb_theme();
+        short.syntax_mode = SyntaxMode::Off;
+        short.line_wrap = true;
+        short.scrollbar_visible = false;
+        let backend = TestBackend::new(50, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| super::render_preview(frame, &mut short, Rect::new(0, 0, 50, 20)))
+            .unwrap();
+        let lines = ascii_buffer_lines(&terminal);
+        let (code_x, row) = text_pos(&lines, "let answer").unwrap();
+        let buffer = terminal.backend().buffer();
+
+        assert_ne!(buffer[(47, row)].bg, buffer[(code_x, row)].bg);
+        assert_eq!(buffer[(47, row)].bg, short.theme.background.unwrap());
+    }
+
+    #[test]
+    fn outdated_comments_view_has_empty_state() {
+        let multi = MultiFileDiff::from_file_pair(
+            std::path::PathBuf::from("src/lib.rs"),
+            std::path::PathBuf::from("src/lib.rs"),
+            "old\n".to_string(),
+            "new\n".to_string(),
+        );
+        let mut app = App::new(multi, ViewMode::Preview, 80, false, None);
+        app.set_review_persist_enabled(false);
+        app.enable_review_mode();
+        app.open_outdated_comments_in_current_tab(None);
+        let backend = TestBackend::new(60, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| super::render_preview(frame, &mut app, Rect::new(0, 0, 60, 8)))
+            .unwrap();
+        let text = ascii_buffer_lines(&terminal).join("\n");
+
+        assert!(
+            text.contains("No outdated comments."),
+            "preview text: {text:?}"
+        );
     }
 
     #[test]
@@ -7659,6 +9071,102 @@ mod tests {
             .expect("edit hit");
         assert!(app.update_topbar_hover(edit_hit.x, edit_hit.y));
         assert_eq!(app.pr_comment_action_hover_key.as_deref(), Some("ia"));
+    }
+
+    #[test]
+    fn discovered_pr_without_comments_shows_add_comment() {
+        let multi = MultiFileDiff::from_file_pair(
+            std::path::PathBuf::from("README.md"),
+            std::path::PathBuf::from("README.md"),
+            "old\n".to_string(),
+            "new\n".to_string(),
+        );
+        let mut app = App::new(multi, ViewMode::Preview, 80, false, None);
+        app.set_review_persist_enabled(false);
+        app.enable_review_mode();
+        app.set_review_pull_request_target(Some(crate::app::review::ReviewPullRequestTarget {
+            provider: "github".to_string(),
+            remote: "origin".to_string(),
+            repo: "owner/repo".to_string(),
+            number: 1,
+            title: "Review this".to_string(),
+        }));
+        app.open_pr_comments_in_current_tab(None);
+
+        let backend = TestBackend::new(80, 7);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| super::render_preview(frame, &mut app, Rect::new(0, 0, 80, 7)))
+            .unwrap();
+        let text = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(text.contains("Review this"), "preview text: {text:?}");
+        assert!(
+            text.contains("No pull request comments."),
+            "preview text: {text:?}"
+        );
+        assert!(text.contains("add comment"), "preview text: {text:?}");
+        assert!(app.pr_comment_add_hit.is_some());
+        assert!(app.start_pull_request_comment());
+    }
+
+    #[test]
+    fn gitlab_review_uses_merge_request_copy() {
+        let multi = MultiFileDiff::from_file_pair(
+            std::path::PathBuf::from("README.md"),
+            std::path::PathBuf::from("README.md"),
+            "old\n".to_string(),
+            "new\n".to_string(),
+        );
+        let mut app = App::new(multi, ViewMode::Preview, 80, false, None);
+        app.set_review_persist_enabled(false);
+        app.enable_review_mode();
+        let mut metadata = crate::app::review::ReviewTargetMetadata {
+            label: "MR".to_string(),
+            vcs: "git".to_string(),
+            jj_change_id: None,
+            jj_commit_id: None,
+            git_base_ref: None,
+            git_head_ref: None,
+            git_base_commit: None,
+            git_head_commit: None,
+            branch: None,
+            pr_provider: Some("gitlab".to_string()),
+            pr_repo: Some("owner/repo".to_string()),
+            pr_number: Some(1),
+            author: None,
+            timestamp: None,
+            bookmarks: None,
+        };
+        app.set_review_target_metadata(Some(metadata.clone()));
+        app.open_pr_comments_in_current_tab(None);
+
+        let tab = super::topbar_tab_spans(&mut app, Rect::new(0, 0, 80, 1), 80)
+            .into_iter()
+            .map(|span| span.content.into_owned())
+            .collect::<String>();
+        assert!(tab.contains("Merge request comments"), "tab text: {tab:?}");
+
+        let backend = TestBackend::new(80, 7);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| super::render_preview(frame, &mut app, Rect::new(0, 0, 80, 7)))
+            .unwrap();
+        let text = ascii_buffer_lines(&terminal).join("\n");
+        assert!(
+            text.contains("No merge request comments."),
+            "preview text: {text:?}"
+        );
+
+        metadata.pr_provider = Some("github".to_string());
+        app.set_review_target_metadata(Some(metadata));
+        assert_eq!(app.review_provider_kind().short_review_noun(), "PR");
     }
 
     #[test]

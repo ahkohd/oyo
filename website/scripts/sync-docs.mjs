@@ -18,13 +18,14 @@ const outDir = path.resolve(here, "..", "src", "content", "docs");
 // Curated, user-facing docs. Internal notes (DEBUG, PERF, PROFILING) and the
 // MARKDOWN preview fixture are intentionally left off the public site.
 const PAGES = [
-  { file: "CONFIG.md",        slug: "config",        title: "Configuration",         group: "guide", order: 1 },
+  { file: "CONFIG.md",        slug: "config",        title: "Configure",             group: "guide", order: 1 },
   { file: "THEME.md",         slug: "theming",       title: "Theming",               group: "guide", order: 2 },
   { file: "KEYBINDINGS.md",   slug: "keybindings",   title: "Keybindings",           group: "guide", order: 3 },
-  { file: "REVIEW.md",        slug: "review",        title: "Review CLI",              group: "guide", order: 4 },
-  { file: "AGENT.md",         slug: "agents",        title: "Working with agents",   group: "guide", order: 5 },
-  { file: "SKILL.md",         source: "../crates/oyo/docs/SKILL.md", slug: "agent-skill", title: "Oyo code review skill", group: "guide", order: 6 },
-  { file: "REVIEW_HOOKS.md",  slug: "hooks",         title: "Hooks",                 group: "guide", order: 7 },
+  { file: "REVIEW.md",        slug: "review",        title: "Review",                group: "guide", order: 4 },
+  { file: "CONTROL.md",       slug: "control",       title: "Control",               group: "guide", order: 5 },
+  { file: "AGENT.md",         slug: "agents",        title: "Working With Agents",   group: "guide", order: 6 },
+  { file: "SKILL.md",         source: "../crates/oyo/docs/SKILL.md", slug: "agent-skill", title: "Oyo code review skill", group: "guide", order: 7 },
+  { file: "REVIEW_HOOKS.md",  slug: "hooks",         title: "Hooks",                 group: "guide", order: 8 },
   { file: "DIFF_VIEWER.md",   slug: "diff-viewer",   title: "Diff Viewer Behaviour", group: "ref",   order: 1 },
   { file: "DIFF_PREVIEWS.md", slug: "diff-styling",  title: "Diff Styling Previews", group: "ref",   order: 2 },
 ];

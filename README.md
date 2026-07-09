@@ -2,73 +2,89 @@
 
 # Oyo
 
-A diff viewer for stepping through changes and reviewing scrollable diffs.
+Oyo is your complete terminal code review tool.
 
 <!-- Regenerate with: cd website && npm run generate-demos -->
 ![Oyo demo](docs/assets/demo.gif)
 
 </div>
 
-Oyo is a terminal diff viewer.
+Read any change, comment on exact lines and work every thread through to resolved. Oyo keeps the whole review in your terminal.
 
-Use it as a normal scrollable diff viewer, or step through changes one at a time. You can switch between both modes at any time.
+Diff viewing is how you read a change. Oyo also stores comments, tracks replies, syncs review threads and gives agents the same workflow.
 
-## Choose a review mode
+## Code review for you, your team and your agent
+
+### Review any change
+
+Review a working tree, branch, commit, range, jj change or stack. Add comments to lines and hunks, reply in threads and resolve feedback.
+
+Oyo saves each review against its target. You can close the TUI and continue later.
+
+### Sync with your team
+
+Pull GitHub pull request comments into Oyo with the `gh` CLI. Reply, resolve threads and push your own changes back to GitHub.
+
+GitLab, Codeberg and Forgejo sync adapters are planned. They are not available yet.
+
+### Work with your agent
+
+Point your coding agent at the Oyo skill. The agent can review a change, leave comments, work through feedback or control a running Oyo session.
+
+Humans and agents use the same targets, comments and commands. See [working with agents](./docs/AGENT.md).
+
+## Choose how you read a change
+
+You can switch between scroll mode and step mode at any time.
 
 ### Scroll mode
 
-Use scroll mode when you want a traditional diff viewer.
-
-You can:
-
-- review all changes at once
-- scroll freely
-- jump between hunks
-
-Start with:
+Use scroll mode to read the whole change at once. You can scroll freely and jump between hunks.
 
 ```sh
 oy
 ```
 
-### Step-through diff
+### Step mode
 
-Use step-through mode when you want to see how a file changes over time. This helps with large refactors and careful reviews.
-
-Start with:
+Use step mode to read one edit at a time. You can also press play to move through the change automatically.
 
 ```sh
 oy --step
 ```
 
-You can also press `s` in the TUI, or set `stepping = true` in config.
+Press `s` in the TUI to switch modes. Set `stepping = true` in your config to start in step mode.
 
 ## Features
 
-- scroll mode
-- step-through navigation
-- hunk navigation
-- unified, split, evolution, blame and preview views
-- tabs for multiple views
-- mouse support
-- Markdown, JSON, YAML, TOML, CSV and image previews
-- inline review comments
-- visual text selection with copy, comments and command actions
-- word-level diffing
-- multi-file navigation
-- watch mode that refreshes changed files on disk
-- regex search
-- syntax highlighting
-- blame hints
-- command palette
-- line wrap
-- context folding
-- animated transitions
-- autoplay
-- Git integration
-- History view with `oy log`
-- built-in themes and `.tmTheme` syntax themes
-- XDG config file support
+Oyo helps you complete a review without leaving the terminal. You can:
+
+- comment on lines, hunks and files
+- reply in flat review threads
+- resolve and reopen thread roots
+- track comments that become outdated as the diff changes
+- pull, reply to, resolve and push GitHub pull request comments with `gh`
+- use the review CLI and installed skill with coding agents
+- read changes in scroll mode or step mode
+- move between hunks and files
+- switch between unified, split, evolution, blame and preview views
+- open multiple views in tabs
+- preview Markdown, JSON, YAML, TOML, CSV and images
+- select and copy text with character, line and block selection
+- see word-level changes
+- search with regular expressions
+- use syntax highlighting and `.tmTheme` syntax themes
+- fold unchanged context with enclosing scope hints
+- show blame hints
+- refresh changed files in watch mode
+- run commands from the command palette
+- use keyboard and mouse controls
+- animate or autoplay changes in step mode
+- wrap long lines
+- review Git and jj targets
+- open saved review history with `oy log`
+- run review hooks
+- load configuration from XDG config paths
 
 ## Install
 
@@ -80,7 +96,7 @@ npm i -g @ahkohd/oyo
 
 ### Pi package
 
-This gives you the `/diff` and `/review` commands.
+The Pi package adds the `/oyo` command. It points the coding agent at the Oyo review skill.
 
 ```sh
 pi install npm:@ahkohd/pi-oyo
@@ -157,13 +173,13 @@ oy old.rs new.rs --step --autoplay
 oy old.rs new.rs --step --speed 100
 ```
 
-### Open History
+### Open history
 
 ```sh
 oy log
 ```
 
-## Use with Git
+## Use Oyo with Git
 
 Use `git difftool`:
 
@@ -171,7 +187,7 @@ Use `git difftool`:
 git difftool -y --tool=oy
 ```
 
-Add this to `~/.gitconfig`:
+Add this configuration to `~/.gitconfig`:
 
 ```gitconfig
 [difftool "oy"]
@@ -188,9 +204,9 @@ Keep your pager, such as `less`, `moar` or `moor`, for `git diff`.
 
 Do not set `core.pager` or `interactive.diffFilter` to `oy`.
 
-## Use with Jujutsu
+## Use Oyo with Jujutsu
 
-Register `oy` as a diff tool and add a shortcut for it:
+Register `oy` as a diff tool and add a shortcut:
 
 ```toml
 [merge-tools.oy]
@@ -201,7 +217,7 @@ diff-args = ["$left", "$right"]
 d = ["diff", "--tool", "oy"]
 ```
 
-Then run `jj d` or `jj diff --tool oy`.
+Run `jj d` or `jj diff --tool oy`.
 
 You can also open jj targets directly:
 
@@ -211,33 +227,50 @@ oy feature
 oy 'trunk()..@'
 ```
 
-Keep your pager for `jj diff`, `jj log` and everything else. Do not set `oy` as the global `ui.diff-formatter`.
+Keep your pager for `jj diff`, `jj log` and other commands. Do not set `oy` as the global `ui.diff-formatter`.
 
 ## Review comments
 
-Press `m` while reviewing to add a comment.
+Press `m` to comment on a line. Press `M` to comment on a hunk.
 
 ```sh
 oy
 ```
 
-Oyo saves review state for the current diff target.
+Oyo saves review state for the current target. Review cards use indexed actions:
 
-Show review status:
+- `ra` replies to the first visible comment
+- `va` resolves or reopens the first visible thread root
+- `ia` edits the first visible comment
+- `xa` deletes the first visible comment
+
+The index changes to `b`, `c` and later letters for other visible cards. Reply cards do not show a resolve action because resolved state belongs to the thread.
+
+Every review action also has a CLI command. This means you and your agent can work on the same review:
 
 ```sh
 oy review status
 oy review status --json
+oy review comment
+oy review comment --unresolved
+oy review comment new --file src/lib.rs --new-line 42 --body "Handle empty input."
+oy review comment reply 1 --body "Fixed in the latest change."
+oy review comment resolve 1
+oy review comment unresolve 1
 ```
 
-Show comments:
+The `--unresolved` filter hides outdated comments by default. Oyo marks a comment outdated when its anchored line changes or disappears. Use `--unresolved --outdated` to inspect stale unresolved comments.
+
+All review commands use the same target rules. In Git, Oyo prefers the current branch's saved pull request review. It falls back to the working tree.
+
+Use `-t @` for the Git working tree. Pass a branch, commit or range with `-t` for another review:
 
 ```sh
-oy review comment
-oy review comment feature
+oy review status -t development...feature
+oy review comment -t feature
 ```
 
-In Git, `status` and `comment` default to the working tree, like `oy`. Pass a branch, commit or range for branch review comments. Use an explicit base for stacked branches, for example `oy review status development...feature`. jj defaults to `@`, unless `@` has one bookmark. In that case, Oyo treats the bookmark like a branch.
+jj defaults to `@`. If `@` has one bookmark, Oyo treats that bookmark like a branch.
 
 Use a jj revset to review a stack:
 
@@ -246,23 +279,21 @@ oy 'trunk()..@'
 oy review comment 'trunk()..@'
 ```
 
-Push or pull GitHub pull request comments with `gh`:
+Pull and push GitHub pull request comments with an authenticated `gh` CLI:
 
 ```sh
 oy review pull
 oy review push
 ```
 
-Export or apply comments as JSON:
+Export comments or apply review JSON:
 
 ```sh
 oy review export --format json > comments.json
 oy review comment apply comments.json
 ```
 
-For the full review workflow, see [review commands](./docs/REVIEW.md).
-
-Review hooks are documented in [review hooks](./docs/REVIEW_HOOKS.md).
+See the [review command reference](./docs/REVIEW.md), [agent workflows](./docs/AGENT.md) and [review hooks](./docs/REVIEW_HOOKS.md).
 
 ## Keybindings
 
@@ -283,39 +314,39 @@ Common defaults:
 | `/` | Search |
 | `n` | Next search match |
 | `N` | Previous search match |
-| `tab` | Cycle view mode |
-| `s` | Toggle stepping |
+| `tab` | Cycle view modes |
+| `s` | Toggle step mode |
 | `m` | Add or update a line comment |
 | `M` | Add or update a hunk comment |
 | `ctrl-s` | Save an inline comment |
 | `ctrl-p` | Open the command palette |
 | `R` | Refresh files |
 | `?` | Show help |
-| `q`, `esc` | Quit |
+| `q` | Quit |
 
-Full keybinding and mouse reference: [keybindings](./docs/KEYBINDINGS.md).
+See the [keybinding and mouse reference](./docs/KEYBINDINGS.md).
 
-Selection works with mouse drag or `v`, `V` and `ctrl-v`. Press `y` to copy and `esc` to clear.
+Select text with a mouse drag or `v`, `V` and `ctrl-v`. Press `y` to copy and `esc` to clear.
 
-Clipboard support first uses system tools:
+Oyo first uses a system clipboard tool:
 
 - `pbcopy` on macOS
 - `wl-copy`, `xclip` or `xsel` on Linux
 - `clip` on Windows
 
-If those fail, Oyo falls back to OSC 52 terminal clipboard support.
+Oyo falls back to OSC 52 clipboard support if these tools fail.
 
 ## Configure Oyo
 
-Create a config file at `~/.config/oyo/config.toml`.
+Create `~/.config/oyo/config.toml`.
 
-You can also pass extra config files with repeatable `--config FILE`. Oyo loads your user config first, then merges each extra config file in order.
+You can pass extra config files with repeatable `--config FILE` options. Oyo loads your user config first, then merges each extra file in order.
 
 ```sh
 oy --config /tmp/oyo-plugin.toml
 ```
 
-Minimal config:
+A minimal configuration looks like this:
 
 ```toml
 [ui]
@@ -323,7 +354,6 @@ view_mode = "unified"
 stepping = false
 watch = true
 line_wrap = false
-fold_context = "off"
 
 [ui.diff]
 fg = "syntax"
@@ -339,13 +369,13 @@ panel_width = 30
 panel_position = "left"
 ```
 
-Config is loaded from the first matching file:
+Oyo loads the first matching user config file:
 
 1. `$XDG_CONFIG_HOME/oyo/config.toml`
 2. `~/.config/oyo/config.toml`
 3. the platform config directory, such as `~/Library/Application Support/oyo/config.toml` on macOS
 
-Use these docs for full configuration:
+Use these references for more configuration:
 
 - [config reference](./docs/CONFIG.md)
 - [theme configuration](./docs/THEME.md)
@@ -355,7 +385,7 @@ Use these docs for full configuration:
 - [diff behaviour](./docs/DIFF_VIEWER.md)
 - [diff styling previews](./docs/DIFF_PREVIEWS.md)
 
-[Diff styling previews](./docs/DIFF_PREVIEWS.md) include screenshots.
+The [diff styling previews](./docs/DIFF_PREVIEWS.md) include screenshots.
 
 ## Development
 

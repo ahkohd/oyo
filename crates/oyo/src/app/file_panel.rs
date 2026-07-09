@@ -98,6 +98,7 @@ impl App {
             return false;
         };
         self.close_status_mode_menu();
+        self.close_review_comment_context_menu();
         self.file_context_menu = Some(FileContextMenu {
             file_index,
             x: column,

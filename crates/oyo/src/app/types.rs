@@ -39,6 +39,53 @@ pub enum ViewMode {
     Preview,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct FoldContextKey {
+    pub(crate) file_index: usize,
+    pub(crate) start_change_id: usize,
+    pub(crate) end_change_id: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct FoldContextExpansion {
+    pub(crate) top: usize,
+    pub(crate) bottom: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum FoldContextDirection {
+    Top,
+    Bottom,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct FoldContextRegion {
+    pub(crate) key: FoldContextKey,
+    pub(crate) hidden_lines: usize,
+    pub(crate) scope_line: Option<usize>,
+    pub(crate) scope_hint: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct FoldContextHit {
+    pub(crate) x: u16,
+    pub(crate) y: u16,
+    pub(crate) width: u16,
+    pub(crate) height: u16,
+    pub(crate) key: FoldContextKey,
+    pub(crate) direction: FoldContextDirection,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct FoldContextRenderRow {
+    pub(crate) row: usize,
+    pub(crate) key: FoldContextKey,
+    pub(crate) top_x: u16,
+    pub(crate) top_width: u16,
+    pub(crate) bottom_x: u16,
+    pub(crate) bottom_width: u16,
+}
+
 impl ViewMode {
     /// Cycle to the next view mode
     pub fn next(self) -> Self {
@@ -205,6 +252,7 @@ pub(crate) struct UnifiedRenderKey {
     pub(crate) strikethrough_deletions: bool,
     pub(crate) search_query: String,
     pub(crate) search_active: bool,
+    pub(crate) search_revision: u64,
     pub(crate) syntax_mode: SyntaxMode,
     pub(crate) syntax_theme: String,
     pub(crate) theme_is_light: bool,
@@ -217,8 +265,12 @@ pub(crate) struct UnifiedRenderKey {
     pub(crate) review_revision: u64,
     pub(crate) review_preview_hover: Option<String>,
     pub(crate) review_preview_edit_hover: Option<String>,
+    pub(crate) review_preview_reply_hover: Option<String>,
+    pub(crate) review_preview_resolve_hover: Option<String>,
     pub(crate) review_preview_delete_hover: Option<String>,
+    pub(crate) review_preview_overflow_hover: Option<String>,
     pub(crate) review_preview_flash: Option<String>,
+    pub(crate) fold_context_hover: Option<(FoldContextKey, FoldContextDirection)>,
 }
 
 pub(crate) struct UnifiedRenderModel {
@@ -230,10 +282,11 @@ pub(crate) struct UnifiedRenderModel {
     pub(crate) max_line_width: usize,
     pub(crate) primary_display_idx: Option<usize>,
     pub(crate) active_display_idx: Option<usize>,
-    /// Preview rows for review comments: (row_idx, row_span, anchor_key, delete_x_offset)
-    pub(crate) review_preview_rows: Vec<(usize, usize, String, u16)>,
+    /// Preview rows for review comments.
+    pub(crate) review_preview_rows: Vec<crate::views::ReviewPreviewRow>,
     /// Avatar rows for review comments: (row_idx, avatar)
     pub(crate) review_avatar_rows: Vec<(usize, crate::views::ReviewNoteAvatar)>,
+    pub(crate) fold_context_rows: Vec<FoldContextRenderRow>,
 }
 
 #[derive(Clone, Debug)]

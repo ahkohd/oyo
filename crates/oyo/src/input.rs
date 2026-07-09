@@ -1,4 +1,4 @@
-use crate::app::{App, FilePanelMode, TopbarTabContent, ViewMode};
+use crate::app::{App, FilePanelMode, FoldContextDirection, TopbarTabContent, ViewMode};
 use crate::config;
 use crate::keybindings::{
     Dispatch, FileFilterAction, GlobalAction, HelpAction, LineInputAction, NormalAction,
@@ -12,6 +12,14 @@ use crossterm::{
 
 use super::{coalesce_key_repeats, open_current_file_in_editor, TuiTerminal};
 
+fn is_force_quit_key(key: KeyEvent) -> bool {
+    key.modifiers == KeyModifiers::CONTROL && matches!(key.code, KeyCode::Char('c' | 'C'))
+}
+
+fn should_force_quit(app: &App, key: KeyEvent) -> bool {
+    !app.review_editor_active() && is_force_quit_key(key)
+}
+
 pub(crate) fn handle_app_key(
     app: &mut App,
     key: KeyEvent,
@@ -19,6 +27,16 @@ pub(crate) fn handle_app_key(
     terminal: &mut TuiTerminal,
     editor_config: &config::EditorConfig,
 ) -> Result<()> {
+    if should_force_quit(app, key) {
+        app.force_quit();
+        return Ok(());
+    }
+
+    if app.quit_confirmation_active() {
+        app.handle_quit_confirmation_key(key);
+        return Ok(());
+    }
+
     if app.show_help {
         handle_help_key(app, key);
         return Ok(());
@@ -47,12 +65,34 @@ pub(crate) fn handle_app_key(
         app.close_status_mode_menu();
     }
 
+    if app.review_comment_context_menu.is_some() {
+        if key.code == KeyCode::Esc {
+            app.close_review_comment_context_menu();
+            return Ok(());
+        }
+        app.close_review_comment_context_menu();
+    }
+
     if app.file_context_menu.is_some() {
         if key.code == KeyCode::Esc {
             app.close_file_context_menu();
             return Ok(());
         }
         app.close_file_context_menu();
+    }
+
+    if key.code == KeyCode::Esc && app.show_path_popup {
+        app.show_path_popup = false;
+        return Ok(());
+    }
+
+    if app.session_rename_active() {
+        handle_session_rename_key(app, key);
+        return Ok(());
+    }
+
+    if app.keybindings.normal_sequence_pending() {
+        return handle_normal_key(app, key, pending_event, terminal, editor_config);
     }
 
     if handle_global_key(app, key) {
@@ -86,6 +126,11 @@ pub(crate) fn handle_app_key(
 
     if app.goto_active() {
         handle_goto_key(app, key);
+        return Ok(());
+    }
+
+    if key.code == KeyCode::Esc && app.search_bar_visible() {
+        app.clear_search();
         return Ok(());
     }
 
@@ -388,6 +433,25 @@ fn handle_file_filter_key(app: &mut App, key: KeyEvent) {
     }
 }
 
+fn handle_session_rename_key(app: &mut App, key: KeyEvent) {
+    match app.keybindings.goto(key) {
+        Dispatch::Matched(LineInputAction::Cancel) => app.cancel_session_rename(),
+        Dispatch::Matched(LineInputAction::Accept) => app.submit_session_rename(),
+        Dispatch::Matched(LineInputAction::Backspace) => {
+            if !app.session_rename_query().is_empty() {
+                app.pop_session_rename_char();
+            }
+        }
+        Dispatch::Matched(LineInputAction::Clear) => app.clear_session_rename_text(),
+        Dispatch::Pending => {}
+        Dispatch::Unmatched => {
+            if let Some(c) = printable_char(key) {
+                app.push_session_rename_char(c);
+            }
+        }
+    }
+}
+
 fn handle_goto_key(app: &mut App, key: KeyEvent) {
     match app.keybindings.goto(key) {
         Dispatch::Matched(LineInputAction::Cancel) => app.clear_goto(),
@@ -420,9 +484,7 @@ fn handle_search_key(app: &mut App, key: KeyEvent) {
             app.search_next();
         }
         Dispatch::Matched(LineInputAction::Backspace) => {
-            if app.search_query().is_empty() {
-                app.clear_search();
-            } else {
+            if !app.search_query().is_empty() {
                 app.pop_search_char();
             }
         }
@@ -465,6 +527,37 @@ fn repeat_count(
     }
 }
 
+fn handle_fold_context_action_key(app: &mut App, key: KeyEvent) -> bool {
+    if !key.modifiers.is_empty() {
+        return false;
+    }
+    if let Some(direction) = app.fold_context_prefix.take() {
+        match key.code {
+            KeyCode::Char(c @ 'a'..='z') => {
+                app.expand_visible_context_fold_letter(c, direction);
+                return true;
+            }
+            KeyCode::Char(c @ '1'..='9') => {
+                app.expand_visible_context_fold_number((c as u8 - b'0') as usize, direction);
+                return true;
+            }
+            _ => {}
+        }
+    }
+    let direction = match key.code {
+        KeyCode::Char('u') => Some(FoldContextDirection::Top),
+        KeyCode::Char('d') => Some(FoldContextDirection::Bottom),
+        _ => None,
+    };
+    if let Some(direction) = direction.filter(|_| app.has_visible_context_folds()) {
+        app.fold_context_prefix = Some(direction);
+        app.keybindings.clear_sequence();
+        app.reset_count();
+        return true;
+    }
+    false
+}
+
 fn handle_normal_key(
     app: &mut App,
     key: KeyEvent,
@@ -472,7 +565,11 @@ fn handle_normal_key(
     terminal: &mut TuiTerminal,
     editor_config: &config::EditorConfig,
 ) -> Result<()> {
+    if handle_fold_context_action_key(app, key) {
+        return Ok(());
+    }
     if app.review_mode() && key.modifiers.is_empty() {
+        let sequence_pending = app.keybindings.normal_sequence_pending();
         if app.active_pr_comments_view() && app.pr_reply_prefix {
             app.pr_reply_prefix = false;
             match key.code {
@@ -501,6 +598,34 @@ fn handle_normal_key(
                 _ => {}
             }
         }
+        if app.review_reply_prefix {
+            app.review_reply_prefix = false;
+            match key.code {
+                KeyCode::Char(c @ 'a'..='z') => {
+                    app.reply_to_review_comment_letter(c);
+                    return Ok(());
+                }
+                KeyCode::Char(c @ '1'..='9') => {
+                    app.reply_to_review_comment_number((c as u8 - b'0') as usize);
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
+        if app.review_resolve_prefix {
+            app.review_resolve_prefix = false;
+            match key.code {
+                KeyCode::Char(c @ 'a'..='z') => {
+                    app.resolve_review_comment_letter(c);
+                    return Ok(());
+                }
+                KeyCode::Char(c @ '1'..='9') => {
+                    app.resolve_review_comment_number((c as u8 - b'0') as usize);
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
         if app.review_delete_prefix {
             app.review_delete_prefix = false;
             match key.code {
@@ -515,7 +640,21 @@ fn handle_normal_key(
                 _ => {}
             }
         }
-        if app.active_pr_comments_view() {
+        if app.review_overflow_prefix {
+            app.review_overflow_prefix = false;
+            match key.code {
+                KeyCode::Char(c @ 'a'..='z') => {
+                    app.open_review_comment_context_menu_letter(c);
+                    return Ok(());
+                }
+                KeyCode::Char(c @ '1'..='9') => {
+                    app.open_review_comment_context_menu_number((c as u8 - b'0') as usize);
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
+        if app.active_pr_comments_view() && !sequence_pending {
             match key.code {
                 KeyCode::Char('c') => {
                     app.start_pull_request_comment();
@@ -524,7 +663,10 @@ fn handle_normal_key(
                 KeyCode::Char('r') => {
                     app.pr_reply_prefix = true;
                     app.review_edit_prefix = false;
+                    app.review_reply_prefix = false;
+                    app.review_resolve_prefix = false;
                     app.review_delete_prefix = false;
+                    app.review_overflow_prefix = false;
                     app.keybindings.clear_sequence();
                     app.reset_count();
                     return Ok(());
@@ -532,17 +674,68 @@ fn handle_normal_key(
                 _ => {}
             }
         }
-        if matches!(key.code, KeyCode::Char('i')) {
+        if !sequence_pending && matches!(key.code, KeyCode::Char('i')) {
             app.review_edit_prefix = true;
+            app.review_reply_prefix = false;
+            app.review_resolve_prefix = false;
             app.review_delete_prefix = false;
+            app.review_overflow_prefix = false;
             app.pr_reply_prefix = false;
             app.keybindings.clear_sequence();
             app.reset_count();
             return Ok(());
         }
-        if matches!(key.code, KeyCode::Char('x')) && app.review_comment_count() > 0 {
+        if !sequence_pending
+            && matches!(key.code, KeyCode::Char('r'))
+            && app.inline_review_reply_available()
+        {
+            app.review_reply_prefix = true;
+            app.review_edit_prefix = false;
+            app.review_resolve_prefix = false;
+            app.review_delete_prefix = false;
+            app.review_overflow_prefix = false;
+            app.pr_reply_prefix = false;
+            app.keybindings.clear_sequence();
+            app.reset_count();
+            return Ok(());
+        }
+        if !sequence_pending
+            && matches!(key.code, KeyCode::Char('v'))
+            && app.inline_review_actions_available()
+        {
+            app.review_resolve_prefix = true;
+            app.review_edit_prefix = false;
+            app.review_reply_prefix = false;
+            app.review_delete_prefix = false;
+            app.review_overflow_prefix = false;
+            app.pr_reply_prefix = false;
+            app.keybindings.clear_sequence();
+            app.reset_count();
+            return Ok(());
+        }
+        if !sequence_pending
+            && matches!(key.code, KeyCode::Char('x'))
+            && app.inline_review_actions_available()
+        {
             app.review_delete_prefix = true;
             app.review_edit_prefix = false;
+            app.review_reply_prefix = false;
+            app.review_resolve_prefix = false;
+            app.review_overflow_prefix = false;
+            app.pr_reply_prefix = false;
+            app.keybindings.clear_sequence();
+            app.reset_count();
+            return Ok(());
+        }
+        if !sequence_pending
+            && matches!(key.code, KeyCode::Char('o'))
+            && app.inline_review_actions_available()
+        {
+            app.review_overflow_prefix = true;
+            app.review_edit_prefix = false;
+            app.review_reply_prefix = false;
+            app.review_resolve_prefix = false;
+            app.review_delete_prefix = false;
             app.pr_reply_prefix = false;
             app.keybindings.clear_sequence();
             app.reset_count();
@@ -583,6 +776,7 @@ fn dispatch_normal_action(
                 | NormalAction::Refresh
                 | NormalAction::ToggleHelp
                 | NormalAction::OpenCommentPicker
+                | NormalAction::OpenOutdatedComments
                 | NormalAction::OpenThemePicker
         )
     {
@@ -606,7 +800,7 @@ fn dispatch_normal_action(
             if app.show_path_popup {
                 app.show_path_popup = false;
             } else {
-                app.submit_review_and_quit();
+                app.request_quit();
             }
         }
         NormalAction::StepDown => {
@@ -975,6 +1169,10 @@ fn dispatch_normal_action(
             app.reset_count();
             app.toggle_fold_context();
         }
+        NormalAction::ExpandAllFolds => {
+            app.reset_count();
+            app.expand_all_context_folds();
+        }
         NormalAction::OpenSearchOrFileFilter => {
             app.reset_count();
             if app.file_list_focused {
@@ -996,6 +1194,18 @@ fn dispatch_normal_action(
         NormalAction::SearchPrev => {
             app.reset_count();
             app.search_prev();
+        }
+        NormalAction::FocusNextComment => {
+            let count = repeat_count(app, key, pending_event, false)?;
+            for _ in 0..count {
+                app.focus_next_review_comment();
+            }
+        }
+        NormalAction::FocusPrevComment => {
+            let count = repeat_count(app, key, pending_event, false)?;
+            for _ in 0..count {
+                app.focus_prev_review_comment();
+            }
         }
         NormalAction::NextConflict => {
             app.reset_count();
@@ -1064,6 +1274,10 @@ fn dispatch_normal_action(
                 app.start_comment_picker();
             }
         }
+        NormalAction::OpenOutdatedComments => {
+            app.reset_count();
+            app.open_outdated_comments_in_current_tab(None);
+        }
         NormalAction::OpenThemePicker => {
             app.reset_count();
             if app.theme_picker_active() {
@@ -1090,6 +1304,32 @@ mod tests {
     }
 
     #[test]
+    fn control_c_is_the_force_quit_key_outside_the_review_editor() {
+        let diff = MultiFileDiff::from_file_pair(
+            "old.txt".into(),
+            "new.txt".into(),
+            "old\n".to_string(),
+            "new\n".to_string(),
+        );
+        let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+        assert!(should_force_quit(&app, ctrl('c')));
+        assert!(!should_force_quit(&app, key('c')));
+        assert!(!should_force_quit(
+            &app,
+            KeyEvent::new(
+                KeyCode::Char('c'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            )
+        ));
+
+        app.set_review_persist_enabled(false);
+        app.enable_review_mode();
+        app.start_line_comment();
+        assert!(app.review_editor_active());
+        assert!(!should_force_quit(&app, ctrl('c')));
+    }
+
+    #[test]
     fn global_palette_binding_opens_from_search_mode() {
         let diff = MultiFileDiff::from_file_pair(
             "old.txt".into(),
@@ -1106,10 +1346,275 @@ mod tests {
     }
 
     #[test]
+    fn review_prefixes_do_not_swallow_pending_normal_sequences() {
+        let diff = MultiFileDiff::from_file_pair(
+            "old.txt".into(),
+            "new.txt".into(),
+            "old\n".to_string(),
+            "new\n".to_string(),
+        );
+        let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+        app.set_review_persist_enabled(false);
+        app.enable_review_mode();
+        app.start_line_comment();
+        app.review_insert_char('x');
+        app.review_save_editor();
+        assert_eq!(app.review_comment_count(), 1);
+        let backend = ratatui::backend::CrosstermBackend::new(
+            Box::new(Vec::<u8>::new()) as Box<dyn std::io::Write>
+        );
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut pending_event = None;
+        let editor_config = config::EditorConfig::default();
+
+        handle_app_key(
+            &mut app,
+            key('g'),
+            &mut pending_event,
+            &mut terminal,
+            &editor_config,
+        )
+        .unwrap();
+        assert!(app.keybindings.normal_sequence_pending());
+        handle_app_key(
+            &mut app,
+            key('o'),
+            &mut pending_event,
+            &mut terminal,
+            &editor_config,
+        )
+        .unwrap();
+
+        assert!(app.active_outdated_comments_view());
+        assert!(!app.review_overflow_prefix);
+
+        handle_app_key(
+            &mut app,
+            key('g'),
+            &mut pending_event,
+            &mut terminal,
+            &editor_config,
+        )
+        .unwrap();
+        handle_app_key(
+            &mut app,
+            key('f'),
+            &mut pending_event,
+            &mut terminal,
+            &editor_config,
+        )
+        .unwrap();
+        assert!(app.file_search_active());
+    }
+
+    #[test]
+    fn inline_review_uses_r_for_reply_and_v_for_resolve() {
+        let diff = MultiFileDiff::from_file_pair(
+            "old.txt".into(),
+            "new.txt".into(),
+            "old\n".to_string(),
+            "new\n".to_string(),
+        );
+        let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+        app.set_review_persist_enabled(false);
+        app.enable_review_mode();
+        app.goto_last_step();
+        app.start_line_comment();
+        app.review_insert_char('x');
+        app.review_save_editor();
+        let backend = ratatui::backend::CrosstermBackend::new(
+            Box::new(Vec::<u8>::new()) as Box<dyn std::io::Write>
+        );
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut pending_event = None;
+        let editor_config = config::EditorConfig::default();
+
+        handle_app_key(
+            &mut app,
+            key('r'),
+            &mut pending_event,
+            &mut terminal,
+            &editor_config,
+        )
+        .unwrap();
+        assert!(app.review_reply_prefix);
+        handle_app_key(
+            &mut app,
+            key('a'),
+            &mut pending_event,
+            &mut terminal,
+            &editor_config,
+        )
+        .unwrap();
+        assert!(app.review_editor_active());
+        app.review_cancel_editor();
+
+        handle_app_key(
+            &mut app,
+            key('v'),
+            &mut pending_event,
+            &mut terminal,
+            &editor_config,
+        )
+        .unwrap();
+        assert!(app.review_resolve_prefix);
+    }
+
+    #[test]
+    fn escape_closes_path_popup_without_quitting() {
+        let diff = MultiFileDiff::from_file_pair(
+            "old.txt".into(),
+            "new.txt".into(),
+            "old\n".to_string(),
+            "new\n".to_string(),
+        );
+        let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+        app.show_path_popup = true;
+        let backend = ratatui::backend::CrosstermBackend::new(
+            Box::new(Vec::<u8>::new()) as Box<dyn std::io::Write>
+        );
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut pending_event = None;
+
+        handle_app_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()),
+            &mut pending_event,
+            &mut terminal,
+            &config::EditorConfig::default(),
+        )
+        .unwrap();
+
+        assert!(!app.show_path_popup);
+        assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn escape_closes_search_after_accept_without_quitting() {
+        let diff = MultiFileDiff::from_file_pair(
+            "old.txt".into(),
+            "new.txt".into(),
+            "needle\n".to_string(),
+            "needle\n".to_string(),
+        );
+        let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+        app.start_search();
+        for ch in "needle".chars() {
+            app.push_search_char(ch);
+        }
+        handle_search_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+        );
+        assert!(!app.search_active());
+        assert!(app.search_bar_visible());
+        assert!(app.search_target().is_some());
+        let backend = ratatui::backend::CrosstermBackend::new(
+            Box::new(Vec::<u8>::new()) as Box<dyn std::io::Write>
+        );
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut pending_event = None;
+
+        handle_app_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()),
+            &mut pending_event,
+            &mut terminal,
+            &config::EditorConfig::default(),
+        )
+        .unwrap();
+
+        assert!(!app.search_bar_visible());
+        assert_eq!(app.search_target(), None);
+        assert!(!app.quit_confirmation_active());
+        assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn backspace_keeps_empty_search_open() {
+        let diff = MultiFileDiff::from_file_pair(
+            "old.txt".into(),
+            "new.txt".into(),
+            "old\n".to_string(),
+            "new\n".to_string(),
+        );
+        let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+        app.start_search();
+
+        handle_search_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::empty()),
+        );
+
+        assert!(app.search_active());
+        assert!(app.search_query().is_empty());
+    }
+
+    #[test]
     fn count_digits_require_plain_digit_keys() {
         assert_eq!(count_digit(key('1'), false), Some(1));
         assert_eq!(count_digit(key('0'), false), None);
         assert_eq!(count_digit(key('0'), true), Some(0));
         assert_eq!(count_digit(ctrl('1'), false), None);
+    }
+
+    #[test]
+    fn visible_fold_shortcuts_reveal_from_each_side() {
+        let content = (1..=40)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let diff = MultiFileDiff::from_file_pair(
+            "fold.txt".into(),
+            "fold.txt".into(),
+            content.clone(),
+            content,
+        );
+        let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+        app.set_fold_context_mode(crate::config::FoldContextMode::Expandable);
+
+        let register_fold = |app: &mut App| {
+            let view = app.current_view_with_frame(oyo_core::AnimationFrame::Idle);
+            let region = view
+                .iter()
+                .find_map(|line| app.fold_context_region_for_line(line))
+                .unwrap();
+            app.fold_context_hits = vec![
+                crate::app::FoldContextHit {
+                    x: 0,
+                    y: 0,
+                    width: 1,
+                    height: 1,
+                    key: region.key,
+                    direction: FoldContextDirection::Top,
+                },
+                crate::app::FoldContextHit {
+                    x: 1,
+                    y: 0,
+                    width: 1,
+                    height: 1,
+                    key: region.key,
+                    direction: FoldContextDirection::Bottom,
+                },
+            ];
+        };
+
+        register_fold(&mut app);
+        assert!(handle_fold_context_action_key(&mut app, key('u')));
+        assert_eq!(app.fold_context_prefix, Some(FoldContextDirection::Top));
+        assert!(handle_fold_context_action_key(&mut app, key('a')));
+        assert!(app
+            .current_view_with_frame(oyo_core::AnimationFrame::Idle)
+            .iter()
+            .any(|line| line.content == "↑ 14 unchanged lines ↓"));
+
+        register_fold(&mut app);
+        assert!(handle_fold_context_action_key(&mut app, key('d')));
+        assert_eq!(app.fold_context_prefix, Some(FoldContextDirection::Bottom));
+        assert!(handle_fold_context_action_key(&mut app, key('a')));
+        assert!(app
+            .current_view_with_frame(oyo_core::AnimationFrame::Idle)
+            .iter()
+            .all(|line| !crate::app::is_fold_line(line)));
     }
 }

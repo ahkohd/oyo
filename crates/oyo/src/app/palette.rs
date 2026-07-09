@@ -1,5 +1,7 @@
 use super::{App, ViewMode};
+use crate::app::utils::copy_to_clipboard;
 use crate::config::{list_ui_themes, ThemeConfig};
+use crate::toasts::ToastEvent;
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum PaletteAction {
@@ -15,9 +17,13 @@ pub(crate) enum PaletteAction {
     ToggleAutoplay,
     ToggleAutoplayReverse,
     OpenDashboard,
+    OpenFileSearch,
     OpenThemePicker,
     OpenCommentPicker,
     OpenPrComments,
+    OpenOutdatedComments,
+    CopySessionName,
+    RenameSession,
     Quit,
     RefreshCurrentFile,
     RefreshAllFiles,
@@ -31,6 +37,84 @@ pub(crate) struct PaletteEntry {
 }
 
 impl App {
+    pub(crate) fn set_control_session_name(&mut self, name: Option<String>) {
+        self.control_session_name = name;
+    }
+
+    pub(crate) fn control_session_name(&self) -> Option<&str> {
+        self.control_session_name.as_deref()
+    }
+
+    pub(crate) fn copy_control_session_name(&mut self) {
+        let Some(name) = self.control_session_name.clone() else {
+            return;
+        };
+        if copy_to_clipboard(&name) {
+            self.notify(ToastEvent::CopiedSessionName);
+        } else {
+            self.notify(ToastEvent::CopyFailed);
+        }
+    }
+
+    pub(crate) fn start_session_rename(&mut self) {
+        let Some(name) = self.control_session_name.clone() else {
+            return;
+        };
+        self.session_rename_active = true;
+        self.session_rename_query = name;
+        self.reset_picker_cursor();
+        self.file_filter_active = false;
+        self.clear_search();
+        self.clear_goto();
+        self.stop_file_search();
+        self.stop_comment_picker();
+        self.stop_theme_picker();
+    }
+
+    pub(crate) fn session_rename_active(&self) -> bool {
+        self.session_rename_active
+    }
+
+    pub(crate) fn session_rename_query(&self) -> &str {
+        &self.session_rename_query
+    }
+
+    pub(crate) fn cancel_session_rename(&mut self) {
+        self.session_rename_active = false;
+        self.session_rename_query.clear();
+    }
+
+    pub(crate) fn clear_session_rename_text(&mut self) {
+        self.session_rename_query.clear();
+        self.reset_picker_cursor();
+    }
+
+    pub(crate) fn push_session_rename_char(&mut self, ch: char) {
+        self.session_rename_query.push(ch);
+        self.reset_picker_cursor();
+    }
+
+    pub(crate) fn pop_session_rename_char(&mut self) {
+        self.session_rename_query.pop();
+        self.reset_picker_cursor();
+    }
+
+    pub(crate) fn submit_session_rename(&mut self) {
+        let name = self.session_rename_query.trim();
+        if name.is_empty() {
+            self.notify(ToastEvent::SelectionActionFailed(
+                "Session name cannot be empty".to_string(),
+            ));
+            return;
+        }
+        self.pending_session_rename = Some(name.to_string());
+        self.session_rename_active = false;
+    }
+
+    pub(crate) fn take_pending_session_rename(&mut self) -> Option<String> {
+        self.pending_session_rename.take()
+    }
+
     fn reset_picker_cursor(&mut self) {
         self.file_filter_cursor_visible = true;
         self.file_filter_cursor_last_blink = std::time::Instant::now();
@@ -158,11 +242,11 @@ impl App {
     fn command_palette_entries(&self) -> Vec<PaletteEntry> {
         let mut entries = vec![
             PaletteEntry {
-                label: "Toggle stepping".to_string(),
+                label: "Toggle step mode".to_string(),
                 action: PaletteAction::ToggleStepping,
             },
             PaletteEntry {
-                label: "Cycle view mode".to_string(),
+                label: "Cycle view modes".to_string(),
                 action: PaletteAction::ToggleViewMode,
             },
             PaletteEntry {
@@ -196,7 +280,7 @@ impl App {
                 action: PaletteAction::ToggleLineWrap,
             },
             PaletteEntry {
-                label: "Toggle context folding".to_string(),
+                label: "Cycle context folding".to_string(),
                 action: PaletteAction::ToggleFoldContext,
             },
             PaletteEntry {
@@ -225,12 +309,19 @@ impl App {
         }
 
         entries.push(PaletteEntry {
-            label: "Pick commit".to_string(),
+            label: "History...".to_string(),
             action: PaletteAction::OpenDashboard,
         });
 
+        if self.multi_diff.file_count() > 0 {
+            entries.push(PaletteEntry {
+                label: "Files...".to_string(),
+                action: PaletteAction::OpenFileSearch,
+            });
+        }
+
         entries.push(PaletteEntry {
-            label: "Pick theme".to_string(),
+            label: "Themes...".to_string(),
             action: PaletteAction::OpenThemePicker,
         });
 
@@ -238,6 +329,17 @@ impl App {
             label: "Refresh current file".to_string(),
             action: PaletteAction::RefreshCurrentFile,
         });
+
+        if self.control_session_name().is_some() {
+            entries.push(PaletteEntry {
+                label: "Copy session name".to_string(),
+                action: PaletteAction::CopySessionName,
+            });
+            entries.push(PaletteEntry {
+                label: "Rename session".to_string(),
+                action: PaletteAction::RenameSession,
+            });
+        }
 
         if self.stepping {
             entries.push(PaletteEntry {
@@ -252,12 +354,19 @@ impl App {
 
         if self.review_mode {
             entries.push(PaletteEntry {
-                label: "Comment picker".to_string(),
+                label: "Comments...".to_string(),
                 action: PaletteAction::OpenCommentPicker,
             });
             entries.push(PaletteEntry {
-                label: "Pull request comments".to_string(),
+                label: format!(
+                    "{} comments",
+                    self.review_provider_kind().long_review_noun_title()
+                ),
                 action: PaletteAction::OpenPrComments,
+            });
+            entries.push(PaletteEntry {
+                label: "Outdated comments".to_string(),
+                action: PaletteAction::OpenOutdatedComments,
             });
             for (idx, action) in self.review_actions.iter().enumerate() {
                 let show = action.show.is_empty()
@@ -295,6 +404,9 @@ impl App {
                     | PaletteAction::OpenThemePicker
                     | PaletteAction::OpenCommentPicker
                     | PaletteAction::OpenPrComments
+                    | PaletteAction::OpenOutdatedComments
+                    | PaletteAction::CopySessionName
+                    | PaletteAction::RenameSession
                     | PaletteAction::Quit
                     | PaletteAction::RefreshAllFiles
             )
@@ -314,10 +426,14 @@ impl App {
             PaletteAction::ToggleAutoplay => self.toggle_autoplay(),
             PaletteAction::ToggleAutoplayReverse => self.toggle_autoplay_reverse(),
             PaletteAction::OpenDashboard => self.open_dashboard = true,
+            PaletteAction::OpenFileSearch => self.start_file_search(),
             PaletteAction::OpenThemePicker => self.start_theme_picker(),
             PaletteAction::OpenCommentPicker => self.start_comment_picker(),
             PaletteAction::OpenPrComments => self.open_pr_comments_in_current_tab(None),
-            PaletteAction::Quit => self.should_quit = true,
+            PaletteAction::OpenOutdatedComments => self.open_outdated_comments_in_current_tab(None),
+            PaletteAction::CopySessionName => self.copy_control_session_name(),
+            PaletteAction::RenameSession => self.start_session_rename(),
+            PaletteAction::Quit => self.request_quit(),
             PaletteAction::RefreshCurrentFile => self.refresh_current_file(),
             PaletteAction::RefreshAllFiles => self.refresh_all_files(),
             PaletteAction::ReviewAction(idx) => self.run_review_action(idx),

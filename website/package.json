@@ -10,10 +10,12 @@
     "build": "npm run sync && astro build",
     "preview": "astro preview",
     "generate-demos": "bash scripts/demo/generate.sh",
+    "generate-review-demos": "bash scripts/demo/generate-review-demos.sh",
     "astro": "astro"
   },
   "dependencies": {
     "@astrojs/starlight": "^0.35.0",
+    "@fontsource-variable/geist-mono": "^5.2.8",
     "asciinema-player": "^3.17.0",
     "astro": "^5.13.0",
     "sharp": "^0.34.0"

@@ -1,4 +1,5 @@
 ---
+import "@fontsource-variable/geist-mono";
 import "../styles/landing.css";
 import DevTools from "../components/DevTools.astro";
 
@@ -49,6 +50,25 @@ const miniStep = `<span class="cur">$</span> oy --step
 <span class="add">+     let n = input.trim().len();</span>
       dispatch(n)          <span class="cur">< here</span>
   }`;
+
+// Review-showcase demo fallbacks. Each renders as static ASCII now; to swap in a
+// real recording, add data-cast-dark / data-cast-light on the block and drop the
+// matching .cast into public/ (see the review section markup below).
+const demoReviewTool = `<span class="cur">$</span> oy review comment --unresolved
+  #7  src/parse.rs:42   Handle empty input.
+  #9  src/parse.rs:88   Name this constant.
+<span class="cur">$</span> oy review comment resolve 7
+  resolved #7`;
+
+const demoReviewTeam = `<span class="cur">$</span> oy review pull
+  pulled 4 comments from PR #128
+<span class="cur">$</span> oy review push
+  pushed 2 comments to PR #128`;
+
+const demoReviewAgent = `<span class="cur">$</span> agent reviewing your diff …
+<span class="add">+  #12  extract this into a helper</span>
+<span class="cur">$</span> check comment 12
+  fixed, resolved #12`;
 ---
 
 <!doctype html>
@@ -56,17 +76,17 @@ const miniStep = `<span class="cur">$</span> oy --step
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Oyo - a terminal diff viewer</title>
+    <title>Oyo — your complete terminal code review tool</title>
     <meta
       name="description"
-      content="Oyo is a terminal diff viewer for stepping through changes and reviewing scrollable diffs. Five views, tabs, rich previews, inline review comments and word-level diffing."
+      content="Oyo is a complete code review tool that lives in your terminal. Diff and review, comment on any line, resolve threads, and sync with your pull requests — for you, your team, and your coding agents."
     />
     <link rel="icon" href={`${base}favicon.svg`} type="image/svg+xml" />
     <link rel="stylesheet" href={`${base}vendor/asciinema-player.css`} />
-    <meta property="og:title" content="Oyo - a terminal diff viewer" />
+    <meta property="og:title" content="Oyo — your complete terminal code review tool" />
     <meta
       property="og:description"
-      content="Scroll a diff like you always have, or step through the change one edit at a time. Without leaving the terminal."
+      content="Diff and review, comment on any line, resolve threads, and sync with your pull requests — all from your terminal. Code review for you, your team, and your coding agents."
     />
     <meta property="og:type" content="website" />
     <!-- Set the theme before paint, synced with the docs' toggle, to avoid a flash. -->
@@ -103,13 +123,9 @@ const miniStep = `<span class="cur">$</span> oy --step
       <!-- ============ HERO ============ -->
       <section class="hero">
         <div class="wrap">
-          <h1>Diff and <span class="hl">Review</span></h1>
-          <p class="hero-sub">
-            Review changes, navigate diffs, trace blame, preview files, and add
-            comments.
-          </p>
+          <h1>Oyo is your <span class="hl">complete</span> terminal code review tool.</h1>
           <div class="hero-actions">
-            <a class="btn btn-primary" href="#install">Install Oyo</a>
+            <a class="btn btn-primary" href="#install">Install</a>
             <a class="btn btn-ghost" href={repo}>
               <span>Star on GitHub</span>
               {stars != null && (
@@ -142,6 +158,46 @@ const miniStep = `<span class="cur">$</span> oy --step
         </div>
       </section>
 
+      <!-- ============ REVIEW WITH AGENTS ============ -->
+      <section class="review" id="review">
+        <div class="wrap">
+          <p class="divider mono"><span class="hash">#</span> the whole review, in your terminal</p>
+          <h2>Code review for you, your team, and your agent.</h2>
+
+          <div class="showcase">
+            <div class="show-row">
+              <div class="show-text">
+                <span class="k mono">Diff and review</span>
+                <h3>Everything a code review needs, right where you already work.</h3>
+                <p>Read any change, comment on the exact lines, and work every thread through to resolved — the whole review, in one place.</p>
+              </div>
+              <!-- Demo: the review TUI — diff with an inline comment card, unified/split (80x18). -->
+              <div class="show-demo mini mini-player" data-cast-dark={`${base}review-tool.cast`} data-cast-light={`${base}review-tool.cast`} set:html={demoReviewTool}></div>
+            </div>
+
+            <div class="show-row">
+              <div class="show-text">
+                <span class="k mono">Sync with your team</span>
+                <h3>Bring your team's code reviews into the terminal.</h3>
+                <p>Pull your team's comments from GitHub, GitLab, or Codeberg into Oyo, work through them, reply, resolve and push your own comments back.</p>
+              </div>
+              <!-- Demo: `oy review pull` + status against a real PR (90x12, full-height panel). -->
+              <div class="show-demo mini mini-player" data-cast-dark={`${base}review-team.cast`} data-cast-light={`${base}review-team.cast`} set:html={demoReviewTeam}></div>
+            </div>
+
+            <div class="show-row">
+              <div class="show-text">
+                <span class="k mono">Work with your agent</span>
+                <h3>Your agent reviews — and walks you through it.</h3>
+                <p>Have it review a diff, leave comments and resolve feedback, or drive the TUI while it walks you through the changes.</p>
+              </div>
+              <!-- Demo: the agent reviews via oy review (identity, comments, resolve) — 80x18. -->
+              <div class="show-demo mini mini-player" data-cast-dark={`${base}review-agent.cast`} data-cast-light={`${base}review-agent.cast`} set:html={demoReviewAgent}></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
       <!-- ============ TWO MODES ============ -->
       <section class="modes" id="modes">
         <div class="wrap">
@@ -150,23 +206,21 @@ const miniStep = `<span class="cur">$</span> oy --step
 
           <div class="modes-grid">
             <div class="mode">
-              <div class="mode-head">
-                <p>
-                  <span class="k">Scroll</span> freely, jump between hunks, and
-                  search across the whole change.
-                </p>
+              <div class="show-text">
+                <span class="k mono">Scroll mode</span>
+                <h3>Read the whole change at once.</h3>
+                <p>Scroll freely, jump between hunks, and search across the whole diff.</p>
               </div>
-<div class="mini mini-player" data-cast-dark={`${base}scroll-mode.cast`} data-cast-light={`${base}scroll-mode-light.cast`} set:html={miniScroll}></div>
+              <div class="show-demo mini mini-player" data-cast-dark={`${base}scroll-mode.cast`} data-cast-light={`${base}scroll-mode-light.cast`} set:html={miniScroll}></div>
             </div>
 
             <div class="mode">
-              <div class="mode-head">
-                <p>
-                  <span class="k">Step through</span> a change one edit at a
-                  time, or let it play.
-                </p>
+              <div class="show-text">
+                <span class="k mono">Step mode</span>
+                <h3>Or take it one edit at a time.</h3>
+                <p>Step through each change in sequence, or press play and watch it run.</p>
               </div>
-<div class="mini mini-player" data-cast-dark={`${base}step-mode.cast`} data-cast-light={`${base}step-mode-light.cast`} set:html={miniStep}></div>
+              <div class="show-demo mini mini-player" data-cast-dark={`${base}step-mode.cast`} data-cast-light={`${base}step-mode-light.cast`} set:html={miniStep}></div>
             </div>
           </div>
         </div>
@@ -179,12 +233,9 @@ const miniStep = `<span class="cur">$</span> oy --step
           <h2>Batteries included.</h2>
 
           <div class="feat-grid">
-            <div class="feat"><h3>Five views</h3><p>Unified, split, evolution, blame and preview. Cycle through them as you read.</p></div>
-            <div class="feat"><h3>Tabs</h3><p>Open several diffs at once, each tab in its own view.</p></div>
-            <div class="feat"><h3>Rich previews</h3><p>Rendered Markdown, JSON, YAML, TOML, CSV and images, right in the diff.</p></div>
-            <div class="feat"><h3>Mouse support</h3><p>Click files, tabs, actions and context menus, drag, and scroll.</p></div>
-            <div class="feat"><h3>Review comments</h3><p>Leave inline notes on the exact lines as you read.</p></div>
-            <div class="feat"><h3>Text selection</h3><p>Select text, then copy, comment, or run an action.</p></div>
+            <div class="feat"><h3>Views and tabs</h3><p>Unified, split, evolution, blame and preview — each diff in its own tab.</p></div>
+            <div class="feat"><h3>Mouse and selection</h3><p>Click files, tabs and menus, drag and scroll, or highlight text for action.</p></div>
+            <div class="feat"><h3>Rich previews</h3><p>Markdown, JSON/YAML/TOML trees, CSV tables, and images.</p></div>
             <div class="feat"><h3>Hooks and actions</h3><p>Set up commands to run automatically on events, or on demand from the UI.</p></div>
             <div class="feat"><h3>Watch mode</h3><p>Refreshes files as they change on disk, so the diff stays live.</p></div>
             <div class="feat"><h3>Git and Jujutsu</h3><p>Drops in as a <span class="mono">difftool</span> for Git and a diff tool for Jujutsu.</p></div>
@@ -504,6 +555,9 @@ d = [<span class="str">"diff"</span>, <span class="str">"--tool"</span>, <span c
             // Same flush treatment as the hero: scale the terminal up by its
             // border so asciinema-player's frame is pushed outside the clip.
             function crop() {
+              // Review-showcase demos are full-height panels, not flush hero
+              // clips — skip the scale/clip treatment so the player just fits.
+              if (el.closest && el.closest(".show-row")) return;
               var term = el.querySelector(".ap-term");
               if (!term || !window.ResizeObserver) return;
               var run = function () {
@@ -604,5 +658,6 @@ d = [<span class="str">"diff"</span>, <span class="str">"--tool"</span>, <span c
         if (mq.addEventListener) mq.addEventListener("change", remountAll);
       })();
     </script>
+
   </body>
 </html>

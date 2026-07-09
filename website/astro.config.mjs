@@ -28,7 +28,10 @@ export default defineConfig({
       title: "Oyo",
       description:
         "A terminal diff viewer for stepping through changes and reviewing scrollable diffs.",
-      customCss: ["./src/styles/starlight-theme.css"],
+      customCss: [
+        "@fontsource-variable/geist-mono",
+        "./src/styles/starlight-theme.css",
+      ],
       // Inject the dev-only Agentation toolbar on every docs page.
       components: {
         Footer: "./src/components/Footer.astro",
@@ -45,12 +48,23 @@ export default defineConfig({
         {
           label: "Guides",
           items: [
-            { label: "Configuration", slug: "config" },
-            { label: "Theming", slug: "theming" },
-            { label: "Keybindings", slug: "keybindings" },
-            { label: "Review CLI", slug: "review" },
-            { label: "Working with agents", slug: "agents" },
-            { label: "Hooks", slug: "hooks" },
+            {
+              label: "Configuration",
+              items: [
+                { label: "Configure", slug: "config" },
+                { label: "Theming", slug: "theming" },
+                { label: "Keybindings", slug: "keybindings" },
+                { label: "Hooks", slug: "hooks" },
+              ],
+            },
+            {
+              label: "CLI",
+              items: [
+                { label: "Review", slug: "review" },
+                { label: "Control", slug: "control" },
+              ],
+            },
+            { label: "Working With Agents", slug: "agents" },
           ],
         },
         {

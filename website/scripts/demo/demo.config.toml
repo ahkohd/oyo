@@ -1,3 +1,8 @@
+[ui]
+# No "Quit? y/n" dialog — the recording ends by quitting oy, and the confirm
+# prompt would flash in the loop seam.
+confirm_quit = false
+
 [files]
 panel_width = 22
 panel_position = "left"

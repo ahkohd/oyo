@@ -9,6 +9,246 @@ use std::time::{Duration, Instant};
 
 static VIEW_DEBUG_ENV_LOCK: Mutex<()> = Mutex::new(());
 
+fn quit_test_app() -> App {
+    App::new(
+        MultiFileDiff::from_file_pair(
+            "old.txt".into(),
+            "new.txt".into(),
+            "old\n".to_string(),
+            "new\n".to_string(),
+        ),
+        ViewMode::UnifiedPane,
+        0,
+        false,
+        None,
+    )
+}
+
+#[test]
+fn quit_confirmation_opens_and_cancel_keeps_running() {
+    for code in [
+        crossterm::event::KeyCode::Esc,
+        crossterm::event::KeyCode::Char('n'),
+        crossterm::event::KeyCode::Char('x'),
+    ] {
+        let mut app = quit_test_app();
+        app.request_quit();
+        assert!(app.quit_confirmation_active());
+        assert!(!app.should_quit);
+
+        app.handle_quit_confirmation_key(crossterm::event::KeyEvent::new(
+            code,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        assert!(!app.quit_confirmation_active());
+        assert!(!app.should_quit);
+    }
+}
+
+#[test]
+fn quit_confirmation_accepts_enter_y_and_q() {
+    for code in [
+        crossterm::event::KeyCode::Enter,
+        crossterm::event::KeyCode::Char('y'),
+        crossterm::event::KeyCode::Char('q'),
+    ] {
+        let mut app = quit_test_app();
+        app.request_quit();
+        app.handle_quit_confirmation_key(crossterm::event::KeyEvent::new(
+            code,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        assert!(app.should_quit);
+        assert!(!app.quit_confirmation_active());
+    }
+}
+
+#[test]
+fn disabled_quit_confirmation_exits_immediately() {
+    let mut app = quit_test_app();
+    app.confirm_quit = false;
+
+    app.request_quit();
+
+    assert!(app.should_quit);
+    assert!(!app.quit_confirmation_active());
+}
+
+#[test]
+fn command_palette_lists_and_opens_pickers() {
+    let mut app = quit_test_app();
+    app.enable_review_mode();
+    app.start_command_palette();
+    let labels = app
+        .command_palette_filtered_entries()
+        .into_iter()
+        .map(|entry| entry.label)
+        .collect::<Vec<_>>();
+
+    assert!(labels.iter().any(|label| label == "Files..."));
+    assert!(labels.iter().any(|label| label == "Comments..."));
+    assert!(labels.iter().any(|label| label == "Themes..."));
+    assert!(labels.iter().any(|label| label == "History..."));
+    assert!(labels.iter().any(|label| label == "Toggle step mode"));
+    assert!(labels.iter().any(|label| label == "Cycle view modes"));
+    assert!(labels.iter().any(|label| label == "Pull request comments"));
+
+    app.clear_command_palette_text();
+    for ch in "Files...".chars() {
+        app.push_command_palette_char(ch);
+    }
+    app.apply_command_palette_selection();
+    assert!(app.file_search_active());
+}
+
+#[test]
+fn comment_picker_cursor_blinks() {
+    let mut app = quit_test_app();
+    app.enable_review_mode();
+    app.start_comment_picker();
+    app.file_filter_cursor_visible = true;
+    app.file_filter_cursor_last_blink = Instant::now() - Duration::from_millis(500);
+
+    assert!(app.tick());
+    assert!(!app.file_filter_cursor_visible);
+}
+
+#[test]
+fn expandable_folds_preserve_step_targets_and_work_without_stepping() {
+    let _guard = DiffSettingsGuard::default();
+    let old = (1..=60)
+        .map(|line| format!("line {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut new_lines = old.lines().map(str::to_string).collect::<Vec<_>>();
+    new_lines[29] = "changed line".to_string();
+    let new = new_lines.join("\n");
+    let make_diff = || {
+        MultiFileDiff::from_file_pair(
+            "fold.txt".into(),
+            "fold.txt".into(),
+            format!("{old}\n"),
+            format!("{new}\n"),
+        )
+    };
+
+    let mut app = App::new(make_diff(), ViewMode::UnifiedPane, 0, false, None);
+    app.next_step();
+    let folded = app.current_view_with_frame(AnimationFrame::Idle);
+    assert_eq!(folded.iter().filter(|line| is_fold_line(line)).count(), 2);
+    let active = folded
+        .iter()
+        .position(|line| line.is_primary_active || line.is_active)
+        .unwrap();
+    assert!(folded
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| is_fold_line(line))
+        .all(|(index, _)| index.abs_diff(active) >= 4));
+    app.start_search();
+    for ch in "lines".chars() {
+        app.push_search_char(ch);
+    }
+    app.search_next();
+    assert_eq!(app.search_target(), None);
+    app.clear_search();
+    let state = app.multi_diff.current_navigator().state();
+    let target = (state.current_step, state.current_hunk, state.total_steps);
+
+    assert!(app.expand_all_context_folds());
+    let state = app.multi_diff.current_navigator().state();
+    assert_eq!(
+        (state.current_step, state.current_hunk, state.total_steps),
+        target
+    );
+    assert!(app
+        .current_view_with_frame(AnimationFrame::Idle)
+        .iter()
+        .all(|line| !is_fold_line(line)));
+
+    app.toggle_fold_context();
+    app.toggle_fold_context();
+    assert_eq!(app.fold_context, FoldContextMode::Expandable);
+    assert_eq!(
+        app.current_view_with_frame(AnimationFrame::Idle)
+            .iter()
+            .filter(|line| is_fold_line(line))
+            .count(),
+        2
+    );
+
+    let mut no_step = App::new(make_diff(), ViewMode::UnifiedPane, 0, false, None);
+    no_step.toggle_stepping();
+    assert_eq!(
+        no_step
+            .current_view_with_frame(AnimationFrame::Idle)
+            .iter()
+            .filter(|line| is_fold_line(line))
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn fold_context_scope_hints_are_cached_and_use_innermost_definition() {
+    let mut lines = vec!["fn outer() {".to_string()];
+    lines.extend((0..12).map(|idx| format!("    let outer_{idx} = {idx};")));
+    lines.push("    fn inner() {".to_string());
+    lines.extend((0..40).map(|idx| format!("        let inner_{idx} = {idx};")));
+    lines.push("    }".to_string());
+    lines.extend((0..12).map(|idx| format!("    let tail_{idx} = {idx};")));
+    lines.push("}".to_string());
+    let old = format!("{}\n", lines.join("\n"));
+    lines[33] = "        let inner_19 = 999;".to_string();
+    let new = format!("{}\n", lines.join("\n"));
+    let diff = MultiFileDiff::from_file_pair("scope.rs".into(), "scope.rs".into(), old, new);
+    let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+    app.next_step();
+
+    let _ = app.current_view_with_frame(AnimationFrame::Idle);
+    let hints = app
+        .fold_context_regions
+        .iter()
+        .filter_map(|region| region.scope_hint.as_deref())
+        .collect::<Vec<_>>();
+    assert!(hints.contains(&"fn outer() {"));
+    assert!(hints.contains(&"fn inner() {"));
+    app.fold_scope_caches[0].as_mut().unwrap()[0].definition = "cached_scope".to_string();
+
+    app.invalidate_fold_context_view();
+    let _ = app.current_view_with_frame(AnimationFrame::Idle);
+    assert_eq!(
+        app.fold_scope_caches[0].as_ref().unwrap()[0].definition,
+        "cached_scope"
+    );
+
+    app.rebuild_current_syntax_cache_after_reload();
+    assert!(app.fold_scope_caches[0].is_none());
+}
+
+#[test]
+fn fold_context_defaults_on_and_toggles_between_two_states() {
+    let mut app = TestApp::new_default(|| {
+        App::new(
+            MultiFileDiff::from_file_pair(
+                "fold.txt".into(),
+                "fold.txt".into(),
+                "old\n".to_string(),
+                "new\n".to_string(),
+            ),
+            ViewMode::UnifiedPane,
+            0,
+            false,
+            None,
+        )
+    });
+    assert_eq!(app.fold_context, FoldContextMode::Expandable);
+    app.toggle_fold_context();
+    assert_eq!(app.fold_context, FoldContextMode::Off);
+    app.toggle_fold_context();
+    assert_eq!(app.fold_context, FoldContextMode::Expandable);
+}
+
 #[test]
 fn diff_scrollbar_thumb_tracks_scroll_offset() {
     assert_eq!(diff_scrollbar_thumb(100, 10, 20, 0), Some((0, 2)));
@@ -220,14 +460,20 @@ fn selecting_file_discards_review_editor() {
             hunk_id: None,
             display_idx_hint: Some(0),
             anchor_key: "line|a.txt|new|1".to_string(),
+            snapshot: None,
         },
         text: "draft".to_string(),
         cursor: 5,
+        reply: None,
     });
 
+    app.review_reply_prefix = true;
+    app.review_overflow_prefix = true;
     app.select_file(1);
 
     assert!(!app.review_editor_active());
+    assert!(!app.review_reply_prefix);
+    assert!(!app.review_overflow_prefix);
 }
 
 #[test]
@@ -500,6 +746,19 @@ fn make_large_app(lines: usize, change_line: usize) -> App {
     app
 }
 
+#[test]
+fn goto_line_keeps_cursor_on_target_when_centered() {
+    let mut app = make_large_app(120, 60);
+    app.last_viewport_height = 20;
+
+    app.goto_line_number(61);
+
+    let cursor = app.multi_diff.current_navigator().state().cursor_change;
+    let view = app.current_view_with_frame(AnimationFrame::Idle);
+    let cursor_line = cursor.and_then(|id| view.iter().find(|line| line.change_id == id));
+    assert_eq!(cursor_line.and_then(|line| line.new_line), Some(61));
+}
+
 fn make_large_step_app(lines: usize, change_lines: &[usize]) -> App {
     let old_lines: Vec<String> = (0..lines).map(|i| format!("line{}", i)).collect();
     let mut new_lines = old_lines.clone();
@@ -695,7 +954,9 @@ fn topbar_files(app: &App) -> Vec<usize> {
         .iter()
         .filter_map(|tab| match tab.content {
             TopbarTabContent::File(index) => Some(index),
-            TopbarTabContent::Help | TopbarTabContent::PrComments => None,
+            TopbarTabContent::Help
+            | TopbarTabContent::PrComments
+            | TopbarTabContent::OutdatedComments => None,
         })
         .collect()
 }
@@ -1482,6 +1743,7 @@ fn test_no_step_cursor_stable_through_file_cycles() {
 fn test_windowed_view_tracks_scroll_offset_in_no_step_large_file() {
     let _guard = DiffSettingsGuard::new(64);
     let mut app = make_large_app(600, 320);
+    app.set_fold_context_mode(FoldContextMode::Off);
     app.last_viewport_height = 25;
     app.scroll_offset = 250;
 
@@ -1501,6 +1763,7 @@ fn test_step_jump_waits_for_view_rebuild_before_scroll() {
     let _guard = DiffSettingsGuard::new(64);
     let change_lines: Vec<usize> = (0..600).collect();
     let mut app = make_large_step_app(600, &change_lines);
+    app.set_fold_context_mode(FoldContextMode::Off);
     app.view_mode = ViewMode::Split;
     app.split_align_lines = true;
     app.last_viewport_height = 25;
@@ -1510,13 +1773,13 @@ fn test_step_jump_waits_for_view_rebuild_before_scroll() {
     app.goto_last_step();
     assert!(app.needs_scroll_to_active);
 
-    app.ensure_active_visible_if_needed(app.last_viewport_height);
+    app.ensure_active_visible_if_needed(app.last_viewport_height, 80);
     assert!(
         app.needs_scroll_to_active,
         "deferred view should keep active scroll pending"
     );
 
-    app.ensure_active_visible_if_needed(app.last_viewport_height);
+    app.ensure_active_visible_if_needed(app.last_viewport_height, 80);
     assert!(!app.needs_scroll_to_active);
     let state = app.multi_diff.current_navigator().state().clone();
     let window_start = app.view_window_start();
@@ -1539,6 +1802,7 @@ fn test_step_jump_waits_for_view_rebuild_before_scroll() {
 fn test_no_step_end_scroll_does_not_shift_window() {
     let _guard = DiffSettingsGuard::new(64);
     let mut app = make_large_app(600, 320);
+    app.set_fold_context_mode(FoldContextMode::Off);
     app.last_viewport_height = 72;
     let total_len = app.multi_diff.current_navigator().diff().changes.len();
     let max = max_scroll(total_len, app.last_viewport_height, app.allow_overscroll());
@@ -1559,6 +1823,7 @@ fn test_no_step_end_scroll_does_not_shift_window() {
 fn test_no_step_goto_end_preserves_hunk_scope() {
     let _guard = DiffSettingsGuard::new(64);
     let mut app = make_large_app(600, 599);
+    app.set_fold_context_mode(FoldContextMode::Off);
     app.view_mode = ViewMode::Split;
     app.split_align_lines = true;
     app.last_viewport_height = 25;
@@ -1580,6 +1845,7 @@ fn test_no_step_goto_end_preserves_hunk_scope() {
 fn test_no_step_goto_end_updates_hunk_scope_after_scroll() {
     let _guard = DiffSettingsGuard::new(64);
     let mut app = make_large_step_app(600, &[10, 590]);
+    app.set_fold_context_mode(FoldContextMode::Off);
     app.stepping = false;
     app.no_step_auto_jump_on_enter = false;
     app.enter_no_step_mode();
@@ -1599,6 +1865,7 @@ fn test_no_step_goto_end_updates_hunk_scope_after_scroll() {
 fn test_no_step_hunk_scope_shows_extent_in_windowed_view() {
     let _guard = DiffSettingsGuard::new(64);
     let mut app = make_large_app(600, 320);
+    app.set_fold_context_mode(FoldContextMode::Off);
     app.last_viewport_height = 25;
 
     app.next_hunk_scroll();
@@ -1615,6 +1882,7 @@ fn test_no_step_hunk_scope_shows_extent_in_windowed_view() {
 fn test_step_hunk_nav_clears_view_build_defer_in_large_file() {
     let _guard = DiffSettingsGuard::new(64);
     let mut app = make_large_step_app(600, &[50, 450]);
+    app.set_fold_context_mode(FoldContextMode::Off);
     app.last_viewport_height = 25;
 
     let _ = app.current_view_with_frame(AnimationFrame::Idle);
@@ -1814,6 +2082,9 @@ fn test_tick_watch_refreshes_changed_files_on_disk() {
     );
     let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
     assert!(app.watch);
+    assert!(app.ensure_syntax_cache().is_some());
+    let _ = app.current_view_with_frame(AnimationFrame::Idle);
+    assert!(app.view_cache.is_some());
 
     std::fs::write(&path, "new changed on disk\n").expect("update test file");
     app.last_fs_check = Instant::now() - Duration::from_secs(2);
@@ -1825,6 +2096,11 @@ fn test_tick_watch_refreshes_changed_files_on_disk() {
         app.multi_diff.file_contents(0).map(|(_, new)| new),
         Some("new changed on disk\n")
     );
+    assert!(app.syntax_caches[0].is_some());
+    assert!(app.view_cache.is_none());
+    assert!(app
+        .syntax_spans_for_line(crate::syntax::SyntaxSide::New, Some(1))
+        .is_some());
 
     let _ = std::fs::remove_file(path);
 }
@@ -1863,6 +2139,8 @@ fn test_tick_watch_adds_new_untracked_file() {
         app.multi_diff.file_contents(0).map(|(_, new)| new),
         Some("new\n")
     );
+    assert!(app.syntax_caches[0].is_some());
+    assert!(app.view_cache.is_none());
 
     let _ = std::fs::remove_dir_all(repo);
 }

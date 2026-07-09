@@ -5,6 +5,7 @@ mod avatars;
 mod blame;
 mod color;
 mod config;
+mod control;
 mod csv_preview;
 mod dashboard;
 mod input;
@@ -31,8 +32,9 @@ use crate::toasts::ToastEvent;
 use anyhow::{anyhow, Context, Result};
 use app::{
     review::{
-        ReviewAuthor, ReviewComment, ReviewProviderComment, ReviewRange, ReviewRemoteOption,
-        ReviewSide, ReviewSyncAction, ReviewTargetKind, ReviewTargetMetadata,
+        ReviewAuthor, ReviewComment, ReviewCommentFilter, ReviewProviderComment,
+        ReviewPullRequestTarget, ReviewRange, ReviewRemoteOption, ReviewSide, ReviewSyncAction,
+        ReviewTargetKind, ReviewTargetMetadata,
     },
     App, ViewMode,
 };
@@ -40,7 +42,8 @@ use clap::{Parser, Subcommand, ValueEnum};
 use crossterm::{
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
-        KeyModifiers, MouseButton, MouseEventKind,
+        KeyModifiers, KeyboardEnhancementFlags, MouseButton, MouseEventKind,
+        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -68,6 +71,7 @@ const MAX_EXIT_INPUT_DRAIN_EVENTS: usize = 65_536;
 const EXIT_INPUT_DRAIN: Duration = Duration::from_millis(100);
 const MOUSE_SCROLL_FRAME: Duration = Duration::from_millis(16);
 const OYO_CODE_REVIEW_SKILL: &str = include_str!("../docs/SKILL.md");
+const OYO_CONTROL_SKILL: &str = include_str!("../docs/CONTROL.md");
 
 type TuiBackend = CrosstermBackend<Box<dyn io::Write>>;
 type TuiTerminal = Terminal<TuiBackend>;
@@ -115,6 +119,10 @@ struct Args {
     #[arg(short, long, default_value = "200")]
     speed: u64,
 
+    /// Name for this live TUI control session
+    #[arg(long)]
+    session: Option<String>,
+
     /// Auto-play through all changes
     #[arg(long)]
     autoplay: bool,
@@ -139,7 +147,7 @@ struct Args {
     #[arg(long, value_name = "FILE")]
     dump_scopes: Option<PathBuf>,
 
-    /// Enable step-through diff view
+    /// Enable step mode
     #[arg(long, global = true, conflicts_with = "no_step")]
     step: bool,
 
@@ -201,6 +209,15 @@ enum Command {
         #[command(subcommand)]
         command: Option<ReviewCommand>,
     },
+    /// Control a running Oyo TUI
+    #[command(visible_alias = "c")]
+    Control {
+        /// Name for this live TUI control session
+        #[arg(short = 's', long, global = true)]
+        session: Option<String>,
+        #[command(subcommand)]
+        command: Option<CtlCommand>,
+    },
     /// Show Oyo agent skill helpers
     Skill {
         #[command(subcommand)]
@@ -208,13 +225,221 @@ enum Command {
     },
 }
 
-#[derive(Debug, Subcommand)]
-enum SkillCommand {
-    /// Print the local Oyo code review skill path
-    Path,
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum SkillName {
+    Review,
+    Control,
+}
+
+impl SkillName {
+    fn directory(self) -> &'static str {
+        match self {
+            SkillName::Review => "oyo-code-review",
+            SkillName::Control => "oyo-tui-control",
+        }
+    }
+
+    fn content(self) -> &'static str {
+        match self {
+            SkillName::Review => OYO_CODE_REVIEW_SKILL,
+            SkillName::Control => OYO_CONTROL_SKILL,
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
+enum SkillCommand {
+    /// Print a local Oyo skill path
+    Path {
+        /// Skill to print
+        #[arg(value_enum, default_value_t = SkillName::Review)]
+        skill: SkillName,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum CtlCommand {
+    /// List running TUI control sessions
+    List {
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show session metadata
+    Get {
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Rename a TUI control session
+    Rename {
+        /// New session name
+        name: String,
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show what the TUI is displaying now
+    Where {
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show the loaded diff structure
+    Diff {
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+        /// Include raw patch text when supported
+        #[arg(long)]
+        include_patch: bool,
+    },
+    /// Move forward
+    Next {
+        /// Repeat count
+        #[arg(long, default_value_t = 1)]
+        count: usize,
+    },
+    /// Move backward
+    Prev {
+        /// Repeat count
+        #[arg(long, default_value_t = 1)]
+        count: usize,
+    },
+    /// Move between hunks, or jump within the current hunk
+    Hunk {
+        /// next, prev, start or end
+        mode: String,
+        /// Repeat count for next/prev
+        #[arg(long, default_value_t = 1)]
+        count: usize,
+    },
+    /// Select a file, or pass next/prev
+    File {
+        /// File path, next or prev
+        target: Option<String>,
+        /// Open in a topbar tab
+        #[arg(long)]
+        new_tab: bool,
+        /// Repeat count for next/prev
+        #[arg(long, default_value_t = 1)]
+        count: usize,
+    },
+    /// Jump to a file, line, hunk or step
+    Goto {
+        /// File path
+        #[arg(long)]
+        file: Option<String>,
+        /// New-side line number
+        #[arg(long, conflicts_with_all = ["old_line", "hunk", "step_number", "start", "end"])]
+        new_line: Option<usize>,
+        /// Old-side line number
+        #[arg(long, conflicts_with_all = ["new_line", "hunk", "step_number", "start", "end"])]
+        old_line: Option<usize>,
+        /// Hunk number
+        #[arg(long, conflicts_with_all = ["new_line", "old_line", "step_number", "start", "end"])]
+        hunk: Option<usize>,
+        /// Step number
+        #[arg(long = "step-number", conflicts_with_all = ["new_line", "old_line", "hunk", "start", "end"])]
+        step_number: Option<usize>,
+        /// Jump to start
+        #[arg(long, conflicts_with_all = ["new_line", "old_line", "hunk", "step_number", "end"])]
+        start: bool,
+        /// Jump to end
+        #[arg(long, conflicts_with_all = ["new_line", "old_line", "hunk", "step_number", "start"])]
+        end: bool,
+    },
+    /// Change the loaded review target
+    Target {
+        /// Commit, branch, bookmark, change ID, revset or range
+        target: Option<String>,
+        /// Load working tree changes
+        #[arg(long, conflicts_with_all = ["staged", "target"])]
+        worktree: bool,
+        /// Load staged changes
+        #[arg(long, conflicts_with_all = ["worktree", "target"])]
+        staged: bool,
+    },
+    /// Set or cycle view mode
+    View {
+        /// unified, split, evolution, blame, preview, next or prev
+        mode: String,
+    },
+    /// Set step mode
+    Step {
+        /// on, off or toggle
+        mode: String,
+    },
+    /// Set watch mode
+    Watch {
+        /// on, off or toggle
+        mode: String,
+    },
+    /// Change animation speed
+    Speed {
+        /// increase or decrease
+        mode: String,
+    },
+    /// Set animation mode
+    Animation {
+        /// on, off or toggle
+        mode: String,
+    },
+    /// Set line wrap mode
+    Wrap {
+        /// on, off or toggle
+        mode: String,
+    },
+    /// Set syntax highlighting mode
+    Syntax {
+        /// on, off or toggle
+        mode: String,
+    },
+    /// Set zen mode
+    Zen {
+        /// on, off or toggle
+        mode: String,
+    },
+    /// Control the sidebar
+    Sidebar {
+        /// files, comments, close, toggle or focus
+        mode: String,
+    },
+    /// Open a topbar tab
+    Tab {
+        /// help, pr-comments, close or file
+        kind: String,
+        /// File path for `file`
+        file: Option<String>,
+    },
+    /// Play visible steps with a delay
+    Play {
+        /// Start step: current, start, end or a 1-based step number
+        #[arg(long)]
+        from: Option<String>,
+        /// End step: current, start, end or a 1-based step number
+        #[arg(long)]
+        to: Option<String>,
+        /// Delay between visible steps, for example 700ms or 1s
+        #[arg(long, default_value = "700ms")]
+        delay: String,
+    },
+    /// Stop autoplay if it is running
+    Pause,
+    /// Cancel queued control work
+    Cancel,
+    /// Run a named TUI action
+    Action {
+        /// Action ID, for example normal.step_down
+        id: String,
+        /// Repeat count
+        #[arg(long, default_value_t = 1)]
+        count: usize,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+#[allow(clippy::large_enum_variant)]
 enum ReviewCommand {
     /// Show saved reviews for this workspace
     Log {
@@ -226,6 +451,29 @@ enum ReviewCommand {
     Status {
         /// Commit, branch, bookmark, change ID, revset or range
         revision: Option<String>,
+        /// Review target
+        #[arg(
+            short = 't',
+            long = "target",
+            value_name = "REV",
+            conflicts_with = "revision"
+        )]
+        target: Option<String>,
+        /// Only show unresolved comments
+        #[arg(long)]
+        unresolved: bool,
+        /// Only show outdated comments
+        #[arg(long, conflicts_with = "no_outdated")]
+        outdated: bool,
+        /// Hide outdated comments
+        #[arg(long = "no-outdated")]
+        no_outdated: bool,
+        /// Only show comments with this ID, repeatable
+        #[arg(long = "id")]
+        ids: Vec<u64>,
+        /// Only show comments changed at or after this Unix timestamp
+        #[arg(long)]
+        since: Option<u64>,
         /// Print JSON
         #[arg(long)]
         json: bool,
@@ -233,7 +481,36 @@ enum ReviewCommand {
     /// Show and manage comments
     Comment {
         /// Saved review ID, commit, branch, bookmark, change ID, revset or range
+        revision: Option<String>,
+        /// Review target
+        #[arg(
+            short = 't',
+            long = "target",
+            value_name = "REV",
+            conflicts_with = "revision"
+        )]
         target: Option<String>,
+        /// Only show unresolved comments
+        #[arg(long)]
+        unresolved: bool,
+        /// Only show outdated comments
+        #[arg(long, conflicts_with = "no_outdated")]
+        outdated: bool,
+        /// Hide outdated comments
+        #[arg(long = "no-outdated")]
+        no_outdated: bool,
+        /// Filter by author name, email or username
+        #[arg(long)]
+        author: Option<String>,
+        /// Filter by author type: human, agent or bot
+        #[arg(long)]
+        author_type: Option<String>,
+        /// Only show comments with this ID, repeatable
+        #[arg(long = "id")]
+        ids: Vec<u64>,
+        /// Only show comments changed at or after this Unix timestamp
+        #[arg(long)]
+        since: Option<u64>,
         /// Print JSON
         #[arg(long)]
         json: bool,
@@ -244,6 +521,14 @@ enum ReviewCommand {
     Export {
         /// Commit, branch, bookmark, change ID, revset or range
         revision: Option<String>,
+        /// Review target
+        #[arg(
+            short = 't',
+            long = "target",
+            value_name = "REV",
+            conflicts_with = "revision"
+        )]
+        target: Option<String>,
         /// Output format
         #[arg(long, value_enum, default_value_t = ReviewExportFormat::Markdown)]
         format: ReviewExportFormat,
@@ -256,6 +541,9 @@ enum ReviewCommand {
         /// Optional target followed by optional remote
         #[arg(num_args = 0..=2)]
         args: Vec<String>,
+        /// Review target
+        #[arg(short = 't', long = "target", value_name = "REV")]
+        target: Option<String>,
         /// Print JSON
         #[arg(long)]
         json: bool,
@@ -265,6 +553,9 @@ enum ReviewCommand {
         /// Optional target followed by optional remote
         #[arg(num_args = 0..=2)]
         args: Vec<String>,
+        /// Review target
+        #[arg(short = 't', long = "target", value_name = "REV")]
+        target: Option<String>,
         /// Print JSON
         #[arg(long)]
         json: bool,
@@ -273,6 +564,14 @@ enum ReviewCommand {
     Abandon {
         /// Commit, branch, bookmark, change ID, revset or range
         revision: Option<String>,
+        /// Review target
+        #[arg(
+            short = 't',
+            long = "target",
+            value_name = "REV",
+            conflicts_with = "revision"
+        )]
+        target: Option<String>,
         /// Print JSON
         #[arg(long)]
         json: bool,
@@ -285,6 +584,14 @@ enum ReviewCommentCommand {
     New {
         /// Commit, branch, bookmark, change ID, revset or range
         revision: Option<String>,
+        /// Review target
+        #[arg(
+            short = 't',
+            long = "target",
+            value_name = "REV",
+            conflicts_with = "revision"
+        )]
+        target: Option<String>,
         /// Changed file path
         #[arg(long)]
         file: String,
@@ -321,7 +628,25 @@ enum ReviewCommentCommand {
         /// Optional revision followed by a comment ID, or just a comment ID
         #[arg(num_args = 1..=2)]
         args: Vec<String>,
+        /// Review target
+        #[arg(short = 't', long = "target", value_name = "REV")]
+        target: Option<String>,
         /// Comment body
+        #[arg(long)]
+        body: String,
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Reply to a pulled review-thread comment
+    Reply {
+        /// Optional revision followed by a parent comment ID, or just a parent comment ID
+        #[arg(num_args = 1..=2)]
+        args: Vec<String>,
+        /// Review target
+        #[arg(short = 't', long = "target", value_name = "REV")]
+        target: Option<String>,
+        /// Reply body
         #[arg(long)]
         body: String,
         /// Print JSON
@@ -333,9 +658,37 @@ enum ReviewCommentCommand {
         /// Optional revision followed by a comment ID, or just a comment ID
         #[arg(num_args = 1..=2)]
         args: Vec<String>,
+        /// Review target
+        #[arg(short = 't', long = "target", value_name = "REV")]
+        target: Option<String>,
         /// Confirm removal
         #[arg(long)]
         yes: bool,
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Mark a comment resolved
+    Resolve {
+        /// Optional revision followed by a comment ID, or just a comment ID
+        #[arg(num_args = 1..=2)]
+        args: Vec<String>,
+        /// Review target
+        #[arg(short = 't', long = "target", value_name = "REV")]
+        target: Option<String>,
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Mark a comment unresolved
+    #[command(name = "unresolve", visible_alias = "reopen")]
+    Reopen {
+        /// Optional revision followed by a comment ID, or just a comment ID
+        #[arg(num_args = 1..=2)]
+        args: Vec<String>,
+        /// Review target
+        #[arg(short = 't', long = "target", value_name = "REV")]
+        target: Option<String>,
         /// Print JSON
         #[arg(long)]
         json: bool,
@@ -345,6 +698,9 @@ enum ReviewCommentCommand {
         /// Optional revision followed by a JSON file, or just a JSON file
         #[arg(num_args = 1..=2)]
         args: Vec<String>,
+        /// Review target
+        #[arg(short = 't', long = "target", value_name = "REV")]
+        target: Option<String>,
         /// Print JSON
         #[arg(long)]
         json: bool,
@@ -392,6 +748,7 @@ impl From<CliViewMode> for ViewMode {
 }
 
 /// Represents input mode detected from arguments
+#[derive(Debug)]
 enum InputMode {
     /// Git external diff: path old-file old-hex old-mode new-file new-hex new-mode
     GitExternal {
@@ -418,10 +775,11 @@ enum InputMode {
     None,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug)]
 enum AppExit {
     Quit,
     OpenDashboard,
+    Reload(InputMode, u64),
 }
 
 struct BuiltDiff {
@@ -664,6 +1022,7 @@ fn directory_scan_options(
 fn install_panic_terminal_restore() {
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
+        let _ = execute!(io::stderr(), PopKeyboardEnhancementFlags);
         let _ = execute!(io::stderr(), DisableMouseCapture);
         drain_queued_input_events();
         let _ = disable_raw_mode();
@@ -683,6 +1042,10 @@ fn setup_terminal() -> Result<TuiTerminal> {
         }
     };
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    let _ = execute!(
+        stdout,
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+    );
     let backend = CrosstermBackend::new(stdout);
     let terminal = Terminal::new(backend)?;
     Ok(terminal)
@@ -977,6 +1340,7 @@ fn drain_queued_input_events() {
 }
 
 fn restore_terminal(terminal: &mut TuiTerminal) -> Result<()> {
+    let _ = execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags);
     execute!(terminal.backend_mut(), DisableMouseCapture)?;
     drain_queued_input_events();
     disable_raw_mode()?;
@@ -996,6 +1360,10 @@ fn resume_terminal_after_child(terminal: &mut TuiTerminal) -> Result<()> {
         EnterAlternateScreen,
         EnableMouseCapture
     )?;
+    let _ = execute!(
+        terminal.backend_mut(),
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+    );
     terminal.clear()?;
     Ok(())
 }
@@ -1070,8 +1438,10 @@ fn apply_config_to_app(app: &mut App, config: &config::Config, args: &Args, ligh
     app.auto_center = config.ui.auto_center;
     app.watch = config.ui.watch;
     app.overscroll = config.ui.overscroll;
+    app.confirm_quit = config.ui.confirm_quit;
     app.topbar = config.ui.topbar;
     app.line_wrap = config.ui.line_wrap;
+    app.set_fold_context_lines(config.ui.fold_context_lines);
     app.set_fold_context_mode(config.ui.fold_context);
     app.scrollbar_visible = config.ui.scrollbar;
     app.strikethrough_deletions = config.ui.strikethrough_deletions;
@@ -1149,18 +1519,18 @@ fn default_review_base_dir() -> PathBuf {
         .join("reviews")
 }
 
-fn oyo_skill_path() -> Result<PathBuf> {
+fn oyo_skill_path(skill: SkillName) -> Result<PathBuf> {
     let path = dirs::data_dir()
         .unwrap_or_else(std::env::temp_dir)
         .join("oyo")
         .join("skills")
-        .join("oyo-code-review")
+        .join(skill.directory())
         .join("SKILL.md");
     if path.parent().is_some_and(|parent| !parent.exists()) {
         fs::create_dir_all(path.parent().unwrap()).context("Failed to create skill directory")?;
     }
-    if fs::read_to_string(&path).ok().as_deref() != Some(OYO_CODE_REVIEW_SKILL) {
-        fs::write(&path, OYO_CODE_REVIEW_SKILL).context("Failed to write Oyo skill")?;
+    if fs::read_to_string(&path).ok().as_deref() != Some(skill.content()) {
+        fs::write(&path, skill.content()).context("Failed to write Oyo skill")?;
     }
     Ok(path)
 }
@@ -1303,6 +1673,9 @@ fn github_avatar_url(username: &str) -> Option<String> {
 }
 
 fn review_author_for_workspace(root: Option<&Path>) -> Option<ReviewAuthor> {
+    if let Ok(Some(author)) = review_author_from_env() {
+        return Some(author);
+    }
     let root = root
         .map(Path::to_path_buf)
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
@@ -1364,7 +1737,59 @@ fn review_author_type(value: Option<&str>) -> Result<Option<String>> {
     }
 }
 
+fn env_text(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn env_author_usernames() -> Vec<String> {
+    env_text("OYO_REVIEW_AUTHOR_USERNAME")
+        .map(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn review_author_from_env() -> Result<Option<ReviewAuthor>> {
+    let name = env_text("OYO_REVIEW_AUTHOR_NAME");
+    let email = env_text("OYO_REVIEW_AUTHOR_EMAIL");
+    let author_type = env_text("OYO_REVIEW_AUTHOR_TYPE");
+    let usernames = env_author_usernames();
+    review_author_from_values(
+        name.as_deref(),
+        email.as_deref(),
+        author_type.as_deref(),
+        &usernames,
+    )
+}
+
 fn review_author_from_cli(
+    name: Option<&str>,
+    email: Option<&str>,
+    author_type: Option<&str>,
+    username_values: &[String],
+) -> Result<Option<ReviewAuthor>> {
+    let env_name = env_text("OYO_REVIEW_AUTHOR_NAME");
+    let env_email = env_text("OYO_REVIEW_AUTHOR_EMAIL");
+    let env_author_type = env_text("OYO_REVIEW_AUTHOR_TYPE");
+    let mut usernames = env_author_usernames();
+    usernames.extend(username_values.iter().cloned());
+    review_author_from_values(
+        name.or(env_name.as_deref()),
+        email.or(env_email.as_deref()),
+        author_type.or(env_author_type.as_deref()),
+        &usernames,
+    )
+}
+
+fn review_author_from_values(
     name: Option<&str>,
     email: Option<&str>,
     author_type: Option<&str>,
@@ -1661,6 +2086,14 @@ fn default_jj_review_label() -> String {
     }
 }
 
+fn input_mode_for_control_target(target: control::ControlTarget, args: &Args) -> Result<InputMode> {
+    match target {
+        control::ControlTarget::Revision(target) => review_input_mode(Some(&target), args),
+        control::ControlTarget::Worktree => Ok(InputMode::GitUncommitted),
+        control::ControlTarget::Staged => Ok(InputMode::GitStaged),
+    }
+}
+
 fn review_input_mode(revision: Option<&str>, args: &Args) -> Result<InputMode> {
     let cwd = std::env::current_dir().unwrap_or_default();
     if let Some(revision) = revision {
@@ -1674,6 +2107,9 @@ fn review_input_mode(revision: Option<&str>, args: &Args) -> Result<InputMode> {
             return Ok(InputMode::JjRevision { rev });
         }
         if oyo_core::git::is_git_repo(&cwd) {
+            if revision == "@" {
+                return Ok(InputMode::GitUncommitted);
+            }
             if let Some(input_mode) = git_ref_input_mode(&cwd, revision) {
                 return Ok(input_mode);
             }
@@ -1910,7 +2346,7 @@ fn configure_review_state_for_app(
             }
         }
     }
-    if app.review_comment_count() == 0 {
+    if app.review_comment_count() == 0 && should_load_saved_review_fallback(input_mode) {
         if let Some(fingerprint) = saved_review_fingerprint_for_app_target(
             config,
             args,
@@ -1922,6 +2358,10 @@ fn configure_review_state_for_app(
         }
     }
     Ok(())
+}
+
+fn should_load_saved_review_fallback(input_mode: &InputMode) -> bool {
+    !matches!(input_mode, InputMode::JjRevision { rev } if rev == "@")
 }
 
 fn review_app_for_target(
@@ -1957,48 +2397,130 @@ fn path_json(path: Option<PathBuf>) -> serde_json::Value {
         .unwrap_or(serde_json::Value::Null)
 }
 
-fn print_review_status(app: &App, json: bool, target: &str) -> Result<()> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReviewTargetSummary {
+    review_key: String,
+    label: String,
+    pr: Option<u64>,
+}
+
+fn review_target_summary(app: &App) -> ReviewTargetSummary {
+    let metadata = app.review_target_metadata();
+    let pr = metadata.and_then(|target| target.pr_number);
+    let label = match (metadata, pr) {
+        (Some(target), Some(number)) => target
+            .branch
+            .as_deref()
+            .or(target.git_head_ref.as_deref())
+            .map(|branch| format!("PR #{number} ({branch})"))
+            .unwrap_or_else(|| format!("PR #{number}")),
+        (Some(target), None) if target.label == "@" => "working tree".to_string(),
+        (Some(target), None) if target.label == "staged" => "staged changes".to_string(),
+        (Some(target), None) => target.label.clone(),
+        (None, None) => "current target".to_string(),
+        (None, Some(_)) => unreachable!(),
+    };
+    ReviewTargetSummary {
+        review_key: app.review_storage_key().to_string(),
+        label,
+        pr,
+    }
+}
+
+fn review_json_with_target(app: &App, mut value: serde_json::Value) -> serde_json::Value {
+    let target = review_target_summary(app);
+    if let Some(object) = value.as_object_mut() {
+        object.insert("reviewKey".to_string(), target.review_key.into());
+        object.insert("target".to_string(), target.label.clone().into());
+        object.insert("label".to_string(), target.label.into());
+        object.insert("pr".to_string(), target.pr.into());
+    }
+    value
+}
+
+fn print_review_target_header(app: &App) {
+    let color = review_cli_color_enabled();
+    let label = review_target_summary(app).label;
+    println!("Reviewing: {}", review_cli_paint(color, "36", &label));
+}
+
+fn review_status_json_value(app: &App, filter: &ReviewCommentFilter) -> serde_json::Value {
     let paths = app.review_paths();
-    let rows = app.review_status_comment_rows();
+    let rows = app.review_status_comment_rows_filtered(filter);
+    let comments = rows
+        .iter()
+        .map(|row| {
+            let mut item = serde_json::json!({
+                "id": row.id,
+                "subject": row.subject,
+                "location": row.location,
+                "preview": row.preview,
+                "createdAt": row.created_at,
+                "updatedAt": row.updated_at,
+                "resolved": row.resolved,
+                "outdated": row.outdated,
+                "deleted": row.deleted,
+            });
+            if filter.since.is_some() {
+                item["changeType"] = serde_json::Value::String(
+                    if row.deleted {
+                        "removed"
+                    } else if row.created_at == row.updated_at {
+                        "added"
+                    } else {
+                        "updated"
+                    }
+                    .to_string(),
+                );
+            }
+            item
+        })
+        .collect::<Vec<_>>();
+    let comment_count = comments.len();
+    review_json_with_target(
+        app,
+        serde_json::json!({
+            "workspaceRoot": app.review_workspace_root().unwrap_or_default(),
+            "diffFingerprint": app.review_diff_fingerprint(),
+            "reviewDir": path_json(paths.review_dir),
+            "reviewDb": path_json(paths.db_file),
+            "commentCount": comment_count,
+            "comments": comments,
+        }),
+    )
+}
+
+fn ensure_review_filter_ids(app: &App, filter: &ReviewCommentFilter) -> Result<()> {
+    if let Some(id) = app.missing_review_filter_id(filter) {
+        anyhow::bail!("No comment matches id {id}.");
+    }
+    Ok(())
+}
+
+fn print_review_status(app: &App, json: bool, filter: &ReviewCommentFilter) -> Result<()> {
+    ensure_review_filter_ids(app, filter)?;
+    let rows = app.review_status_comment_rows_filtered(filter);
     if json {
-        let comments = rows
-            .iter()
-            .map(|(id, subject, location, preview)| {
-                serde_json::json!({
-                    "id": id,
-                    "subject": subject,
-                    "location": location,
-                    "preview": preview,
-                })
-            })
-            .collect::<Vec<_>>();
         println!(
             "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "workspaceRoot": app.review_workspace_root().unwrap_or_default(),
-                "target": target,
-                "diffFingerprint": app.review_diff_fingerprint(),
-                "reviewDir": path_json(paths.review_dir),
-                "reviewDb": path_json(paths.db_file),
-                "commentCount": app.review_comment_count(),
-                "comments": comments,
-            }))?
+            serde_json::to_string_pretty(&review_status_json_value(app, filter))?
         );
         return Ok(());
     }
     let color = review_cli_color_enabled();
+    print_review_target_header(app);
     if rows.is_empty() {
         println!("{}", review_cli_paint(color, "32", "No review comments."));
     } else {
         println!("Review comments:");
-        for (_id, subject, location, preview) in rows {
-            let subject = review_cli_paint(color, "36", &review_cli_truncate(&subject, 34));
-            let location = review_cli_paint(color, "2", &location);
-            let preview = review_cli_truncate(&preview, 72);
-            println!("{subject} {location}  {preview}");
+        for row in rows {
+            let id = review_cli_paint(color, "1;38;5;8", &format!("#{}", row.id));
+            let subject = review_cli_paint(color, "36", &review_cli_truncate(&row.subject, 34));
+            let location = review_cli_paint(color, "2", &row.location);
+            let preview = review_cli_truncate(&row.preview, 72);
+            println!("{id} {subject} {location}  {preview}");
         }
     }
-    println!("{}", review_cli_target_label(color, target));
     if app.review_session_has_changes() {
         println!("{}", review_cli_paint(color, "33", "local changes"));
     }
@@ -2049,52 +2571,6 @@ fn shortest_unique_prefix_len(value: &str, values: &[String]) -> usize {
         .unwrap_or(value.len())
 }
 
-fn jj_working_copy_label(color: bool) -> Option<String> {
-    let root = current_review_workspace().ok()?;
-    if !is_jj_repo(&root) {
-        return None;
-    }
-    let output = ProcessCommand::new("jj")
-        .arg("-R")
-        .arg(&root)
-        .arg("--no-pager")
-        .arg("--config")
-        .arg("signing.behavior=\"drop\"")
-        .arg("log")
-        .arg("--no-graph")
-        .arg("-r")
-        .arg("@")
-        .arg("-T")
-        .arg("change_id.shortest(8) ++ \" \" ++ commit_id.shortest(8) ++ if(description.first_line().len() == 0, \"\", \" \" ++ description.first_line()) ++ \"\\n\"")
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if value.is_empty() {
-        return None;
-    }
-    let mut parts = value.splitn(3, char::is_whitespace);
-    let change_id = parts.next().unwrap_or_default();
-    let commit_id = parts.next().unwrap_or_default();
-    let description = parts.next().unwrap_or_default();
-    let mut value = format!(
-        "{} {}",
-        review_cli_jj_id(color, change_id, "1;38;5;13"),
-        review_cli_jj_id(color, commit_id, "1;38;5;12")
-    );
-    if !description.trim().is_empty() {
-        value.push(' ');
-        value.push_str(description);
-    }
-    Some(format!(
-        "Working copy  ({}) : {}",
-        review_cli_paint(color, "1;32", "@"),
-        value
-    ))
-}
-
 fn review_cli_truncate(value: &str, max_chars: usize) -> String {
     if value.chars().count() <= max_chars {
         return value.to_string();
@@ -2122,25 +2598,6 @@ fn review_cli_target_value(color: bool, target: &str) -> String {
     review_cli_paint(color, "36", target)
 }
 
-fn review_cli_target_label(color: bool, target: &str) -> String {
-    if target == "@" {
-        if let Some(label) = jj_working_copy_label(color) {
-            return label;
-        }
-    }
-    if let Some(rest) = target.strip_prefix("@  ") {
-        return format!(
-            "Review target ({}) : {}",
-            review_cli_paint(color, "1;32", "@"),
-            review_cli_target_value(color, rest)
-        );
-    }
-    format!(
-        "Review target     : {}",
-        review_cli_target_value(color, target)
-    )
-}
-
 fn review_comment_count_label(count: usize) -> String {
     match count {
         0 => "0 comments".to_string(),
@@ -2159,7 +2616,7 @@ fn saved_review_fingerprint(
     }
     let current = review_app_for_target(config, args, None, false)
         .ok()
-        .map(|app| app.review_diff_fingerprint().to_string());
+        .map(|app| app.review_storage_key().to_string());
     let current_metadata = review_target_metadata(None, args);
     let mut matches = review_log_entries_for_scope(config, args)?
         .into_iter()
@@ -2255,7 +2712,7 @@ fn review_log_entries_for_scope(
     let current_mode = review_input_mode(None, args).ok();
     let current = review_app_for_target(config, args, None, false)
         .ok()
-        .map(|app| app.review_diff_fingerprint().to_string());
+        .map(|app| app.review_storage_key().to_string());
     let current_diff_only = matches!(
         current_mode,
         Some(InputMode::GitUncommitted | InputMode::GitStaged | InputMode::GitFile { .. })
@@ -2434,6 +2891,69 @@ fn load_jj_revset_snapshots_for_read(
     Ok(())
 }
 
+fn local_pr_review_revision(entries: &[serde_json::Value], branch: &str) -> Option<String> {
+    entries.iter().find_map(|entry| {
+        let metadata = review_log_entry_metadata(entry)?;
+        metadata.pr_number?;
+        let matches_branch = metadata.branch.as_deref() == Some(branch)
+            || metadata.git_head_ref.as_deref() == Some(branch);
+        if metadata.vcs != "git" || !matches_branch {
+            return None;
+        }
+        let base = metadata.git_base_commit.or(metadata.git_base_ref)?;
+        let head = metadata.git_head_ref.or(metadata.branch)?;
+        Some(format!("{base}...{head}"))
+    })
+}
+
+fn resolve_review_target(
+    config: &config::Config,
+    args: &Args,
+    explicit: Option<&str>,
+) -> Result<Option<String>> {
+    if let Some(target) = explicit {
+        return Ok(Some(target.to_string()));
+    }
+    if args.worktree || args.staged || args.range.is_some() {
+        return Ok(None);
+    }
+    let cwd = std::env::current_dir().unwrap_or_default();
+    if is_jj_repo(&cwd) || !oyo_core::git::is_git_repo(&cwd) {
+        return Ok(None);
+    }
+    let root = oyo_core::git::get_repo_root(&cwd)?;
+    let Some(branch) = oyo_core::git::get_current_branch(&root)
+        .ok()
+        .filter(|branch| branch != "HEAD" && !branch.is_empty())
+    else {
+        return Ok(None);
+    };
+    let target = local_pr_review_revision(&review_log_entries(config, args)?, &branch);
+    let Some(target) = target else {
+        return Ok(None);
+    };
+    let valid = parse_range(&target).is_ok_and(|(base, head)| {
+        git_commit(&root, &base).is_some() && git_commit(&root, &head).is_some()
+    });
+    if valid {
+        Ok(Some(target))
+    } else {
+        eprintln!(
+            "Notice: the saved PR review for branch '{branch}' is unavailable; using the working tree."
+        );
+        Ok(None)
+    }
+}
+
+fn combine_review_targets(targets: &[Option<&str>]) -> Result<Option<String>> {
+    let targets = targets.iter().flatten().copied().collect::<Vec<_>>();
+    match targets.as_slice() {
+        [] => Ok(None),
+        [target] => Ok(Some((*target).to_string())),
+        _ => anyhow::bail!("Pass the review target once, using -t/--target or a positional target"),
+    }
+}
+
 fn review_app_for_comment_target(
     config: &config::Config,
     args: &Args,
@@ -2474,14 +2994,28 @@ fn review_app_for_comment_target(
     review_app_for_target(config, args, Some(target), false)
 }
 
-fn print_review_comments(app: &App, json: bool) -> Result<()> {
+fn review_comments_json_value(
+    app: &App,
+    filter: &ReviewCommentFilter,
+) -> Result<serde_json::Value> {
+    let value = serde_json::from_str(&app.review_comments_json_filtered(filter))?;
+    Ok(review_json_with_target(app, value))
+}
+
+fn print_review_comments(app: &App, json: bool, filter: &ReviewCommentFilter) -> Result<()> {
+    ensure_review_filter_ids(app, filter)?;
     if json {
-        println!("{}", app.review_comments_json());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&review_comments_json_value(app, filter)?)?
+        );
         return Ok(());
     }
-    let markdown = app.review_markdown();
+    let color = review_cli_color_enabled();
+    print_review_target_header(app);
+    let markdown = app.review_markdown_filtered_colored(filter, color);
     if markdown.trim().is_empty() {
-        println!("No comments.");
+        println!("{}", review_cli_paint(color, "32", "No review comments."));
     } else {
         println!("{markdown}");
     }
@@ -2507,14 +3041,17 @@ fn write_export_output(output: Option<&Path>, data: &str) -> Result<()> {
 
 fn export_review(app: &App, format: ReviewExportFormat, output: Option<&Path>) -> Result<()> {
     let data = match format {
-        ReviewExportFormat::Json => app.review_comments_json(),
+        ReviewExportFormat::Json => serde_json::to_string_pretty(&review_json_with_target(
+            app,
+            serde_json::from_str(&app.review_comments_json())?,
+        ))?,
         ReviewExportFormat::Markdown => app.review_markdown(),
     };
     write_export_output(output, &data)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ReviewProviderKind {
+pub(crate) enum ReviewProviderKind {
     GitHub,
     GitLab,
     Forgejo,
@@ -2526,6 +3063,37 @@ impl ReviewProviderKind {
             Self::GitHub => "github",
             Self::GitLab => "gitlab",
             Self::Forgejo => "forgejo",
+        }
+    }
+
+    pub(crate) fn from_id(id: &str) -> Option<Self> {
+        match id {
+            "github" => Some(Self::GitHub),
+            "gitlab" => Some(Self::GitLab),
+            "forgejo" => Some(Self::Forgejo),
+            _ => None,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn short_review_noun(self) -> &'static str {
+        match self {
+            Self::GitLab => "MR",
+            Self::GitHub | Self::Forgejo => "PR",
+        }
+    }
+
+    pub(crate) fn long_review_noun_title(self) -> &'static str {
+        match self {
+            Self::GitLab => "Merge request",
+            Self::GitHub | Self::Forgejo => "Pull request",
+        }
+    }
+
+    pub(crate) fn long_review_noun(self) -> &'static str {
+        match self {
+            Self::GitLab => "merge request",
+            Self::GitHub | Self::Forgejo => "pull request",
         }
     }
 }
@@ -2549,6 +3117,16 @@ struct ProviderPr {
     head_branch: String,
     base_commit: String,
     head_commit: String,
+}
+
+fn review_pull_request_target(pr: &ProviderPr) -> ReviewPullRequestTarget {
+    ReviewPullRequestTarget {
+        provider: pr.provider.id().to_string(),
+        remote: pr.remote.clone(),
+        repo: pr.repo.clone(),
+        number: pr.number,
+        title: pr.title.clone(),
+    }
 }
 
 fn review_pr_target_metadata(pr: &ProviderPr) -> ReviewTargetMetadata {
@@ -2594,8 +3172,6 @@ struct GhCommentUser {
 #[derive(Debug, Clone, Deserialize)]
 struct GhComment {
     id: u64,
-    #[serde(default)]
-    node_id: Option<String>,
     body: String,
     path: String,
     #[serde(default)]
@@ -2604,16 +3180,86 @@ struct GhComment {
     original_line: Option<usize>,
     #[serde(default)]
     side: Option<String>,
+    #[serde(default)]
+    in_reply_to_id: Option<u64>,
     user: GhCommentUser,
     created_at: String,
     updated_at: String,
 }
 
+#[derive(Debug, Clone)]
+struct GhProviderComment {
+    comment: GhComment,
+    thread_id: Option<String>,
+    thread_resolved: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GhReviewThreadState {
+    thread_id: String,
+    resolved: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhReviewThreadsResponse {
+    data: GhReviewThreadsData,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhReviewThreadsData {
+    repository: GhReviewThreadsRepository,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhReviewThreadsRepository {
+    pull_request: GhReviewThreadsPullRequest,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhReviewThreadsPullRequest {
+    review_threads: GhReviewThreadConnection,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhReviewThreadConnection {
+    #[serde(default)]
+    nodes: Vec<GhReviewThread>,
+    page_info: GhPageInfo,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhPageInfo {
+    has_next_page: bool,
+    end_cursor: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhReviewThread {
+    id: String,
+    is_resolved: bool,
+    comments: GhReviewThreadComments,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhReviewThreadComments {
+    #[serde(default)]
+    nodes: Vec<GhReviewThreadComment>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhReviewThreadComment {
+    full_database_id: Option<serde_json::Value>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct GhIssueComment {
     id: u64,
-    #[serde(default)]
-    node_id: Option<String>,
     body: String,
     user: GhCommentUser,
     created_at: String,
@@ -2784,6 +3430,89 @@ fn gh_comments(pr: &ProviderPr) -> Result<Vec<GhComment>> {
     gh_json(&["api", &endpoint, "--paginate"])
 }
 
+fn insert_review_thread_states(
+    states: &mut BTreeMap<u64, GhReviewThreadState>,
+    threads: Vec<GhReviewThread>,
+) {
+    for thread in threads {
+        for comment in thread.comments.nodes {
+            let comment_id = comment.full_database_id.as_ref().and_then(|id| {
+                id.as_u64()
+                    .or_else(|| id.as_str().and_then(|id| id.parse().ok()))
+            });
+            if let Some(comment_id) = comment_id {
+                states.insert(
+                    comment_id,
+                    GhReviewThreadState {
+                        thread_id: thread.id.clone(),
+                        resolved: thread.is_resolved,
+                    },
+                );
+            }
+        }
+    }
+}
+
+fn gh_review_thread_states(pr: &ProviderPr) -> Result<BTreeMap<u64, GhReviewThreadState>> {
+    const QUERY: &str = r#"
+query($owner: String!, $name: String!, $number: Int!, $endCursor: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 100, after: $endCursor) {
+        nodes {
+          id
+          isResolved
+          comments(first: 100) { nodes { fullDatabaseId } }
+        }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}
+"#;
+    let (owner, name) = pr
+        .repo
+        .split_once('/')
+        .ok_or_else(|| anyhow!("GitHub repository must use owner/name format."))?;
+    let query = format!("query={QUERY}");
+    let owner = format!("owner={owner}");
+    let name = format!("name={name}");
+    let number = format!("number={}", pr.number);
+    let mut end_cursor = None;
+    let mut states = BTreeMap::new();
+    loop {
+        let mut args = vec![
+            "api",
+            "graphql",
+            "-f",
+            query.as_str(),
+            "-f",
+            owner.as_str(),
+            "-f",
+            name.as_str(),
+            "-F",
+            number.as_str(),
+        ];
+        let cursor_arg = end_cursor
+            .as_ref()
+            .map(|cursor| format!("endCursor={cursor}"));
+        if let Some(cursor) = cursor_arg.as_deref() {
+            args.extend(["-f", cursor]);
+        }
+        let response: GhReviewThreadsResponse = gh_json(&args)?;
+        let threads = response.data.repository.pull_request.review_threads;
+        insert_review_thread_states(&mut states, threads.nodes);
+        if !threads.page_info.has_next_page {
+            break;
+        }
+        end_cursor = threads.page_info.end_cursor;
+        if end_cursor.is_none() {
+            anyhow::bail!("GitHub review thread pagination returned no cursor.");
+        }
+    }
+    Ok(states)
+}
+
 fn gh_issue_comments(pr: &ProviderPr) -> Result<Vec<GhIssueComment>> {
     let endpoint = format!("repos/{}/issues/{}/comments", pr.repo, pr.number);
     gh_json(&["api", &endpoint, "--paginate"])
@@ -2859,23 +3588,22 @@ fn github_issue_comment_to_review_comment(
             "author": {
                 "name": login.clone(),
                 "usernames": usernames,
-                "avatar_url": avatar_url
+                "avatarUrl": avatar_url
             },
-            "can_edit": login == current_login,
+            "canEdit": login == current_login,
             "provider": {
                 "provider": provider_id,
                 "remote": pr.remote.clone(),
                 "repo": pr.repo.clone(),
-                "pr_number": pr.number,
-                "comment_id": comment.id.to_string(),
-                "thread_id": comment.node_id,
-                "author_username": login,
-                "pr_title": pr.title.clone(),
-                "api_kind": "issue",
-                "sync_state": "clean"
+                "prNumber": pr.number,
+                "commentId": comment.id.to_string(),
+                "authorUsername": login,
+                "prTitle": pr.title.clone(),
+                "apiKind": "issue",
+                "syncState": "clean"
             },
-            "created_at": parse_github_time(&comment.created_at),
-            "updated_at": parse_github_time(&comment.updated_at),
+            "createdAt": parse_github_time(&comment.created_at),
+            "updatedAt": parse_github_time(&comment.updated_at),
             "body": comment.body
         }]
     });
@@ -2892,8 +3620,13 @@ fn github_comment_to_review_comment(
     app: &App,
     pr: &ProviderPr,
     current_login: &str,
-    comment: GhComment,
+    provider_comment: GhProviderComment,
 ) -> Result<ReviewComment> {
+    let GhProviderComment {
+        comment,
+        thread_id,
+        thread_resolved,
+    } = provider_comment;
     let side = match comment.side.as_deref() {
         Some("LEFT") => Some(ReviewSide::Old),
         _ => Some(ReviewSide::New),
@@ -2933,28 +3666,31 @@ fn github_comment_to_review_comment(
             "file": comment.path,
             "kind": "line",
             "side": side.map(|side| side.as_str()),
-            "old_range": old_range,
-            "new_range": new_range,
+            "oldRange": old_range,
+            "newRange": new_range,
             "author": {
                 "name": login.clone(),
                 "usernames": usernames,
-                "avatar_url": avatar_url
+                "avatarUrl": avatar_url
             },
-            "can_edit": login == current_login,
+            "canEdit": login == current_login,
             "provider": {
                 "provider": provider_id,
                 "remote": pr.remote.clone(),
                 "repo": pr.repo.clone(),
-                "pr_number": pr.number,
-                "comment_id": comment.id.to_string(),
-                "thread_id": comment.node_id,
-                "author_username": login,
-                "pr_title": pr.title.clone(),
-                "api_kind": "review",
-                "sync_state": "clean"
+                "prNumber": pr.number,
+                "commentId": comment.id.to_string(),
+                "inReplyToId": comment.in_reply_to_id.map(|id| id.to_string()),
+                "threadId": thread_id,
+                "threadResolved": thread_resolved,
+                "authorUsername": login,
+                "prTitle": pr.title.clone(),
+                "apiKind": "review",
+                "syncState": "clean"
             },
-            "created_at": parse_github_time(&comment.created_at),
-            "updated_at": parse_github_time(&comment.updated_at),
+            "createdAt": parse_github_time(&comment.created_at),
+            "updatedAt": parse_github_time(&comment.updated_at),
+            "resolved": thread_resolved.unwrap_or(false),
             "body": comment.body
         }]
     });
@@ -3058,14 +3794,29 @@ fn github_create_comment(pr: &ProviderPr, comment: &ReviewComment) -> Result<GhC
     gh_api_json("POST", &endpoint, github_comment_body(pr, comment)?)
 }
 
+fn github_create_reply(pr: &ProviderPr, parent_comment_id: &str, body: &str) -> Result<GhComment> {
+    let endpoint = format!(
+        "repos/{}/pulls/{}/comments/{parent_comment_id}/replies",
+        pr.repo, pr.number
+    );
+    gh_api_json("POST", &endpoint, serde_json::json!({ "body": body }))
+}
+
 fn github_update_comment(pr: &ProviderPr, comment_id: &str, body: &str) -> Result<GhComment> {
     let endpoint = format!("repos/{}/pulls/comments/{comment_id}", pr.repo);
     gh_api_json("PATCH", &endpoint, serde_json::json!({ "body": body }))
 }
 
+fn ignore_github_delete_not_found(result: Result<()>) -> Result<()> {
+    match result {
+        Err(error) if error.to_string().to_ascii_lowercase().contains("http 404") => Ok(()),
+        result => result,
+    }
+}
+
 fn github_delete_comment(pr: &ProviderPr, comment_id: &str) -> Result<()> {
     let endpoint = format!("repos/{}/pulls/comments/{comment_id}", pr.repo);
-    gh_api_no_output("DELETE", &endpoint)
+    ignore_github_delete_not_found(gh_api_no_output("DELETE", &endpoint))
 }
 
 fn github_create_issue_comment(pr: &ProviderPr, body: &str) -> Result<GhIssueComment> {
@@ -3084,7 +3835,28 @@ fn github_update_issue_comment(
 
 fn github_delete_issue_comment(pr: &ProviderPr, comment_id: &str) -> Result<()> {
     let endpoint = format!("repos/{}/issues/comments/{comment_id}", pr.repo);
-    gh_api_no_output("DELETE", &endpoint)
+    ignore_github_delete_not_found(gh_api_no_output("DELETE", &endpoint))
+}
+
+fn github_set_review_thread_resolved(thread_id: &str, resolved: bool) -> Result<()> {
+    let mutation = if resolved {
+        "resolveReviewThread"
+    } else {
+        "unresolveReviewThread"
+    };
+    let query = format!(
+        "query=mutation($threadId: ID!) {{ {mutation}(input: {{threadId: $threadId}}) {{ thread {{ id isResolved }} }} }}"
+    );
+    let thread_id = format!("threadId={thread_id}");
+    let _: serde_json::Value = gh_json(&[
+        "api",
+        "graphql",
+        "-f",
+        query.as_str(),
+        "-f",
+        thread_id.as_str(),
+    ])?;
+    Ok(())
 }
 
 fn clean_provider_link(
@@ -3098,9 +3870,13 @@ fn clean_provider_link(
         repo: pr.repo.clone(),
         pr_number: pr.number,
         comment_id: comment.id.to_string(),
-        thread_id: comment.node_id.clone(),
+        in_reply_to_id: comment.in_reply_to_id.map(|id| id.to_string()),
+        thread_id: None,
+        thread_resolved: None,
+        resolved_dirty: false,
         author_username: Some(remote_user.to_string()),
         pr_title: Some(pr.title.clone()),
+        pr_url: Some(pr.url.clone()),
         api_kind: "review".to_string(),
         sync_state: "clean".to_string(),
     }
@@ -3117,9 +3893,13 @@ fn clean_issue_provider_link(
         repo: pr.repo.clone(),
         pr_number: pr.number,
         comment_id: comment.id.to_string(),
-        thread_id: comment.node_id.clone(),
+        in_reply_to_id: None,
+        thread_id: None,
+        thread_resolved: None,
+        resolved_dirty: false,
         author_username: Some(remote_user.to_string()),
         pr_title: Some(pr.title.clone()),
+        pr_url: Some(pr.url.clone()),
         api_kind: "issue".to_string(),
         sync_state: "clean".to_string(),
     }
@@ -3135,11 +3915,11 @@ fn sync_pr_target(target: Option<&str>) -> Option<&str> {
     })
 }
 
-fn resolve_sync_target_items(
-    items: &[String],
+fn resolve_sync_target_parts(
+    target: Option<String>,
+    remote_name: String,
 ) -> Result<(Option<String>, ReviewRemote, ProviderPr, String)> {
     let workspace = current_review_workspace()?;
-    let (target, remote_name) = parse_sync_args(&workspace, items)?;
     let remote = review_remote(&workspace, Some(&remote_name))?;
     let lookup_target = sync_pr_target(target.as_deref())
         .map(str::to_string)
@@ -3155,12 +3935,36 @@ fn resolve_sync_target_items(
     Ok((target, remote, pr, revision))
 }
 
-fn resolve_sync_target(
-    _config: &config::Config,
-    _args: &Args,
+fn resolve_sync_target_items(
     items: &[String],
 ) -> Result<(Option<String>, ReviewRemote, ProviderPr, String)> {
-    resolve_sync_target_items(items)
+    let workspace = current_review_workspace()?;
+    let (target, remote_name) = parse_sync_args(&workspace, items)?;
+    resolve_sync_target_parts(target, remote_name)
+}
+
+fn sync_lookup_target(explicit: Option<String>, default: Option<String>) -> Option<String> {
+    explicit.or_else(|| {
+        default.map(|target| sync_pr_target(Some(&target)).unwrap_or(&target).to_string())
+    })
+}
+
+fn resolve_sync_target(
+    config: &config::Config,
+    args: &Args,
+    items: &[String],
+    option_target: Option<&str>,
+) -> Result<(Option<String>, ReviewRemote, ProviderPr, String)> {
+    let workspace = current_review_workspace()?;
+    let (positional_target, remote_name) = parse_sync_args(&workspace, items)?;
+    let explicit = combine_review_targets(&[option_target, positional_target.as_deref()])?;
+    let default = if explicit.is_none() {
+        resolve_review_target(config, args, None)?
+    } else {
+        None
+    };
+    let target = sync_lookup_target(explicit, default);
+    resolve_sync_target_parts(target, remote_name)
 }
 
 fn review_app_for_pr(
@@ -3183,9 +3987,11 @@ struct ReviewPullStats {
 struct ReviewPushStats {
     created: usize,
     updated: usize,
+    threads_updated: usize,
     deleted: usize,
     skipped: usize,
     changed: Vec<u64>,
+    warnings: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -3195,25 +4001,52 @@ struct ReviewPushChange {
 }
 
 #[derive(Debug)]
+struct ReviewPushThreadChange {
+    provider: String,
+    repo: String,
+    pr_number: u64,
+    thread_id: String,
+    resolved: bool,
+    comment_states: Vec<(u64, bool)>,
+}
+
+#[derive(Debug)]
 struct ReviewPushOutcome {
     created: usize,
     updated: usize,
     deleted: usize,
     skipped: usize,
     changes: Vec<ReviewPushChange>,
+    thread_changes: Vec<ReviewPushThreadChange>,
+    warnings: Vec<String>,
 }
 
 #[derive(Debug)]
 struct ReviewPullRemoteData {
     pr: ProviderPr,
     user: GhUser,
-    provider_comments: Vec<GhComment>,
+    provider_comments: Vec<GhProviderComment>,
     issue_comments: Vec<GhIssueComment>,
     conversation_users: BTreeSet<String>,
 }
 
 fn fetch_provider_comments_for_pull(pr: ProviderPr, user: GhUser) -> Result<ReviewPullRemoteData> {
-    let provider_comments = gh_comments(&pr)?;
+    let thread_states = gh_review_thread_states(&pr)?;
+    let provider_comments = gh_comments(&pr)?
+        .into_iter()
+        .map(|comment| {
+            let thread = thread_states.get(&comment.id).or_else(|| {
+                comment
+                    .in_reply_to_id
+                    .and_then(|comment_id| thread_states.get(&comment_id))
+            });
+            GhProviderComment {
+                thread_id: thread.map(|thread| thread.thread_id.clone()),
+                thread_resolved: thread.map(|thread| thread.resolved),
+                comment,
+            }
+        })
+        .collect();
     let issue_comments = gh_issue_comments(&pr)?;
     let conversation_users = github_conversation_comment_users(&pr, &user.login)?;
     Ok(ReviewPullRemoteData {
@@ -3268,11 +4101,107 @@ fn push_review_comments_to_provider(
     pr: &ProviderPr,
     user: &GhUser,
 ) -> Result<ReviewPushOutcome> {
+    push_review_comments_to_provider_with(
+        comments,
+        pr,
+        user,
+        |parent_comment_id, body| github_create_reply(pr, parent_comment_id, body),
+        github_set_review_thread_resolved,
+    )
+}
+
+fn push_review_comments_to_provider_with<R, F>(
+    comments: Vec<ReviewComment>,
+    pr: &ProviderPr,
+    user: &GhUser,
+    mut create_reply: R,
+    mut set_thread_resolved: F,
+) -> Result<ReviewPushOutcome>
+where
+    R: FnMut(&str, &str) -> Result<GhComment>,
+    F: FnMut(&str, bool) -> Result<()>,
+{
+    let mut comments = comments;
+    comments.sort_by_key(|comment| {
+        match (
+            comment.deleted,
+            comment
+                .provider
+                .as_ref()
+                .and_then(|provider| provider.in_reply_to_id.as_ref())
+                .is_some(),
+        ) {
+            (true, true) => 0,
+            (true, false) => 1,
+            _ => 2,
+        }
+    });
+
+    for comment in &comments {
+        let Some(provider) = comment.provider.as_ref() else {
+            continue;
+        };
+        if !comment.can_edit
+            || comment.deleted
+            || provider.provider != pr.provider.id()
+            || provider.repo != pr.repo
+            || provider.pr_number != pr.number
+            || !provider.comment_id.is_empty()
+        {
+            continue;
+        }
+        if provider.api_kind != "review"
+            || provider.thread_id.is_none()
+            || provider.in_reply_to_id.is_none()
+        {
+            anyhow::bail!(
+                "Reply comment {} is not linked to a remote review thread",
+                comment.id
+            );
+        }
+    }
+
+    let mut pending_threads = BTreeMap::new();
+    let mut thread_comment_states = BTreeMap::<String, Vec<(u64, bool)>>::new();
+    for comment in &comments {
+        let Some(provider) = comment.provider.as_ref() else {
+            continue;
+        };
+        if comment.deleted
+            || provider.provider != pr.provider.id()
+            || provider.repo != pr.repo
+            || provider.pr_number != pr.number
+            || provider.api_kind != "review"
+        {
+            continue;
+        }
+        let (Some(thread_id), Some(remote_resolved)) =
+            (provider.thread_id.as_deref(), provider.thread_resolved)
+        else {
+            continue;
+        };
+        thread_comment_states
+            .entry(thread_id.to_string())
+            .or_default()
+            .push((comment.id, comment.resolved));
+        if comment.resolved != remote_resolved {
+            if let Some(existing) = pending_threads.insert(thread_id.to_string(), comment.resolved)
+            {
+                if existing != comment.resolved {
+                    anyhow::bail!(
+                        "Review thread {thread_id} has conflicting local resolved states. Pull and retry."
+                    );
+                }
+            }
+        }
+    }
     let mut created = 0usize;
     let mut updated = 0usize;
     let mut deleted = 0usize;
     let mut skipped = 0usize;
     let mut changes = Vec::new();
+    let mut warnings = Vec::new();
+    let mut pending_replies = Vec::new();
     for comment in comments {
         if !comment.can_edit {
             skipped += 1;
@@ -3285,6 +4214,12 @@ fn push_review_comments_to_provider(
                 || provider.pr_number != pr.number
             {
                 skipped += 1;
+                continue;
+            }
+            if provider.comment_id.is_empty() {
+                if !comment.deleted {
+                    pending_replies.push((comment.id, comment.body, provider.clone()));
+                }
                 continue;
             }
             if comment.deleted {
@@ -3301,7 +4236,7 @@ fn push_review_comments_to_provider(
                 continue;
             }
             if provider.sync_state == "dirty" {
-                let provider = if provider.api_kind == "issue" {
+                let mut clean_provider = if provider.api_kind == "issue" {
                     let remote_comment =
                         github_update_issue_comment(pr, &provider.comment_id, &comment.body)?;
                     clean_issue_provider_link(pr, &user.login, &remote_comment)
@@ -3310,9 +4245,15 @@ fn push_review_comments_to_provider(
                         github_update_comment(pr, &provider.comment_id, &comment.body)?;
                     clean_provider_link(pr, &user.login, &remote_comment)
                 };
+                clean_provider
+                    .in_reply_to_id
+                    .clone_from(&provider.in_reply_to_id);
+                clean_provider.thread_id.clone_from(&provider.thread_id);
+                clean_provider.thread_resolved = provider.thread_resolved;
+                clean_provider.resolved_dirty = provider.resolved_dirty;
                 changes.push(ReviewPushChange {
                     id: comment.id,
-                    provider,
+                    provider: clean_provider,
                 });
                 updated += 1;
             }
@@ -3321,18 +4262,70 @@ fn push_review_comments_to_provider(
         if comment.deleted {
             continue;
         }
-        let provider = if comment.anchor.kind == ReviewTargetKind::PullRequest {
+        if comment.in_reply_to.is_some() {
+            skipped += 1;
+            continue;
+        }
+        let mut provider = if comment.anchor.kind == ReviewTargetKind::PullRequest {
             let remote_comment = github_create_issue_comment(pr, &comment.body)?;
             clean_issue_provider_link(pr, &user.login, &remote_comment)
         } else {
             let remote_comment = github_create_comment(pr, &comment)?;
             clean_provider_link(pr, &user.login, &remote_comment)
         };
+        provider.resolved_dirty = comment.resolved;
         changes.push(ReviewPushChange {
             id: comment.id,
             provider,
         });
         created += 1;
+    }
+
+    for (id, body, provider) in pending_replies {
+        let parent_comment_id = provider.in_reply_to_id.as_deref().unwrap();
+        match create_reply(parent_comment_id, &body) {
+            Ok(remote_comment) => {
+                let mut clean_provider = clean_provider_link(pr, &user.login, &remote_comment);
+                clean_provider.in_reply_to_id = Some(parent_comment_id.to_string());
+                clean_provider.thread_id.clone_from(&provider.thread_id);
+                clean_provider.thread_resolved = provider.thread_resolved;
+                clean_provider.resolved_dirty = provider.resolved_dirty;
+                changes.push(ReviewPushChange {
+                    id,
+                    provider: clean_provider,
+                });
+                created += 1;
+            }
+            Err(error) => {
+                skipped += 1;
+                warnings.push(format!(
+                    "Could not reply to GitHub review comment {parent_comment_id}: {error}"
+                ));
+            }
+        }
+    }
+
+    let mut thread_changes = Vec::new();
+    for (thread_id, resolved) in pending_threads {
+        match set_thread_resolved(&thread_id, resolved) {
+            Ok(()) => {
+                thread_changes.push(ReviewPushThreadChange {
+                    provider: pr.provider.id().to_string(),
+                    repo: pr.repo.clone(),
+                    pr_number: pr.number,
+                    comment_states: thread_comment_states.remove(&thread_id).unwrap_or_default(),
+                    thread_id,
+                    resolved,
+                });
+            }
+            Err(error) => {
+                skipped += 1;
+                let action = if resolved { "resolve" } else { "unresolve" };
+                warnings.push(format!(
+                    "Could not {action} GitHub review thread {thread_id}: {error}"
+                ));
+            }
+        }
     }
     Ok(ReviewPushOutcome {
         created,
@@ -3340,21 +4333,38 @@ fn push_review_comments_to_provider(
         deleted,
         skipped,
         changes,
+        thread_changes,
+        warnings,
     })
 }
 
 fn apply_push_outcome_to_app(app: &mut App, outcome: ReviewPushOutcome) -> ReviewPushStats {
     let mut changed = Vec::new();
+    let threads_updated = outcome.thread_changes.len();
     for change in outcome.changes {
         app.mark_review_comment_synced(change.id, change.provider);
         changed.push(change.id);
     }
+    for change in outcome.thread_changes {
+        changed.extend(app.mark_review_thread_synced(
+            &change.provider,
+            &change.repo,
+            change.pr_number,
+            &change.thread_id,
+            change.resolved,
+            &change.comment_states,
+        ));
+    }
+    changed.sort_unstable();
+    changed.dedup();
     ReviewPushStats {
         created: outcome.created,
         updated: outcome.updated,
+        threads_updated,
         deleted: outcome.deleted,
         skipped: outcome.skipped,
         changed,
+        warnings: outcome.warnings,
     }
 }
 
@@ -3382,6 +4392,20 @@ enum ReviewSyncWorkerResult {
 
 struct ReviewSyncWorker {
     rx: std::sync::mpsc::Receiver<Result<ReviewSyncWorkerResult>>,
+}
+
+struct ReviewPrLookupWorker {
+    rx: std::sync::mpsc::Receiver<Result<ProviderPr>>,
+}
+
+fn spawn_review_pr_lookup_worker(target: Option<String>) -> ReviewPrLookupWorker {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let items = target.into_iter().collect::<Vec<_>>();
+        let result = resolve_sync_target_items(&items).map(|(_, _, pr, _)| pr);
+        let _ = tx.send(result);
+    });
+    ReviewPrLookupWorker { rx }
 }
 
 fn spawn_review_pull_worker(action: ReviewSyncAction, remote: Option<String>) -> ReviewSyncWorker {
@@ -3463,11 +4487,12 @@ fn review_remote_options() -> Result<Vec<ReviewRemoteOption>> {
 
 fn handle_review_pull_command(
     items: &[String],
+    target: Option<&str>,
     json: bool,
     config: &config::Config,
     args: &Args,
 ) -> Result<()> {
-    let (_target, _remote, pr, revision) = resolve_sync_target(config, args, items)?;
+    let (_target, _remote, pr, revision) = resolve_sync_target(config, args, items, target)?;
     let mut app = review_app_for_pr(config, args, &revision, true)?;
     app.set_review_target_metadata(Some(review_pr_target_metadata(&pr)));
     let user = gh_whoami()?;
@@ -3475,21 +4500,24 @@ fn handle_review_pull_command(
     if json {
         println!(
             "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "ok": true,
-                "provider": pr.provider.id(),
-                "repo": pr.repo,
-                "pr": pr.number,
-                "url": pr.url,
-                "revision": revision,
-                "baseCommit": pr.base_commit,
-                "headCommit": pr.head_commit,
-                "pulled": stats.pulled,
-                "skipped": stats.skipped,
-                "changedComments": stats.changed,
-            }))?
+            serde_json::to_string_pretty(&review_json_with_target(
+                &app,
+                serde_json::json!({
+                    "ok": true,
+                    "provider": pr.provider.id(),
+                    "repo": pr.repo,
+                    "url": pr.url,
+                    "revision": revision,
+                    "baseCommit": pr.base_commit,
+                    "headCommit": pr.head_commit,
+                    "pulled": stats.pulled,
+                    "skipped": stats.skipped,
+                    "changedComments": stats.changed,
+                }),
+            ))?
         );
     } else {
+        print_review_target_header(&app);
         println!("Pulled {} comments from {}.", stats.pulled, pr.url);
         if stats.skipped > 0 {
             println!(
@@ -3503,11 +4531,12 @@ fn handle_review_pull_command(
 
 fn handle_review_push_command(
     items: &[String],
+    target: Option<&str>,
     json: bool,
     config: &config::Config,
     args: &Args,
 ) -> Result<()> {
-    let (_target, _remote, pr, revision) = resolve_sync_target(config, args, items)?;
+    let (_target, _remote, pr, revision) = resolve_sync_target(config, args, items, target)?;
     let mut app = review_app_for_pr(config, args, &revision, false)?;
     app.set_review_target_metadata(Some(review_pr_target_metadata(&pr)));
     let user = gh_whoami()?;
@@ -3515,29 +4544,37 @@ fn handle_review_push_command(
     if json {
         println!(
             "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "ok": true,
-                "provider": pr.provider.id(),
-                "repo": pr.repo,
-                "pr": pr.number,
-                "url": pr.url,
-                "revision": revision,
-                "baseCommit": pr.base_commit,
-                "headCommit": pr.head_commit,
-                "created": stats.created,
-                "updated": stats.updated,
-                "deleted": stats.deleted,
-                "skipped": stats.skipped,
-                "changedComments": stats.changed,
-            }))?
+            serde_json::to_string_pretty(&review_json_with_target(
+                &app,
+                serde_json::json!({
+                    "ok": true,
+                    "provider": pr.provider.id(),
+                    "repo": pr.repo,
+                    "url": pr.url,
+                    "revision": revision,
+                    "baseCommit": pr.base_commit,
+                    "headCommit": pr.head_commit,
+                    "created": stats.created,
+                    "updated": stats.updated,
+                    "threadsUpdated": stats.threads_updated,
+                    "deleted": stats.deleted,
+                    "skipped": stats.skipped,
+                    "changedComments": stats.changed,
+                    "warnings": stats.warnings,
+                }),
+            ))?
         );
     } else {
+        print_review_target_header(&app);
         println!(
-            "Pushed {} created, {} updated and {} deleted comments to {}.",
-            stats.created, stats.updated, stats.deleted, pr.url
+            "Pushed {} created, {} updated and {} deleted comments, plus {} thread updates, to {}.",
+            stats.created, stats.updated, stats.deleted, stats.threads_updated, pr.url
         );
         if stats.skipped > 0 {
-            println!("Skipped {} comments.", stats.skipped);
+            println!("Skipped {} comments or thread updates.", stats.skipped);
+        }
+        for warning in stats.warnings {
+            eprintln!("Warning: {warning}");
         }
     }
     Ok(())
@@ -3553,10 +4590,10 @@ fn review_log_entries(config: &config::Config, args: &Args) -> Result<Vec<serde_
     }
     let conn = Connection::open(&db_path)?;
     let mut stmt = conn.prepare(
-        "SELECT r.diff_fingerprint, r.updated_at, r.target_json, COUNT(c.id)
+        "SELECT r.review_key, r.updated_at, r.target_json, COUNT(c.id)
          FROM reviews r
-         LEFT JOIN comments c ON c.diff_fingerprint = r.diff_fingerprint
-         GROUP BY r.diff_fingerprint, r.updated_at, r.target_json
+         LEFT JOIN comments c ON c.review_key = r.review_key
+         GROUP BY r.review_key, r.updated_at, r.target_json
          ORDER BY r.updated_at DESC",
     )?;
     let rows = stmt.query_map([], |row| {
@@ -3565,6 +4602,7 @@ fn review_log_entries(config: &config::Config, args: &Args) -> Result<Vec<serde_
             "reviewDir": root.to_string_lossy().to_string(),
             "reviewDb": db_path.to_string_lossy().to_string(),
             "diffFingerprint": row.get::<_, String>(0)?,
+            "reviewKey": row.get::<_, String>(0)?,
             "updatedAt": row.get::<_, i64>(1)?.max(0) as u64,
             "target": row.get::<_, Option<String>>(2)?.and_then(|json| serde_json::from_str::<ReviewTargetMetadata>(&json).ok()),
             "commentCount": row.get::<_, i64>(3)?.max(0) as u64,
@@ -3734,7 +4772,7 @@ fn print_review_log(config: &config::Config, args: &Args, json: bool) -> Result<
     }
     let current = review_app_for_target(config, args, None, false)
         .ok()
-        .map(|app| app.review_diff_fingerprint().to_string());
+        .map(|app| app.review_storage_key().to_string());
     let current_metadata = review_target_metadata(None, args);
     let color = review_cli_color_enabled();
     let display_ids = entries
@@ -3910,15 +4948,18 @@ fn mutation_json(app: &App, changed: Vec<u64>) -> Result<()> {
     let paths = app.review_paths();
     println!(
         "{}",
-        serde_json::to_string_pretty(&serde_json::json!({
-            "ok": true,
-            "workspaceRoot": app.review_workspace_root().unwrap_or_default(),
-            "diffFingerprint": app.review_diff_fingerprint(),
-            "reviewDir": path_json(paths.review_dir),
-            "reviewDb": path_json(paths.db_file),
-            "commentCount": app.review_comment_count(),
-            "changedComments": changed,
-        }))?
+        serde_json::to_string_pretty(&review_json_with_target(
+            app,
+            serde_json::json!({
+                "ok": true,
+                "workspaceRoot": app.review_workspace_root().unwrap_or_default(),
+                "diffFingerprint": app.review_diff_fingerprint(),
+                "reviewDir": path_json(paths.review_dir),
+                "reviewDb": path_json(paths.db_file),
+                "commentCount": app.review_comment_count(),
+                "changedComments": changed,
+            }),
+        ))?
     );
     Ok(())
 }
@@ -3927,41 +4968,53 @@ fn abandon_json(app: &App, removed: bool) -> Result<()> {
     let paths = app.review_paths();
     println!(
         "{}",
-        serde_json::to_string_pretty(&serde_json::json!({
-            "ok": true,
-            "abandoned": removed,
-            "workspaceRoot": app.review_workspace_root().unwrap_or_default(),
-            "diffFingerprint": app.review_diff_fingerprint(),
-            "reviewDir": path_json(paths.review_dir),
-            "reviewDb": path_json(paths.db_file),
-            "commentCount": app.review_comment_count(),
-        }))?
+        serde_json::to_string_pretty(&review_json_with_target(
+            app,
+            serde_json::json!({
+                "ok": true,
+                "abandoned": removed,
+                "workspaceRoot": app.review_workspace_root().unwrap_or_default(),
+                "diffFingerprint": app.review_diff_fingerprint(),
+                "reviewDir": path_json(paths.review_dir),
+                "reviewDb": path_json(paths.db_file),
+                "commentCount": app.review_comment_count(),
+            }),
+        ))?
     );
     Ok(())
 }
 
-fn parse_comment_id_args(items: &[String]) -> Result<(Option<&str>, u64)> {
+fn parse_comment_id_args(
+    items: &[String],
+    option_target: Option<&str>,
+) -> Result<(Option<String>, u64)> {
     match items {
-        [id] => Ok((None, id.parse()?)),
-        [revision, id] => Ok((Some(revision.as_str()), id.parse()?)),
-        _ => anyhow::bail!("Usage: oy review comment edit [revision] <comment-id>"),
+        [id] => Ok((option_target.map(str::to_string), id.parse()?)),
+        [revision, id] => Ok((
+            combine_review_targets(&[option_target, Some(revision)])?,
+            id.parse()?,
+        )),
+        _ => anyhow::bail!("Pass a comment ID, with an optional review target"),
     }
 }
 
 fn handle_review_comment_command(
     command: &Option<ReviewCommentCommand>,
-    target: Option<&str>,
+    outer_target: Option<&str>,
     default_json: bool,
+    filter: &ReviewCommentFilter,
     config: &config::Config,
     args: &Args,
 ) -> Result<()> {
     match command {
         None => {
-            let app = review_app_for_comment_target(config, args, target)?;
-            print_review_comments(&app, default_json)
+            let target = resolve_review_target(config, args, outer_target)?;
+            let app = review_app_for_comment_target(config, args, target.as_deref())?;
+            print_review_comments(&app, default_json, filter)
         }
         Some(ReviewCommentCommand::New {
             revision,
+            target,
             file,
             new_line,
             old_line,
@@ -3973,7 +5026,10 @@ fn handle_review_comment_command(
             author_username,
             json,
         }) => {
-            let mut app = review_app_for_target(config, args, revision.as_deref(), true)?;
+            let explicit =
+                combine_review_targets(&[outer_target, target.as_deref(), revision.as_deref()])?;
+            let target = resolve_review_target(config, args, explicit.as_deref())?;
+            let mut app = review_app_for_target(config, args, target.as_deref(), true)?;
             if let Some(author) = review_author_from_cli(
                 author_name.as_deref(),
                 author_email.as_deref(),
@@ -4013,53 +5069,150 @@ fn handle_review_comment_command(
             if *json {
                 mutation_json(&app, vec![id])
             } else {
+                print_review_target_header(&app);
                 println!("Added comment {id}.");
                 Ok(())
             }
         }
         Some(ReviewCommentCommand::Edit {
             args: items,
+            target,
             body,
             json,
         }) => {
-            let (revision, comment_id) = parse_comment_id_args(items)?;
-            let mut app = review_app_for_target(config, args, revision, false)?;
+            let explicit = combine_review_targets(&[outer_target, target.as_deref()])?;
+            let (target, comment_id) = parse_comment_id_args(items, explicit.as_deref())?;
+            let target = resolve_review_target(config, args, target.as_deref())?;
+            let mut app = review_app_for_comment_target(config, args, target.as_deref())?;
             if !app.edit_review_comment_from_cli(comment_id, body.clone()) {
                 anyhow::bail!("No comment matches id {comment_id}");
             }
             if *json {
                 mutation_json(&app, vec![comment_id])
             } else {
+                print_review_target_header(&app);
                 println!("Edited comment {comment_id}.");
+                Ok(())
+            }
+        }
+        Some(ReviewCommentCommand::Reply {
+            args: items,
+            target,
+            body,
+            json,
+        }) => {
+            let explicit = combine_review_targets(&[outer_target, target.as_deref()])?;
+            let (target, parent_id) = parse_comment_id_args(items, explicit.as_deref())?;
+            let target = resolve_review_target(config, args, target.as_deref())?;
+            let mut app = review_app_for_comment_target(config, args, target.as_deref())?;
+            let id = app
+                .add_review_reply_from_cli(parent_id, body.clone())
+                .map_err(|error| anyhow!(error))?;
+            if *json {
+                mutation_json(&app, vec![id])
+            } else {
+                print_review_target_header(&app);
+                println!("Replied to comment {parent_id} with comment {id}.");
                 Ok(())
             }
         }
         Some(ReviewCommentCommand::Rm {
             args: items,
+            target,
             yes,
             json,
         }) => {
+            let explicit = combine_review_targets(&[outer_target, target.as_deref()])?;
+            let (target, comment_id) = parse_comment_id_args(items, explicit.as_deref())?;
+            let target = resolve_review_target(config, args, target.as_deref())?;
+            let mut app = review_app_for_comment_target(config, args, target.as_deref())?;
+            let Some(deleted_ids) = app.review_comment_delete_ids(comment_id) else {
+                anyhow::bail!("No comment matches id {comment_id}");
+            };
+            let reply_count = deleted_ids.len().saturating_sub(1);
+            let replies = if reply_count == 1 { "reply" } else { "replies" };
             if !yes {
+                if reply_count > 0 {
+                    anyhow::bail!(
+                        "Pass --yes to remove this comment and its {reply_count} {replies}"
+                    );
+                }
                 anyhow::bail!("Pass --yes to remove a comment");
             }
-            let (revision, comment_id) = parse_comment_id_args(items)?;
-            let mut app = review_app_for_target(config, args, revision, false)?;
             if !app.remove_review_comment_from_cli(comment_id) {
+                anyhow::bail!("No comment matches id {comment_id}");
+            }
+            if *json {
+                mutation_json(&app, deleted_ids)
+            } else {
+                print_review_target_header(&app);
+                if reply_count > 0 {
+                    println!("Removed comment {comment_id} and {reply_count} {replies}.");
+                } else {
+                    println!("Removed comment {comment_id}.");
+                }
+                Ok(())
+            }
+        }
+        Some(ReviewCommentCommand::Resolve {
+            args: items,
+            target,
+            json,
+        }) => {
+            let explicit = combine_review_targets(&[outer_target, target.as_deref()])?;
+            let (target, comment_id) = parse_comment_id_args(items, explicit.as_deref())?;
+            let target = resolve_review_target(config, args, target.as_deref())?;
+            let mut app = review_app_for_comment_target(config, args, target.as_deref())?;
+            if app.review_comment_is_reply_id(comment_id) {
+                anyhow::bail!("Replies can't be resolved - resolve the parent comment.");
+            }
+            if !app.set_review_comment_resolved_from_cli(comment_id, true) {
                 anyhow::bail!("No comment matches id {comment_id}");
             }
             if *json {
                 mutation_json(&app, vec![comment_id])
             } else {
-                println!("Removed comment {comment_id}.");
+                print_review_target_header(&app);
+                println!("Resolved comment {comment_id}.");
                 Ok(())
             }
         }
-        Some(ReviewCommentCommand::Apply { args: items, json }) => {
-            let (revision, input) = match items.as_slice() {
+        Some(ReviewCommentCommand::Reopen {
+            args: items,
+            target,
+            json,
+        }) => {
+            let explicit = combine_review_targets(&[outer_target, target.as_deref()])?;
+            let (target, comment_id) = parse_comment_id_args(items, explicit.as_deref())?;
+            let target = resolve_review_target(config, args, target.as_deref())?;
+            let mut app = review_app_for_comment_target(config, args, target.as_deref())?;
+            if app.review_comment_is_reply_id(comment_id) {
+                anyhow::bail!("Replies can't be resolved - resolve the parent comment.");
+            }
+            if !app.set_review_comment_resolved_from_cli(comment_id, false) {
+                anyhow::bail!("No comment matches id {comment_id}");
+            }
+            if *json {
+                mutation_json(&app, vec![comment_id])
+            } else {
+                print_review_target_header(&app);
+                println!("Reopened comment {comment_id}.");
+                Ok(())
+            }
+        }
+        Some(ReviewCommentCommand::Apply {
+            args: items,
+            target,
+            json,
+        }) => {
+            let (positional_target, input) = match items.as_slice() {
                 [input] => (None, input.as_str()),
                 [revision, input] => (Some(revision.as_str()), input.as_str()),
                 _ => anyhow::bail!("Usage: oy review comment apply [revision] <file|->"),
             };
+            let explicit =
+                combine_review_targets(&[outer_target, target.as_deref(), positional_target])?;
+            let target = resolve_review_target(config, args, explicit.as_deref())?;
             let mut data = String::new();
             if input == "-" {
                 io::stdin().read_to_string(&mut data)?;
@@ -4067,17 +5220,198 @@ fn handle_review_comment_command(
                 data = std::fs::read_to_string(input)
                     .with_context(|| format!("Failed to read comments file: {input}"))?;
             }
-            let mut app = review_app_for_target(config, args, revision, true)?;
+            let mut app = review_app_for_target(config, args, target.as_deref(), true)?;
             let ids = app
                 .apply_review_comments_from_cli(&data)
                 .map_err(|error| anyhow!(error))?;
             if *json {
                 mutation_json(&app, ids)
             } else {
+                print_review_target_header(&app);
                 println!("Applied {} comments.", ids.len());
                 Ok(())
             }
         }
+    }
+}
+
+fn print_ctl_sessions(sessions: &[control::ControlSessionInfo], json: bool) -> Result<()> {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({ "sessions": sessions }))?
+        );
+        return Ok(());
+    }
+    if sessions.is_empty() {
+        println!("No Oyo sessions running.");
+        return Ok(());
+    }
+    println!("{:<20} {:<36} TARGET", "SESSION", "WORKSPACE");
+    for session in sessions {
+        println!(
+            "{:<20} {:<36} {}",
+            session.name,
+            review_cli_truncate(&session.workspace.display().to_string(), 36),
+            session.target
+        );
+    }
+    Ok(())
+}
+
+fn print_ctl_response(response: &control::ControlResponse, json: bool) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(response)?);
+    } else if let Some(message) = response.message.as_deref() {
+        println!("{message}");
+    }
+    Ok(())
+}
+
+fn ctl_request(command: &CtlCommand) -> Option<control::ControlRequest> {
+    match command {
+        CtlCommand::List { .. } => None,
+        CtlCommand::Get { .. } => Some(control::ControlRequest::Get),
+        CtlCommand::Rename { name, .. } => {
+            Some(control::ControlRequest::Rename { name: name.clone() })
+        }
+        CtlCommand::Where { .. } => Some(control::ControlRequest::Where),
+        CtlCommand::Diff { include_patch, .. } => Some(control::ControlRequest::Diff {
+            include_patch: *include_patch,
+        }),
+        CtlCommand::Next { count } => Some(control::ControlRequest::Next { count: *count }),
+        CtlCommand::Prev { count } => Some(control::ControlRequest::Prev { count: *count }),
+        CtlCommand::Hunk { mode, count } => Some(control::ControlRequest::Hunk {
+            mode: mode.clone(),
+            count: *count,
+        }),
+        CtlCommand::File {
+            target,
+            new_tab,
+            count,
+        } => Some(control::ControlRequest::File {
+            target: target.clone(),
+            new_tab: *new_tab,
+            count: *count,
+        }),
+        CtlCommand::Goto {
+            file,
+            new_line,
+            old_line,
+            hunk,
+            step_number,
+            start,
+            end,
+        } => Some(control::ControlRequest::Goto {
+            file: file.clone(),
+            new_line: *new_line,
+            old_line: *old_line,
+            hunk: *hunk,
+            step: *step_number,
+            start: *start,
+            end: *end,
+        }),
+        CtlCommand::Target {
+            target,
+            worktree,
+            staged,
+        } => Some(control::ControlRequest::Target {
+            target: target.clone(),
+            worktree: *worktree,
+            staged: *staged,
+        }),
+        CtlCommand::View { mode } => Some(control::ControlRequest::View { mode: mode.clone() }),
+        CtlCommand::Step { mode } => Some(control::ControlRequest::Step { mode: mode.clone() }),
+        CtlCommand::Watch { mode } => Some(control::ControlRequest::Watch { mode: mode.clone() }),
+        CtlCommand::Speed { mode } => Some(control::ControlRequest::Speed { mode: mode.clone() }),
+        CtlCommand::Animation { mode } => {
+            Some(control::ControlRequest::Animation { mode: mode.clone() })
+        }
+        CtlCommand::Wrap { mode } => Some(control::ControlRequest::Wrap { mode: mode.clone() }),
+        CtlCommand::Syntax { mode } => Some(control::ControlRequest::Syntax { mode: mode.clone() }),
+        CtlCommand::Zen { mode } => Some(control::ControlRequest::Zen { mode: mode.clone() }),
+        CtlCommand::Sidebar { mode } => {
+            Some(control::ControlRequest::Sidebar { mode: mode.clone() })
+        }
+        CtlCommand::Tab { kind, file } => Some(control::ControlRequest::Tab {
+            kind: kind.clone(),
+            file: file.clone(),
+        }),
+        CtlCommand::Play { .. } => None,
+        CtlCommand::Pause => Some(control::ControlRequest::Pause),
+        CtlCommand::Cancel => Some(control::ControlRequest::Cancel),
+        CtlCommand::Action { id, count } => Some(control::ControlRequest::Action {
+            id: id.clone(),
+            count: *count,
+        }),
+    }
+}
+
+fn ctl_json(command: &CtlCommand) -> bool {
+    match command {
+        CtlCommand::List { json }
+        | CtlCommand::Get { json }
+        | CtlCommand::Rename { json, .. }
+        | CtlCommand::Where { json }
+        | CtlCommand::Diff { json, .. } => *json,
+        _ => false,
+    }
+}
+
+fn parse_ctl_delay(value: &str) -> Result<Duration> {
+    let value = value.trim();
+    if let Some(ms) = value.strip_suffix("ms") {
+        return Ok(Duration::from_millis(ms.trim().parse()?));
+    }
+    if let Some(seconds) = value.strip_suffix('s') {
+        let seconds = seconds.trim().parse::<f64>()?;
+        if !seconds.is_finite() || seconds < 0.0 {
+            anyhow::bail!("Delay must be a positive duration");
+        }
+        return Ok(Duration::from_secs_f64(seconds));
+    }
+    Ok(Duration::from_millis(value.parse()?))
+}
+
+fn handle_ctl_command(command: &Command, args: &Args) -> Result<()> {
+    let Command::Control { command, session } = command else {
+        return Ok(());
+    };
+    let default_command = CtlCommand::List { json: false };
+    let command = command.as_ref().unwrap_or(&default_command);
+    let json = ctl_json(command);
+    if matches!(command, CtlCommand::List { .. }) {
+        return print_ctl_sessions(&control::list_sessions(), json);
+    }
+    let workspace = current_review_workspace().ok();
+    let session_name = session.as_deref().or(args.session.as_deref());
+    let session = control::resolve_session(session_name, workspace.as_deref())?;
+    if let CtlCommand::Play { from, to, delay } = command {
+        let delay_ms = parse_ctl_delay(delay)?
+            .as_millis()
+            .min(u128::from(u64::MAX)) as u64;
+        let response = control::send_request(
+            &session,
+            &control::ControlRequest::Play {
+                from: from.clone(),
+                to: to.clone(),
+                delay_ms,
+            },
+        )?;
+        return print_ctl_response(&response, false);
+    }
+    let request = ctl_request(command).expect("control request");
+    let response = control::send_request(&session, &request)?;
+    print_ctl_response(&response, json)
+}
+
+fn review_outdated_filter(outdated: bool, no_outdated: bool) -> Option<bool> {
+    if outdated {
+        Some(true)
+    } else if no_outdated {
+        Some(false)
+    } else {
+        None
     }
 }
 
@@ -4088,41 +5422,92 @@ fn handle_review_command(command: &Command, config: &config::Config, args: &Args
     match command {
         None => print_review_log(config, args, *json),
         Some(ReviewCommand::Log { json }) => print_review_log(config, args, *json),
-        Some(ReviewCommand::Status { revision, json }) => {
-            let mut app = review_app_for_target(config, args, revision.as_deref(), false)?;
-            load_jj_revset_snapshots_for_read(&mut app, config, args, revision.as_deref())?;
-            let target = review_target_label(revision.as_deref(), args);
-            print_review_status(&app, *json, &target)
+        Some(ReviewCommand::Status {
+            revision,
+            target,
+            unresolved,
+            outdated,
+            no_outdated,
+            ids,
+            since,
+            json,
+        }) => {
+            let explicit = combine_review_targets(&[revision.as_deref(), target.as_deref()])?;
+            let target = resolve_review_target(config, args, explicit.as_deref())?;
+            let mut app = review_app_for_target(config, args, target.as_deref(), false)?;
+            load_jj_revset_snapshots_for_read(&mut app, config, args, target.as_deref())?;
+            let filter = ReviewCommentFilter {
+                unresolved: *unresolved,
+                outdated: review_outdated_filter(*outdated, *no_outdated),
+                ids: ids.clone(),
+                since: *since,
+                ..ReviewCommentFilter::default()
+            };
+            print_review_status(&app, *json, &filter)
         }
         Some(ReviewCommand::Comment {
+            revision,
             target,
+            unresolved,
+            outdated,
+            no_outdated,
+            author,
+            author_type,
+            ids,
+            since,
             json,
             command,
-        }) => handle_review_comment_command(command, target.as_deref(), *json, config, args),
+        }) => {
+            let filter = ReviewCommentFilter {
+                unresolved: *unresolved,
+                outdated: review_outdated_filter(*outdated, *no_outdated),
+                author: author.clone(),
+                author_type: review_author_type(author_type.as_deref())?,
+                since: *since,
+                ids: ids.clone(),
+            };
+            let target = combine_review_targets(&[revision.as_deref(), target.as_deref()])?;
+            handle_review_comment_command(command, target.as_deref(), *json, &filter, config, args)
+        }
         Some(ReviewCommand::Export {
             revision,
+            target,
             format,
             output,
         }) => {
-            let mut app = review_app_for_target(config, args, revision.as_deref(), false)?;
-            load_jj_revset_snapshots_for_read(&mut app, config, args, revision.as_deref())?;
+            let explicit = combine_review_targets(&[revision.as_deref(), target.as_deref()])?;
+            let target = resolve_review_target(config, args, explicit.as_deref())?;
+            let mut app = review_app_for_target(config, args, target.as_deref(), false)?;
+            load_jj_revset_snapshots_for_read(&mut app, config, args, target.as_deref())?;
             export_review(&app, *format, output.as_deref())
         }
-        Some(ReviewCommand::Pull { args: items, json }) => {
-            handle_review_pull_command(items, *json, config, args)
-        }
-        Some(ReviewCommand::Push { args: items, json }) => {
-            handle_review_push_command(items, *json, config, args)
-        }
-        Some(ReviewCommand::Abandon { revision, json }) => {
-            let mut app = review_app_for_target(config, args, revision.as_deref(), false)?;
+        Some(ReviewCommand::Pull {
+            args: items,
+            target,
+            json,
+        }) => handle_review_pull_command(items, target.as_deref(), *json, config, args),
+        Some(ReviewCommand::Push {
+            args: items,
+            target,
+            json,
+        }) => handle_review_push_command(items, target.as_deref(), *json, config, args),
+        Some(ReviewCommand::Abandon {
+            revision,
+            target,
+            json,
+        }) => {
+            let explicit = combine_review_targets(&[revision.as_deref(), target.as_deref()])?;
+            let target = resolve_review_target(config, args, explicit.as_deref())?;
+            let mut app = review_app_for_target(config, args, target.as_deref(), false)?;
             let removed = app.abandon_review_from_cli();
             if *json {
                 abandon_json(&app, removed)
             } else if removed {
+                print_review_target_header(&app);
                 println!("Abandoned review.");
                 Ok(())
             } else {
+                print_review_target_header(&app);
                 println!("No saved review.");
                 Ok(())
             }
@@ -4413,7 +5798,10 @@ fn run() -> Result<()> {
             return Ok(());
         }
         Some(Command::Log { limit }) => Some(*limit),
-        Some(Command::Skill { .. }) | Some(Command::Review { .. }) | None => None,
+        Some(Command::Skill { .. })
+        | Some(Command::Control { .. })
+        | Some(Command::Review { .. })
+        | None => None,
     };
     let mut config = if args.config_files.is_empty() {
         config::Config::load()
@@ -4473,10 +5861,17 @@ fn run() -> Result<()> {
     };
 
     if let Some(Command::Skill { command }) = args.command.as_ref() {
-        match command.as_ref().unwrap_or(&SkillCommand::Path) {
-            SkillCommand::Path => println!("{}", oyo_skill_path()?.display()),
+        let default_command = SkillCommand::Path {
+            skill: SkillName::Review,
+        };
+        match command.as_ref().unwrap_or(&default_command) {
+            SkillCommand::Path { skill } => println!("{}", oyo_skill_path(*skill)?.display()),
         }
         return Ok(());
+    }
+
+    if let Some(command @ Command::Control { .. }) = args.command.as_ref() {
+        return handle_ctl_command(command, &args);
     }
 
     if let Some(command @ Command::Review { .. }) = args.command.as_ref() {
@@ -4498,6 +5893,7 @@ fn run() -> Result<()> {
         let mut exit_message: Option<String> = None;
         let mut review_hook_warnings = Vec::new();
         let mut runtime_theme: Option<(config::ResolvedTheme, Option<String>)> = None;
+        let mut control_last_applied_seq = 0;
         loop {
             let empty_message = match &input_mode {
                 InputMode::GitUncommitted => Some("No uncommitted changes found.".to_string()),
@@ -4544,11 +5940,21 @@ fn run() -> Result<()> {
                 true,
             )?;
 
-            let exit = run_app(&mut terminal, &mut app, &config, &args)?;
+            let exit = run_app(
+                &mut terminal,
+                &mut app,
+                &config,
+                &args,
+                control_last_applied_seq,
+            )?;
             review_hook_warnings.extend(app.take_review_hook_warnings());
             runtime_theme = Some((app.theme.clone(), app.ui_theme_name.clone()));
             match exit {
                 AppExit::Quit => break,
+                AppExit::Reload(mode, seq) => {
+                    input_mode = mode;
+                    control_last_applied_seq = seq;
+                }
                 AppExit::OpenDashboard => {
                     let Some(mode) = run_commit_picker(
                         &mut terminal,
@@ -4617,6 +6023,7 @@ fn run() -> Result<()> {
     let mut review_hook_warnings = Vec::new();
     let mut runtime_theme: Option<(config::ResolvedTheme, Option<String>)> = None;
     let mut pending_diff = Some(prefetched);
+    let mut control_last_applied_seq = 0;
     loop {
         let empty_message = match &input_mode {
             InputMode::GitUncommitted => Some("No uncommitted changes found.".to_string()),
@@ -4667,11 +6074,22 @@ fn run() -> Result<()> {
             true,
         )?;
 
-        let exit = run_app(&mut terminal, &mut app, &config, &args)?;
+        let exit = run_app(
+            &mut terminal,
+            &mut app,
+            &config,
+            &args,
+            control_last_applied_seq,
+        )?;
         review_hook_warnings.extend(app.take_review_hook_warnings());
         runtime_theme = Some((app.theme.clone(), app.ui_theme_name.clone()));
         match exit {
             AppExit::Quit => break,
+            AppExit::Reload(mode, seq) => {
+                input_mode = mode;
+                pending_diff = None;
+                control_last_applied_seq = seq;
+            }
             AppExit::OpenDashboard => {
                 let Some(mode) = run_commit_picker(
                     &mut terminal,
@@ -4705,7 +6123,8 @@ fn run_app(
     terminal: &mut TuiTerminal,
     app: &mut App,
     config: &config::Config,
-    _args: &Args,
+    args: &Args,
+    control_last_applied_seq: u64,
 ) -> Result<AppExit> {
     let editor_config = &config.editor;
     let mut pending_event: Option<Event> = None;
@@ -4716,6 +6135,33 @@ fn run_app(
     let mut blocked_mouse_scroll: Option<BlockedMouseScroll> = None;
     let mut review_sync_worker: Option<ReviewSyncWorker> = None;
     let mut review_sync_pull_stats: Option<ReviewPullStats> = None;
+    let mut review_pr_lookup_worker = app
+        .review_pull_request_lookup_needed()
+        .then(|| spawn_review_pr_lookup_worker(app.review_pull_request_lookup_target()));
+    let workspace = app
+        .review_workspace_root()
+        .map(PathBuf::from)
+        .or_else(|| current_review_workspace().ok())
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let mut control_session = match control::ControlSession::start(
+        &workspace,
+        &app.control_target_label(),
+        args.session.as_deref(),
+        control_last_applied_seq,
+    ) {
+        Ok(session) => Some(session),
+        Err(error) => {
+            app.notify(ToastEvent::SelectionActionFailed(format!(
+                "Control disabled: {error}"
+            )));
+            None
+        }
+    };
+    app.set_control_session_name(
+        control_session
+            .as_ref()
+            .map(|session| session.name().to_string()),
+    );
 
     loop {
         if scroll_draw_pending && last_scroll_draw.elapsed() >= MOUSE_SCROLL_FRAME {
@@ -4766,6 +6212,9 @@ fn run_app(
         };
 
         if let Some(event) = event {
+            if let Some(session) = control_session.as_mut() {
+                session.preempt(app);
+            }
             app.mark_user_input();
             needs_draw = true;
             if !is_mouse_scroll_event(&event) {
@@ -4808,6 +6257,29 @@ fn run_app(
                             | MouseEventKind::ScrollLeft
                             | MouseEventKind::ScrollRight => {
                                 app.close_status_mode_menu();
+                                continue;
+                            }
+                            _ => {}
+                        }
+                    }
+                    if app.review_comment_context_menu.is_some() {
+                        match me.kind {
+                            MouseEventKind::Down(MouseButton::Left) => {
+                                app.handle_review_comment_context_menu_click(me.column, me.row);
+                                continue;
+                            }
+                            MouseEventKind::Moved => {
+                                if !app.update_review_comment_context_menu_hover(me.column, me.row)
+                                {
+                                    needs_draw = false;
+                                }
+                                continue;
+                            }
+                            MouseEventKind::ScrollUp
+                            | MouseEventKind::ScrollDown
+                            | MouseEventKind::ScrollLeft
+                            | MouseEventKind::ScrollRight => {
+                                app.close_review_comment_context_menu();
                                 continue;
                             }
                             _ => {}
@@ -4934,6 +6406,9 @@ fn run_app(
                         }
                         continue;
                     }
+                    if app.session_rename_active() {
+                        continue;
+                    }
                     if app.review_remote_picker_active() {
                         match me.kind {
                             MouseEventKind::Down(MouseButton::Left) => {
@@ -4941,6 +6416,21 @@ fn run_app(
                             }
                             MouseEventKind::Moved
                                 if !app.update_review_remote_picker_hover(me.column, me.row) =>
+                            {
+                                needs_draw = false;
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
+                    if app.quit_confirmation_active() {
+                        match me.kind {
+                            MouseEventKind::Down(MouseButton::Left) => {
+                                app.handle_quit_confirmation_click(me.column, me.row);
+                            }
+                            MouseEventKind::Moved
+                                if !app
+                                    .update_review_delete_confirmation_hover(me.column, me.row) =>
                             {
                                 needs_draw = false;
                             }
@@ -4965,6 +6455,9 @@ fn run_app(
                     }
                     match me.kind {
                         MouseEventKind::Down(MouseButton::Left) => {
+                            if app.handle_search_bar_click(me.column, me.row) {
+                                continue;
+                            }
                             if app.handle_no_changes_dashboard_click(me.column, me.row) {
                                 continue;
                             }
@@ -5003,6 +6496,9 @@ fn run_app(
                                 continue;
                             }
                             if app.start_diff_scrollbar_drag(me.column, me.row) {
+                                continue;
+                            }
+                            if app.handle_fold_context_click(me.column, me.row) {
                                 continue;
                             }
                             if app.handle_review_line_add_click(me.column, me.row) {
@@ -5081,8 +6577,12 @@ fn run_app(
                             }
                             app.end_file_panel_resize();
                         }
-                        MouseEventKind::Moved if !app.update_topbar_hover(me.column, me.row) => {
-                            needs_draw = false;
+                        MouseEventKind::Moved => {
+                            let search_changed = app.update_search_bar_hover(me.column, me.row);
+                            let topbar_changed = app.update_topbar_hover(me.column, me.row);
+                            if !search_changed && !topbar_changed {
+                                needs_draw = false;
+                            }
                         }
                         MouseEventKind::ScrollLeft | MouseEventKind::ScrollRight
                             if app.mouse_over_selection_toolbar(me.column, me.row) =>
@@ -5203,6 +6703,56 @@ fn run_app(
         if app.tick() && !(scroll_draw_pending && last_scroll_draw.elapsed() < MOUSE_SCROLL_FRAME) {
             needs_draw = true;
         }
+        if let Some(name) = app.take_pending_session_rename() {
+            if let Some(session) = control_session.as_mut() {
+                match session.rename(&name) {
+                    Ok(info) => {
+                        app.set_control_session_name(Some(info.name));
+                        app.notify(ToastEvent::SessionRenamed);
+                    }
+                    Err(error) => app.notify(ToastEvent::SelectionActionFailed(error.to_string())),
+                }
+            }
+            needs_draw = true;
+        }
+        if let Some(session) = control_session.as_mut() {
+            let poll = session.poll(app);
+            if poll.redraw {
+                needs_draw = true;
+            }
+            if let Some((target, seq)) = poll.target {
+                match input_mode_for_control_target(target, args) {
+                    Ok(mode) => match build_diff_from_input_mode(&mode, config, args)? {
+                        Some(_) => return Ok(AppExit::Reload(mode, seq)),
+                        None => app.notify(ToastEvent::SelectionActionFailed(
+                            "Target has no changes".to_string(),
+                        )),
+                    },
+                    Err(error) => app.notify(ToastEvent::SelectionActionFailed(format!(
+                        "Target failed: {error}"
+                    ))),
+                }
+                needs_draw = true;
+            }
+        }
+
+        let pr_lookup_result =
+            review_pr_lookup_worker
+                .as_ref()
+                .and_then(|worker| match worker.rx.try_recv() {
+                    Ok(result) => Some(result),
+                    Err(std::sync::mpsc::TryRecvError::Empty) => None,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        Some(Err(anyhow!("Pull request lookup stopped.")))
+                    }
+                });
+        if let Some(result) = pr_lookup_result {
+            review_pr_lookup_worker = None;
+            if let Ok(pr) = result {
+                app.set_review_pull_request_target(Some(review_pull_request_target(&pr)));
+                needs_draw = true;
+            }
+        }
 
         let worker_result =
             review_sync_worker
@@ -5223,6 +6773,7 @@ fn run_app(
                         &data.user.login,
                         data.user.avatar_url.clone(),
                     );
+                    app.set_review_pull_request_target(Some(review_pull_request_target(&data.pr)));
                     app.set_review_target_metadata(Some(review_pr_target_metadata(&data.pr)));
                     let pr = data.pr.clone();
                     let user = data.user.clone();
@@ -5264,7 +6815,9 @@ fn run_app(
                         user.avatar_url.clone(),
                     );
                     let push = apply_push_outcome_to_app(app, outcome);
-                    app.mark_review_session_clean();
+                    if push.warnings.is_empty() {
+                        app.mark_review_session_clean();
+                    }
                     app.set_review_sync_status(None);
                     if action == ReviewSyncAction::Sync {
                         let pull = review_sync_pull_stats.take().unwrap_or(ReviewPullStats {
@@ -5273,14 +6826,21 @@ fn run_app(
                             changed: Vec::new(),
                         });
                         app.notify(ToastEvent::SelectionActionStarted(format!(
-                            "Synced: pulled {}, created {}, updated {}, deleted {}",
-                            pull.pulled, push.created, push.updated, push.deleted
+                            "Synced: pulled {}, created {}, updated {}, deleted {}, threads {}",
+                            pull.pulled,
+                            push.created,
+                            push.updated,
+                            push.deleted,
+                            push.threads_updated
                         )));
                     } else {
                         app.notify(ToastEvent::SelectionActionStarted(format!(
-                            "Pushed: created {}, updated {}, deleted {}",
-                            push.created, push.updated, push.deleted
+                            "Pushed: created {}, updated {}, deleted {}, threads {}",
+                            push.created, push.updated, push.deleted, push.threads_updated
                         )));
+                    }
+                    for warning in push.warnings {
+                        app.notify(ToastEvent::SelectionActionFailed(warning));
                     }
                 }
                 Err(error) => {
@@ -5889,12 +7449,27 @@ fn run_commit_picker<B: Backend>(
 mod tests {
     use super::{
         blocks_mouse_scroll, config, dedupe_review_log_entries, detect_input_mode,
-        git_ref_input_mode, mouse_horizontal_scroll_delta, parse_range, push_pending_mouse_scroll,
-        render_editor_args, review_author_from_cli, update_mouse_scroll_block, BlockedMouseScroll,
-        InputMode, MouseScrollTarget, PendingMouseScroll, ReviewTargetMetadata,
-        MAX_DISCRETE_MOUSE_SCROLL_ACTIONS_PER_FRAME,
+        git_ref_input_mode, github_comment_to_review_comment, ignore_github_delete_not_found,
+        insert_review_thread_states, local_pr_review_revision, mouse_horizontal_scroll_delta,
+        parse_range, push_pending_mouse_scroll, push_review_comments_to_provider_with,
+        render_editor_args, review_author_from_cli, review_comments_json_value,
+        review_pr_target_metadata, review_status_json_value, should_load_saved_review_fallback,
+        sync_lookup_target, update_mouse_scroll_block, Args, BlockedMouseScroll, Command,
+        GhComment, GhCommentUser, GhProviderComment, GhReviewThreadsResponse, GhUser, InputMode,
+        MouseScrollTarget, PendingMouseScroll, ProviderPr, ReviewCommand, ReviewCommentCommand,
+        ReviewProviderKind, ReviewTargetMetadata, MAX_DISCRETE_MOUSE_SCROLL_ACTIONS_PER_FRAME,
     };
+    use crate::app::{
+        review::{
+            ReviewAnchor, ReviewComment, ReviewCommentFilter, ReviewProviderComment, ReviewRange,
+            ReviewSide, ReviewTargetKind,
+        },
+        App, ViewMode,
+    };
+    use anyhow::anyhow;
+    use clap::Parser;
     use crossterm::event::{KeyModifiers, MouseEventKind};
+    use oyo_core::MultiFileDiff;
     use std::path::{Path, PathBuf};
     use std::process::Command as ProcessCommand;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -5908,6 +7483,420 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ))
+    }
+
+    fn test_provider_pr() -> ProviderPr {
+        ProviderPr {
+            provider: ReviewProviderKind::GitHub,
+            remote: "origin".to_string(),
+            repo: "owner/repo".to_string(),
+            number: 7,
+            title: "PR".to_string(),
+            url: "https://github.com/owner/repo/pull/7".to_string(),
+            base_branch: "main".to_string(),
+            head_branch: "feature".to_string(),
+            base_commit: "base".to_string(),
+            head_commit: "head".to_string(),
+        }
+    }
+
+    fn sync_comment(
+        id: u64,
+        api_kind: &str,
+        thread_id: Option<&str>,
+        remote_resolved: Option<bool>,
+        resolved: bool,
+    ) -> ReviewComment {
+        ReviewComment {
+            id,
+            anchor: ReviewAnchor {
+                file_index: 0,
+                file_path: "file.rs".to_string(),
+                kind: ReviewTargetKind::Line,
+                side: Some(ReviewSide::New),
+                old_range: None,
+                new_range: Some(ReviewRange { start: 1, end: 1 }),
+                hunk_id: None,
+                display_idx_hint: None,
+                anchor_key: format!("line-{id}"),
+                snapshot: None,
+            },
+            body: format!("comment {id}"),
+            author: None,
+            can_edit: false,
+            resolved,
+            outdated: false,
+            reanchored: false,
+            deleted: false,
+            provider: Some(ReviewProviderComment {
+                provider: "github".to_string(),
+                remote: "origin".to_string(),
+                repo: "owner/repo".to_string(),
+                pr_number: 7,
+                comment_id: id.to_string(),
+                in_reply_to_id: None,
+                thread_id: thread_id.map(str::to_string),
+                thread_resolved: remote_resolved,
+                resolved_dirty: false,
+                author_username: Some("reviewer".to_string()),
+                pr_title: Some("PR".to_string()),
+                pr_url: Some("https://github.com/owner/repo/pull/7".to_string()),
+                api_kind: api_kind.to_string(),
+                sync_state: "clean".to_string(),
+            }),
+            in_reply_to: None,
+            created_at: 1,
+            updated_at: 1,
+        }
+    }
+
+    #[test]
+    fn review_provider_uses_pr_or_mr_nouns() {
+        assert_eq!(ReviewProviderKind::GitHub.short_review_noun(), "PR");
+        assert_eq!(
+            ReviewProviderKind::GitHub.long_review_noun(),
+            "pull request"
+        );
+        assert_eq!(ReviewProviderKind::Forgejo.short_review_noun(), "PR");
+        assert_eq!(
+            ReviewProviderKind::Forgejo.long_review_noun(),
+            "pull request"
+        );
+        assert_eq!(ReviewProviderKind::GitLab.short_review_noun(), "MR");
+        assert_eq!(
+            ReviewProviderKind::GitLab.long_review_noun(),
+            "merge request"
+        );
+        assert_eq!(
+            ReviewProviderKind::GitHub.long_review_noun_title(),
+            "Pull request"
+        );
+        assert_eq!(
+            ReviewProviderKind::GitLab.long_review_noun_title(),
+            "Merge request"
+        );
+    }
+
+    #[test]
+    fn github_delete_treats_not_found_as_already_deleted() {
+        assert!(ignore_github_delete_not_found(Err(anyhow!("gh: Not Found (HTTP 404)"))).is_ok());
+        assert!(ignore_github_delete_not_found(Err(anyhow!(
+            "gh: Internal Server Error (HTTP 500)"
+        )))
+        .is_err());
+    }
+
+    #[test]
+    fn github_review_thread_graphql_maps_comment_ids() {
+        let response: GhReviewThreadsResponse = serde_json::from_value(serde_json::json!({
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "reviewThreads": {
+                            "nodes": [{
+                                "id": "PRRT_thread",
+                                "isResolved": true,
+                                "comments": { "nodes": [{ "fullDatabaseId": "42" }] }
+                            }],
+                            "pageInfo": { "hasNextPage": false, "endCursor": null }
+                        }
+                    }
+                }
+            }
+        }))
+        .unwrap();
+        let mut states = std::collections::BTreeMap::new();
+        insert_review_thread_states(
+            &mut states,
+            response.data.repository.pull_request.review_threads.nodes,
+        );
+
+        assert_eq!(states[&42].thread_id, "PRRT_thread");
+        assert!(states[&42].resolved);
+    }
+
+    #[test]
+    fn github_review_comment_imports_thread_and_resolved_state() {
+        let diff = MultiFileDiff::from_file_pair(
+            PathBuf::from("file.rs"),
+            PathBuf::from("file.rs"),
+            "old\n".to_string(),
+            "new\n".to_string(),
+        );
+        let app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+        let comment = github_comment_to_review_comment(
+            &app,
+            &test_provider_pr(),
+            "me",
+            GhProviderComment {
+                comment: GhComment {
+                    id: 42,
+                    body: "review".to_string(),
+                    path: "file.rs".to_string(),
+                    line: Some(1),
+                    original_line: Some(1),
+                    side: Some("RIGHT".to_string()),
+                    in_reply_to_id: Some(41),
+                    user: GhCommentUser {
+                        login: "reviewer".to_string(),
+                        avatar_url: None,
+                    },
+                    created_at: "2026-01-01T00:00:00Z".to_string(),
+                    updated_at: "2026-01-01T00:00:00Z".to_string(),
+                },
+                thread_id: Some("PRRT_thread".to_string()),
+                thread_resolved: Some(true),
+            },
+        )
+        .unwrap();
+
+        assert!(comment.resolved);
+        let provider = comment.provider.unwrap();
+        assert_eq!(provider.thread_id.as_deref(), Some("PRRT_thread"));
+        assert_eq!(provider.thread_resolved, Some(true));
+        assert_eq!(provider.in_reply_to_id.as_deref(), Some("41"));
+        assert_eq!(provider.api_kind, "review");
+    }
+
+    #[test]
+    fn github_push_creates_review_thread_reply_and_marks_it_clean() {
+        let mut reply = sync_comment(2, "review", Some("PRRT_thread"), Some(false), false);
+        reply.can_edit = true;
+        reply.body = "Thread reply".to_string();
+        let provider = reply.provider.as_mut().unwrap();
+        provider.comment_id.clear();
+        provider.in_reply_to_id = Some("42".to_string());
+        provider.sync_state = "dirty".to_string();
+        let mut calls = Vec::new();
+
+        let outcome = push_review_comments_to_provider_with(
+            vec![reply],
+            &test_provider_pr(),
+            &GhUser {
+                login: "me".to_string(),
+                avatar_url: None,
+            },
+            |parent_id, body| {
+                calls.push((parent_id.to_string(), body.to_string()));
+                Ok(GhComment {
+                    id: 99,
+                    body: body.to_string(),
+                    path: "file.rs".to_string(),
+                    line: Some(1),
+                    original_line: None,
+                    side: Some("RIGHT".to_string()),
+                    in_reply_to_id: Some(42),
+                    user: GhCommentUser {
+                        login: "me".to_string(),
+                        avatar_url: None,
+                    },
+                    created_at: "2026-01-01T00:00:00Z".to_string(),
+                    updated_at: "2026-01-01T00:00:00Z".to_string(),
+                })
+            },
+            |_thread_id, _resolved| unreachable!(),
+        )
+        .unwrap();
+
+        assert_eq!(calls, vec![("42".to_string(), "Thread reply".to_string())]);
+        assert_eq!(outcome.created, 1);
+        let provider = &outcome.changes[0].provider;
+        assert_eq!(provider.comment_id, "99");
+        assert_eq!(provider.in_reply_to_id.as_deref(), Some("42"));
+        assert_eq!(provider.thread_id.as_deref(), Some("PRRT_thread"));
+        assert_eq!(provider.sync_state, "clean");
+    }
+
+    #[test]
+    fn github_reply_failures_keep_successful_reply_bookkeeping() {
+        let make_reply = |id, parent_id: &str| {
+            let mut reply = sync_comment(id, "review", Some("PRRT_thread"), Some(false), false);
+            reply.can_edit = true;
+            let provider = reply.provider.as_mut().unwrap();
+            provider.comment_id.clear();
+            provider.in_reply_to_id = Some(parent_id.to_string());
+            provider.sync_state = "dirty".to_string();
+            reply
+        };
+        let mut calls = Vec::new();
+
+        let outcome = push_review_comments_to_provider_with(
+            vec![make_reply(2, "42"), make_reply(3, "43")],
+            &test_provider_pr(),
+            &GhUser {
+                login: "me".to_string(),
+                avatar_url: None,
+            },
+            |parent_id, body| {
+                calls.push(parent_id.to_string());
+                if parent_id == "43" {
+                    anyhow::bail!("parent deleted")
+                }
+                Ok(GhComment {
+                    id: 99,
+                    body: body.to_string(),
+                    path: "file.rs".to_string(),
+                    line: Some(1),
+                    original_line: None,
+                    side: Some("RIGHT".to_string()),
+                    in_reply_to_id: Some(42),
+                    user: GhCommentUser {
+                        login: "me".to_string(),
+                        avatar_url: None,
+                    },
+                    created_at: "2026-01-01T00:00:00Z".to_string(),
+                    updated_at: "2026-01-01T00:00:00Z".to_string(),
+                })
+            },
+            |_thread_id, _resolved| unreachable!(),
+        )
+        .unwrap();
+
+        assert_eq!(calls, vec!["42", "43"]);
+        assert_eq!(outcome.created, 1);
+        assert_eq!(outcome.changes.len(), 1);
+        assert_eq!(outcome.changes[0].id, 2);
+        assert_eq!(outcome.warnings.len(), 1);
+        assert!(outcome.warnings[0].contains("parent deleted"));
+    }
+
+    #[test]
+    fn malformed_reply_is_rejected_before_remote_mutation() {
+        let mut reply = sync_comment(2, "review", None, None, false);
+        reply.can_edit = true;
+        let provider = reply.provider.as_mut().unwrap();
+        provider.comment_id.clear();
+        provider.in_reply_to_id = Some("42".to_string());
+        let mut calls = 0usize;
+
+        let error = push_review_comments_to_provider_with(
+            vec![reply],
+            &test_provider_pr(),
+            &GhUser {
+                login: "me".to_string(),
+                avatar_url: None,
+            },
+            |_parent_id, _body| {
+                calls += 1;
+                unreachable!()
+            },
+            |_thread_id, _resolved| unreachable!(),
+        )
+        .unwrap_err();
+
+        assert_eq!(calls, 0);
+        assert!(error
+            .to_string()
+            .contains("not linked to a remote review thread"));
+    }
+
+    #[test]
+    fn local_reply_children_are_not_pushed_to_provider() {
+        let mut reply = sync_comment(2, "review", None, None, false);
+        reply.can_edit = true;
+        reply.provider = None;
+        reply.in_reply_to = Some(1);
+
+        let outcome = push_review_comments_to_provider_with(
+            vec![reply],
+            &test_provider_pr(),
+            &GhUser {
+                login: "me".to_string(),
+                avatar_url: None,
+            },
+            |_parent_id, _body| unreachable!(),
+            |_thread_id, _resolved| unreachable!(),
+        )
+        .unwrap();
+
+        assert_eq!(outcome.created, 0);
+        assert_eq!(outcome.skipped, 1);
+        assert!(outcome.changes.is_empty());
+    }
+
+    #[test]
+    fn github_push_resolves_each_review_thread_once_and_skips_other_comments() {
+        let mut local = sync_comment(4, "review", None, None, true);
+        local.provider = None;
+        let comments = vec![
+            sync_comment(1, "review", Some("PRRT_thread"), Some(false), true),
+            sync_comment(2, "review", Some("PRRT_thread"), Some(false), true),
+            sync_comment(3, "issue", None, None, true),
+            sync_comment(5, "review", Some("PRRT_clean"), Some(true), true),
+            local,
+        ];
+        let mut calls = Vec::new();
+        let outcome = push_review_comments_to_provider_with(
+            comments,
+            &test_provider_pr(),
+            &GhUser {
+                login: "me".to_string(),
+                avatar_url: None,
+            },
+            |_parent_id, _body| unreachable!(),
+            |thread_id, resolved| {
+                calls.push((thread_id.to_string(), resolved));
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(calls, vec![("PRRT_thread".to_string(), true)]);
+        assert_eq!(outcome.updated, 0);
+        assert_eq!(outcome.thread_changes.len(), 1);
+    }
+
+    #[test]
+    fn github_thread_permission_error_is_a_push_warning() {
+        let outcome = push_review_comments_to_provider_with(
+            vec![sync_comment(
+                1,
+                "review",
+                Some("PRRT_thread"),
+                Some(false),
+                true,
+            )],
+            &test_provider_pr(),
+            &GhUser {
+                login: "me".to_string(),
+                avatar_url: None,
+            },
+            |_parent_id, _body| unreachable!(),
+            |_thread_id, _resolved| anyhow::bail!("forbidden"),
+        )
+        .unwrap();
+
+        assert_eq!(outcome.thread_changes.len(), 0);
+        assert_eq!(outcome.warnings.len(), 1);
+        assert!(outcome.warnings[0].contains("forbidden"));
+    }
+
+    #[test]
+    fn github_push_unresolves_review_thread() {
+        let mut calls = Vec::new();
+        let outcome = push_review_comments_to_provider_with(
+            vec![sync_comment(
+                1,
+                "review",
+                Some("PRRT_thread"),
+                Some(true),
+                false,
+            )],
+            &test_provider_pr(),
+            &GhUser {
+                login: "me".to_string(),
+                avatar_url: None,
+            },
+            |_parent_id, _body| unreachable!(),
+            |thread_id, resolved| {
+                calls.push((thread_id.to_string(), resolved));
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(calls, vec![("PRRT_thread".to_string(), false)]);
+        assert_eq!(outcome.thread_changes.len(), 1);
     }
 
     #[test]
@@ -5948,6 +7937,117 @@ mod tests {
     }
 
     #[test]
+    fn local_pr_review_target_uses_newest_matching_branch_review() {
+        let entries = vec![
+            serde_json::json!({
+                "reviewKey": "git:branch:new",
+                "target": {
+                    "label": "github#7",
+                    "vcs": "git",
+                    "gitBaseRef": "main",
+                    "gitHeadRef": "feature",
+                    "gitBaseCommit": "base-oid",
+                    "gitHeadCommit": "head-oid",
+                    "branch": "feature",
+                    "prProvider": "github",
+                    "prRepo": "owner/repo",
+                    "prNumber": 7
+                }
+            }),
+            serde_json::json!({
+                "reviewKey": "git:branch:old",
+                "target": {
+                    "label": "github#6",
+                    "vcs": "git",
+                    "gitBaseRef": "old-main",
+                    "gitHeadRef": "feature",
+                    "branch": "feature",
+                    "prNumber": 6
+                }
+            }),
+        ];
+
+        assert_eq!(
+            local_pr_review_revision(&entries, "feature").as_deref(),
+            Some("base-oid...feature")
+        );
+        assert_eq!(local_pr_review_revision(&entries, "other"), None);
+    }
+
+    #[test]
+    fn sync_default_uses_saved_head_but_explicit_range_stays_exact() {
+        assert_eq!(
+            sync_lookup_target(None, Some("base...feature".to_string())).as_deref(),
+            Some("feature")
+        );
+        assert_eq!(
+            sync_lookup_target(
+                Some("other-base...feature".to_string()),
+                Some("base...feature".to_string()),
+            )
+            .as_deref(),
+            Some("other-base...feature")
+        );
+    }
+
+    #[test]
+    fn review_target_option_parses_before_or_after_comment_subcommand() {
+        let before =
+            Args::try_parse_from(["oy", "review", "comment", "-t", "feature", "resolve", "1"])
+                .unwrap();
+        let after =
+            Args::try_parse_from(["oy", "review", "comment", "resolve", "-t", "feature", "1"])
+                .unwrap();
+
+        let target = |args: Args| match args.command.unwrap() {
+            Command::Review {
+                command:
+                    Some(ReviewCommand::Comment {
+                        target: outer,
+                        command: Some(ReviewCommentCommand::Resolve { target: inner, .. }),
+                        ..
+                    }),
+                ..
+            } => outer.or(inner),
+            _ => panic!("unexpected review command"),
+        };
+        assert_eq!(target(before).as_deref(), Some("feature"));
+        assert_eq!(target(after).as_deref(), Some("feature"));
+    }
+
+    #[test]
+    fn review_reply_command_parses_parent_body_target_and_json() {
+        let args = Args::try_parse_from([
+            "oy", "review", "comment", "reply", "42", "--body", "Fixed", "--target", "feature",
+            "--json",
+        ])
+        .unwrap();
+
+        match args.command.unwrap() {
+            Command::Review {
+                command:
+                    Some(ReviewCommand::Comment {
+                        command:
+                            Some(ReviewCommentCommand::Reply {
+                                args,
+                                target,
+                                body,
+                                json,
+                            }),
+                        ..
+                    }),
+                ..
+            } => {
+                assert_eq!(args, vec!["42"]);
+                assert_eq!(target.as_deref(), Some("feature"));
+                assert_eq!(body, "Fixed");
+                assert!(json);
+            }
+            _ => panic!("unexpected review command"),
+        }
+    }
+
+    #[test]
     fn parse_range_accepts_double_dot() {
         let (from, to) = parse_range("HEAD~1..HEAD").unwrap();
         assert_eq!(from, "HEAD~1");
@@ -5978,6 +8078,16 @@ mod tests {
     #[test]
     fn parse_range_rejects_missing_separator() {
         assert!(parse_range("HEAD").is_err());
+    }
+
+    #[test]
+    fn jj_at_does_not_load_saved_fingerprint_fallback() {
+        assert!(!should_load_saved_review_fallback(&InputMode::JjRevision {
+            rev: "@".to_string(),
+        }));
+        assert!(should_load_saved_review_fallback(&InputMode::JjRevision {
+            rev: "trunk()..feature".to_string(),
+        }));
     }
 
     #[test]
@@ -6128,6 +8238,61 @@ mod tests {
     }
 
     #[test]
+    fn review_status_json_comment_count_uses_filtered_count() {
+        let diff = MultiFileDiff::from_file_pair(
+            PathBuf::from("old.txt"),
+            PathBuf::from("new.txt"),
+            "old\n".to_string(),
+            "new\n".to_string(),
+        );
+        let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+        app.set_review_persist_enabled(false);
+        app.enable_review_mode();
+        app.set_review_target_metadata(Some(review_pr_target_metadata(&test_provider_pr())));
+        app.add_review_comment_from_cli(
+            "new.txt",
+            ReviewTargetKind::Line,
+            Some(ReviewSide::New),
+            None,
+            Some(ReviewRange { start: 1, end: 1 }),
+            "open".to_string(),
+        )
+        .unwrap();
+        let resolved = app
+            .add_review_comment_from_cli(
+                "new.txt",
+                ReviewTargetKind::Line,
+                Some(ReviewSide::New),
+                None,
+                Some(ReviewRange { start: 1, end: 1 }),
+                "done".to_string(),
+            )
+            .unwrap();
+        assert!(app.set_review_comment_resolved_from_cli(resolved, true));
+
+        let value = review_status_json_value(
+            &app,
+            &ReviewCommentFilter {
+                unresolved: true,
+                ..ReviewCommentFilter::default()
+            },
+        );
+
+        assert_eq!(value["commentCount"], 1);
+        assert_eq!(value["comments"].as_array().unwrap().len(), 1);
+        assert_eq!(value["pr"], 7);
+        assert_eq!(value["label"], "PR #7 (feature)");
+        assert_eq!(value["target"], value["label"]);
+        assert!(value["reviewKey"]
+            .as_str()
+            .is_some_and(|key| !key.is_empty()));
+        let comments = review_comments_json_value(&app, &ReviewCommentFilter::default()).unwrap();
+        assert_eq!(comments["reviewKey"], value["reviewKey"]);
+        assert_eq!(comments["label"], value["label"]);
+        assert_eq!(comments["pr"], value["pr"]);
+    }
+
+    #[test]
     fn review_log_dedupes_current_git_snapshots() {
         let current = ReviewTargetMetadata {
             label: "feature".to_string(),
@@ -6152,7 +8317,7 @@ mod tests {
                 "target": {
                     "label": "feature",
                     "vcs": "git",
-                    "git_base_commit": "head",
+                    "gitBaseCommit": "head",
                     "branch": "feature"
                 },
                 "commentCount": 4
@@ -6162,7 +8327,7 @@ mod tests {
                 "target": {
                     "label": "feature",
                     "vcs": "git",
-                    "git_head_commit": "head",
+                    "gitHeadCommit": "head",
                     "branch": "feature"
                 },
                 "commentCount": 4

@@ -7,6 +7,7 @@ use keymap::{parser::parse_seq, ToKeyMap};
 use oyo_core::{AnimationFrame, LineKind};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use serde::Serialize;
+use serde_json::{json, Value};
 use std::io::Write;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -36,6 +37,7 @@ pub(crate) struct DiffSelectionCursor {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct SelectionActionPayload {
     version: u8,
     action: String,
@@ -312,7 +314,24 @@ impl App {
         true
     }
 
-    fn set_diff_selection_end(&mut self, point: (u16, u16)) -> bool {
+    fn set_diff_selection_end(&mut self, mut point: (u16, u16)) -> bool {
+        let Some(selection) = self.diff_selection else {
+            return false;
+        };
+        if row_nearest_col(&self.diff_selection_cells, point.1, point.0, selection).is_none() {
+            let delta_row = (point.1 as i32 - selection.end.1 as i32)
+                .clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+            let Some((_, row)) =
+                reanchor_point(&self.diff_selection_cells, selection, 0, delta_row)
+            else {
+                return false;
+            };
+            let Some(col) = row_nearest_col(&self.diff_selection_cells, row, point.0, selection)
+            else {
+                return false;
+            };
+            point = (col, row);
+        }
         self.hide_selection_toolbar();
         let Some(selection) = self.diff_selection.as_mut() else {
             return false;
@@ -619,6 +638,53 @@ impl App {
         serde_json::to_string(&payload).unwrap_or_default()
     }
 
+    pub(crate) fn control_selection_json(&mut self) -> Value {
+        let selection = self.diff_selection;
+        let cursor = self.diff_selection_cursor;
+        if selection.is_none() && cursor.is_none() {
+            return json!({ "active": false });
+        }
+        let rows = self
+            .diff_selection_segments()
+            .into_iter()
+            .map(|(row, _, _)| row)
+            .collect::<Vec<_>>();
+        let metadata_rows = if rows.is_empty() {
+            cursor
+                .map(|cursor| vec![cursor.point.1])
+                .unwrap_or_default()
+        } else {
+            rows.clone()
+        };
+        let (old_range, new_range, side) = self.selected_line_metadata(&metadata_rows);
+        let file = self
+            .multi_diff
+            .files
+            .get(self.multi_diff.selected_index)
+            .map(|file| file.display_name.clone())
+            .unwrap_or_default();
+        let kind = selection
+            .map(|selection| match selection.mode {
+                DiffSelectionMode::Char => "char",
+                DiffSelectionMode::Line => "line",
+                DiffSelectionMode::Block => "block",
+            })
+            .unwrap_or("cursor");
+        json!({
+            "active": true,
+            "rangeActive": selection.is_some(),
+            "kind": kind,
+            "file": file,
+            "side": side,
+            "oldRange": range_json(old_range),
+            "newRange": range_json(new_range),
+            "rows": rows,
+            "start": selection.map(|selection| point_json(selection.start)),
+            "end": selection.map(|selection| point_json(selection.end)),
+            "cursor": cursor.map(|cursor| point_json(cursor.point)),
+        })
+    }
+
     fn selected_line_metadata(
         &mut self,
         rows: &[u16],
@@ -710,9 +776,23 @@ impl App {
     }
 
     fn diff_selection_segments(&self) -> Vec<(u16, u16, u16)> {
+        let excluded_rows = self.diff_selection_excluded_rows();
         self.diff_selection
             .map(selection_segments)
             .unwrap_or_default()
+            .into_iter()
+            .filter(|(row, _, _)| !excluded_rows.contains(row))
+            .collect()
+    }
+
+    pub(crate) fn diff_selection_excluded_rows(&self) -> Vec<u16> {
+        let Some((_, y, _, height)) = self.diff_view_area else {
+            return Vec::new();
+        };
+        self.fold_context_screen_rows
+            .iter()
+            .filter_map(|row| row.checked_sub(y).filter(|local_row| *local_row < height))
+            .collect()
     }
 
     pub(crate) fn diff_selection_content_ranges(&self) -> Vec<(u16, u16)> {
@@ -809,6 +889,16 @@ impl App {
         }
         Some((col, row))
     }
+}
+
+fn range_json(range: Option<[usize; 2]>) -> Value {
+    range
+        .map(|[start, end]| json!({ "start": start, "end": end }))
+        .unwrap_or(Value::Null)
+}
+
+fn point_json((column, row): (u16, u16)) -> Value {
+    json!({ "column": column, "row": row })
 }
 
 fn reanchor_point(

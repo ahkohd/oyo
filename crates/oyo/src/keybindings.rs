@@ -107,10 +107,13 @@ pub(crate) enum NormalAction {
     Refresh,
     ToggleFilePanel,
     ToggleFoldContext,
+    ExpandAllFolds,
     OpenSearchOrFileFilter,
     OpenGoto,
     SearchNext,
     SearchPrev,
+    FocusNextComment,
+    FocusPrevComment,
     NextConflict,
     PrevConflict,
     LineComment,
@@ -122,6 +125,7 @@ pub(crate) enum NormalAction {
     OpenCommandPalette,
     OpenFileSearch,
     OpenCommentPicker,
+    OpenOutdatedComments,
     OpenThemePicker,
 }
 
@@ -270,7 +274,7 @@ binding_action!(GlobalAction, [
 ]);
 
 binding_action!(NormalAction, [
-    Quit => ("quit", "Quit", ["q", "esc"]),
+    Quit => ("quit", "Quit", ["q"]),
     StepDown => ("step_down", "Step forward", ["j", "down"]),
     StepUp => ("step_up", "Step backward", ["k", "up"]),
     NextHunk => ("next_hunk", "Next hunk", ["l", "right"]),
@@ -297,8 +301,8 @@ binding_action!(NormalAction, [
     NextFile => ("next_file", "Next file", ["]"]),
     ToggleAutoplay => ("toggle_autoplay", "Autoplay forward", ["space"]),
     ToggleAutoplayReverse => ("toggle_autoplay_reverse", "Autoplay reverse", ["B"]),
-    ToggleViewMode => ("toggle_view_mode", "Cycle view mode", ["tab"]),
-    ToggleViewModeReverse => ("toggle_view_mode_reverse", "Cycle view mode reverse", ["backtab"]),
+    ToggleViewMode => ("toggle_view_mode", "Cycle view modes", ["tab"]),
+    ToggleViewModeReverse => ("toggle_view_mode_reverse", "Cycle view modes reverse", ["backtab"]),
     OpenDashboard => ("open_dashboard", "Open history", ["ctrl-r"]),
     ScrollUp => ("scroll_up", "Scroll up", ["K"]),
     ScrollDown => ("scroll_down", "Scroll down", ["J"]),
@@ -311,7 +315,7 @@ binding_action!(NormalAction, [
     ToggleLineWrap => ("toggle_line_wrap", "Toggle line wrap", ["w"]),
     ToggleSyntax => ("toggle_syntax", "Toggle syntax highlight", ["t"]),
     ToggleEvoSyntax => ("toggle_evo_syntax", "Toggle evo syntax", ["E"]),
-    ToggleStepping => ("toggle_stepping", "Toggle stepping", ["s"]),
+    ToggleStepping => ("toggle_stepping", "Toggle step mode", ["s"]),
     ToggleStrikethrough => ("toggle_strikethrough", "Toggle strikethrough", ["S"]),
     ScrollLeft => ("scroll_left", "Scroll left", ["H"]),
     ScrollRight => ("scroll_right", "Scroll right", ["L"]),
@@ -323,10 +327,13 @@ binding_action!(NormalAction, [
     Refresh => ("refresh", "Refresh files", ["R"]),
     ToggleFilePanel => ("toggle_file_panel", "Toggle file panel", ["ctrl-f"]),
     ToggleFoldContext => ("toggle_fold_context", "Toggle context folding", ["f"]),
+    ExpandAllFolds => ("expand_all_folds", "Expand all context folds", ["F"]),
     OpenSearchOrFileFilter => ("open_search_or_file_filter", "Search or filter files", ["/"]),
     OpenGoto => ("open_goto", "Go to line/hunk/step", [":"]),
     SearchNext => ("search_next", "Next match", ["n"]),
     SearchPrev => ("search_prev", "Previous match", ["N"]),
+    FocusNextComment => ("focus_next_comment", "Next review comment", ["}"]),
+    FocusPrevComment => ("focus_prev_comment", "Previous review comment", ["{"]),
     NextConflict => ("next_conflict", "Next conflict", ["c"]),
     PrevConflict => ("prev_conflict", "Previous conflict", ["C"]),
     LineComment => ("line_comment", "Add/update line comment", ["m"]),
@@ -336,8 +343,9 @@ binding_action!(NormalAction, [
     RemoveHunkComment => ("remove_hunk_comment", "Remove hunk comment", ["X"]),
     ToggleHelp => ("toggle_help", "Toggle help", ["?"]),
     OpenCommandPalette => ("open_command_palette", "Command palette", ["ctrl-p"]),
-    OpenFileSearch => ("open_file_search", "Quick file search", ["ctrl-shift-p"]),
+    OpenFileSearch => ("open_file_search", "Quick file search", ["ctrl-shift-p", "g f"]),
     OpenCommentPicker => ("open_comment_picker", "Comment picker", ["g c"]),
+    OpenOutdatedComments => ("open_outdated_comments", "Outdated comments", ["g o"]),
     OpenThemePicker => ("open_theme_picker", "Theme picker", ["ctrl-t"]),
 ]);
 
@@ -360,7 +368,7 @@ binding_action!(ReviewEditorAction, [
     Down => ("down", "Move down", ["down"]),
     Home => ("home", "Move to line start", ["home"]),
     End => ("end", "Move to line end", ["end"]),
-    Clear => ("clear", "Clear text", ["ctrl-u", "ctrl-c"]),
+    Clear => ("clear", "Clear text", ["ctrl-u"]),
     MentionNext => ("mention_next", "Next mention candidate", ["ctrl-n"]),
     MentionPrev => ("mention_prev", "Previous mention candidate", ["ctrl-p"]),
 ]);
@@ -508,6 +516,10 @@ impl Keybindings {
             ),
             active_sequence_mode: None,
         }
+    }
+
+    pub(crate) fn normal_sequence_pending(&self) -> bool {
+        self.active_sequence_mode == Some(KeybindingMode::Normal)
     }
 
     pub(crate) fn clear_sequence(&mut self) {
@@ -1012,6 +1024,20 @@ mod tests {
     }
 
     #[test]
+    fn escape_is_not_a_normal_quit_binding() {
+        let mut bindings = Keybindings::default();
+
+        assert_eq!(
+            bindings.normal(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty())),
+            Dispatch::Unmatched
+        );
+        assert_eq!(
+            bindings.normal(key('q')),
+            Dispatch::Matched(NormalAction::Quit)
+        );
+    }
+
+    #[test]
     fn dashboard_e_selects_hovered() {
         let mut bindings = Keybindings::default();
 
@@ -1195,6 +1221,30 @@ mod tests {
         assert_eq!(
             bindings.normal(key),
             Dispatch::Matched(NormalAction::OpenFileSearch)
+        );
+    }
+
+    #[test]
+    fn file_picker_has_reliable_gf_fallback() {
+        let mut bindings = Keybindings::default();
+
+        assert_eq!(bindings.normal(key('g')), Dispatch::Pending);
+        assert!(bindings.normal_sequence_pending());
+        assert_eq!(
+            bindings.normal(key('f')),
+            Dispatch::Matched(NormalAction::OpenFileSearch)
+        );
+        assert!(!bindings.normal_sequence_pending());
+    }
+
+    #[test]
+    fn outdated_comments_key_uses_go_sequence() {
+        let mut bindings = Keybindings::default();
+
+        assert_eq!(bindings.normal(key('g')), Dispatch::Pending);
+        assert_eq!(
+            bindings.normal(key('o')),
+            Dispatch::Matched(NormalAction::OpenOutdatedComments)
         );
     }
 
