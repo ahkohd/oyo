@@ -3326,10 +3326,8 @@ fn parse_remote_url(url: &str) -> Option<(String, String)> {
         rest.split_once('/')?
     } else if let Some(rest) = url.strip_prefix("https://") {
         rest.split_once('/')?
-    } else if let Some(rest) = url.strip_prefix("http://") {
-        rest.split_once('/')?
     } else {
-        return None;
+        url.strip_prefix("http://")?.split_once('/')?
     };
     let repo = rest.trim_end_matches(".git").trim_matches('/');
     let mut parts = repo.split('/');

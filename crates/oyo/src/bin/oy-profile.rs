@@ -420,15 +420,8 @@ fn thread_stats(thread: &Value, units: &SampleUnits) -> ThreadStats {
     let time_sum = time_values
         .as_ref()
         .map(|values| values.iter().fold(0.0, |acc, value| acc + value));
-    let elapsed_ms = thread_elapsed_ms(thread).or_else(|| {
-        time_sum.and_then(|sum| {
-            if units.time_scale_ms.is_some() {
-                Some(sum)
-            } else {
-                None
-            }
-        })
-    });
+    let elapsed_ms =
+        thread_elapsed_ms(thread).or_else(|| time_sum.filter(|_| units.time_scale_ms.is_some()));
     let cpu_ms = samples.and_then(extract_cpu_values).and_then(|values| {
         units
             .cpu_scale_ms

@@ -230,7 +230,7 @@ impl StructuredPreviewState {
 
     fn visible_indices(&self) -> Vec<Index> {
         let mut indices = Vec::new();
-        let mut row = Some(0usize).filter(|_| !self.viewer.flatjson.0.is_empty());
+        let mut row = (!self.viewer.flatjson.0.is_empty()).then_some(0usize);
         while let Some(index) = row {
             indices.push(index);
             row = match self.viewer.mode {
