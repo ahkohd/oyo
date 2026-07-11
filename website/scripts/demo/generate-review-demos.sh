@@ -24,7 +24,11 @@ PUBLIC="$ROOT/website/public"
 DOG="${OYO_REVIEW_DOGFOOD:-/tmp/oyo-review-dogfood-1783482731}"
 OY="${OYO_BIN:-oy}"
 RANGE="${OYO_REVIEW_RANGE:-main...feature/review-sync}"
-THEME="${OYO_DEMO_THEME:-evergarden-winter}"; TMODE="${OYO_DEMO_MODE:-dark}"
+# Recorded in both dark and light. THEME/TMODE/SUFFIX are set per pass by gen_all
+# below; the "-light" suffix mirrors the hero (demo.cast / demo-light.cast).
+DARK_THEME="${OYO_DEMO_DARK_THEME:-evergarden-winter}"
+LIGHT_THEME="${OYO_DEMO_LIGHT_THEME:-everforest}"
+THEME="$DARK_THEME"; TMODE="dark"; SUFFIX=""
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
 export GIT_PAGER=cat _ZO_DOCTOR=0
 
@@ -65,13 +69,13 @@ clear; sleep 0.7
 printf '\$ git branch --show-current\n'; sleep 0.45
 git branch --show-current; sleep 1.2
 printf '\$ oy review pull\n'; sleep 0.45
-$OY review pull; sleep 1.8
+$OY --theme-name $THEME --theme-mode $TMODE review pull; sleep 1.8
 printf '\$ oy review status\n'; sleep 0.45
-$OY review status; sleep 3.4
+$OY --theme-name $THEME --theme-mode $TMODE review status; sleep 3.4
 printf '\033[0m'
 TEAM
   ( cd "$DOG" && "$OY" review pull >/dev/null 2>&1 || true )   # warm gh
-  local RAW="$WORK/team_raw.cast" OUT="$PUBLIC/review-team.cast"
+  local RAW="$WORK/team_raw.cast" OUT="$PUBLIC/review-team${SUFFIX}.cast"
   asciinema rec --overwrite --window-size 90x20 -f asciicast-v2 --idle-time-limit 4 \
     -c "bash $WORK/team.sh" "$RAW" >/dev/null 2>&1
   python3 - "$RAW" "$OUT" <<'PY'
@@ -81,14 +85,14 @@ last=max(i for i,e in enumerate(evs) if 'Review comments' in e[2] or 'Pulled' in
 kept=evs[:last+1]+[[evs[-1][0],'o','\x1b[0m']]
 open(sys.argv[2],'w').write(h+'\n'+''.join(json.dumps(e)+'\n' for e in kept))
 PY
-  echo "  review-team.cast"
+  echo "  review-team${SUFFIX}.cast"
 }
 
 # ---------------------------------------------------------------------------
 # card 1 — Diff and review (oy TUI). Drives } to walk the comment threads.
 # ---------------------------------------------------------------------------
 gen_tool(){
-  local RAW="$WORK/tool_raw.cast" OUT="$PUBLIC/review-tool.cast" S=oyrevtui
+  local RAW="$WORK/tool_raw.cast" OUT="$PUBLIC/review-tool${SUFFIX}.cast" S=oyrevtui
   pilotty kill -s "$S" 2>/dev/null || true; rm -f "$RAW"
   pilotty spawn --name "$S" --cwd "$DOG" -- \
     asciinema rec --overwrite --window-size 80x18 -f asciicast-v2 --idle-time-limit 2 \
@@ -136,7 +140,7 @@ keep=[e for e in clean if not noop(e[2]) and not junk(e[2])]
 keep.append([round(keep[-1][0]+2.0,3),'o',''])
 open(sys.argv[2],'w').write(h+'\n'+''.join(json.dumps(e)+'\n' for e in keep))
 PY
-  echo "  review-tool.cast"
+  echo "  review-tool${SUFFIX}.cast"
 }
 
 # ---------------------------------------------------------------------------
@@ -161,7 +165,7 @@ printf '\$ oy review comment resolve 1\n'; sleep 0.5
 $OY review comment resolve 1; sleep 1.4
 printf '\$ oy --range $RANGE\n'; sleep 0.9
 AGENT
-  local CLI="$WORK/agent_cli.cast" TUI="$WORK/agent_tui.cast" OUT="$PUBLIC/review-agent.cast" S=agt
+  local CLI="$WORK/agent_cli.cast" TUI="$WORK/agent_tui.cast" OUT="$PUBLIC/review-agent${SUFFIX}.cast" S=agt
   asciinema rec --overwrite --window-size 80x18 -f asciicast-v2 --idle-time-limit 3 \
     -c "bash $WORK/agent.sh" "$CLI" >/dev/null 2>&1
   pilotty kill -s "$S" 2>/dev/null || true; rm -f "$TUI"
@@ -196,13 +200,20 @@ allev=cli+new; allev.append([round(allev[-1][0]+1.6,3),'o',''])
 open(sys.argv[3],'w').write(h+'\n'+''.join(json.dumps(e)+'\n' for e in allev))
 PY
   reset_dog
-  echo "  review-agent.cast"
+  echo "  review-agent${SUFFIX}.cast"
 }
 
-echo "==> resetting dogfood PR to the clean 4-comment state"
-reset_dog
-echo "==> recording review card demos into $PUBLIC"
-gen_team
-gen_tool
-gen_agent
+# Record every card in both themes so the page can swap per prefers-color-scheme,
+# mirroring the hero's demo.cast / demo-light.cast pair.
+gen_all(){   # $1=theme  $2=mode  $3=suffix
+  THEME="$1"; TMODE="$2"; SUFFIX="$3"
+  echo "==> [$2] recording review card demos into $PUBLIC"
+  reset_dog
+  gen_team
+  gen_tool
+  gen_agent
+}
+
+gen_all "$DARK_THEME"  dark  ""
+gen_all "$LIGHT_THEME" light "-light"
 echo "done."

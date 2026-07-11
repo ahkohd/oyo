@@ -172,7 +172,7 @@ const demoReviewAgent = `<span class="cur">$</span> agent reviewing your diff â€
                 <p>Read any change, comment on the exact lines, and work every thread through to resolved â€” the whole review, in one place.</p>
               </div>
               <!-- Demo: the review TUI â€” diff with an inline comment card, unified/split (80x18). -->
-              <div class="show-demo mini mini-player" data-cast-dark={`${base}review-tool.cast`} data-cast-light={`${base}review-tool.cast`} set:html={demoReviewTool}></div>
+              <div class="show-demo mini mini-player" data-cast-dark={`${base}review-tool.cast`} data-cast-light={`${base}review-tool-light.cast`} set:html={demoReviewTool}></div>
             </div>
 
             <div class="show-row">
@@ -182,7 +182,7 @@ const demoReviewAgent = `<span class="cur">$</span> agent reviewing your diff â€
                 <p>Pull your team's comments from GitHub, GitLab, Codeberg or self-hosted Forgejo into Oyo, work through them, reply, resolve and push your own comments back.</p>
               </div>
               <!-- Demo: `oy review pull` + status against a real PR (90x12, full-height panel). -->
-              <div class="show-demo mini mini-player" data-cast-dark={`${base}review-team.cast`} data-cast-light={`${base}review-team.cast`} set:html={demoReviewTeam}></div>
+              <div class="show-demo mini mini-player" data-cast-dark={`${base}review-team.cast`} data-cast-light={`${base}review-team-light.cast`} set:html={demoReviewTeam}></div>
             </div>
 
             <div class="show-row">
@@ -192,7 +192,7 @@ const demoReviewAgent = `<span class="cur">$</span> agent reviewing your diff â€
                 <p>Have it review a diff, leave comments and resolve feedback, or drive the TUI while it walks you through the changes.</p>
               </div>
               <!-- Demo: the agent reviews via oy review (identity, comments, resolve) â€” 80x18. -->
-              <div class="show-demo mini mini-player" data-cast-dark={`${base}review-agent.cast`} data-cast-light={`${base}review-agent.cast`} set:html={demoReviewAgent}></div>
+              <div class="show-demo mini mini-player" data-cast-dark={`${base}review-agent.cast`} data-cast-light={`${base}review-agent-light.cast`} set:html={demoReviewAgent}></div>
             </div>
           </div>
         </div>
@@ -604,6 +604,12 @@ d = [<span class="str">"diff"</span>, <span class="str">"--tool"</span>, <span c
                     controls: false,
                     fit: "width",
                     poster: "npt:0:04",
+                    // The TUI casts paint their own truecolor background, but the
+                    // CLI "team" card doesn't â€” it inherits the player's terminal
+                    // theme. solarized-light's bg (#fdf6e3) matches the light TUI
+                    // casts' background exactly, so all three cards agree in light
+                    // mode; dark keeps the default.
+                    theme: m === "light" ? "solarized-light" : "asciinema",
                   },
                 );
               } catch (e) {
