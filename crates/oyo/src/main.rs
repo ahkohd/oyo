@@ -8,6 +8,8 @@ mod config;
 mod control;
 mod csv_preview;
 mod dashboard;
+mod forgejo;
+mod gitlab;
 mod input;
 mod jless;
 mod keybindings;
@@ -536,7 +538,7 @@ enum ReviewCommand {
         #[arg(short, long)]
         output: Option<PathBuf>,
     },
-    /// Pull pull request comments into the local review
+    /// Pull provider comments into the local review
     Pull {
         /// Optional target followed by optional remote
         #[arg(num_args = 0..=2)]
@@ -548,7 +550,7 @@ enum ReviewCommand {
         #[arg(long)]
         json: bool,
     },
-    /// Push local review comments to the pull request
+    /// Push local review comments to the provider
     Push {
         /// Optional target followed by optional remote
         #[arg(num_args = 0..=2)]
@@ -2493,12 +2495,20 @@ fn review_target_summary(app: &App) -> ReviewTargetSummary {
     let metadata = app.review_target_metadata();
     let pr = metadata.and_then(|target| target.pr_number);
     let label = match (metadata, pr) {
-        (Some(target), Some(number)) => target
-            .branch
-            .as_deref()
-            .or(target.git_head_ref.as_deref())
-            .map(|branch| format!("PR #{number} ({branch})"))
-            .unwrap_or_else(|| format!("PR #{number}")),
+        (Some(target), Some(number)) => {
+            let noun = target
+                .pr_provider
+                .as_deref()
+                .and_then(ReviewProviderKind::from_id)
+                .unwrap_or(ReviewProviderKind::GitHub)
+                .short_review_noun();
+            target
+                .branch
+                .as_deref()
+                .or(target.git_head_ref.as_deref())
+                .map(|branch| format!("{noun} #{number} ({branch})"))
+                .unwrap_or_else(|| format!("{noun} #{number}"))
+        }
         (Some(target), None) if target.label == "@" => "working tree".to_string(),
         (Some(target), None) if target.label == "staged" => "staged changes".to_string(),
         (Some(target), None) => target.label.clone(),
@@ -3160,7 +3170,6 @@ impl ReviewProviderKind {
         }
     }
 
-    #[allow(dead_code)]
     pub(crate) fn short_review_noun(self) -> &'static str {
         match self {
             Self::GitLab => "MR",
@@ -3187,6 +3196,7 @@ impl ReviewProviderKind {
 struct ReviewRemote {
     name: String,
     provider: ReviewProviderKind,
+    host: String,
     repo: String,
 }
 
@@ -3194,6 +3204,7 @@ struct ReviewRemote {
 struct ProviderPr {
     provider: ReviewProviderKind,
     remote: String,
+    host: String,
     repo: String,
     number: u64,
     title: String,
@@ -3201,7 +3212,14 @@ struct ProviderPr {
     base_branch: String,
     head_branch: String,
     base_commit: String,
+    start_commit: Option<String>,
     head_commit: String,
+}
+
+#[derive(Debug, Clone)]
+struct ProviderUser {
+    login: String,
+    avatar_url: Option<String>,
 }
 
 fn review_pull_request_target(pr: &ProviderPr) -> ReviewPullRequestTarget {
@@ -3416,9 +3434,9 @@ fn parse_remote_url(url: &str) -> Option<(String, String)> {
     };
     let repo = rest.trim_end_matches(".git").trim_matches('/');
     let mut parts = repo.split('/');
-    let owner = parts.next()?;
-    let name = parts.next()?;
-    Some((host.to_string(), format!("{owner}/{name}")))
+    parts.next()?;
+    parts.next()?;
+    Some((host.to_string(), repo.to_string()))
 }
 
 fn review_remote(root: &Path, remote: Option<&str>) -> Result<ReviewRemote> {
@@ -3428,25 +3446,56 @@ fn review_remote(root: &Path, remote: Option<&str>) -> Result<ReviewRemote> {
     };
     let url = git_output(root, &["remote", "get-url", &name])?;
     let Some((host, repo)) = parse_remote_url(&url) else {
-        if url.contains("gitlab") {
-            anyhow::bail!("GitLab review sync is planned, but only GitHub is implemented now.");
-        }
-        if url.contains("codeberg") || url.contains("forgejo") {
-            anyhow::bail!("Forgejo review sync is planned, but only GitHub is implemented now.");
-        }
         anyhow::bail!("Unsupported review remote URL: {url}");
     };
-    let provider = match host.as_str() {
-        "github.com" => ReviewProviderKind::GitHub,
-        "gitlab.com" => ReviewProviderKind::GitLab,
-        "codeberg.org" => ReviewProviderKind::Forgejo,
-        _ => anyhow::bail!("Unsupported review provider: {host}"),
-    };
+    let provider = review_provider_for_host(&host)
+        .ok_or_else(|| anyhow!("Unsupported or unauthenticated review provider: {host}"))?;
     Ok(ReviewRemote {
         name,
         provider,
+        host,
         repo,
     })
+}
+
+fn review_provider_for_host(host: &str) -> Option<ReviewProviderKind> {
+    match host {
+        "github.com" => Some(ReviewProviderKind::GitHub),
+        "gitlab.com" => Some(ReviewProviderKind::GitLab),
+        "codeberg.org" => Some(ReviewProviderKind::Forgejo),
+        _ => {
+            let forgejo_configured = forgejo::has_forgejo_token(host);
+            let gitlab_configured = !forgejo_configured && glab_host_configured(host);
+            review_provider_for_configured_host(host, forgejo_configured, gitlab_configured)
+        }
+    }
+}
+
+fn review_provider_for_configured_host(
+    host: &str,
+    forgejo_configured: bool,
+    gitlab_configured: bool,
+) -> Option<ReviewProviderKind> {
+    match host {
+        "github.com" => Some(ReviewProviderKind::GitHub),
+        "gitlab.com" => Some(ReviewProviderKind::GitLab),
+        "codeberg.org" => Some(ReviewProviderKind::Forgejo),
+        _ if forgejo_configured => Some(ReviewProviderKind::Forgejo),
+        _ if gitlab_configured => Some(ReviewProviderKind::GitLab),
+        _ => None,
+    }
+}
+
+fn glab_host_configured(host: &str) -> bool {
+    let mut command = ProcessCommand::new("glab");
+    command
+        .arg("auth")
+        .arg("status")
+        .arg("--hostname")
+        .arg(host)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    command.status().is_ok_and(|status| status.success())
 }
 
 fn parse_sync_args(root: &Path, items: &[String]) -> Result<(Option<String>, String)> {
@@ -3467,12 +3516,15 @@ fn gh_json<T: for<'de> Deserialize<'de>>(args: &[&str]) -> Result<T> {
     serde_json::from_str(&data).map_err(|error| anyhow!(error))
 }
 
-fn gh_whoami() -> Result<GhUser> {
+fn gh_whoami() -> Result<ProviderUser> {
     let user: GhUser = gh_json(&["api", "user"])?;
     if let Some(url) = user.avatar_url.as_deref() {
         let _ = crate::avatars::cache_avatar_url(url);
     }
-    Ok(user)
+    Ok(ProviderUser {
+        login: user.login,
+        avatar_url: user.avatar_url,
+    })
 }
 
 fn gh_pr(remote: &ReviewRemote, target: Option<&str>) -> Result<ProviderPr> {
@@ -3497,6 +3549,7 @@ fn gh_pr(remote: &ReviewRemote, target: Option<&str>) -> Result<ProviderPr> {
     Ok(ProviderPr {
         provider: remote.provider,
         remote: remote.name.clone(),
+        host: remote.host.clone(),
         repo: remote.repo.clone(),
         number: pr.number,
         title: pr.title,
@@ -3504,6 +3557,7 @@ fn gh_pr(remote: &ReviewRemote, target: Option<&str>) -> Result<ProviderPr> {
         base_branch: pr.base_ref_name,
         head_branch: pr.head_ref_name,
         base_commit: pr.base_ref_oid,
+        start_commit: None,
         head_commit: pr.head_ref_oid,
     })
 }
@@ -3998,6 +4052,61 @@ fn sync_pr_target(target: Option<&str>) -> Option<&str> {
     })
 }
 
+trait ReviewProviderAdapter: Send + Sync {
+    fn find_pr(&self, remote: &ReviewRemote, target: Option<&str>) -> Result<ProviderPr>;
+    fn whoami(&self, pr: &ProviderPr) -> Result<ProviderUser>;
+    fn fetch_comments(&self, pr: ProviderPr, user: ProviderUser) -> Result<ReviewPullRemoteData>;
+    fn push_ops<'a>(
+        &self,
+        pr: &'a ProviderPr,
+        user: &'a ProviderUser,
+    ) -> Box<dyn ReviewProviderPushOps + 'a>;
+}
+
+struct GithubProvider;
+
+impl ReviewProviderAdapter for GithubProvider {
+    fn find_pr(&self, remote: &ReviewRemote, target: Option<&str>) -> Result<ProviderPr> {
+        gh_pr(remote, target)
+    }
+
+    fn whoami(&self, _pr: &ProviderPr) -> Result<ProviderUser> {
+        gh_whoami()
+    }
+
+    fn fetch_comments(&self, pr: ProviderPr, user: ProviderUser) -> Result<ReviewPullRemoteData> {
+        fetch_github_comments_for_pull(pr, user)
+    }
+
+    fn push_ops<'a>(
+        &self,
+        pr: &'a ProviderPr,
+        user: &'a ProviderUser,
+    ) -> Box<dyn ReviewProviderPushOps + 'a> {
+        Box::new(GithubPushOps { pr, user })
+    }
+}
+
+static GITHUB_PROVIDER: GithubProvider = GithubProvider;
+static GITLAB_PROVIDER: gitlab::GitlabProvider = gitlab::GitlabProvider;
+static FORGEJO_PROVIDER: forgejo::ForgejoProvider = forgejo::ForgejoProvider;
+
+fn provider_adapter(kind: ReviewProviderKind) -> Result<&'static dyn ReviewProviderAdapter> {
+    match kind {
+        ReviewProviderKind::GitHub => Ok(&GITHUB_PROVIDER),
+        ReviewProviderKind::GitLab => Ok(&GITLAB_PROVIDER),
+        ReviewProviderKind::Forgejo => Ok(&FORGEJO_PROVIDER),
+    }
+}
+
+fn provider_pr(remote: &ReviewRemote, target: Option<&str>) -> Result<ProviderPr> {
+    provider_adapter(remote.provider)?.find_pr(remote, target)
+}
+
+fn provider_whoami(pr: &ProviderPr) -> Result<ProviderUser> {
+    provider_adapter(pr.provider)?.whoami(pr)
+}
+
 fn resolve_sync_target_parts(
     target: Option<String>,
     remote_name: String,
@@ -4008,12 +4117,7 @@ fn resolve_sync_target_parts(
         .map(str::to_string)
         .or_else(|| git_output(&workspace, &["branch", "--show-current"]).ok())
         .filter(|branch| !branch.is_empty());
-    let pr = match remote.provider {
-        ReviewProviderKind::GitHub => gh_pr(&remote, lookup_target.as_deref())?,
-        ReviewProviderKind::GitLab | ReviewProviderKind::Forgejo => {
-            anyhow::bail!("Only GitHub review sync is implemented now.")
-        }
-    };
+    let pr = provider_pr(&remote, lookup_target.as_deref())?;
     let revision = provider_revision(target.as_deref(), &pr);
     Ok((target, remote, pr, revision))
 }
@@ -4105,15 +4209,54 @@ struct ReviewPushOutcome {
 }
 
 #[derive(Debug)]
-struct ReviewPullRemoteData {
-    pr: ProviderPr,
-    user: GhUser,
-    provider_comments: Vec<GhProviderComment>,
-    issue_comments: Vec<GhIssueComment>,
-    conversation_users: BTreeSet<String>,
+enum ReviewPullRemoteData {
+    GitHub {
+        pr: ProviderPr,
+        user: ProviderUser,
+        provider_comments: Vec<GhProviderComment>,
+        issue_comments: Vec<GhIssueComment>,
+        conversation_users: BTreeSet<String>,
+    },
+    GitLab {
+        pr: ProviderPr,
+        user: ProviderUser,
+        discussions: Vec<gitlab::GlDiscussion>,
+    },
+    Forgejo {
+        pr: ProviderPr,
+        user: ProviderUser,
+        review_comments: Vec<forgejo::FjReviewComments>,
+        issue_comments: Vec<forgejo::FjIssueComment>,
+    },
 }
 
-fn fetch_provider_comments_for_pull(pr: ProviderPr, user: GhUser) -> Result<ReviewPullRemoteData> {
+impl ReviewPullRemoteData {
+    fn pr(&self) -> &ProviderPr {
+        match self {
+            Self::GitHub { pr, .. } | Self::GitLab { pr, .. } | Self::Forgejo { pr, .. } => pr,
+        }
+    }
+
+    fn user(&self) -> &ProviderUser {
+        match self {
+            Self::GitHub { user, .. } | Self::GitLab { user, .. } | Self::Forgejo { user, .. } => {
+                user
+            }
+        }
+    }
+}
+
+fn fetch_provider_comments_for_pull(
+    pr: ProviderPr,
+    user: ProviderUser,
+) -> Result<ReviewPullRemoteData> {
+    provider_adapter(pr.provider)?.fetch_comments(pr, user)
+}
+
+fn fetch_github_comments_for_pull(
+    pr: ProviderPr,
+    user: ProviderUser,
+) -> Result<ReviewPullRemoteData> {
     let thread_states = gh_review_thread_states(&pr)?;
     let provider_comments = gh_comments(&pr)?
         .into_iter()
@@ -4132,7 +4275,7 @@ fn fetch_provider_comments_for_pull(pr: ProviderPr, user: GhUser) -> Result<Revi
         .collect();
     let issue_comments = gh_issue_comments(&pr)?;
     let conversation_users = github_conversation_comment_users(&pr, &user.login)?;
-    Ok(ReviewPullRemoteData {
+    Ok(ReviewPullRemoteData::GitHub {
         pr,
         user,
         provider_comments,
@@ -4147,20 +4290,65 @@ fn apply_provider_comments_to_app(
 ) -> Result<ReviewPullStats> {
     let mut changed = Vec::new();
     let mut skipped = 0usize;
-    for comment in data.provider_comments {
-        match github_comment_to_review_comment(app, &data.pr, &data.user.login, comment) {
-            Ok(comment) => changed.push(app.upsert_provider_review_comment(comment)),
-            Err(_) => skipped += 1,
+    match data {
+        ReviewPullRemoteData::GitHub {
+            pr,
+            user,
+            provider_comments,
+            issue_comments,
+            conversation_users,
+        } => {
+            for comment in provider_comments {
+                match github_comment_to_review_comment(app, &pr, &user.login, comment) {
+                    Ok(comment) => changed.push(app.upsert_provider_review_comment(comment)),
+                    Err(_) => skipped += 1,
+                }
+            }
+            for comment in issue_comments {
+                if !conversation_users.contains(&comment.user.login) {
+                    skipped += 1;
+                    continue;
+                }
+                match github_issue_comment_to_review_comment(app, &pr, &user.login, comment) {
+                    Ok(comment) => changed.push(app.upsert_provider_review_comment(comment)),
+                    Err(_) => skipped += 1,
+                }
+            }
         }
-    }
-    for comment in data.issue_comments {
-        if !data.conversation_users.contains(&comment.user.login) {
-            skipped += 1;
-            continue;
+        ReviewPullRemoteData::GitLab {
+            pr,
+            user,
+            discussions,
+        } => {
+            for discussion in discussions {
+                for comment in
+                    gitlab::discussion_to_review_comments(app, &pr, &user.login, discussion)
+                {
+                    match comment {
+                        Ok(comment) => changed.push(app.upsert_provider_review_comment(comment)),
+                        Err(_) => skipped += 1,
+                    }
+                }
+            }
         }
-        match github_issue_comment_to_review_comment(app, &data.pr, &data.user.login, comment) {
-            Ok(comment) => changed.push(app.upsert_provider_review_comment(comment)),
-            Err(_) => skipped += 1,
+        ReviewPullRemoteData::Forgejo {
+            pr,
+            user,
+            review_comments,
+            issue_comments,
+        } => {
+            for comment in forgejo::review_comments_to_oyo(app, &pr, &user.login, review_comments) {
+                match comment {
+                    Ok(comment) => changed.push(app.upsert_provider_review_comment(comment)),
+                    Err(_) => skipped += 1,
+                }
+            }
+            for comment in issue_comments {
+                match forgejo::issue_comment_to_oyo(app, &pr, &user.login, comment) {
+                    Ok(comment) => changed.push(app.upsert_provider_review_comment(comment)),
+                    Err(_) => skipped += 1,
+                }
+            }
         }
     }
     Ok(ReviewPullStats {
@@ -4173,36 +4361,200 @@ fn apply_provider_comments_to_app(
 fn pull_provider_comments_into_app(
     app: &mut App,
     pr: &ProviderPr,
-    user: &GhUser,
+    user: &ProviderUser,
 ) -> Result<ReviewPullStats> {
     let data = fetch_provider_comments_for_pull(pr.clone(), user.clone())?;
     apply_provider_comments_to_app(app, data)
 }
 
-fn push_review_comments_to_provider(
-    comments: Vec<ReviewComment>,
-    pr: &ProviderPr,
-    user: &GhUser,
-) -> Result<ReviewPushOutcome> {
-    push_review_comments_to_provider_with(
-        comments,
-        pr,
-        user,
-        |parent_comment_id, body| github_create_reply(pr, parent_comment_id, body),
-        github_set_review_thread_resolved,
-    )
+trait ReviewProviderPushOps {
+    fn provider_label(&self) -> &'static str;
+    fn create_root(&mut self, comment: &ReviewComment) -> Result<ReviewProviderComment>;
+    fn create_reply(
+        &mut self,
+        provider: &ReviewProviderComment,
+        body: &str,
+    ) -> Result<ReviewProviderComment>;
+    fn update(
+        &mut self,
+        provider: &ReviewProviderComment,
+        body: &str,
+    ) -> Result<ReviewProviderComment>;
+    fn delete(&mut self, provider: &ReviewProviderComment) -> Result<()>;
+    fn set_thread_resolved(&mut self, thread_id: &str, resolved: bool) -> Result<()>;
 }
 
+struct GithubPushOps<'a> {
+    pr: &'a ProviderPr,
+    user: &'a ProviderUser,
+}
+
+impl ReviewProviderPushOps for GithubPushOps<'_> {
+    fn provider_label(&self) -> &'static str {
+        "GitHub"
+    }
+
+    fn create_root(&mut self, comment: &ReviewComment) -> Result<ReviewProviderComment> {
+        if comment.anchor.kind == ReviewTargetKind::PullRequest {
+            let remote_comment = github_create_issue_comment(self.pr, &comment.body)?;
+            Ok(clean_issue_provider_link(
+                self.pr,
+                &self.user.login,
+                &remote_comment,
+            ))
+        } else {
+            let remote_comment = github_create_comment(self.pr, comment)?;
+            Ok(clean_provider_link(
+                self.pr,
+                &self.user.login,
+                &remote_comment,
+            ))
+        }
+    }
+
+    fn create_reply(
+        &mut self,
+        provider: &ReviewProviderComment,
+        body: &str,
+    ) -> Result<ReviewProviderComment> {
+        let parent_comment_id = provider
+            .in_reply_to_id
+            .as_deref()
+            .ok_or_else(|| anyhow!("Reply is missing a parent comment id."))?;
+        let remote_comment = github_create_reply(self.pr, parent_comment_id, body)?;
+        Ok(clean_provider_link(
+            self.pr,
+            &self.user.login,
+            &remote_comment,
+        ))
+    }
+
+    fn update(
+        &mut self,
+        provider: &ReviewProviderComment,
+        body: &str,
+    ) -> Result<ReviewProviderComment> {
+        if provider.api_kind == "issue" {
+            let remote_comment = github_update_issue_comment(self.pr, &provider.comment_id, body)?;
+            Ok(clean_issue_provider_link(
+                self.pr,
+                &self.user.login,
+                &remote_comment,
+            ))
+        } else {
+            let remote_comment = github_update_comment(self.pr, &provider.comment_id, body)?;
+            Ok(clean_provider_link(
+                self.pr,
+                &self.user.login,
+                &remote_comment,
+            ))
+        }
+    }
+
+    fn delete(&mut self, provider: &ReviewProviderComment) -> Result<()> {
+        if provider.api_kind == "issue" {
+            github_delete_issue_comment(self.pr, &provider.comment_id)
+        } else {
+            github_delete_comment(self.pr, &provider.comment_id)
+        }
+    }
+
+    fn set_thread_resolved(&mut self, thread_id: &str, resolved: bool) -> Result<()> {
+        github_set_review_thread_resolved(thread_id, resolved)
+    }
+}
+
+#[cfg(test)]
 fn push_review_comments_to_provider_with<R, F>(
     comments: Vec<ReviewComment>,
     pr: &ProviderPr,
-    user: &GhUser,
-    mut create_reply: R,
-    mut set_thread_resolved: F,
+    user: &ProviderUser,
+    create_reply: R,
+    set_thread_resolved: F,
 ) -> Result<ReviewPushOutcome>
 where
     R: FnMut(&str, &str) -> Result<GhComment>,
     F: FnMut(&str, bool) -> Result<()>,
+{
+    struct GithubClosurePushOps<'a, R, F> {
+        pr: &'a ProviderPr,
+        user: &'a ProviderUser,
+        create_reply: R,
+        set_thread_resolved: F,
+    }
+
+    impl<R, F> ReviewProviderPushOps for GithubClosurePushOps<'_, R, F>
+    where
+        R: FnMut(&str, &str) -> Result<GhComment>,
+        F: FnMut(&str, bool) -> Result<()>,
+    {
+        fn provider_label(&self) -> &'static str {
+            "GitHub"
+        }
+
+        fn create_root(&mut self, _comment: &ReviewComment) -> Result<ReviewProviderComment> {
+            unreachable!()
+        }
+
+        fn create_reply(
+            &mut self,
+            provider: &ReviewProviderComment,
+            body: &str,
+        ) -> Result<ReviewProviderComment> {
+            let parent_comment_id = provider
+                .in_reply_to_id
+                .as_deref()
+                .ok_or_else(|| anyhow!("Reply is missing a parent comment id."))?;
+            let remote_comment = (self.create_reply)(parent_comment_id, body)?;
+            Ok(clean_provider_link(
+                self.pr,
+                &self.user.login,
+                &remote_comment,
+            ))
+        }
+
+        fn update(
+            &mut self,
+            _provider: &ReviewProviderComment,
+            _body: &str,
+        ) -> Result<ReviewProviderComment> {
+            unreachable!()
+        }
+
+        fn delete(&mut self, _provider: &ReviewProviderComment) -> Result<()> {
+            unreachable!()
+        }
+
+        fn set_thread_resolved(&mut self, thread_id: &str, resolved: bool) -> Result<()> {
+            (self.set_thread_resolved)(thread_id, resolved)
+        }
+    }
+
+    let mut ops = GithubClosurePushOps {
+        pr,
+        user,
+        create_reply,
+        set_thread_resolved,
+    };
+    push_review_comments_to_provider_with_ops(comments, pr, &mut ops)
+}
+
+fn push_review_comments_to_provider(
+    comments: Vec<ReviewComment>,
+    pr: &ProviderPr,
+    user: &ProviderUser,
+) -> Result<ReviewPushOutcome> {
+    let mut ops = provider_adapter(pr.provider)?.push_ops(pr, user);
+    push_review_comments_to_provider_with_ops(comments, pr, ops.as_mut())
+}
+
+fn push_review_comments_to_provider_with_ops<O>(
+    comments: Vec<ReviewComment>,
+    pr: &ProviderPr,
+    ops: &mut O,
+) -> Result<ReviewPushOutcome>
+where
+    O: ReviewProviderPushOps + ?Sized,
 {
     let mut comments = comments;
     comments.sort_by_key(|comment| {
@@ -4306,11 +4658,7 @@ where
                 continue;
             }
             if comment.deleted {
-                if provider.api_kind == "issue" {
-                    github_delete_issue_comment(pr, &provider.comment_id)?;
-                } else {
-                    github_delete_comment(pr, &provider.comment_id)?;
-                }
+                ops.delete(provider)?;
                 changes.push(ReviewPushChange {
                     id: comment.id,
                     provider: provider.clone(),
@@ -4319,15 +4667,7 @@ where
                 continue;
             }
             if provider.sync_state == "dirty" {
-                let mut clean_provider = if provider.api_kind == "issue" {
-                    let remote_comment =
-                        github_update_issue_comment(pr, &provider.comment_id, &comment.body)?;
-                    clean_issue_provider_link(pr, &user.login, &remote_comment)
-                } else {
-                    let remote_comment =
-                        github_update_comment(pr, &provider.comment_id, &comment.body)?;
-                    clean_provider_link(pr, &user.login, &remote_comment)
-                };
+                let mut clean_provider = ops.update(provider, &comment.body)?;
                 clean_provider
                     .in_reply_to_id
                     .clone_from(&provider.in_reply_to_id);
@@ -4349,13 +4689,7 @@ where
             skipped += 1;
             continue;
         }
-        let mut provider = if comment.anchor.kind == ReviewTargetKind::PullRequest {
-            let remote_comment = github_create_issue_comment(pr, &comment.body)?;
-            clean_issue_provider_link(pr, &user.login, &remote_comment)
-        } else {
-            let remote_comment = github_create_comment(pr, &comment)?;
-            clean_provider_link(pr, &user.login, &remote_comment)
-        };
+        let mut provider = ops.create_root(&comment)?;
         provider.resolved_dirty = comment.resolved;
         changes.push(ReviewPushChange {
             id: comment.id,
@@ -4365,11 +4699,12 @@ where
     }
 
     for (id, body, provider) in pending_replies {
-        let parent_comment_id = provider.in_reply_to_id.as_deref().unwrap();
-        match create_reply(parent_comment_id, &body) {
-            Ok(remote_comment) => {
-                let mut clean_provider = clean_provider_link(pr, &user.login, &remote_comment);
-                clean_provider.in_reply_to_id = Some(parent_comment_id.to_string());
+        let parent_comment_id = provider.in_reply_to_id.as_deref().unwrap_or_default();
+        match ops.create_reply(&provider, &body) {
+            Ok(mut clean_provider) => {
+                clean_provider
+                    .in_reply_to_id
+                    .clone_from(&provider.in_reply_to_id);
                 clean_provider.thread_id.clone_from(&provider.thread_id);
                 clean_provider.thread_resolved = provider.thread_resolved;
                 clean_provider.resolved_dirty = provider.resolved_dirty;
@@ -4382,7 +4717,8 @@ where
             Err(error) => {
                 skipped += 1;
                 warnings.push(format!(
-                    "Could not reply to GitHub review comment {parent_comment_id}: {error}"
+                    "Could not reply to {} review comment {parent_comment_id}: {error}",
+                    ops.provider_label()
                 ));
             }
         }
@@ -4390,7 +4726,7 @@ where
 
     let mut thread_changes = Vec::new();
     for (thread_id, resolved) in pending_threads {
-        match set_thread_resolved(&thread_id, resolved) {
+        match ops.set_thread_resolved(&thread_id, resolved) {
             Ok(()) => {
                 thread_changes.push(ReviewPushThreadChange {
                     provider: pr.provider.id().to_string(),
@@ -4405,7 +4741,8 @@ where
                 skipped += 1;
                 let action = if resolved { "resolve" } else { "unresolve" };
                 warnings.push(format!(
-                    "Could not {action} GitHub review thread {thread_id}: {error}"
+                    "Could not {action} {} review thread {thread_id}: {error}",
+                    ops.provider_label()
                 ));
             }
         }
@@ -4454,7 +4791,7 @@ fn apply_push_outcome_to_app(app: &mut App, outcome: ReviewPushOutcome) -> Revie
 fn push_app_comments_to_provider(
     app: &mut App,
     pr: &ProviderPr,
-    user: &GhUser,
+    user: &ProviderUser,
 ) -> Result<ReviewPushStats> {
     let outcome = push_review_comments_to_provider(app.review_comments_for_sync(), pr, user)?;
     Ok(apply_push_outcome_to_app(app, outcome))
@@ -4468,7 +4805,7 @@ enum ReviewSyncWorkerResult {
     Push {
         action: ReviewSyncAction,
         provider: ReviewProviderKind,
-        user: GhUser,
+        user: ProviderUser,
         outcome: ReviewPushOutcome,
     },
 }
@@ -4497,7 +4834,7 @@ fn spawn_review_pull_worker(action: ReviewSyncAction, remote: Option<String>) ->
         let result = (|| {
             let items = remote.into_iter().collect::<Vec<_>>();
             let (_target, _remote, pr, _revision) = resolve_sync_target_items(&items)?;
-            let user = gh_whoami()?;
+            let user = provider_whoami(&pr)?;
             let data = fetch_provider_comments_for_pull(pr, user)?;
             Ok(ReviewSyncWorkerResult::Pull {
                 action,
@@ -4512,7 +4849,7 @@ fn spawn_review_pull_worker(action: ReviewSyncAction, remote: Option<String>) ->
 fn spawn_review_push_worker(
     action: ReviewSyncAction,
     pr: ProviderPr,
-    user: GhUser,
+    user: ProviderUser,
     comments: Vec<ReviewComment>,
 ) -> ReviewSyncWorker {
     let (tx, rx) = std::sync::mpsc::channel();
@@ -4541,7 +4878,7 @@ fn spawn_review_push_request_worker(
         let result = (|| {
             let items = remote.into_iter().collect::<Vec<_>>();
             let (_target, _remote, pr, _revision) = resolve_sync_target_items(&items)?;
-            let user = gh_whoami()?;
+            let user = provider_whoami(&pr)?;
             let outcome = push_review_comments_to_provider(comments, &pr, &user)?;
             Ok(ReviewSyncWorkerResult::Push {
                 action,
@@ -4578,7 +4915,7 @@ fn handle_review_pull_command(
     let (_target, _remote, pr, revision) = resolve_sync_target(config, args, items, target)?;
     let mut app = review_app_for_pr(config, args, &revision, true)?;
     app.set_review_target_metadata(Some(review_pr_target_metadata(&pr)));
-    let user = gh_whoami()?;
+    let user = provider_whoami(&pr)?;
     let stats = pull_provider_comments_into_app(&mut app, &pr, &user)?;
     if json {
         println!(
@@ -4622,7 +4959,7 @@ fn handle_review_push_command(
     let (_target, _remote, pr, revision) = resolve_sync_target(config, args, items, target)?;
     let mut app = review_app_for_pr(config, args, &revision, false)?;
     app.set_review_target_metadata(Some(review_pr_target_metadata(&pr)));
-    let user = gh_whoami()?;
+    let user = provider_whoami(&pr)?;
     let stats = push_app_comments_to_provider(&mut app, &pr, &user)?;
     if json {
         println!(
@@ -6836,7 +7173,7 @@ fn run_app(
                     Ok(result) => Some(result),
                     Err(std::sync::mpsc::TryRecvError::Empty) => None,
                     Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                        Some(Err(anyhow!("Pull request lookup stopped.")))
+                        Some(Err(anyhow!("Review request lookup stopped.")))
                     }
                 });
         if let Some(result) = pr_lookup_result {
@@ -6861,15 +7198,15 @@ fn run_app(
             review_sync_worker = None;
             match result {
                 Ok(ReviewSyncWorkerResult::Pull { action, data }) => {
+                    let pr = data.pr().clone();
+                    let user = data.user().clone();
                     app.set_review_author_provider_avatar(
-                        data.pr.provider.id(),
-                        &data.user.login,
-                        data.user.avatar_url.clone(),
+                        pr.provider.id(),
+                        &user.login,
+                        user.avatar_url.clone(),
                     );
-                    app.set_review_pull_request_target(Some(review_pull_request_target(&data.pr)));
-                    app.set_review_target_metadata(Some(review_pr_target_metadata(&data.pr)));
-                    let pr = data.pr.clone();
-                    let user = data.user.clone();
+                    app.set_review_pull_request_target(Some(review_pull_request_target(&pr)));
+                    app.set_review_target_metadata(Some(review_pr_target_metadata(&pr)));
                     match apply_provider_comments_to_app(app, *data) {
                         Ok(pull) if action == ReviewSyncAction::Sync => {
                             review_sync_pull_stats = Some(pull);
@@ -7542,16 +7879,18 @@ fn run_commit_picker<B: Backend>(
 mod tests {
     use super::{
         blocks_mouse_scroll, build_jj_diff, config, dedupe_review_log_entries, detect_input_mode,
-        git_ref_input_mode, github_comment_to_review_comment, ignore_github_delete_not_found,
-        insert_review_thread_states, jj_bookmark_revset, jj_summary_paths,
-        local_pr_review_revision, mouse_horizontal_scroll_delta, parse_range,
-        push_pending_mouse_scroll, push_review_comments_to_provider_with, render_editor_args,
-        review_author_from_cli, review_comments_json_value, review_pr_target_metadata,
-        review_status_json_value, should_load_saved_review_fallback, sync_lookup_target,
-        update_mouse_scroll_block, Args, BlockedMouseScroll, Command, GhComment, GhCommentUser,
-        GhProviderComment, GhReviewThreadsResponse, GhUser, InputMode, MouseScrollTarget,
-        PendingMouseScroll, ProviderPr, ReviewCommand, ReviewCommentCommand, ReviewProviderKind,
-        ReviewTargetMetadata, MAX_DISCRETE_MOUSE_SCROLL_ACTIONS_PER_FRAME,
+        git_ref_input_mode, github_comment_to_review_comment, gitlab,
+        ignore_github_delete_not_found, insert_review_thread_states, jj_bookmark_revset,
+        jj_summary_paths, local_pr_review_revision, mouse_horizontal_scroll_delta, parse_range,
+        parse_remote_url, push_pending_mouse_scroll, push_review_comments_to_provider_with,
+        push_review_comments_to_provider_with_ops, render_editor_args, review_author_from_cli,
+        review_comments_json_value, review_pr_target_metadata, review_provider_for_configured_host,
+        review_status_json_value, review_target_summary, should_load_saved_review_fallback,
+        sync_lookup_target, update_mouse_scroll_block, Args, BlockedMouseScroll, Command,
+        GhComment, GhCommentUser, GhProviderComment, GhReviewThreadsResponse, InputMode,
+        MouseScrollTarget, PendingMouseScroll, ProviderPr, ProviderUser, ReviewCommand,
+        ReviewCommentCommand, ReviewProviderKind, ReviewProviderPushOps, ReviewTargetMetadata,
+        MAX_DISCRETE_MOUSE_SCROLL_ACTIONS_PER_FRAME,
     };
     use crate::app::{
         review::{
@@ -7560,7 +7899,7 @@ mod tests {
         },
         App, ViewMode,
     };
-    use anyhow::anyhow;
+    use anyhow::{anyhow, Result};
     use clap::Parser;
     use crossterm::event::{KeyModifiers, MouseEventKind};
     use oyo_core::MultiFileDiff;
@@ -7600,6 +7939,7 @@ mod tests {
         ProviderPr {
             provider: ReviewProviderKind::GitHub,
             remote: "origin".to_string(),
+            host: "github.com".to_string(),
             repo: "owner/repo".to_string(),
             number: 7,
             title: "PR".to_string(),
@@ -7607,6 +7947,24 @@ mod tests {
             base_branch: "main".to_string(),
             head_branch: "feature".to_string(),
             base_commit: "base".to_string(),
+            start_commit: None,
+            head_commit: "head".to_string(),
+        }
+    }
+
+    fn test_gitlab_pr() -> ProviderPr {
+        ProviderPr {
+            provider: ReviewProviderKind::GitLab,
+            remote: "origin".to_string(),
+            host: "gitlab.com".to_string(),
+            repo: "group/sub/repo".to_string(),
+            number: 1,
+            title: "MR".to_string(),
+            url: "https://gitlab.com/group/sub/repo/-/merge_requests/1".to_string(),
+            base_branch: "main".to_string(),
+            head_branch: "feature".to_string(),
+            base_commit: "base".to_string(),
+            start_commit: Some("start".to_string()),
             head_commit: "head".to_string(),
         }
     }
@@ -7662,6 +8020,22 @@ mod tests {
     }
 
     #[test]
+    fn configured_self_hosted_review_providers_are_detected() {
+        assert_eq!(
+            review_provider_for_configured_host("source.example.org", true, false),
+            Some(ReviewProviderKind::Forgejo)
+        );
+        assert_eq!(
+            review_provider_for_configured_host("git.example.org", false, true),
+            Some(ReviewProviderKind::GitLab)
+        );
+        assert_eq!(
+            review_provider_for_configured_host("git.example.org", false, false),
+            None
+        );
+    }
+
+    #[test]
     fn review_provider_uses_pr_or_mr_nouns() {
         assert_eq!(ReviewProviderKind::GitHub.short_review_noun(), "PR");
         assert_eq!(
@@ -7685,6 +8059,14 @@ mod tests {
         assert_eq!(
             ReviewProviderKind::GitLab.long_review_noun_title(),
             "Merge request"
+        );
+    }
+
+    #[test]
+    fn gitlab_remote_url_preserves_nested_group_path() {
+        assert_eq!(
+            parse_remote_url("git@gitlab.com:group/subgroup/repo.git"),
+            Some(("gitlab.com".to_string(), "group/subgroup/repo".to_string()))
         );
     }
 
@@ -7770,6 +8152,367 @@ mod tests {
     }
 
     #[test]
+    fn gitlab_discussion_mapping_inherits_root_position_for_replies() {
+        let diff = MultiFileDiff::from_file_pair(
+            PathBuf::from("app.py"),
+            PathBuf::from("app.py"),
+            "one\ntwo\nthree\n".to_string(),
+            "one\ntwo changed\nthree\n".to_string(),
+        );
+        let app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+        let discussion: gitlab::GlDiscussion = serde_json::from_value(serde_json::json!({
+            "id": "disc-1",
+            "resolved": true,
+            "notes": [
+                {
+                    "id": 101,
+                    "body": "root",
+                    "system": false,
+                    "author": { "username": "reviewer", "name": "Reviewer" },
+                    "created_at": "2026-01-01T00:00:00Z",
+                    "updated_at": "2026-01-01T00:00:00Z",
+                    "position": { "new_path": "app.py", "old_path": "app.py", "old_line": 2, "new_line": 2 },
+                    "resolved": true
+                },
+                {
+                    "id": 102,
+                    "body": "reply",
+                    "system": false,
+                    "author": { "username": "me", "name": "Me" },
+                    "created_at": "2026-01-01T00:01:00Z",
+                    "updated_at": "2026-01-01T00:01:00Z",
+                    "position": null,
+                    "resolved": true
+                }
+            ]
+        }))
+        .unwrap();
+
+        let comments =
+            gitlab::discussion_to_review_comments(&app, &test_gitlab_pr(), "me", discussion)
+                .into_iter()
+                .collect::<Result<Vec<_>>>()
+                .unwrap();
+
+        assert_eq!(comments.len(), 2);
+        assert_eq!(comments[0].anchor.file_path, "app.py");
+        assert_eq!(
+            comments[0].anchor.old_range,
+            Some(ReviewRange { start: 2, end: 2 })
+        );
+        assert_eq!(
+            comments[1].anchor.new_range,
+            Some(ReviewRange { start: 2, end: 2 })
+        );
+        assert!(comments.iter().all(|comment| comment.resolved));
+        let root = comments[0].provider.as_ref().unwrap();
+        let reply = comments[1].provider.as_ref().unwrap();
+        assert_eq!(root.provider, "gitlab");
+        assert_eq!(root.repo, "group/sub/repo");
+        assert_eq!(root.thread_id.as_deref(), Some("disc-1"));
+        assert_eq!(root.thread_resolved, Some(true));
+        assert_eq!(root.in_reply_to_id, None);
+        assert_eq!(reply.comment_id, "102");
+        assert_eq!(reply.in_reply_to_id.as_deref(), Some("101"));
+        assert_eq!(reply.thread_id.as_deref(), Some("disc-1"));
+        assert_eq!(reply.api_kind, "review");
+        assert_eq!(
+            comments[0]
+                .author
+                .as_ref()
+                .and_then(|author| author.usernames.get("gitlab"))
+                .map(String::as_str),
+            Some("reviewer")
+        );
+    }
+
+    #[test]
+    fn gitlab_positionless_discussion_maps_to_merge_request_comment() {
+        let diff = MultiFileDiff::from_file_pair(
+            PathBuf::from("app.py"),
+            PathBuf::from("app.py"),
+            "old\n".to_string(),
+            "new\n".to_string(),
+        );
+        let app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+        let discussion: gitlab::GlDiscussion = serde_json::from_value(serde_json::json!({
+            "id": "disc-general",
+            "notes": [{
+                "id": 201,
+                "body": "General feedback",
+                "system": false,
+                "author": { "username": "reviewer", "name": "Reviewer" },
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:00Z",
+                "position": null
+            }]
+        }))
+        .unwrap();
+
+        let comments =
+            gitlab::discussion_to_review_comments(&app, &test_gitlab_pr(), "me", discussion)
+                .into_iter()
+                .collect::<Result<Vec<_>>>()
+                .unwrap();
+
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments[0].anchor.kind, ReviewTargetKind::PullRequest);
+        let provider = comments[0].provider.as_ref().unwrap();
+        assert_eq!(provider.api_kind, "issue");
+        assert_eq!(provider.thread_id.as_deref(), Some("disc-general"));
+        assert_eq!(provider.comment_id, "201");
+    }
+
+    #[test]
+    fn sync_enriches_context_line_with_old_and_new_ranges() {
+        let diff = MultiFileDiff::from_file_pair(
+            PathBuf::from("app.py"),
+            PathBuf::from("app.py"),
+            "same\n".to_string(),
+            "same\nadded\n".to_string(),
+        );
+        let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+        app.set_review_persist_enabled(false);
+        app.enable_review_mode();
+        app.add_review_comment_from_cli(
+            "app.py",
+            ReviewTargetKind::Line,
+            Some(ReviewSide::New),
+            None,
+            Some(ReviewRange { start: 1, end: 1 }),
+            "context".to_string(),
+        )
+        .unwrap();
+
+        let comments = app.review_comments_for_sync();
+        assert_eq!(
+            comments[0].anchor.old_range,
+            Some(ReviewRange { start: 1, end: 1 })
+        );
+        assert_eq!(
+            comments[0].anchor.new_range,
+            Some(ReviewRange { start: 1, end: 1 })
+        );
+    }
+
+    #[test]
+    fn gitlab_positioned_body_uses_json_position_and_diff_refs() {
+        let comment = sync_comment(9, "review", None, None, false);
+        let body = gitlab::positioned_discussion_body(&test_gitlab_pr(), &comment).unwrap();
+        assert_eq!(body["body"], "comment 9");
+        assert_eq!(body["position"]["position_type"], "text");
+        assert_eq!(body["position"]["base_sha"], "base");
+        assert_eq!(body["position"]["start_sha"], "start");
+        assert_eq!(body["position"]["head_sha"], "head");
+        assert_eq!(body["position"]["new_path"], "file.rs");
+        assert_eq!(body["position"]["old_path"], "file.rs");
+        assert_eq!(body["position"]["new_line"], 1);
+        assert!(body["position"].get("old_line").is_none());
+
+        let mut context = comment.clone();
+        context.anchor.old_range = Some(ReviewRange { start: 1, end: 1 });
+        let context_body = gitlab::positioned_discussion_body(&test_gitlab_pr(), &context).unwrap();
+        assert_eq!(context_body["position"]["old_line"], 1);
+        assert_eq!(context_body["position"]["new_line"], 1);
+
+        let mut hunk = context.clone();
+        hunk.anchor.kind = ReviewTargetKind::Hunk;
+        hunk.anchor.side = None;
+        let hunk_body = gitlab::positioned_discussion_body(&test_gitlab_pr(), &hunk).unwrap();
+        assert!(hunk_body["position"].get("old_line").is_none());
+        assert_eq!(hunk_body["position"]["new_line"], 1);
+
+        let mut removed = comment.clone();
+        removed.anchor.side = Some(ReviewSide::Old);
+        removed.anchor.old_range = Some(ReviewRange { start: 1, end: 1 });
+        removed.anchor.new_range = None;
+        let removed_body = gitlab::positioned_discussion_body(&test_gitlab_pr(), &removed).unwrap();
+        assert_eq!(removed_body["position"]["old_line"], 1);
+        assert!(removed_body["position"].get("new_line").is_none());
+
+        assert_eq!(
+            gitlab::percent_encode("group/sub repo/repo"),
+            "group%2Fsub%20repo%2Frepo"
+        );
+
+        let mut wrong_side = comment;
+        wrong_side.anchor.side = Some(ReviewSide::Old);
+        assert!(gitlab::positioned_discussion_body(&test_gitlab_pr(), &wrong_side).is_err());
+    }
+
+    #[test]
+    fn gitlab_positioned_response_validation_rejects_general_note() {
+        let discussion: gitlab::GlDiscussion = serde_json::from_value(serde_json::json!({
+            "id": "disc-1",
+            "notes": [{
+                "id": 101,
+                "body": "root",
+                "system": false,
+                "author": { "username": "me" },
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:00Z",
+                "position": null
+            }]
+        }))
+        .unwrap();
+
+        assert!(gitlab::ensure_positioned_discussion(&discussion)
+            .unwrap_err()
+            .to_string()
+            .contains("unpositioned"));
+    }
+
+    #[test]
+    fn provider_push_dispatch_covers_create_reply_resolve_edit_and_delete() {
+        struct MockOps {
+            calls: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+        }
+
+        impl ReviewProviderPushOps for MockOps {
+            fn provider_label(&self) -> &'static str {
+                "Mock"
+            }
+
+            fn create_root(&mut self, comment: &ReviewComment) -> Result<ReviewProviderComment> {
+                self.calls
+                    .borrow_mut()
+                    .push(format!("create:{}", comment.id));
+                let mut provider = comment.provider.clone().unwrap_or_else(|| {
+                    let mut provider = sync_comment(
+                        100 + comment.id,
+                        "review",
+                        Some("new-thread"),
+                        Some(false),
+                        false,
+                    )
+                    .provider
+                    .unwrap();
+                    provider.provider = "gitlab".to_string();
+                    provider.repo = "group/sub/repo".to_string();
+                    provider.pr_number = 1;
+                    provider
+                });
+                provider.comment_id = format!("new-{}", comment.id);
+                provider.sync_state = "clean".to_string();
+                Ok(provider)
+            }
+
+            fn create_reply(
+                &mut self,
+                provider: &ReviewProviderComment,
+                body: &str,
+            ) -> Result<ReviewProviderComment> {
+                self.calls.borrow_mut().push(format!(
+                    "reply:{}:{body}",
+                    provider.in_reply_to_id.as_deref().unwrap_or_default()
+                ));
+                let mut clean = provider.clone();
+                clean.comment_id = "reply-remote".to_string();
+                clean.sync_state = "clean".to_string();
+                Ok(clean)
+            }
+
+            fn update(
+                &mut self,
+                provider: &ReviewProviderComment,
+                body: &str,
+            ) -> Result<ReviewProviderComment> {
+                self.calls
+                    .borrow_mut()
+                    .push(format!("update:{}:{body}", provider.comment_id));
+                let mut clean = provider.clone();
+                clean.sync_state = "clean".to_string();
+                Ok(clean)
+            }
+
+            fn delete(&mut self, provider: &ReviewProviderComment) -> Result<()> {
+                self.calls
+                    .borrow_mut()
+                    .push(format!("delete:{}", provider.comment_id));
+                Ok(())
+            }
+
+            fn set_thread_resolved(&mut self, thread_id: &str, resolved: bool) -> Result<()> {
+                self.calls
+                    .borrow_mut()
+                    .push(format!("resolve:{thread_id}:{resolved}"));
+                Ok(())
+            }
+        }
+
+        let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut root = sync_comment(1, "review", None, None, false);
+        root.provider = None;
+        root.can_edit = true;
+
+        let mut reply = sync_comment(2, "review", Some("thread-1"), Some(false), false);
+        reply.can_edit = true;
+        reply.body = "reply body".to_string();
+        {
+            let provider = reply.provider.as_mut().unwrap();
+            provider.provider = "gitlab".to_string();
+            provider.repo = "group/sub/repo".to_string();
+            provider.pr_number = 1;
+            provider.comment_id.clear();
+            provider.in_reply_to_id = Some("10".to_string());
+            provider.sync_state = "dirty".to_string();
+        }
+
+        let mut update = sync_comment(3, "review", Some("thread-2"), Some(false), false);
+        update.can_edit = true;
+        update.body = "updated body".to_string();
+        {
+            let provider = update.provider.as_mut().unwrap();
+            provider.provider = "gitlab".to_string();
+            provider.repo = "group/sub/repo".to_string();
+            provider.pr_number = 1;
+            provider.comment_id = "20".to_string();
+            provider.sync_state = "dirty".to_string();
+        }
+
+        let mut delete = sync_comment(4, "review", Some("thread-3"), Some(false), false);
+        delete.can_edit = true;
+        delete.deleted = true;
+        {
+            let provider = delete.provider.as_mut().unwrap();
+            provider.provider = "gitlab".to_string();
+            provider.repo = "group/sub/repo".to_string();
+            provider.pr_number = 1;
+            provider.comment_id = "30".to_string();
+        }
+
+        let mut resolve = sync_comment(5, "review", Some("thread-4"), Some(false), true);
+        resolve.can_edit = true;
+        {
+            let provider = resolve.provider.as_mut().unwrap();
+            provider.provider = "gitlab".to_string();
+            provider.repo = "group/sub/repo".to_string();
+            provider.pr_number = 1;
+        }
+
+        let mut ops = MockOps {
+            calls: calls.clone(),
+        };
+        let outcome = push_review_comments_to_provider_with_ops(
+            vec![root, reply, update, delete, resolve],
+            &test_gitlab_pr(),
+            &mut ops,
+        )
+        .unwrap();
+        let calls = calls.borrow().clone();
+
+        assert!(calls.contains(&"create:1".to_string()));
+        assert!(calls.contains(&"reply:10:reply body".to_string()));
+        assert!(calls.contains(&"update:20:updated body".to_string()));
+        assert!(calls.contains(&"delete:30".to_string()));
+        assert!(calls.contains(&"resolve:thread-4:true".to_string()));
+        assert_eq!(outcome.created, 2);
+        assert_eq!(outcome.updated, 1);
+        assert_eq!(outcome.deleted, 1);
+        assert_eq!(outcome.thread_changes.len(), 1);
+    }
+
+    #[test]
     fn github_push_creates_review_thread_reply_and_marks_it_clean() {
         let mut reply = sync_comment(2, "review", Some("PRRT_thread"), Some(false), false);
         reply.can_edit = true;
@@ -7783,7 +8526,7 @@ mod tests {
         let outcome = push_review_comments_to_provider_with(
             vec![reply],
             &test_provider_pr(),
-            &GhUser {
+            &ProviderUser {
                 login: "me".to_string(),
                 avatar_url: None,
             },
@@ -7834,7 +8577,7 @@ mod tests {
         let outcome = push_review_comments_to_provider_with(
             vec![make_reply(2, "42"), make_reply(3, "43")],
             &test_provider_pr(),
-            &GhUser {
+            &ProviderUser {
                 login: "me".to_string(),
                 avatar_url: None,
             },
@@ -7883,7 +8626,7 @@ mod tests {
         let error = push_review_comments_to_provider_with(
             vec![reply],
             &test_provider_pr(),
-            &GhUser {
+            &ProviderUser {
                 login: "me".to_string(),
                 avatar_url: None,
             },
@@ -7911,7 +8654,7 @@ mod tests {
         let outcome = push_review_comments_to_provider_with(
             vec![reply],
             &test_provider_pr(),
-            &GhUser {
+            &ProviderUser {
                 login: "me".to_string(),
                 avatar_url: None,
             },
@@ -7940,7 +8683,7 @@ mod tests {
         let outcome = push_review_comments_to_provider_with(
             comments,
             &test_provider_pr(),
-            &GhUser {
+            &ProviderUser {
                 login: "me".to_string(),
                 avatar_url: None,
             },
@@ -7968,7 +8711,7 @@ mod tests {
                 true,
             )],
             &test_provider_pr(),
-            &GhUser {
+            &ProviderUser {
                 login: "me".to_string(),
                 avatar_url: None,
             },
@@ -7994,7 +8737,7 @@ mod tests {
                 false,
             )],
             &test_provider_pr(),
-            &GhUser {
+            &ProviderUser {
                 login: "me".to_string(),
                 avatar_url: None,
             },
@@ -8512,6 +9255,20 @@ mod tests {
         assert_eq!(comments["reviewKey"], value["reviewKey"]);
         assert_eq!(comments["label"], value["label"]);
         assert_eq!(comments["pr"], value["pr"]);
+    }
+
+    #[test]
+    fn review_target_summary_uses_merge_request_noun() {
+        let diff = MultiFileDiff::from_file_pair(
+            PathBuf::from("old.txt"),
+            PathBuf::from("new.txt"),
+            "old\n".to_string(),
+            "new\n".to_string(),
+        );
+        let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+        app.set_review_target_metadata(Some(review_pr_target_metadata(&test_gitlab_pr())));
+
+        assert_eq!(review_target_summary(&app).label, "MR #1 (feature)");
     }
 
     #[test]

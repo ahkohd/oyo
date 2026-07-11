@@ -236,7 +236,7 @@ fn review_comment_can_reply(comment: &ReviewComment) -> bool {
             ReviewTargetKind::Line | ReviewTargetKind::Hunk
         )
         && comment.provider.as_ref().is_none_or(|provider| {
-            provider.provider == "github"
+            matches!(provider.provider.as_str(), "github" | "gitlab" | "forgejo")
                 && provider.api_kind == "review"
                 && provider.thread_id.is_some()
                 && (!provider.comment_id.is_empty() || provider.in_reply_to_id.is_some())
@@ -1248,7 +1248,15 @@ fn review_comment_subject(comment: &ReviewComment) -> String {
             .as_ref()
             .and_then(|provider| provider.pr_title.clone())
             .filter(|title| !title.trim().is_empty())
-            .unwrap_or_else(|| "Pull request".to_string()),
+            .unwrap_or_else(|| {
+                comment
+                    .provider
+                    .as_ref()
+                    .and_then(|provider| crate::ReviewProviderKind::from_id(&provider.provider))
+                    .map(crate::ReviewProviderKind::long_review_noun_title)
+                    .unwrap_or("Pull request")
+                    .to_string()
+            }),
         ReviewTargetKind::File => comment.anchor.file_path.clone(),
         ReviewTargetKind::Line | ReviewTargetKind::Hunk => format!(
             "{} {}",
@@ -2709,13 +2717,10 @@ impl App {
             provider.resolved_dirty = provider
                 .thread_resolved
                 .is_some_and(|remote| remote != parent.resolved);
-            provider.author_username = self.review_author.as_ref().and_then(|author| {
-                author
-                    .usernames
-                    .get(&provider.provider)
-                    .cloned()
-                    .or_else(|| author.usernames.get("github").cloned())
-            });
+            provider.author_username = self
+                .review_author
+                .as_ref()
+                .and_then(|author| author.usernames.get(&provider.provider).cloned());
             (Some(provider), None)
         } else {
             (None, Some(parent_id))
@@ -3716,7 +3721,12 @@ impl App {
                     )
                 })
                 .unwrap_or_else(|| "Copy location".to_string()),
-            ReviewCommentContextMenuAction::Url => "Copy PR URL".to_string(),
+            ReviewCommentContextMenuAction::Url => {
+                format!(
+                    "Copy {} URL",
+                    self.review_provider_kind().short_review_noun()
+                )
+            }
             ReviewCommentContextMenuAction::MarkdownQuote => "Copy as blockquote".to_string(),
         }
     }
@@ -6994,8 +7004,90 @@ impl App {
         self.set_review_comment_resolved_at(idx, resolved)
     }
 
-    pub(crate) fn review_comments_for_sync(&self) -> Vec<ReviewComment> {
-        self.review_comments.clone()
+    pub(crate) fn review_comments_for_sync(&mut self) -> Vec<ReviewComment> {
+        let mut comments = self.review_comments.clone();
+        let previous_file = self.multi_diff.selected_index;
+        for comment in &mut comments {
+            if comment.anchor.kind != ReviewTargetKind::Line {
+                continue;
+            }
+            let target = match comment.anchor.side {
+                Some(ReviewSide::Old) => comment
+                    .anchor
+                    .old_range
+                    .map(|range| (ReviewSide::Old, range.end)),
+                Some(ReviewSide::New) => comment
+                    .anchor
+                    .new_range
+                    .map(|range| (ReviewSide::New, range.end)),
+                None => comment
+                    .anchor
+                    .new_range
+                    .map(|range| (ReviewSide::New, range.end))
+                    .or_else(|| {
+                        comment
+                            .anchor
+                            .old_range
+                            .map(|range| (ReviewSide::Old, range.end))
+                    }),
+            };
+            let Some((side, line)) = target else {
+                continue;
+            };
+            let strip_other_side = |comment: &mut ReviewComment| match side {
+                ReviewSide::Old => comment.anchor.new_range = None,
+                ReviewSide::New => comment.anchor.old_range = None,
+            };
+            let Some(file_index) = self
+                .multi_diff
+                .files
+                .iter()
+                .position(|file| file.path == Path::new(&comment.anchor.file_path))
+            else {
+                strip_other_side(comment);
+                continue;
+            };
+            if self.multi_diff.diff_status(file_index) != oyo_core::multi::DiffStatus::Ready {
+                strip_other_side(comment);
+                continue;
+            }
+            self.multi_diff.select_file(file_index);
+            if self.multi_diff.current_navigator_is_placeholder() {
+                strip_other_side(comment);
+                continue;
+            }
+            let mapping = self
+                .multi_diff
+                .current_navigator()
+                .diff()
+                .changes
+                .iter()
+                .find_map(|change| {
+                    let matching_span = change.spans.iter().find(|span| match side {
+                        ReviewSide::Old => span.old_line == Some(line),
+                        ReviewSide::New => span.new_line == Some(line),
+                    })?;
+                    if change.has_changes() {
+                        return Some(None);
+                    }
+                    Some(Some((matching_span.old_line?, matching_span.new_line?)))
+                });
+            match mapping {
+                Some(Some((old_line, new_line))) => {
+                    comment.anchor.old_range = Some(ReviewRange {
+                        start: old_line,
+                        end: old_line,
+                    });
+                    comment.anchor.new_range = Some(ReviewRange {
+                        start: new_line,
+                        end: new_line,
+                    });
+                }
+                _ => strip_other_side(comment),
+            }
+        }
+        self.multi_diff.select_file(previous_file);
+        comments
     }
 
     pub(crate) fn mark_review_comment_synced(
@@ -7587,6 +7679,67 @@ mod tests {
     use crate::app::ViewMode;
     use oyo_core::MultiFileDiff;
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn sync_keeps_modified_lines_on_the_declared_side() {
+        let diff = MultiFileDiff::from_file_pair(
+            PathBuf::from("app.py"),
+            PathBuf::from("app.py"),
+            "before\n".to_string(),
+            "after\n".to_string(),
+        );
+        let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+        app.set_review_persist_enabled(false);
+        app.enable_review_mode();
+        app.add_review_comment_from_cli(
+            "app.py",
+            ReviewTargetKind::Line,
+            Some(ReviewSide::New),
+            None,
+            Some(ReviewRange { start: 1, end: 1 }),
+            "modified".to_string(),
+        )
+        .unwrap();
+        app.review_comments[0].anchor.old_range = Some(ReviewRange { start: 1, end: 1 });
+
+        let comments = app.review_comments_for_sync();
+        assert_eq!(comments[0].anchor.old_range, None);
+        assert_eq!(
+            comments[0].anchor.new_range,
+            Some(ReviewRange { start: 1, end: 1 })
+        );
+    }
+
+    #[test]
+    fn sync_does_not_infer_context_from_non_ready_diff() {
+        let diff = MultiFileDiff::from_file_pair(
+            PathBuf::from("app.py"),
+            PathBuf::from("app.py"),
+            "base\n".to_string(),
+            "base\nadded\n".to_string(),
+        );
+        let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+        app.set_review_persist_enabled(false);
+        app.enable_review_mode();
+        app.add_review_comment_from_cli(
+            "app.py",
+            ReviewTargetKind::Line,
+            Some(ReviewSide::New),
+            None,
+            Some(ReviewRange { start: 2, end: 2 }),
+            "added".to_string(),
+        )
+        .unwrap();
+        app.review_comments[0].anchor.old_range = Some(ReviewRange { start: 2, end: 2 });
+        app.multi_diff.mark_diff_computing(0);
+
+        let comments = app.review_comments_for_sync();
+        assert_eq!(comments[0].anchor.old_range, None);
+        assert_eq!(
+            comments[0].anchor.new_range,
+            Some(ReviewRange { start: 2, end: 2 })
+        );
+    }
 
     fn temp_path(name: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!(
@@ -8621,6 +8774,113 @@ mod tests {
         assert_eq!(overlays[1].reply_label.as_deref(), Some("rb"));
         assert_eq!(overlays[1].resolve_label, None);
         assert!(!app.resolve_review_comment_letter('b'));
+    }
+
+    #[test]
+    fn cli_reply_accepts_gitlab_thread_and_uses_gitlab_username() {
+        let mut app = test_app();
+        let mut parent = line_comment();
+        let mut provider = provider_link("clean");
+        provider.provider = "gitlab".to_string();
+        provider.thread_id = Some("discussion-1".to_string());
+        provider.thread_resolved = Some(false);
+        parent.provider = Some(provider);
+        parent.can_edit = false;
+        app.review_comments.push(parent);
+        app.review_next_comment_id = 2;
+        app.set_review_author(Some(ReviewAuthor {
+            name: "Agent".to_string(),
+            email: None,
+            author_type: Some("agent".to_string()),
+            usernames: BTreeMap::from([
+                ("github".to_string(), "wrong".to_string()),
+                ("gitlab".to_string(), "agent-gl".to_string()),
+            ]),
+            avatar_url: None,
+        }));
+
+        let id = app
+            .add_review_reply_from_cli(1, "Thanks, fixed.".to_string())
+            .unwrap();
+        let provider = app
+            .review_comments
+            .iter()
+            .find(|comment| comment.id == id)
+            .and_then(|comment| comment.provider.as_ref())
+            .unwrap();
+
+        assert_eq!(provider.provider, "gitlab");
+        assert_eq!(provider.thread_id.as_deref(), Some("discussion-1"));
+        assert_eq!(provider.in_reply_to_id.as_deref(), Some("10"));
+        assert_eq!(provider.author_username.as_deref(), Some("agent-gl"));
+    }
+
+    #[test]
+    fn cli_reply_accepts_forgejo_thread_and_uses_forgejo_username() {
+        let mut app = test_app();
+        let mut parent = line_comment();
+        let mut provider = provider_link("clean");
+        provider.provider = "forgejo".to_string();
+        provider.comment_id = "20".to_string();
+        provider.thread_id = Some("review:10:20".to_string());
+        parent.provider = Some(provider);
+        parent.can_edit = false;
+        app.review_comments.push(parent);
+        app.review_next_comment_id = 2;
+        app.set_review_author(Some(ReviewAuthor {
+            name: "Agent".to_string(),
+            email: None,
+            author_type: Some("agent".to_string()),
+            usernames: BTreeMap::from([("forgejo".to_string(), "agent-fj".to_string())]),
+            avatar_url: None,
+        }));
+
+        let id = app
+            .add_review_reply_from_cli(1, "Thanks, fixed.".to_string())
+            .unwrap();
+        let provider = app
+            .review_comments
+            .iter()
+            .find(|comment| comment.id == id)
+            .and_then(|comment| comment.provider.as_ref())
+            .unwrap();
+
+        assert_eq!(provider.provider, "forgejo");
+        assert_eq!(provider.thread_id.as_deref(), Some("review:10:20"));
+        assert_eq!(provider.in_reply_to_id.as_deref(), Some("20"));
+        assert_eq!(provider.author_username.as_deref(), Some("agent-fj"));
+    }
+
+    #[test]
+    fn cli_gitlab_reply_does_not_use_github_username_fallback() {
+        let mut app = test_app();
+        let mut parent = line_comment();
+        let mut provider = provider_link("clean");
+        provider.provider = "gitlab".to_string();
+        provider.thread_id = Some("discussion-1".to_string());
+        provider.thread_resolved = Some(false);
+        parent.provider = Some(provider);
+        app.review_comments.push(parent);
+        app.review_next_comment_id = 2;
+        app.set_review_author(Some(ReviewAuthor {
+            name: "Agent".to_string(),
+            email: None,
+            author_type: Some("agent".to_string()),
+            usernames: BTreeMap::from([("github".to_string(), "agent-gh".to_string())]),
+            avatar_url: None,
+        }));
+
+        let id = app
+            .add_review_reply_from_cli(1, "Thanks, fixed.".to_string())
+            .unwrap();
+        let provider = app
+            .review_comments
+            .iter()
+            .find(|comment| comment.id == id)
+            .and_then(|comment| comment.provider.as_ref())
+            .unwrap();
+
+        assert_eq!(provider.author_username, None);
     }
 
     #[test]

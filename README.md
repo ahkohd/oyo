@@ -23,9 +23,7 @@ Oyo saves each review against its target. You can close the TUI and continue lat
 
 ### Sync with your team
 
-Pull GitHub pull request comments into Oyo with the `gh` CLI. Reply, resolve threads and push your own changes back to GitHub.
-
-GitLab, Codeberg and Forgejo sync adapters are planned. They are not available yet.
+Pull review comments from GitHub, GitLab, Codeberg or self-hosted Forgejo. Reply and push changes back. GitHub and GitLab also support remote thread resolution. Forgejo resolved state is read-only because its API has no resolve endpoint.
 
 ### Work with your agent
 
@@ -63,7 +61,7 @@ Oyo helps you complete a review without leaving the terminal. You can:
 - reply in flat review threads
 - resolve and reopen thread roots
 - track comments that become outdated as the diff changes
-- pull, reply to, resolve and push GitHub pull request comments with `gh`
+- pull, reply to and push GitHub, GitLab, Codeberg and self-hosted Forgejo review comments
 - use the review CLI and installed skill with coding agents
 - read changes in scroll mode or step mode
 - move between hunks and files
@@ -279,7 +277,7 @@ oy 'trunk()..@'
 oy review comment 'trunk()..@'
 ```
 
-Pull and push GitHub pull request comments with an authenticated `gh` CLI:
+Pull and push provider review comments after authenticating `gh`, `glab`, `cb` or `fj` for the remote host:
 
 ```sh
 oy review pull

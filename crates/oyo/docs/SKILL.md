@@ -234,7 +234,7 @@ oy review comment reply 1 --body "Fixed in the latest change."
 oy review comment reply -t feature 1 --body "Fixed in the latest change." --json
 ```
 
-The reply keeps the parent anchor and thread. Replies to local inline comments stay local. `oy review push` publishes replies to pulled GitHub comments in that review thread. Conversation and file-level comments use their existing actions instead.
+The reply keeps the parent anchor and thread. Replies to local inline comments stay local. `oy review push` publishes replies to pulled provider comments in that review thread. Conversation and file-level comments use their existing actions instead.
 
 Use the `#id` shown by `oy review comment` for edit, resolve and delete commands.
 
@@ -277,13 +277,13 @@ oy review push -t main...feature
 oy review push -t main...feature origin
 ```
 
-- Oyo supports GitHub through `gh`
-- install and authenticate `gh` before you sync GitHub comments
+- provider sync needs matching authentication: `gh` for GitHub, `glab` for each GitLab host, `cb` for Codeberg or `fj` for each self-hosted Forgejo host
 - Oyo finds the remote from the current branch upstream, then falls back to `origin`
 - pulled provider comment bodies can be read-only
 - push sends body changes only for comments you can edit
-- push publishes replies to pulled GitHub inline review threads; local replies stay local
-- GitHub inline review thread resolve and unresolve changes sync once per thread
+- push publishes replies to pulled provider inline review threads; local replies stay local
+- inline review thread resolve and unresolve changes sync once per thread when the provider API supports it
+- Forgejo resolved state is read-only because its API has no review-thread resolve endpoint; resolve attempts warn without blocking other push changes
 - pull, read, resolve and push use the same PR-aware default target
 - check the target fields in JSON and use `-t` when an agent must pin the review
 
@@ -365,5 +365,5 @@ oy review abandon -t @
 - `Comment N cannot accept replies.` - the comment has provider metadata that cannot accept synced replies
 - `Pass --yes to remove a comment` - add `--yes` to confirm deletion
 - `Pass --new-line, --old-line or --file-level` - choose where the new comment belongs
-- `Only GitHub review sync is implemented now.` - use `gh` for sync, or stay local
+- `No valid Forgejo token found for HOST.` - authenticate that host with `cb` for Codeberg or `fj` for self-hosted Forgejo
 - `No saved reviews.` - there are no saved comments for the current workspace and target

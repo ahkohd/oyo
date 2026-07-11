@@ -326,7 +326,7 @@ oy review comment reply 1 --body "Fixed in the latest change."
 oy review comment reply -t feature 1 --body "Fixed in the latest change." --json
 ```
 
-The new comment keeps the parent anchor and thread. Replies to local inline comments stay local. `oy review push` posts replies to pulled GitHub comments in that review thread. Conversation and file-level comments use their existing actions instead.
+The new comment keeps the parent anchor and thread. Replies to local inline comments stay local. `oy review push` posts replies to pulled provider comments in that review thread. Conversation and file-level comments use their existing actions instead.
 
 Edit or remove a comment:
 
@@ -353,17 +353,17 @@ oy review comment unresolve 1
 
 `reopen` is kept as an alias for agents that already use it. Resolve or reopen the parent comment; replies inherit the thread state and cannot be resolved separately.
 
-## Push and pull pull request comments
+## Push and pull provider comments
 
-Push and pull sync the local review with the matching pull request.
+Push and pull sync the local review with the matching pull request or merge request.
 
-Oyo currently supports GitHub through `gh`. Install and authenticate `gh` before you run these commands.
+Oyo supports GitHub, GitLab, Codeberg and self-hosted Forgejo. Authenticate `gh` for GitHub, `glab` for each GitLab host, `cb` for Codeberg or `fj` for each self-hosted Forgejo host before you run these commands.
 
 `oy review status`, `oy review log`, `oy review comment` and the TUI read the local database. Remote comments appear after you pull them.
 
 Oyo finds the remote from the current branch upstream, then falls back to `origin`. Pass a remote name when you want another remote.
 
-Use `pull` to bring pull request comments into Oyo:
+Use `pull` to bring provider comments into Oyo:
 
 ```sh
 oy review pull
@@ -371,9 +371,9 @@ oy review pull main...feature
 oy review pull main...feature origin
 ```
 
-In Git, `pull` resolves the current branch or the range head to the matching pull request. In jj, use a bookmark for a branch-like review target.
+In Git, `pull` resolves the current branch or range head to the matching pull request or merge request. In jj, use a bookmark for a branch-like review target.
 
-Use `push` to send your local comments to the pull request:
+Use `push` to send your local comments to the provider:
 
 ```sh
 oy review push
@@ -381,9 +381,9 @@ oy review push main...feature
 oy review push main...feature origin
 ```
 
-Push and pull use the matching pull request. If Oyo cannot find one, it stops with an error.
+Push and pull use the matching pull request or merge request. If Oyo cannot find one, it stops with an error.
 
-GitHub has a built-in `gh` adapter. GitLab, Codeberg and Forgejo adapters are planned.
+GitHub uses `gh`. GitLab uses the matching host from `glab` configuration. Forgejo calls the host API with the token saved by `cb` or `fj`. Self-hosted Forgejo is live-verified. Self-hosted GitLab uses `glab` multi-host support but has not been live-verified.
 
 Custom providers use the provider command contract in config.
 
@@ -463,18 +463,11 @@ See [provider config](./CONFIG.md#provider-command-interface).
 
 ### What `pull` imports
 
-Oyo imports these comments by default:
+Oyo imports all inline file and line comments. GitLab pull also imports every non-system discussion note. Forgejo pull imports review comments and pull request conversation comments.
 
-- all inline review comments on files and lines
-- pull request conversation comments from you
-- pull request conversation comments from the PR author
-- pull request conversation comments from requested reviewers
-- pull request conversation comments from people who have submitted a review
+For GitHub conversation comments, Oyo imports comments from you, the pull request author, requested reviewers and people who submitted a review. It skips other GitHub conversation comments to keep bot and drive-by comments out of the local review.
 
-Oyo skips pull request conversation comments from other users. This keeps bot and drive-by comments out of the local review unless the account is part of the review set.
-
-Other users' comment bodies are read-only. GitHub inline review comments also
-import their review thread's resolved state.
+Other users' comment bodies are read-only. GitHub, GitLab and Forgejo inline comments import their review thread's resolved state. Forgejo exposes resolved state as read-only, so Oyo cannot change it remotely.
 
 ### What `push` sends
 
@@ -483,15 +476,13 @@ Oyo sends comment changes only for comments you can edit.
 For your comments, push can:
 
 - create new inline comments
-- reply in local inline threads and pulled GitHub inline review threads
-- create new pull request comments
+- reply in local inline threads and pulled provider review threads
+- create new pull request or merge request comments
 - update comments that already exist on the provider
 - delete comments you removed locally
-- resolve or unresolve linked GitHub inline review threads
+- resolve or unresolve linked provider review threads when the provider API supports it
 
-Resolve changes are sent once per review thread. Pull request conversation comments
-and local-only comments keep their resolved state locally because they have no
-provider review thread.
+Resolve changes are sent once per review thread. Forgejo has no review-thread resolve endpoint. A Forgejo resolve attempt produces a warning and does not block other push changes. Pull request conversation comments and local-only comments keep their resolved state locally because they have no provider review thread.
 
 ### Pull request and merge request comments in the TUI
 
@@ -511,7 +502,7 @@ Editable comments show `ia edit`, `ib edit` and so on. They also show `xa delete
 
 Use the reply action under a pull request conversation comment to quote it in a new comment. Oyo uses Markdown blockquotes for the quoted text.
 
-Every inline comment shows a separate `ra reply` action. This opens an empty reply editor and keeps the saved reply in a flat chronological thread under its parent. Local replies stay local. Replies to pulled GitHub review-thread comments sync into the same provider thread.
+Every inline comment shows a separate `ra reply` action. This opens an empty reply editor and keeps the saved reply in a flat chronological thread under its parent. Local replies stay local. Replies to pulled provider comments sync into the same review thread.
 
 ## Export comments
 
