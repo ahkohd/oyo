@@ -9,6 +9,64 @@ use std::time::{Duration, Instant};
 
 static VIEW_DEBUG_ENV_LOCK: Mutex<()> = Mutex::new(());
 
+fn run_git(repo: &std::path::Path, args: &[&str]) {
+    assert!(std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .status()
+        .expect("run git")
+        .success());
+}
+
+fn run_jj(repo: &std::path::Path, args: &[&str]) {
+    let output = std::process::Command::new("jj")
+        .current_dir(repo)
+        .arg("-R")
+        .arg(repo)
+        .arg("--config")
+        .arg("signing.behavior=\"drop\"")
+        .args(args)
+        .output()
+        .expect("run jj");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn tracked_watch_repo(name: &str) -> std::path::PathBuf {
+    let repo = std::env::temp_dir().join(format!(
+        "oyo_{name}_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&repo).expect("create repo");
+    run_git(&repo, &["init", "-q"]);
+    std::fs::write(repo.join("README.md"), "readme\n").expect("write readme");
+    std::fs::write(repo.join("other.txt"), "other\n").expect("write other");
+    run_git(&repo, &["add", "."]);
+    run_git(
+        &repo,
+        &[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-qm",
+            "initial",
+        ],
+    );
+    repo
+}
+
 fn quit_test_app() -> App {
     App::new(
         MultiFileDiff::from_file_pair(
@@ -2025,6 +2083,7 @@ fn test_files_changed_indicator_detects_disk_modification_and_clears_on_refresh(
         initial.to_string(),
     );
     let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+    app.watch = false;
 
     app.last_fs_check = Instant::now() - Duration::from_secs(2);
     app.maybe_check_file_changes();
@@ -2082,6 +2141,14 @@ fn test_tick_watch_refreshes_changed_files_on_disk() {
     );
     let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
     assert!(app.watch);
+    let diff_bg = ratatui::style::Color::Rgb(1, 2, 3);
+    app.theme.diff_added_bg = Some(diff_bg);
+    app.theme.diff_removed_bg = Some(diff_bg);
+    app.theme.diff_modified_bg = Some(diff_bg);
+    app.diff_bg = true;
+    app.stepping = false;
+    app.no_step_auto_jump_on_enter = false;
+    app.enter_no_step_mode();
     assert!(app.ensure_syntax_cache().is_some());
     let _ = app.current_view_with_frame(AnimationFrame::Idle);
     assert!(app.view_cache.is_some());
@@ -2091,16 +2158,41 @@ fn test_tick_watch_refreshes_changed_files_on_disk() {
 
     assert!(app.tick());
     assert!(!app.files_changed_on_disk);
-    assert!(!app.file_changed_on_disk(0));
+    assert!(app.file_changed_on_disk(0));
+    assert!(app.files_changed_indicator_active());
     assert_eq!(
         app.multi_diff.file_contents(0).map(|(_, new)| new),
         Some("new changed on disk\n")
     );
+    assert!(!app.multi_diff.current_navigator().diff().hunks.is_empty());
     assert!(app.syntax_caches[0].is_some());
     assert!(app.view_cache.is_none());
     assert!(app
         .syntax_spans_for_line(crate::syntax::SyntaxSide::New, Some(1))
         .is_some());
+
+    let backend = ratatui::backend::TestBackend::new(80, 20);
+    let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+    terminal
+        .draw(|frame| crate::views::render_unified_pane(frame, &mut app, frame.area()))
+        .expect("render refreshed diff");
+    let buffer = terminal.backend().buffer();
+    let mut has_diff_bg = false;
+    let mut has_gutter_decoration = false;
+    for y in 0..buffer.area.height {
+        for x in 0..buffer.area.width {
+            let cell = &buffer[(x, y)];
+            has_diff_bg |= cell.bg == diff_bg;
+            has_gutter_decoration |= matches!(cell.symbol(), "+" | "~" | "┃");
+        }
+    }
+    assert!(has_diff_bg);
+    assert!(has_gutter_decoration);
+
+    app.file_recently_changed_until[0] = Some(Instant::now() - Duration::from_millis(1));
+    assert!(app.expire_recent_file_changes(Instant::now()));
+    assert!(!app.file_changed_on_disk(0));
+    assert!(!app.files_changed_indicator_active());
 
     let _ = std::fs::remove_file(path);
 }
@@ -2130,7 +2222,7 @@ fn test_tick_watch_adds_new_untracked_file() {
     assert_eq!(app.multi_diff.file_count(), 0);
 
     std::fs::write(repo.join("new.txt"), "new\n").expect("write new file");
-    app.last_git_watch_check = Instant::now() - Duration::from_secs(2);
+    app.last_change_list_watch_check = Instant::now() - Duration::from_secs(2);
 
     assert!(app.maybe_watch_refresh_git_files());
     assert_eq!(app.multi_diff.file_count(), 1);
@@ -2141,6 +2233,250 @@ fn test_tick_watch_adds_new_untracked_file() {
     );
     assert!(app.syntax_caches[0].is_some());
     assert!(app.view_cache.is_none());
+
+    let _ = std::fs::remove_dir_all(repo);
+}
+
+#[test]
+fn live_refresh_moves_deleted_comment_to_outdated_and_restores_it() {
+    let _guard = DiffSettingsGuard::default();
+    let path = std::env::temp_dir().join(format!(
+        "oyo_live_review_refresh_{}_{}.txt",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos()
+    ));
+    let other_path = path.with_extension("other.txt");
+    std::fs::write(&path, "base\ntarget\n").expect("write target");
+    std::fs::write(&other_path, "base\nother target\n").expect("write other target");
+    let diff = MultiFileDiff::from_raw_files(
+        None,
+        vec![
+            oyo_core::multi::RawFileDiff {
+                path: "live.txt".into(),
+                old_path: None,
+                old_source_path: None,
+                new_source_path: Some(path.clone()),
+                status: oyo_core::git::FileStatus::Modified,
+                old_content: "base\n".to_string(),
+                new_content: "base\ntarget\n".to_string(),
+                binary: false,
+            },
+            oyo_core::multi::RawFileDiff {
+                path: "other.txt".into(),
+                old_path: None,
+                old_source_path: None,
+                new_source_path: Some(other_path.clone()),
+                status: oyo_core::git::FileStatus::Modified,
+                old_content: "base\n".to_string(),
+                new_content: "base\nother target\n".to_string(),
+                binary: false,
+            },
+        ],
+    );
+    let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+    app.set_review_persist_enabled(false);
+    app.enable_review_mode();
+    app.add_review_comment_from_cli(
+        "live.txt",
+        review::ReviewTargetKind::Line,
+        Some(review::ReviewSide::New),
+        None,
+        Some(review::ReviewRange { start: 2, end: 2 }),
+        "keep this".to_string(),
+    )
+    .unwrap();
+    app.add_review_comment_from_cli(
+        "other.txt",
+        review::ReviewTargetKind::Line,
+        Some(review::ReviewSide::New),
+        None,
+        Some(review::ReviewRange { start: 2, end: 2 }),
+        "keep this too".to_string(),
+    )
+    .unwrap();
+
+    std::fs::write(&path, "base\n").expect("delete target");
+    std::fs::write(&other_path, "base\n").expect("delete other target");
+    app.refresh_current_file();
+
+    assert!(app.review_comments[0].outdated);
+    assert!(!app.review_comments[1].outdated);
+    assert!(app.maybe_watch_refresh_changed_files());
+    assert!(app.review_comments[1].outdated);
+    assert!(app.open_review_comment(0));
+    assert!(app.active_outdated_comments_view());
+    assert_eq!(app.outdated_comment_focus, Some(app.review_comments[0].id));
+
+    std::fs::write(&path, "base\ntarget\n").expect("restore target");
+    app.refresh_current_file();
+    assert!(!app.review_comments[0].outdated);
+    assert!(!app.review_comments[0].reanchored);
+
+    let _ = std::fs::remove_file(path);
+    let _ = std::fs::remove_file(other_path);
+}
+
+#[test]
+fn test_jj_watch_tracks_empty_start_additions_and_removals() {
+    let _guard = DiffSettingsGuard::default();
+    if std::process::Command::new("jj")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        return;
+    }
+    let repo = std::env::temp_dir().join(format!(
+        "oyo_jj_watch_repo_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos()
+    ));
+    let init = std::process::Command::new("jj")
+        .arg("--config")
+        .arg("signing.behavior=\"drop\"")
+        .args(["git", "init"])
+        .arg(&repo)
+        .output()
+        .expect("jj init");
+    assert!(init.status.success());
+    run_jj(&repo, &["config", "set", "--repo", "user.name", "Test"]);
+    run_jj(
+        &repo,
+        &["config", "set", "--repo", "user.email", "test@example.com"],
+    );
+    std::fs::write(repo.join("README.md"), "base\n").expect("write base");
+    run_jj(&repo, &["commit", "-m", "base"]);
+
+    let diff = crate::build_jj_diff(&repo, "@").expect("initial jj diff");
+    let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, Some("@".into()));
+    app.set_jj_watch_target(repo.clone(), "@".into());
+    assert_eq!(app.multi_diff.file_count(), 0);
+    app.last_change_list_watch_check = Instant::now() - Duration::from_secs(2);
+    assert!(!app.maybe_watch_refresh_jj_files());
+
+    std::fs::write(repo.join("README.md"), "base\nbefore\n").expect("change tracked file");
+    app.last_change_list_watch_check = Instant::now() - Duration::from_secs(2);
+    assert!(app.tick());
+    assert_eq!(app.current_file_path(), "README.md");
+    assert_eq!(app.stats(), (1, 0));
+    assert!(!app.multi_diff.current_navigator().diff().hunks.is_empty());
+    assert!(app.file_recently_changed_until[0].is_some());
+    let existing_flash = Instant::now() + Duration::from_secs(1);
+    app.file_recently_changed_until[0] = Some(existing_flash);
+    app.scroll_offset = 3;
+    app.horizontal_scroll = 2;
+
+    std::fs::write(repo.join("new.txt"), "new\n").expect("add new file");
+    app.last_change_list_watch_check = Instant::now() - Duration::from_secs(2);
+    assert!(app.maybe_watch_refresh_jj_files());
+    assert_eq!(app.multi_diff.file_count(), 2);
+    assert_eq!(app.current_file_path(), "README.md");
+    assert_eq!(app.scroll_offset, 3);
+    assert_eq!(app.horizontal_scroll, 2);
+    let readme_index = app
+        .multi_diff
+        .files
+        .iter()
+        .position(|file| file.path == std::path::Path::new("README.md"))
+        .unwrap();
+    let new_index = app
+        .multi_diff
+        .files
+        .iter()
+        .position(|file| file.path == std::path::Path::new("new.txt"))
+        .unwrap();
+    assert_eq!(
+        app.file_recently_changed_until[readme_index],
+        Some(existing_flash)
+    );
+    assert!(app.file_recently_changed_until[new_index].is_some());
+
+    std::fs::write(repo.join("new.txt"), "new\nmore\n").expect("re-edit non-current file");
+    app.last_fs_check = Instant::now() - Duration::from_secs(2);
+    app.last_change_list_watch_check = Instant::now() - Duration::from_secs(2);
+    assert!(app.tick());
+    assert_eq!(app.multi_diff.files[new_index].insertions, 2);
+    assert_eq!(app.multi_diff.files[new_index].deletions, 0);
+
+    app.file_recently_changed_until[readme_index] = None;
+    std::fs::write(repo.join("README.md"), "base\nbefore\nduring\n").expect("re-edit tracked file");
+    app.last_fs_check = Instant::now() - Duration::from_secs(2);
+    app.last_change_list_watch_check = Instant::now() - Duration::from_secs(2);
+    assert!(app.tick());
+    assert_eq!(app.stats(), (2, 0));
+    assert!(!app.multi_diff.current_navigator().diff().hunks.is_empty());
+    assert!(app.file_recently_changed_until[readme_index].is_some());
+
+    std::fs::remove_file(repo.join("new.txt")).expect("remove new file");
+    app.last_change_list_watch_check = Instant::now() - Duration::from_secs(2);
+    assert!(app.maybe_watch_refresh_jj_files());
+    assert_eq!(app.multi_diff.file_count(), 1);
+    assert_eq!(app.current_file_path(), "README.md");
+
+    std::fs::write(repo.join("manual.txt"), "manual\n").expect("add manual file");
+    app.refresh_all_files();
+    assert!(app
+        .multi_diff
+        .files
+        .iter()
+        .any(|file| file.path == std::path::Path::new("manual.txt")));
+
+    let _ = std::fs::remove_dir_all(repo);
+}
+
+#[test]
+fn test_watch_adds_newly_modified_tracked_file() {
+    let _guard = DiffSettingsGuard::default();
+    let repo = tracked_watch_repo("watch_tracked");
+    std::fs::write(repo.join("other.txt"), "other changed\n").expect("modify other");
+    let changes = oyo_core::git::get_uncommitted_changes(&repo).expect("changes");
+    let diff = MultiFileDiff::from_git_changes(repo.clone(), changes).expect("diff");
+    let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+    assert_eq!(app.multi_diff.file_count(), 1);
+
+    std::fs::write(repo.join("README.md"), "readme changed\n").expect("modify readme");
+    app.last_change_list_watch_check = Instant::now() - Duration::from_secs(2);
+
+    assert!(app.maybe_watch_refresh_git_files());
+    assert_eq!(app.multi_diff.file_count(), 2);
+    assert!(app
+        .multi_diff
+        .files
+        .iter()
+        .any(|file| file.path == std::path::Path::new("README.md")));
+
+    let _ = std::fs::remove_dir_all(repo);
+}
+
+#[test]
+fn test_palette_refresh_all_adds_newly_modified_tracked_file() {
+    let _guard = DiffSettingsGuard::default();
+    let repo = tracked_watch_repo("palette_refresh_tracked");
+    std::fs::write(repo.join("other.txt"), "other changed\n").expect("modify other");
+    let changes = oyo_core::git::get_uncommitted_changes(&repo).expect("changes");
+    let diff = MultiFileDiff::from_git_changes(repo.clone(), changes).expect("diff");
+    let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+    assert_eq!(app.multi_diff.file_count(), 1);
+
+    std::fs::write(repo.join("README.md"), "readme changed\n").expect("modify readme");
+    app.start_command_palette();
+    for ch in "refresh all files".chars() {
+        app.push_command_palette_char(ch);
+    }
+    app.apply_command_palette_selection();
+
+    assert_eq!(app.multi_diff.file_count(), 2);
+    assert!(app
+        .multi_diff
+        .files
+        .iter()
+        .any(|file| file.path == std::path::Path::new("README.md")));
 
     let _ = std::fs::remove_dir_all(repo);
 }
@@ -2177,6 +2513,8 @@ fn test_tick_watch_refreshes_non_current_changed_file() {
 
     assert!(app.tick());
     assert!(!app.files_changed_on_disk);
+    assert!(app.file_changed_on_disk(0));
+    assert!(app.file_changed_on_disk(1));
     assert_eq!(
         app.multi_diff.file_contents(0).map(|(_, new)| new),
         Some("A changed\n")
@@ -2268,6 +2606,107 @@ fn test_view_nav_logging_emits_entry() {
     assert!(log.contains("OYO_VIEW_NAV"), "missing nav log header");
     assert!(log.contains("action=step_down"), "missing step_down action");
     assert!(log.contains("moved=true"), "expected moved=true for step");
+}
+
+#[test]
+fn test_refresh_current_file_queues_deferred_diff_and_restores_decorations() {
+    let _guard = DiffSettingsGuard::new(32);
+    let path = std::env::temp_dir().join(format!(
+        "oyo_refresh_deferred_{}_{}.txt",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos()
+    ));
+    std::fs::write(&path, "new\n").expect("write file");
+    let diff = MultiFileDiff::from_file_pair_with_sources(
+        path.clone(),
+        b"old\n".to_vec(),
+        b"new\n".to_vec(),
+        None,
+        Some(path.clone()),
+    );
+    let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+    app.stepping = false;
+    app.no_step_auto_jump_on_enter = false;
+    app.enter_no_step_mode();
+    let revision = app.diff_revision();
+
+    std::fs::write(
+        &path,
+        "new line 1\nnew line 2\nnew line 3\nnew line 4\nnew line 5\n",
+    )
+    .expect("update file");
+    app.refresh_current_file();
+
+    assert!(app.diff_revision() > revision);
+    assert_eq!(app.diff_inflight, Some(0));
+    assert!(matches!(
+        app.multi_diff.current_file_diff_status(),
+        DiffStatus::Computing
+    ));
+
+    let final_content =
+        "final line 1\nfinal line 2\nfinal line 3\nfinal line 4\nfinal line 5\nfinal line 6\n";
+    std::fs::write(&path, final_content).expect("update file again");
+    app.refresh_current_file();
+    assert!(app.diff_queue.contains(&0));
+
+    let mut ready = false;
+    for _ in 0..200 {
+        app.poll_diff_responses();
+        if matches!(app.multi_diff.current_file_diff_status(), DiffStatus::Ready) {
+            ready = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+
+    assert!(ready, "refreshed diff worker did not finish");
+    assert!(!app.multi_diff.current_navigator_is_placeholder());
+    assert_eq!(
+        app.multi_diff.file_contents(0).map(|(_, new)| new),
+        Some(final_content)
+    );
+    let state = app.multi_diff.current_navigator().state().clone();
+    assert!(state.is_at_end());
+    assert!(!app.multi_diff.current_navigator().diff().hunks.is_empty());
+
+    std::fs::write(
+        &path,
+        "large again 1\nlarge again 2\nlarge again 3\nlarge again 4\n",
+    )
+    .expect("start another deferred refresh");
+    app.refresh_current_file();
+    assert_eq!(app.diff_inflight, Some(0));
+
+    let immediate_content = "tiny\n";
+    std::fs::write(&path, immediate_content).expect("replace with immediate diff");
+    app.refresh_current_file();
+    assert!(matches!(
+        app.multi_diff.current_file_diff_status(),
+        DiffStatus::Ready
+    ));
+    assert!(!app.diff_queue.contains(&0));
+    for _ in 0..200 {
+        app.poll_diff_responses();
+        if app.diff_inflight.is_none() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+
+    let expected = MultiFileDiff::compute_diff("old\n", immediate_content);
+    assert_eq!(
+        app.multi_diff.file_contents(0).map(|(_, new)| new),
+        Some(immediate_content)
+    );
+    assert_eq!(app.multi_diff.files[0].insertions, expected.insertions);
+    assert_eq!(app.multi_diff.files[0].deletions, expected.deletions);
+    assert!(!app.multi_diff.current_navigator().diff().hunks.is_empty());
+
+    let _ = std::fs::remove_file(path);
 }
 
 #[test]

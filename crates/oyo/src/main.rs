@@ -1839,6 +1839,7 @@ fn apply_review_storage_to_app(
 
 fn run_jj(repo_root: &Path, args: &[&str]) -> Result<String> {
     let output = ProcessCommand::new("jj")
+        .current_dir(repo_root)
         .arg("-R")
         .arg(repo_root)
         .arg("--no-pager")
@@ -1853,8 +1854,18 @@ fn run_jj(repo_root: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+pub(crate) fn jj_working_copy_stamp(repo_root: &Path) -> Option<String> {
+    run_jj(
+        repo_root,
+        &["log", "--no-graph", "-r", "@", "-T", "commit_id"],
+    )
+    .ok()
+    .map(|stamp| stamp.trim().to_string())
+}
+
 fn run_jj_bytes(repo_root: &Path, args: &[&str]) -> Result<Vec<u8>> {
     let output = ProcessCommand::new("jj")
+        .current_dir(repo_root)
         .arg("-R")
         .arg(repo_root)
         .arg("--no-pager")
@@ -1864,46 +1875,120 @@ fn run_jj_bytes(repo_root: &Path, args: &[&str]) -> Result<Vec<u8>> {
         .output()
         .with_context(|| format!("Failed to run jj in {}", repo_root.display()))?;
     if !output.status.success() {
-        return Ok(Vec::new());
+        anyhow::bail!(String::from_utf8_lossy(&output.stderr).trim().to_string());
     }
     Ok(output.stdout)
 }
 
-fn build_jj_diff(repo_root: &Path, rev: &str) -> Result<MultiFileDiff> {
-    let summary = run_jj(repo_root, &["diff", "-r", rev, "--summary"])?;
-    let parent_rev = format!("({rev})-");
-    let mut files = Vec::new();
-    for line in summary
+fn jj_summary_paths(status: oyo_core::git::FileStatus, path: &str) -> (Option<String>, String) {
+    if status != oyo_core::git::FileStatus::Renamed {
+        return (None, path.to_string());
+    }
+    let Some(open) = path.find('{') else {
+        return (None, path.to_string());
+    };
+    let Some(close_offset) = path[open + 1..].find('}') else {
+        return (None, path.to_string());
+    };
+    let close = open + 1 + close_offset;
+    let Some((old, new)) = path[open + 1..close].split_once(" => ") else {
+        return (None, path.to_string());
+    };
+    let prefix = &path[..open];
+    let suffix = &path[close + 1..];
+    (
+        Some(format!("{prefix}{old}{suffix}")),
+        format!("{prefix}{new}{suffix}"),
+    )
+}
+
+fn jj_diff_summary(repo_root: &Path, rev: &str) -> Result<(String, String, String)> {
+    if rev.contains("..") {
+        let (from, to) = parse_range(rev)?;
+        let base = format!("fork_point(({from}) | ({to}))");
+        let summary = run_jj(
+            repo_root,
+            &["diff", "--from", &base, "--to", &to, "--summary"],
+        )?;
+        Ok((summary, base, to))
+    } else {
+        Ok((
+            run_jj(repo_root, &["diff", "-r", rev, "--summary"])?,
+            format!("({rev})-"),
+            rev.to_string(),
+        ))
+    }
+}
+
+fn jj_summary_entries(summary: &str) -> Vec<(oyo_core::git::FileStatus, Option<PathBuf>, PathBuf)> {
+    summary
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
-    {
-        let Some((status, path)) = line.split_once(' ') else {
-            continue;
-        };
-        let status = match status.chars().next().unwrap_or('M') {
-            'A' => oyo_core::git::FileStatus::Added,
-            'D' => oyo_core::git::FileStatus::Deleted,
-            'R' => oyo_core::git::FileStatus::Renamed,
-            _ => oyo_core::git::FileStatus::Modified,
-        };
-        let path = path.trim();
+        .filter_map(|line| {
+            let (status, path) = line.split_once(' ')?;
+            let status = match status.chars().next().unwrap_or('M') {
+                'A' => oyo_core::git::FileStatus::Added,
+                'D' => oyo_core::git::FileStatus::Deleted,
+                'R' => oyo_core::git::FileStatus::Renamed,
+                _ => oyo_core::git::FileStatus::Modified,
+            };
+            let (old_path, path) = jj_summary_paths(status, path.trim());
+            Some((status, old_path.map(PathBuf::from), PathBuf::from(path)))
+        })
+        .collect()
+}
+
+pub(crate) fn jj_diff_file_signature(
+    repo_root: &Path,
+    rev: &str,
+) -> Result<Vec<(oyo_core::git::FileStatus, Option<PathBuf>, PathBuf)>> {
+    let (summary, _, _) = jj_diff_summary(repo_root, rev)?;
+    Ok(jj_summary_entries(&summary))
+}
+
+fn build_jj_diff(repo_root: &Path, rev: &str) -> Result<MultiFileDiff> {
+    let (summary, old_rev, new_rev) = jj_diff_summary(repo_root, rev)?;
+    let mut files = Vec::new();
+    for (status, old_path, path) in jj_summary_entries(&summary) {
         let old_bytes = if matches!(status, oyo_core::git::FileStatus::Added) {
             Vec::new()
         } else {
-            run_jj_bytes(repo_root, &["file", "show", "-r", &parent_rev, path])?
+            run_jj_bytes(
+                repo_root,
+                &[
+                    "file",
+                    "show",
+                    "-r",
+                    &old_rev,
+                    old_path
+                        .as_deref()
+                        .unwrap_or(&path)
+                        .to_string_lossy()
+                        .as_ref(),
+                ],
+            )?
         };
         let new_bytes = if matches!(status, oyo_core::git::FileStatus::Deleted) {
             Vec::new()
         } else {
-            run_jj_bytes(repo_root, &["file", "show", "-r", rev, path])?
+            run_jj_bytes(
+                repo_root,
+                &[
+                    "file",
+                    "show",
+                    "-r",
+                    &new_rev,
+                    path.to_string_lossy().as_ref(),
+                ],
+            )?
         };
         let old_content = String::from_utf8_lossy(&old_bytes).to_string();
         let new_content = String::from_utf8_lossy(&new_bytes).to_string();
         let binary = old_content.contains('\0') || new_content.contains('\0');
         files.push(RawFileDiff {
-            path: PathBuf::from(path),
-            old_path: None,
+            path: path.clone(),
+            old_path,
             old_source_path: None,
             new_source_path: Some(repo_root.join(path)),
             status,
@@ -5919,6 +6004,11 @@ fn run() -> Result<()> {
             let autoplay = args.autoplay || config.playback.autoplay;
 
             let mut app = App::new(built.multi_diff, view_mode, speed, autoplay, built.branch);
+            if let (InputMode::JjRevision { rev }, Some(repo_root)) =
+                (&input_mode, built.workspace_root.as_ref())
+            {
+                app.set_jj_watch_target(repo_root.clone(), rev.clone());
+            }
             if let Some(picker) = image_picker.as_ref() {
                 app.set_image_picker(picker.clone());
             }
@@ -6053,6 +6143,11 @@ fn run() -> Result<()> {
         let autoplay = args.autoplay || config.playback.autoplay;
 
         let mut app = App::new(built.multi_diff, view_mode, speed, autoplay, built.branch);
+        if let (InputMode::JjRevision { rev }, Some(repo_root)) =
+            (&input_mode, built.workspace_root.as_ref())
+        {
+            app.set_jj_watch_target(repo_root.clone(), rev.clone());
+        }
         if let Some(picker) = image_picker.as_ref() {
             app.set_image_picker(picker.clone());
         }
@@ -7446,16 +7541,17 @@ fn run_commit_picker<B: Backend>(
 #[cfg(test)]
 mod tests {
     use super::{
-        blocks_mouse_scroll, config, dedupe_review_log_entries, detect_input_mode,
+        blocks_mouse_scroll, build_jj_diff, config, dedupe_review_log_entries, detect_input_mode,
         git_ref_input_mode, github_comment_to_review_comment, ignore_github_delete_not_found,
-        insert_review_thread_states, local_pr_review_revision, mouse_horizontal_scroll_delta,
-        parse_range, push_pending_mouse_scroll, push_review_comments_to_provider_with,
-        render_editor_args, review_author_from_cli, review_comments_json_value,
-        review_pr_target_metadata, review_status_json_value, should_load_saved_review_fallback,
-        sync_lookup_target, update_mouse_scroll_block, Args, BlockedMouseScroll, Command,
-        GhComment, GhCommentUser, GhProviderComment, GhReviewThreadsResponse, GhUser, InputMode,
-        MouseScrollTarget, PendingMouseScroll, ProviderPr, ReviewCommand, ReviewCommentCommand,
-        ReviewProviderKind, ReviewTargetMetadata, MAX_DISCRETE_MOUSE_SCROLL_ACTIONS_PER_FRAME,
+        insert_review_thread_states, jj_bookmark_revset, jj_summary_paths,
+        local_pr_review_revision, mouse_horizontal_scroll_delta, parse_range,
+        push_pending_mouse_scroll, push_review_comments_to_provider_with, render_editor_args,
+        review_author_from_cli, review_comments_json_value, review_pr_target_metadata,
+        review_status_json_value, should_load_saved_review_fallback, sync_lookup_target,
+        update_mouse_scroll_block, Args, BlockedMouseScroll, Command, GhComment, GhCommentUser,
+        GhProviderComment, GhReviewThreadsResponse, GhUser, InputMode, MouseScrollTarget,
+        PendingMouseScroll, ProviderPr, ReviewCommand, ReviewCommentCommand, ReviewProviderKind,
+        ReviewTargetMetadata, MAX_DISCRETE_MOUSE_SCROLL_ACTIONS_PER_FRAME,
     };
     use crate::app::{
         review::{
@@ -7481,6 +7577,23 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ))
+    }
+
+    fn test_jj(repo: &Path, args: &[&str]) {
+        let output = ProcessCommand::new("jj")
+            .current_dir(repo)
+            .arg("-R")
+            .arg(repo)
+            .arg("--config")
+            .arg("signing.behavior=\"drop\"")
+            .args(args)
+            .output()
+            .expect("run jj");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     fn test_provider_pr() -> ProviderPr {
@@ -8076,6 +8189,117 @@ mod tests {
     #[test]
     fn parse_range_rejects_missing_separator() {
         assert!(parse_range("HEAD").is_err());
+    }
+
+    #[test]
+    fn jj_rename_summary_paths_expand_braces() {
+        let (old, new) =
+            jj_summary_paths(oyo_core::git::FileStatus::Renamed, "src/{old.rs => new.rs}");
+        assert_eq!(old.as_deref(), Some("src/old.rs"));
+        assert_eq!(new, "src/new.rs");
+    }
+
+    #[test]
+    fn jj_merge_ranges_use_endpoint_tree_diff() {
+        if ProcessCommand::new("jj").arg("--version").output().is_err() {
+            return;
+        }
+        let repo = temp_path("jj-merge-range");
+        std::fs::create_dir_all(&repo).unwrap();
+        let init = ProcessCommand::new("jj")
+            .arg("--config")
+            .arg("signing.behavior=\"drop\"")
+            .args(["git", "init"])
+            .arg(&repo)
+            .output()
+            .unwrap();
+        assert!(
+            init.status.success(),
+            "{}",
+            String::from_utf8_lossy(&init.stderr)
+        );
+        test_jj(&repo, &["config", "set", "--repo", "user.name", "Test"]);
+        test_jj(
+            &repo,
+            &["config", "set", "--repo", "user.email", "test@example.com"],
+        );
+        std::fs::write(repo.join("base.txt"), "base\n").unwrap();
+        test_jj(&repo, &["commit", "-m", "base"]);
+        test_jj(&repo, &["bookmark", "create", "main", "-r", "@-"]);
+        test_jj(
+            &repo,
+            &[
+                "config",
+                "set",
+                "--repo",
+                "revset-aliases.'trunk()'",
+                "main",
+            ],
+        );
+        test_jj(&repo, &["new", "main"]);
+        std::fs::write(repo.join("feature.txt"), "feature\n").unwrap();
+        test_jj(&repo, &["commit", "-m", "feature"]);
+        test_jj(&repo, &["bookmark", "create", "feature", "-r", "@-"]);
+        test_jj(&repo, &["new", "main"]);
+        std::fs::write(repo.join("main.txt"), "main\n").unwrap();
+        test_jj(&repo, &["commit", "-m", "main"]);
+        test_jj(&repo, &["bookmark", "set", "main", "-r", "@-"]);
+
+        let diverged = build_jj_diff(&repo, "trunk()..feature").unwrap();
+        assert!(diverged
+            .files
+            .iter()
+            .any(|file| file.path == Path::new("feature.txt")));
+        assert!(!diverged
+            .files
+            .iter()
+            .any(|file| file.path == Path::new("main.txt")));
+
+        test_jj(&repo, &["new", "feature", "main"]);
+        std::fs::write(repo.join("merge.txt"), "merge\n").unwrap();
+        test_jj(&repo, &["commit", "-m", "merge"]);
+        test_jj(&repo, &["bookmark", "set", "feature", "-r", "@-"]);
+        test_jj(&repo, &["edit", "feature"]);
+
+        let old_range = ProcessCommand::new("jj")
+            .current_dir(&repo)
+            .arg("-R")
+            .arg(&repo)
+            .args(["diff", "-r", "trunk()..feature", "--summary"])
+            .output()
+            .unwrap();
+        assert!(!old_range.status.success());
+
+        let range = build_jj_diff(&repo, "trunk()..feature").unwrap();
+        let explicit_range = build_jj_diff(&repo, "main..feature").unwrap();
+        assert_eq!(jj_bookmark_revset("feature"), "trunk()..feature");
+        assert_eq!(
+            range
+                .files
+                .iter()
+                .map(|file| file.path.as_path())
+                .collect::<Vec<_>>(),
+            explicit_range
+                .files
+                .iter()
+                .map(|file| file.path.as_path())
+                .collect::<Vec<_>>()
+        );
+        assert!(range
+            .files
+            .iter()
+            .any(|file| file.path == Path::new("feature.txt")));
+        assert!(range
+            .files
+            .iter()
+            .any(|file| file.path == Path::new("merge.txt")));
+        assert!(!range
+            .files
+            .iter()
+            .any(|file| file.path == Path::new("main.txt")));
+        assert!(build_jj_diff(&repo, "@").is_ok());
+
+        let _ = std::fs::remove_dir_all(repo);
     }
 
     #[test]

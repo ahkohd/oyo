@@ -302,6 +302,13 @@ fn scrollbar_row_to_offset(
     Some((thumb_top as usize).saturating_mul(max_scroll) / max_thumb_top as usize)
 }
 
+#[derive(Clone)]
+pub(crate) struct JjWatchTarget {
+    pub(crate) repo_root: PathBuf,
+    pub(crate) revision: String,
+    pub(crate) working_copy_stamp: Option<String>,
+}
+
 /// The main application state
 pub struct App {
     /// Multi-file diff manager
@@ -444,8 +451,12 @@ pub struct App {
     file_disk_baseline: Vec<FileDiskStamp>,
     /// Per-file changed-on-disk flags (same indexing as multi_diff.files)
     file_disk_changed: Vec<bool>,
-    /// Last time we checked git path/status changes
-    last_git_watch_check: Instant,
+    /// Watch-mode indicator expiry for recently refreshed files.
+    file_recently_changed_until: Vec<Option<Instant>>,
+    /// Last time we checked VCS path/status changes.
+    last_change_list_watch_check: Instant,
+    /// jj workspace and revision to rescan in watch mode.
+    jj_watch_target: Option<JjWatchTarget>,
     /// Baseline git index stamp for staged/index-backed diffs
     git_index_baseline: FileDiskStamp,
     /// Message shown when a git diff currently has no files
@@ -650,6 +661,8 @@ pub struct App {
     diff_queue: VecDeque<usize>,
     /// Currently computing diff (file index)
     diff_inflight: Option<usize>,
+    /// Refreshed file that should return to the no-step end state when ready.
+    diff_refresh_restore_end: Option<usize>,
     /// Worker thread for diff computation
     diff_worker_tx: Option<mpsc::Sender<DiffRequest>>,
     diff_worker_rx: Option<mpsc::Receiver<DiffResponse>>,
@@ -992,6 +1005,8 @@ pub struct App {
     pub last_viewport_height: usize,
     /// Cached view lines for the current state/frame
     view_cache: Option<ViewCache>,
+    /// Revision of diff content used by render caches.
+    diff_revision: u64,
     /// Cached render model for unified view
     pub(crate) unified_render_cache: Option<UnifiedRenderModel>,
     /// Windowed render start (for large-file partial rendering)
@@ -1022,6 +1037,7 @@ struct ViewCacheKey {
     fold_context_revision: u64,
     fold_comment_revision: u64,
     search_revision: u64,
+    diff_revision: u64,
     viewport_height: usize,
     windowed: bool,
     window_start: usize,
@@ -1145,7 +1161,9 @@ impl App {
             last_fs_check: Instant::now(),
             file_disk_baseline: vec![FileDiskStamp::default(); file_count],
             file_disk_changed: vec![false; file_count],
-            last_git_watch_check: Instant::now(),
+            file_recently_changed_until: vec![None; file_count],
+            last_change_list_watch_check: Instant::now(),
+            jj_watch_target: None,
             git_index_baseline: FileDiskStamp::default(),
             no_changes_message: None,
             no_changes_dashboard_hit: None,
@@ -1284,6 +1302,7 @@ impl App {
             diff_last_input: Instant::now(),
             diff_queue: VecDeque::new(),
             diff_inflight: None,
+            diff_refresh_restore_end: None,
             diff_worker_tx: None,
             diff_worker_rx: None,
             blame_extra_rows: None,
@@ -1456,6 +1475,7 @@ impl App {
             hunk_edge_hint: None,
             last_viewport_height: 0,
             view_cache: None,
+            diff_revision: 0,
             unified_render_cache: None,
             view_window_start: 0,
             view_window_total_len: None,
@@ -1944,6 +1964,16 @@ impl App {
         self.centered_once = false;
     }
 
+    pub(crate) fn mark_diff_changed(&mut self) {
+        self.diff_revision = self.diff_revision.wrapping_add(1);
+        self.view_cache = None;
+        self.unified_render_cache = None;
+    }
+
+    pub(crate) fn diff_revision(&self) -> u64 {
+        self.diff_revision
+    }
+
     fn invalidate_fold_context_view(&mut self) {
         self.fold_context_revision = self.fold_context_revision.wrapping_add(1);
         self.fold_context_regions.clear();
@@ -2362,6 +2392,7 @@ impl App {
             fold_context_revision: self.fold_context_revision,
             fold_comment_revision,
             search_revision: self.search_revision,
+            diff_revision: self.diff_revision,
             viewport_height: self.last_viewport_height,
             windowed,
             window_start,
@@ -2950,11 +2981,13 @@ impl App {
             dirty = true;
         }
 
+        dirty |= self.expire_recent_file_changes(now);
         dirty |= self.toast_tick();
         dirty |= self.poll_diff_responses();
         dirty |= self.maybe_queue_idle_diff();
         dirty |= self.maybe_check_file_changes();
         dirty |= self.maybe_watch_refresh_git_files();
+        dirty |= self.maybe_watch_refresh_jj_files();
         dirty |= self.maybe_watch_refresh_changed_files();
         dirty |= self.maybe_watch_reload_review_state();
 

@@ -8,8 +8,11 @@ use crate::toasts::ToastEvent;
 use oyo_core::multi::FileSide;
 use ratatui::layout::Size;
 use ratatui_image::{picker::Picker, protocol::Protocol, Resize};
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+
+const WATCH_CHANGE_FLASH_DURATION: Duration = Duration::from_secs(3);
 
 /// Whether a URL is safe to hand to the OS opener: only http(s)/mailto, so we
 /// never launch `file://`, `javascript:`, or other schemes from preview clicks.
@@ -2044,6 +2047,7 @@ impl App {
             .map(|idx| self.disk_stamp_for_index(idx))
             .collect();
         self.file_disk_changed = vec![false; file_count];
+        self.file_recently_changed_until = vec![None; file_count];
     }
 
     fn refresh_file_disk_baseline_for(&mut self, idx: usize) {
@@ -2082,6 +2086,31 @@ impl App {
 
     pub(crate) fn file_changed_on_disk(&self, idx: usize) -> bool {
         self.file_disk_changed.get(idx).copied().unwrap_or(false)
+            || self
+                .file_recently_changed_until
+                .get(idx)
+                .and_then(|until| *until)
+                .is_some_and(|until| Instant::now() < until)
+    }
+
+    pub(crate) fn files_changed_indicator_active(&self) -> bool {
+        self.files_changed_on_disk
+            || self
+                .file_recently_changed_until
+                .iter()
+                .flatten()
+                .any(|until| Instant::now() < *until)
+    }
+
+    pub(crate) fn expire_recent_file_changes(&mut self, now: Instant) -> bool {
+        let mut expired = false;
+        for until in &mut self.file_recently_changed_until {
+            if until.is_some_and(|until| now >= until) {
+                *until = None;
+                expired = true;
+            }
+        }
+        expired
     }
 
     /// Check if tracked files changed on disk since the last refresh baseline.
@@ -2095,14 +2124,14 @@ impl App {
     }
 
     pub(crate) fn maybe_watch_refresh_git_files(&mut self) -> bool {
-        if !self.watch || !self.multi_diff.is_git_mode() {
+        if !self.watch || self.jj_watch_target.is_some() || !self.multi_diff.is_git_mode() {
             return false;
         }
         let now = Instant::now();
-        if now.duration_since(self.last_git_watch_check) < Duration::from_secs(1) {
+        if now.duration_since(self.last_change_list_watch_check) < Duration::from_secs(1) {
             return false;
         }
-        self.last_git_watch_check = now;
+        self.last_change_list_watch_check = now;
 
         let index_stamp = self.git_index_stamp();
         let changed =
@@ -2113,6 +2142,81 @@ impl App {
 
         self.refresh_all_files();
         true
+    }
+
+    pub fn set_jj_watch_target(&mut self, repo_root: PathBuf, revision: String) {
+        let working_copy_stamp = crate::jj_working_copy_stamp(&repo_root);
+        self.jj_watch_target = Some(super::JjWatchTarget {
+            repo_root,
+            revision,
+            working_copy_stamp,
+        });
+    }
+
+    pub(crate) fn maybe_watch_refresh_jj_files(&mut self) -> bool {
+        if !self.watch || self.jj_watch_target.is_none() {
+            return false;
+        }
+        let now = Instant::now();
+        if now.duration_since(self.last_change_list_watch_check) < Duration::from_secs(1) {
+            return false;
+        }
+        self.last_change_list_watch_check = now;
+
+        let target = self.jj_watch_target.clone().unwrap();
+        let working_copy_stamp = crate::jj_working_copy_stamp(&target.repo_root);
+        if working_copy_stamp == target.working_copy_stamp {
+            return false;
+        }
+        let Ok(signature) = crate::jj_diff_file_signature(&target.repo_root, &target.revision)
+        else {
+            return false;
+        };
+        if self.same_file_signature(&signature) {
+            if let Some(target) = self.jj_watch_target.as_mut() {
+                target.working_copy_stamp = working_copy_stamp;
+            }
+            return false;
+        }
+        let changed_indices: Vec<usize> = signature
+            .iter()
+            .enumerate()
+            .filter_map(|(index, (status, old_path, path))| {
+                (!self.multi_diff.files.iter().any(|file| {
+                    file.path == *path && file.old_path == *old_path && file.status == *status
+                }))
+                .then_some(index)
+            })
+            .collect();
+        let Ok(refreshed) = crate::build_jj_diff(&target.repo_root, &target.revision) else {
+            return false;
+        };
+        if let Some(target) = self.jj_watch_target.as_mut() {
+            target.working_copy_stamp = working_copy_stamp;
+        }
+        self.replace_multi_diff(refreshed);
+        let flash_until = Instant::now() + WATCH_CHANGE_FLASH_DURATION;
+        for index in changed_indices {
+            if let Some(until) = self.file_recently_changed_until.get_mut(index) {
+                *until = Some(flash_until);
+            }
+        }
+        true
+    }
+
+    fn same_file_signature(
+        &self,
+        other: &[(oyo_core::git::FileStatus, Option<PathBuf>, PathBuf)],
+    ) -> bool {
+        self.multi_diff.files.len() == other.len()
+            && self
+                .multi_diff
+                .files
+                .iter()
+                .zip(other)
+                .all(|(left, (status, old_path, path))| {
+                    left.path == *path && left.old_path == *old_path && left.status == *status
+                })
     }
 
     pub(crate) fn maybe_watch_refresh_changed_files(&mut self) -> bool {
@@ -2131,21 +2235,27 @@ impl App {
         }
 
         let current = self.multi_diff.selected_index;
+        let flash_until = Instant::now() + WATCH_CHANGE_FLASH_DURATION;
         for idx in changed {
             if idx == current {
                 self.refresh_current_file();
-                continue;
+            } else {
+                self.multi_diff.refresh_file(idx);
+                self.mark_diff_changed();
+                if idx < self.syntax_caches.len() {
+                    self.syntax_caches[idx] = None;
+                }
+                if idx < self.fold_scope_caches.len() {
+                    self.fold_scope_caches[idx] = None;
+                }
+                self.refresh_file_disk_baseline_for(idx);
             }
-            self.multi_diff.refresh_file(idx);
-            if idx < self.syntax_caches.len() {
-                self.syntax_caches[idx] = None;
+            if let Some(until) = self.file_recently_changed_until.get_mut(idx) {
+                *until = Some(flash_until);
             }
-            if idx < self.fold_scope_caches.len() {
-                self.fold_scope_caches[idx] = None;
-            }
-            self.refresh_file_disk_baseline_for(idx);
         }
         self.recompute_file_change_state();
+        self.repair_review_comments_after_diff_refresh();
         true
     }
 
@@ -2178,6 +2288,13 @@ impl App {
         };
 
         self.multi_diff.refresh_current_file();
+        self.mark_diff_changed();
+        let idx = self.multi_diff.selected_index;
+        if self.queue_refreshed_current_file_diff() {
+            self.diff_refresh_restore_end = Some(idx);
+        } else if self.diff_refresh_restore_end == Some(idx) {
+            self.diff_refresh_restore_end = None;
+        }
 
         // The navigator is rebuilt at step 0 after refresh; jump to the end
         // so all changes remain visible.
@@ -2222,44 +2339,99 @@ impl App {
             }
         }
 
-        let idx = self.multi_diff.selected_index;
         self.invalidate_fold_context_view();
         self.rebuild_current_syntax_cache_after_reload();
 
         self.refresh_file_disk_baseline_for(idx);
         self.recompute_file_change_state();
+        self.repair_review_comments_after_diff_refresh();
     }
 
-    /// Refresh all files from git (re-scan for uncommitted changes)
+    /// Refresh all files from the active VCS.
     pub fn refresh_all_files(&mut self) {
-        if self.multi_diff.refresh_all_from_git() {
-            // Reset scroll states for all files
-            let file_count = self.multi_diff.file_count();
-            self.scroll_offsets_step = vec![0; file_count];
-            self.scroll_offsets_no_step = vec![0; file_count];
-            self.horizontal_scrolls_step = vec![0; file_count];
-            self.horizontal_scrolls_no_step = vec![0; file_count];
-            self.max_line_widths_step = vec![0; file_count];
-            self.max_line_widths_no_step = vec![0; file_count];
-            self.no_step_visited = vec![false; file_count];
-            self.files_visited = vec![false; file_count];
-            self.syntax_caches = vec![None; file_count];
-            self.fold_scope_caches = vec![None; file_count];
-            self.step_state_snapshots = vec![None; file_count];
-            self.no_step_state_snapshots = vec![None; file_count];
-            self.scroll_offset = 0;
-            self.horizontal_scroll = 0;
-            self.needs_scroll_to_active = true;
-            self.centered_once = false;
-            self.handle_file_enter();
-            self.invalidate_fold_context_view();
-            self.rebuild_current_syntax_cache_after_reload();
-
-            self.rebuild_file_disk_baseline();
-            self.git_index_baseline = self.git_index_stamp();
-            self.files_changed_on_disk = false;
-            self.invalidate_review_repo_file_cache();
+        if let Some(target) = self.jj_watch_target.clone() {
+            let working_copy_stamp = crate::jj_working_copy_stamp(&target.repo_root);
+            if let Ok(refreshed) = crate::build_jj_diff(&target.repo_root, &target.revision) {
+                if let Some(target) = self.jj_watch_target.as_mut() {
+                    target.working_copy_stamp = working_copy_stamp;
+                }
+                self.replace_multi_diff(refreshed);
+            }
+        } else if self.multi_diff.refresh_all_from_git() {
+            self.reset_after_file_list_refresh();
         }
+    }
+
+    fn replace_multi_diff(&mut self, mut refreshed: oyo_core::MultiFileDiff) {
+        let recent_changes: HashMap<PathBuf, Option<Instant>> = self
+            .multi_diff
+            .files
+            .iter()
+            .zip(&self.file_recently_changed_until)
+            .map(|(file, until)| (file.path.clone(), *until))
+            .collect();
+        let selected_path = self.multi_diff.current_file().map(|file| file.path.clone());
+        let selected_index = selected_path
+            .and_then(|path| refreshed.files.iter().position(|file| file.path == path));
+        if let Some(index) = selected_index {
+            refreshed.select_file(index);
+        }
+        let scroll_offset = self.scroll_offset;
+        let horizontal_scroll = self.horizontal_scroll;
+        self.multi_diff = refreshed;
+        self.reset_after_file_list_refresh();
+        for (index, file) in self.multi_diff.files.iter().enumerate() {
+            if let Some(until) = recent_changes.get(&file.path) {
+                self.file_recently_changed_until[index] = *until;
+            }
+        }
+        if let Some(index) = selected_index {
+            self.scroll_offset = scroll_offset;
+            self.horizontal_scroll = horizontal_scroll;
+            self.needs_scroll_to_active = false;
+            if self.stepping {
+                self.scroll_offsets_step[index] = scroll_offset;
+                self.horizontal_scrolls_step[index] = horizontal_scroll;
+            } else {
+                self.scroll_offsets_no_step[index] = scroll_offset;
+                self.horizontal_scrolls_no_step[index] = horizontal_scroll;
+            }
+        }
+    }
+
+    fn reset_after_file_list_refresh(&mut self) {
+        self.mark_diff_changed();
+        self.diff_worker_tx = None;
+        self.diff_worker_rx = None;
+        self.diff_inflight = None;
+        self.diff_queue.clear();
+        self.diff_refresh_restore_end = None;
+        let file_count = self.multi_diff.file_count();
+        self.scroll_offsets_step = vec![0; file_count];
+        self.scroll_offsets_no_step = vec![0; file_count];
+        self.horizontal_scrolls_step = vec![0; file_count];
+        self.horizontal_scrolls_no_step = vec![0; file_count];
+        self.max_line_widths_step = vec![0; file_count];
+        self.max_line_widths_no_step = vec![0; file_count];
+        self.no_step_visited = vec![false; file_count];
+        self.files_visited = vec![false; file_count];
+        self.syntax_caches = vec![None; file_count];
+        self.fold_scope_caches = vec![None; file_count];
+        self.step_state_snapshots = vec![None; file_count];
+        self.no_step_state_snapshots = vec![None; file_count];
+        self.scroll_offset = 0;
+        self.horizontal_scroll = 0;
+        self.needs_scroll_to_active = true;
+        self.centered_once = false;
+        self.handle_file_enter();
+        self.invalidate_fold_context_view();
+        self.rebuild_current_syntax_cache_after_reload();
+
+        self.rebuild_file_disk_baseline();
+        self.git_index_baseline = self.git_index_stamp();
+        self.files_changed_on_disk = false;
+        self.invalidate_review_repo_file_cache();
+        self.repair_review_comments_after_diff_refresh();
     }
 
     /// Get the total number of lines in the current view

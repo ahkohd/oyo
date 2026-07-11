@@ -8,6 +8,7 @@ use std::time::Instant;
 impl App {
     pub(crate) fn mark_user_input(&mut self) {
         self.diff_last_input = Instant::now();
+        self.diff_refresh_restore_end = None;
     }
 
     fn ensure_diff_worker(&mut self) {
@@ -21,6 +22,8 @@ impl App {
                 let diff = MultiFileDiff::compute_diff(req.old.as_ref(), req.new.as_ref());
                 let response = DiffResponse {
                     file_index: req.file_index,
+                    old: req.old,
+                    new: req.new,
                     diff: Ok(diff),
                 };
                 if resp_tx.send(response).is_err() {
@@ -53,6 +56,28 @@ impl App {
     pub(crate) fn queue_current_file_diff(&mut self) -> bool {
         let idx = self.multi_diff.selected_index;
         self.queue_diff_for_file(idx)
+    }
+
+    pub(crate) fn queue_refreshed_current_file_diff(&mut self) -> bool {
+        let idx = self.multi_diff.selected_index;
+        if self.queue_diff_for_file(idx) {
+            return true;
+        }
+        if !matches!(
+            self.multi_diff.diff_status(idx),
+            oyo_core::multi::DiffStatus::Deferred
+        ) {
+            self.diff_queue.retain(|queued| *queued != idx);
+            return false;
+        }
+        if self.diff_queue.contains(&idx) {
+            return true;
+        }
+        if self.diff_inflight == Some(idx) {
+            self.diff_queue.push_back(idx);
+            return true;
+        }
+        false
     }
 
     fn start_next_diff_job(&mut self) -> bool {
@@ -96,15 +121,33 @@ impl App {
             if self.diff_inflight == Some(resp.file_index) {
                 self.diff_inflight = None;
             }
+            let stale = self
+                .multi_diff
+                .file_contents_arc(resp.file_index)
+                .is_none_or(|(old, new)| old != resp.old || new != resp.new);
+            if stale || self.diff_queue.contains(&resp.file_index) {
+                continue;
+            }
+            let restore_refresh_end = self.diff_refresh_restore_end == Some(resp.file_index);
+            if self.diff_refresh_restore_end == Some(resp.file_index) {
+                self.diff_refresh_restore_end = None;
+            }
             match resp.diff {
                 Ok(diff) => {
                     self.multi_diff.apply_diff_result(resp.file_index, diff);
+                    self.mark_diff_changed();
                     if resp.file_index == self.multi_diff.selected_index {
                         self.multi_diff.ensure_full_navigator(resp.file_index);
-                    }
-                    if resp.file_index == self.multi_diff.selected_index {
+                        if !self.stepping || restore_refresh_end {
+                            self.multi_diff.current_navigator().goto_end();
+                            if !self.stepping {
+                                self.multi_diff.current_navigator().clear_active_change();
+                            }
+                        }
+                        self.invalidate_fold_context_view();
                         self.reset_current_max_line_width();
-                        if !self.files_visited[resp.file_index]
+                        if (restore_refresh_end && !self.stepping)
+                            || !self.files_visited[resp.file_index]
                             || !self.no_step_visited[resp.file_index]
                         {
                             self.finish_file_enter();

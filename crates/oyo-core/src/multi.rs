@@ -1517,8 +1517,12 @@ impl MultiFileDiff {
                 }
                 _ => {
                     let old_content = self.old_contents[idx].as_ref().to_string();
-                    let (old_content, old_binary) = self
-                        .source_path(idx, FileSide::Old)
+                    let old_source_path = file.old_source_path.clone().or_else(|| {
+                        self.source_roots.as_ref().map(|roots| {
+                            roots.old.join(file.old_path.as_ref().unwrap_or(&file.path))
+                        })
+                    });
+                    let (old_content, old_binary) = old_source_path
                         .filter(|path| path.is_file())
                         .map(|path| Self::read_text_or_binary(&path))
                         .unwrap_or((old_content, false));
@@ -1648,6 +1652,36 @@ mod tests {
             .iter()
             .map(|file| file.display_name.clone())
             .collect()
+    }
+
+    #[test]
+    fn raw_file_refresh_keeps_immutable_old_content() {
+        let root = temp_dir("raw-refresh");
+        let path = root.join("README.md");
+        write_file(&path, "base\nbefore\nduring\n");
+        let mut diff = MultiFileDiff::from_raw_files(
+            Some(root.clone()),
+            vec![RawFileDiff {
+                path: PathBuf::from("README.md"),
+                old_path: None,
+                old_source_path: None,
+                new_source_path: Some(path),
+                status: FileStatus::Modified,
+                old_content: "base\n".to_string(),
+                new_content: "base\nbefore\n".to_string(),
+                binary: false,
+            }],
+        );
+
+        diff.refresh_file(0);
+
+        assert_eq!(
+            diff.file_contents(0),
+            Some(("base\n", "base\nbefore\nduring\n"))
+        );
+        assert_eq!(diff.files[0].insertions, 2);
+        assert_eq!(diff.files[0].deletions, 0);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

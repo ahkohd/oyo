@@ -253,6 +253,7 @@ pub(crate) struct UnifiedRenderKey {
     pub(crate) search_query: String,
     pub(crate) search_active: bool,
     pub(crate) search_revision: u64,
+    pub(crate) diff_revision: u64,
     pub(crate) syntax_mode: SyntaxMode,
     pub(crate) syntax_theme: String,
     pub(crate) theme_is_light: bool,
@@ -317,6 +318,8 @@ pub(crate) struct DiffRequest {
 #[derive(Clone, Debug)]
 pub(crate) struct DiffResponse {
     pub(crate) file_index: usize,
+    pub(crate) old: Arc<str>,
+    pub(crate) new: Arc<str>,
     pub(crate) diff: Result<DiffResult, String>,
 }
 

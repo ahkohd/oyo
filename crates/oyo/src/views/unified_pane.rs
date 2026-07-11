@@ -309,6 +309,7 @@ fn unified_render_key(
         search_query: app.search_query().trim().to_string(),
         search_active: app.search_active(),
         search_revision: app.search_revision(),
+        diff_revision: app.diff_revision(),
         syntax_mode: app.syntax_mode,
         syntax_theme: app.syntax_theme.clone(),
         theme_is_light: app.theme_is_light,

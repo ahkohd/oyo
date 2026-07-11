@@ -7361,6 +7361,15 @@ impl App {
         changed
     }
 
+    pub(crate) fn repair_review_comments_after_diff_refresh(&mut self) -> bool {
+        if !self.review_mode || !self.repair_review_comment_file_indexes() {
+            return false;
+        }
+        self.persist_review_session();
+        self.touch_review_state();
+        true
+    }
+
     fn repair_review_comment_file_indexes(&mut self) -> bool {
         let paths = self.current_diff_file_indexes();
         let mut changed = false;
