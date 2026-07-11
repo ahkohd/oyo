@@ -1,6 +1,6 @@
 {
   "name": "@ahkohd/pi-oyo",
-  "version": "0.1.43",
+  "version": "0.1.44",
   "private": false,
   "publishConfig": {
     "access": "public",
