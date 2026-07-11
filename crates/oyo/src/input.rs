@@ -1303,6 +1303,19 @@ mod tests {
         KeyEvent::new(KeyCode::Char(ch), KeyModifiers::CONTROL)
     }
 
+    fn test_terminal() -> TuiTerminal {
+        let backend = ratatui::backend::CrosstermBackend::new(
+            Box::new(Vec::<u8>::new()) as Box<dyn std::io::Write>
+        );
+        ratatui::Terminal::with_options(
+            backend,
+            ratatui::TerminalOptions {
+                viewport: ratatui::Viewport::Fixed(ratatui::layout::Rect::new(0, 0, 80, 24)),
+            },
+        )
+        .unwrap()
+    }
+
     #[test]
     fn control_c_is_the_force_quit_key_outside_the_review_editor() {
         let diff = MultiFileDiff::from_file_pair(
@@ -1360,10 +1373,7 @@ mod tests {
         app.review_insert_char('x');
         app.review_save_editor();
         assert_eq!(app.review_comment_count(), 1);
-        let backend = ratatui::backend::CrosstermBackend::new(
-            Box::new(Vec::<u8>::new()) as Box<dyn std::io::Write>
-        );
-        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut terminal = test_terminal();
         let mut pending_event = None;
         let editor_config = config::EditorConfig::default();
 
@@ -1422,10 +1432,7 @@ mod tests {
         app.start_line_comment();
         app.review_insert_char('x');
         app.review_save_editor();
-        let backend = ratatui::backend::CrosstermBackend::new(
-            Box::new(Vec::<u8>::new()) as Box<dyn std::io::Write>
-        );
-        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut terminal = test_terminal();
         let mut pending_event = None;
         let editor_config = config::EditorConfig::default();
 
@@ -1470,10 +1477,7 @@ mod tests {
         );
         let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
         app.show_path_popup = true;
-        let backend = ratatui::backend::CrosstermBackend::new(
-            Box::new(Vec::<u8>::new()) as Box<dyn std::io::Write>
-        );
-        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut terminal = test_terminal();
         let mut pending_event = None;
 
         handle_app_key(
@@ -1509,10 +1513,7 @@ mod tests {
         assert!(!app.search_active());
         assert!(app.search_bar_visible());
         assert!(app.search_target().is_some());
-        let backend = ratatui::backend::CrosstermBackend::new(
-            Box::new(Vec::<u8>::new()) as Box<dyn std::io::Write>
-        );
-        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut terminal = test_terminal();
         let mut pending_event = None;
 
         handle_app_key(
