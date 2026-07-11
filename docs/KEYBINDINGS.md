@@ -210,7 +210,7 @@ Use each mode as `[keybindings.<mode>]`.
 | `focus_prev_comment` | `{` | Focus the previous review comment |
 | `next_conflict` | `c` | Go to the next conflict |
 | `prev_conflict` | `C` | Go to the previous conflict |
-| `line_comment` | `m` | Add or update a line comment |
+| `line_comment` | `m` | Comment on the hovered diff line, or the cursor line when no line is hovered |
 | `hunk_comment` | `M` | Add or update a hunk comment |
 | `clear_comments` | `ctrl-x` | Clear all comments |
 | `remove_line_comment` | `x` | Remove a line comment |

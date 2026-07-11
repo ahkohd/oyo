@@ -340,6 +340,7 @@ fn build_unified_render_model(
     scroll_offset: usize,
     blame_extra_rows: Option<&[usize]>,
 ) -> UnifiedRenderModel {
+    app.clear_review_unified_line_rows();
     let primary_marker = app.primary_marker.clone();
     let extent_marker = app.extent_marker.clone();
     let extent_marker_deleted = app.extent_marker_deleted.clone();
@@ -682,18 +683,14 @@ fn build_unified_render_model(
             format!("{:4}", line_num)
         };
 
-        let insert_base = color::gradient_color(&app.theme.insert, 0.5);
-        let delete_base = color::gradient_color(&app.theme.delete, 0.5);
+        let insert_base = app.theme.insert_base();
+        let delete_base = app.theme.delete_base();
         let modify_base = color::gradient_color(&app.theme.modify, 0.5);
 
         let line_num_style = match view_line.kind {
             LineKind::Context => Style::default().fg(app.theme.diff_line_number),
-            LineKind::Inserted | LineKind::PendingInsert => {
-                Style::default().fg(Color::Rgb(insert_base.r, insert_base.g, insert_base.b))
-            }
-            LineKind::Deleted | LineKind::PendingDelete => {
-                Style::default().fg(Color::Rgb(delete_base.r, delete_base.g, delete_base.b))
-            }
+            LineKind::Inserted | LineKind::PendingInsert => Style::default().fg(insert_base),
+            LineKind::Deleted | LineKind::PendingDelete => Style::default().fg(delete_base),
             LineKind::Modified | LineKind::PendingModify => {
                 Style::default().fg(Color::Rgb(modify_base.r, modify_base.g, modify_base.b))
             }
@@ -1182,6 +1179,8 @@ fn build_unified_render_model(
         } else {
             1
         };
+        let line_display_row = display_len;
+        let line_content_row = content_lines.len();
         if app.line_wrap {
             display_len += wrap_count;
         }
@@ -1202,6 +1201,18 @@ fn build_unified_render_model(
             super::push_wrapped_bg_line(bg_lines, wrap_width, wrap_count, line_bg_line);
         }
         content_lines.push(Line::from(display_spans));
+        for wrapped_row in 0..wrap_count {
+            let local_row = if app.line_wrap {
+                line_display_row
+                    .saturating_add(wrapped_row)
+                    .checked_sub(scroll_offset)
+            } else {
+                Some(line_content_row.saturating_add(wrapped_row))
+            };
+            if let Some(local_row) = local_row.filter(|row| *row < visible_height) {
+                app.add_review_unified_line_row(local_row, idx);
+            }
+        }
         if let Some(band) = fold_band {
             fold_context_rows.push(crate::app::FoldContextRenderRow {
                 row: fold_row,

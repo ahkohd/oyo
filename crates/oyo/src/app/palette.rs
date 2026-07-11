@@ -22,6 +22,12 @@ pub(crate) enum PaletteAction {
     OpenCommentPicker,
     OpenPrComments,
     OpenOutdatedComments,
+    CopyFilePath,
+    CopyFilePosition,
+    CopyAbsoluteFilePath,
+    CopyAbsoluteFilePosition,
+    CopyFileCursorPosition,
+    CopyAbsoluteFileCursorPosition,
     CopySessionName,
     RenameSession,
     Quit,
@@ -43,6 +49,77 @@ impl App {
 
     pub(crate) fn control_session_name(&self) -> Option<&str> {
         self.control_session_name.as_deref()
+    }
+
+    pub(crate) fn copy_current_file_path(&mut self) {
+        let path = self.current_file_path();
+        if path.is_empty() {
+            self.notify(ToastEvent::CopyFailed);
+        } else if copy_to_clipboard(&path) {
+            self.notify(ToastEvent::CopiedPath);
+        } else {
+            self.notify(ToastEvent::CopyFailed);
+        }
+    }
+
+    pub(crate) fn copy_current_file_position(&mut self) {
+        let Some(location) = self.current_file_relative_position_label() else {
+            self.notify(ToastEvent::CopyFailed);
+            return;
+        };
+        if copy_to_clipboard(&location) {
+            self.notify(ToastEvent::CopiedPath);
+        } else {
+            self.notify(ToastEvent::CopyFailed);
+        }
+    }
+
+    pub(crate) fn copy_current_file_cursor_position(&mut self) {
+        let Some(location) = self.current_file_cursor_position_label() else {
+            self.notify(ToastEvent::CopyFailed);
+            return;
+        };
+        if copy_to_clipboard(&location) {
+            self.notify(ToastEvent::CopiedPath);
+        } else {
+            self.notify(ToastEvent::CopyFailed);
+        }
+    }
+
+    pub(crate) fn copy_current_absolute_file_path(&mut self) {
+        let Some(path) = self.current_file_absolute_path_label() else {
+            self.notify(ToastEvent::CopyFailed);
+            return;
+        };
+        if copy_to_clipboard(&path) {
+            self.notify(ToastEvent::CopiedPath);
+        } else {
+            self.notify(ToastEvent::CopyFailed);
+        }
+    }
+
+    pub(crate) fn copy_current_absolute_file_position(&mut self) {
+        let Some(location) = self.current_file_absolute_position_label() else {
+            self.notify(ToastEvent::CopyFailed);
+            return;
+        };
+        if copy_to_clipboard(&location) {
+            self.notify(ToastEvent::CopiedPath);
+        } else {
+            self.notify(ToastEvent::CopyFailed);
+        }
+    }
+
+    pub(crate) fn copy_current_absolute_file_cursor_position(&mut self) {
+        let Some(location) = self.current_file_absolute_cursor_position_label() else {
+            self.notify(ToastEvent::CopyFailed);
+            return;
+        };
+        if copy_to_clipboard(&location) {
+            self.notify(ToastEvent::CopiedPath);
+        } else {
+            self.notify(ToastEvent::CopyFailed);
+        }
     }
 
     pub(crate) fn copy_control_session_name(&mut self) {
@@ -320,6 +397,37 @@ impl App {
             });
         }
 
+        let diff_file_active = self.multi_diff.file_count() > 0
+            && self.view_mode != ViewMode::Preview
+            && !self.active_pr_comments_view()
+            && !self.active_outdated_comments_view();
+        if diff_file_active {
+            entries.push(PaletteEntry {
+                label: "Copy file path".to_string(),
+                action: PaletteAction::CopyFilePath,
+            });
+            entries.push(PaletteEntry {
+                label: "Copy file path and position".to_string(),
+                action: PaletteAction::CopyFilePosition,
+            });
+            entries.push(PaletteEntry {
+                label: "Copy absolute file path".to_string(),
+                action: PaletteAction::CopyAbsoluteFilePath,
+            });
+            entries.push(PaletteEntry {
+                label: "Copy absolute file path and position".to_string(),
+                action: PaletteAction::CopyAbsoluteFilePosition,
+            });
+            entries.push(PaletteEntry {
+                label: "Copy file path and cursor position".to_string(),
+                action: PaletteAction::CopyFileCursorPosition,
+            });
+            entries.push(PaletteEntry {
+                label: "Copy absolute file path and cursor position".to_string(),
+                action: PaletteAction::CopyAbsoluteFileCursorPosition,
+            });
+        }
+
         entries.push(PaletteEntry {
             label: "Themes...".to_string(),
             action: PaletteAction::OpenThemePicker,
@@ -431,6 +539,14 @@ impl App {
             PaletteAction::OpenCommentPicker => self.start_comment_picker(),
             PaletteAction::OpenPrComments => self.open_pr_comments_in_current_tab(None),
             PaletteAction::OpenOutdatedComments => self.open_outdated_comments_in_current_tab(None),
+            PaletteAction::CopyFilePath => self.copy_current_file_path(),
+            PaletteAction::CopyFilePosition => self.copy_current_file_position(),
+            PaletteAction::CopyAbsoluteFilePath => self.copy_current_absolute_file_path(),
+            PaletteAction::CopyAbsoluteFilePosition => self.copy_current_absolute_file_position(),
+            PaletteAction::CopyFileCursorPosition => self.copy_current_file_cursor_position(),
+            PaletteAction::CopyAbsoluteFileCursorPosition => {
+                self.copy_current_absolute_file_cursor_position()
+            }
             PaletteAction::CopySessionName => self.copy_control_session_name(),
             PaletteAction::RenameSession => self.start_session_rename(),
             PaletteAction::Quit => self.request_quit(),
@@ -831,5 +947,121 @@ impl App {
         self.unified_render_cache = None;
         self.blame_render_cache = None;
         self.blame_bar_cache.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::review::{ReviewAnchor, ReviewRange, ReviewSide, ReviewTargetKind};
+    use oyo_core::MultiFileDiff;
+    use std::path::PathBuf;
+
+    fn app() -> App {
+        let diff = MultiFileDiff::from_file_pair(
+            PathBuf::from("src/lib.rs"),
+            PathBuf::from("src/lib.rs"),
+            "same\nold\nthree\nfour\nold five\n".to_string(),
+            "same\nnew\nthree\nfour\nnew five\n".to_string(),
+        );
+        let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+        app.set_review_workspace_root(Some(PathBuf::from("/tmp/oyo-palette")));
+        app.handle_file_enter();
+        app
+    }
+
+    #[test]
+    fn palette_offers_current_file_path_and_position_in_diff_views() {
+        let mut app = app();
+        let entries = app.command_palette_entries();
+        assert!(entries.iter().any(|entry| {
+            entry.label == "Copy file path" && matches!(entry.action, PaletteAction::CopyFilePath)
+        }));
+        assert!(entries.iter().any(|entry| {
+            entry.label == "Copy file path and position"
+                && matches!(entry.action, PaletteAction::CopyFilePosition)
+        }));
+        assert!(entries.iter().any(|entry| {
+            entry.label == "Copy absolute file path"
+                && matches!(entry.action, PaletteAction::CopyAbsoluteFilePath)
+        }));
+        assert!(entries.iter().any(|entry| {
+            entry.label == "Copy absolute file path and position"
+                && matches!(entry.action, PaletteAction::CopyAbsoluteFilePosition)
+        }));
+        assert!(entries.iter().any(|entry| {
+            entry.label == "Copy file path and cursor position"
+                && matches!(entry.action, PaletteAction::CopyFileCursorPosition)
+        }));
+        assert!(entries.iter().any(|entry| {
+            entry.label == "Copy absolute file path and cursor position"
+                && matches!(entry.action, PaletteAction::CopyAbsoluteFileCursorPosition)
+        }));
+        assert_eq!(app.current_file_path(), "src/lib.rs");
+        assert_eq!(
+            app.current_file_relative_position_label().as_deref(),
+            Some("src/lib.rs:R2")
+        );
+        assert_eq!(
+            app.current_file_absolute_path_label().as_deref(),
+            Some("/tmp/oyo-palette/src/lib.rs")
+        );
+        assert_eq!(
+            app.current_file_absolute_position_label().as_deref(),
+            Some("/tmp/oyo-palette/src/lib.rs:R2")
+        );
+        app.last_hovered_review_anchor = Some((
+            app.diff_revision(),
+            ReviewAnchor {
+                file_index: 0,
+                file_path: "src/lib.rs".to_string(),
+                kind: ReviewTargetKind::Line,
+                side: Some(ReviewSide::New),
+                old_range: Some(ReviewRange { start: 5, end: 5 }),
+                new_range: Some(ReviewRange { start: 5, end: 5 }),
+                hunk_id: None,
+                display_idx_hint: Some(4),
+                anchor_key: "line|src/lib.rs|new|5".to_string(),
+                snapshot: None,
+            },
+        ));
+        assert_eq!(
+            app.current_file_relative_position_label().as_deref(),
+            Some("src/lib.rs:R5")
+        );
+        assert_eq!(
+            app.current_file_cursor_position_label().as_deref(),
+            Some("src/lib.rs:R2")
+        );
+        assert_eq!(
+            app.current_file_absolute_position_label().as_deref(),
+            Some("/tmp/oyo-palette/src/lib.rs:R5")
+        );
+        assert_eq!(
+            app.current_file_absolute_cursor_position_label().as_deref(),
+            Some("/tmp/oyo-palette/src/lib.rs:R2")
+        );
+        app.mark_diff_changed();
+        assert_eq!(
+            app.current_file_relative_position_label().as_deref(),
+            Some("src/lib.rs:R2")
+        );
+        app.last_hovered_review_anchor = None;
+        app.next_step();
+        assert_eq!(
+            app.current_file_relative_position_label().as_deref(),
+            Some("src/lib.rs:R5")
+        );
+
+        app.view_mode = ViewMode::Preview;
+        assert!(!app.command_palette_entries().iter().any(|entry| matches!(
+            entry.action,
+            PaletteAction::CopyFilePath
+                | PaletteAction::CopyFilePosition
+                | PaletteAction::CopyAbsoluteFilePath
+                | PaletteAction::CopyAbsoluteFilePosition
+                | PaletteAction::CopyFileCursorPosition
+                | PaletteAction::CopyAbsoluteFileCursorPosition
+        )));
     }
 }

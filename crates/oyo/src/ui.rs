@@ -1525,8 +1525,9 @@ fn draw_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
     // Build RIGHT section: stats + hunk + file
     let diff_pending = matches!(
         app.multi_diff.current_file_diff_status(),
-        DiffStatus::Deferred | DiffStatus::Computing
-    ) || app.view_build_pending()
+        DiffStatus::Loading | DiffStatus::Deferred | DiffStatus::Computing
+    ) || app.content_loading_count() > 0
+        || app.view_build_pending()
         || app.syntax_warmup_pending();
     let stats_known = insertions > 0 || deletions > 0;
     let mut right_spans = Vec::new();
@@ -1553,7 +1554,12 @@ fn draw_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
         Style::default().fg(app.theme.text_muted),
     ));
     right_spans.push(Span::raw(" "));
-    if diff_pending && !stats_known {
+    if app.content_loading_count() > 0 {
+        right_spans.push(Span::styled(
+            format!("loading {} files…", app.content_loading_count()),
+            Style::default().fg(app.theme.text_muted),
+        ));
+    } else if diff_pending && !stats_known {
         right_spans.push(Span::styled(
             "diffing…",
             Style::default().fg(app.theme.text_muted),
@@ -1685,8 +1691,9 @@ fn draw_top_bar(frame: &mut Frame, app: &mut App, area: Rect) {
         let (insertions, deletions) = app.stats();
         let diff_pending = matches!(
             app.multi_diff.current_file_diff_status(),
-            DiffStatus::Deferred | DiffStatus::Computing
-        ) || app.view_build_pending()
+            DiffStatus::Loading | DiffStatus::Deferred | DiffStatus::Computing
+        ) || app.content_loading_count() > 0
+            || app.view_build_pending()
             || app.syntax_warmup_pending();
         let stats_known = insertions > 0 || deletions > 0;
         if matches!(app.view_mode, ViewMode::Blame) {
@@ -6666,6 +6673,12 @@ fn draw_confirmation(frame: &mut Frame, app: &mut App, quit: bool) {
     let popup_area = Rect::new(popup_x, popup_y, popup_width, popup_height);
 
     frame.render_widget(Clear, popup_area);
+    if let Some(background) = app.theme.background {
+        frame.render_widget(
+            Block::default().style(Style::default().bg(background)),
+            popup_area,
+        );
+    }
 
     let border = Style::default().fg(tone);
     let title_style = Style::default().fg(tone).add_modifier(Modifier::BOLD);
@@ -7865,7 +7878,7 @@ mod tests {
     use oyo_core::MultiFileDiff;
     use ratatui::backend::TestBackend;
     use ratatui::layout::Rect;
-    use ratatui::style::{Modifier, Style};
+    use ratatui::style::{Color, Modifier, Style};
     use ratatui::text::Line;
     use ratatui::Terminal;
     use std::collections::HashMap;
@@ -8780,6 +8793,7 @@ mod tests {
             "new\n".to_string(),
         );
         let mut app = App::new(multi, ViewMode::UnifiedPane, 0, false, None);
+        app.theme.background = Some(Color::Blue);
         app.request_quit();
         let backend = TestBackend::new(60, 10);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -8794,6 +8808,11 @@ mod tests {
         );
         assert!(text.contains("enter quit"), "screen text: {text:?}");
         assert!(text.contains("esc cancel"), "screen text: {text:?}");
+        let (body_x, body_y) = text_pos(&lines, "Are you sure").unwrap();
+        assert_eq!(
+            terminal.backend().buffer()[(body_x, body_y)].bg,
+            Color::Blue
+        );
         let (cancel_x, cancel_y) = text_pos(&lines, "esc cancel").unwrap();
         assert!(app.handle_quit_confirmation_click(cancel_x, cancel_y));
         assert!(!app.quit_confirmation_active());

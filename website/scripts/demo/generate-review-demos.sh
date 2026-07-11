@@ -27,7 +27,7 @@ RANGE="${OYO_REVIEW_RANGE:-main...feature/review-sync}"
 # Recorded in both dark and light. THEME/TMODE/SUFFIX are set per pass by gen_all
 # below; the "-light" suffix mirrors the hero (demo.cast / demo-light.cast).
 DARK_THEME="${OYO_DEMO_DARK_THEME:-evergarden-winter}"
-LIGHT_THEME="${OYO_DEMO_LIGHT_THEME:-everforest}"
+LIGHT_THEME="${OYO_DEMO_LIGHT_THEME:-evergarden-winter}"
 THEME="$DARK_THEME"; TMODE="dark"; SUFFIX=""
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
 export GIT_PAGER=cat _ZO_DOCTOR=0

@@ -238,7 +238,7 @@ h2 {
    0.75em terminal border, which can't be removed without desyncing its layout,
    is painted with the recorded cast's exact background, so the border is
    invisible and the demo reads as borderless and flush in the chrome.
-   Dark = evergarden-winter's bg (#1d2428); light = everforest paper (#fdf6e3). */
+   Dark = evergarden-winter's bg (#1d2428); light = everforest cream (#fdf6e3), evergarden accents. */
 .term-body--player { --term-cast-bg: #fdf6e3; }
 @media (prefers-color-scheme: dark) {
   .term-body--player { --term-cast-bg: #1d2428; }
@@ -318,19 +318,32 @@ h2 {
 }
 .mini .add { color: var(--add); } .mini .del { color: var(--del); }
 .mini .cur { color: var(--accent); }
-/* Two-modes clips: small dark terminal, plays on hover. Border coloured to the
-   cast bg (evergarden-winter) so the player's frame blends. */
-.mini-player { padding: 0 !important; background: #1d2428; overflow: hidden; }
+/* Clip players: the terminal frame is coloured to the cast's painted background
+   so the player's padding/border blends with the TUI. That background is
+   theme-aware (matches the light/dark cast variant), same as the hero. */
+.mini-player { --term-cast-bg: #fdf6e3; }
+@media (prefers-color-scheme: dark) {
+  .mini-player { --term-cast-bg: #1d2428; }
+}
+:root[data-theme="dark"] .mini-player { --term-cast-bg: #1d2428; }
+:root[data-theme="light"] .mini-player { --term-cast-bg: #fdf6e3; }
+.mini-player { padding: 0 !important; background: var(--term-cast-bg); overflow: hidden; }
 .mini-player .ap-wrapper { width: 100%; }
 .mini-player .ap-wrapper,
 .mini-player .ap-player,
-.mini-player .ap-term { background: #1d2428 !important; }
+.mini-player .ap-term { background: var(--term-cast-bg) !important; }
 .mini-player .ap-player,
 .mini-player .ap-term { padding: 0 !important; }
-.mini-player .ap-term { border-color: #1d2428 !important; }
+.mini-player .ap-term { border-color: var(--term-cast-bg) !important; }
 /* Clip the scaled-up terminal (flush treatment, see index.astro). */
 .mini-player .ap-player { overflow: hidden; }
 .mini-player .ap-player { border-radius: 0 !important; }
+
+/* These players are autoplay loops with no controls — the start/play-button
+   overlay (and its dimming) should never show. When a player is paused (out of
+   view), it just shows the frozen frame. */
+.term-body--player .ap-overlay-start,
+.mini-player .ap-overlay-start { display: none !important; }
 
 /* ---------- features ---------- */
 .features { padding: 4.5rem 0 1.5rem; }

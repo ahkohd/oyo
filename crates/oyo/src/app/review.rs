@@ -3487,24 +3487,17 @@ impl App {
         )
     }
 
-    pub(crate) fn review_line_add_hover_at(&self, column: u16, row: u16) -> (Option<u16>, bool) {
-        if !self.review_mode
-            || self.view_mode == ViewMode::Preview
-            || self.current_file_is_binary()
-            || self.review_editor.is_some()
-            || self.selection_toolbar_visible()
-        {
-            return (None, false);
+    pub(crate) fn diff_line_hover_row_at(&self, column: u16, row: u16) -> Option<u16> {
+        if self.view_mode == ViewMode::Preview || self.current_file_is_binary() {
+            return None;
         }
-        let Some((x, y, width, height)) = self.diff_view_area else {
-            return (None, false);
-        };
+        let (x, y, width, height) = self.diff_view_area?;
         if column < x
             || column >= x.saturating_add(width)
             || row < y
             || row >= y.saturating_add(height)
         {
-            return (None, false);
+            return None;
         }
         let local_row = row.saturating_sub(y) as usize;
         if self
@@ -3512,16 +3505,73 @@ impl App {
             .get(local_row)
             .is_none_or(|cells| cells.iter().all(|cell| cell.trim().is_empty()))
         {
+            return None;
+        }
+        self.review_display_idx_for_screen_row(row).map(|_| row)
+    }
+
+    pub(crate) fn remember_diff_line_hover(&mut self, column: u16, row: u16) {
+        let Some(row) = self.diff_line_hover_row_at(column, row) else {
+            return;
+        };
+        let side = self.review_side_at_screen_column(column);
+        if let Some(anchor) = self.review_anchor_at_screen_row_on_side(row, side) {
+            self.last_hovered_review_anchor = Some((self.diff_revision(), anchor));
+        }
+    }
+
+    pub(crate) fn review_line_add_hover_at(&self, column: u16, row: u16) -> (Option<u16>, bool) {
+        if !self.review_mode || self.review_editor.is_some() || self.selection_toolbar_visible() {
             return (None, false);
         }
-        if self.review_display_idx_for_screen_row(row).is_none() {
+        let Some(row) = self.diff_line_hover_row_at(column, row) else {
             return (None, false);
-        }
+        };
         let Some(hit_x) = self.review_line_add_button_x() else {
             return (Some(row), false);
         };
         let hover = column >= hit_x && column < hit_x.saturating_add(3);
         (Some(row), hover)
+    }
+
+    pub(crate) fn clear_review_unified_line_rows(&mut self) {
+        self.review_unified_line_rows.clear();
+    }
+
+    pub(crate) fn add_review_unified_line_row(&mut self, row: usize, display_idx: usize) {
+        self.review_unified_line_rows.push((row, display_idx));
+    }
+
+    pub(crate) fn clear_review_split_line_rows(&mut self) {
+        self.review_split_line_rows.clear();
+    }
+
+    pub(crate) fn add_review_split_line_row(
+        &mut self,
+        row: u16,
+        side: ReviewSide,
+        display_idx: usize,
+    ) {
+        self.review_split_line_rows.push((row, side, display_idx));
+    }
+
+    pub(crate) fn review_side_at_screen_column(&self, column: u16) -> Option<ReviewSide> {
+        if self.view_mode != ViewMode::Split {
+            return None;
+        }
+        let (x, _, _, _) = self.diff_view_area?;
+        let column = column.saturating_sub(x);
+        let ranges = self.diff_selection_content_ranges();
+        let [left, right] = ranges.as_slice() else {
+            return None;
+        };
+        if column >= right.0 && column < right.1 {
+            Some(ReviewSide::New)
+        } else if column >= left.0 && column < left.1 {
+            Some(ReviewSide::Old)
+        } else {
+            None
+        }
     }
 
     pub fn handle_review_line_add_click(&mut self, column: u16, row: u16) -> bool {
@@ -3538,7 +3588,7 @@ impl App {
         {
             return false;
         }
-        self.start_line_comment_at_screen_row(hit.row)
+        self.start_line_comment_at_screen_row_on_side(hit.row, self.review_line_add_side)
     }
 
     pub fn handle_review_preview_click(&mut self, column: u16, row: u16) -> bool {
@@ -3797,19 +3847,85 @@ impl App {
         }
     }
 
+    fn current_cursor_review_anchor(&mut self) -> Option<ReviewAnchor> {
+        let file_index = self.multi_diff.selected_index;
+        let file_path = self.current_file_path();
+        if file_path.is_empty() {
+            return None;
+        }
+        let visible = self.review_visible_lines_with_idx();
+        let (display_idx, line) = visible
+            .iter()
+            .find(|(_, line)| line.is_primary_active)
+            .or_else(|| visible.iter().find(|(_, line)| line.is_active))?;
+        line_review_anchor_from_view_line(file_index, file_path, *display_idx, line)
+    }
+
+    fn hovered_or_cursor_review_anchor(&mut self) -> Option<ReviewAnchor> {
+        let current_path = self.current_file_path();
+        if let Some((revision, anchor)) = &self.last_hovered_review_anchor {
+            if *revision == self.diff_revision()
+                && anchor.file_index == self.multi_diff.selected_index
+                && anchor.file_path == current_path
+            {
+                return Some(anchor.clone());
+            }
+        }
+        self.current_cursor_review_anchor()
+    }
+
+    fn relative_anchor_position_label(anchor: &ReviewAnchor) -> Option<String> {
+        let position = review_anchor_start_location_label(anchor)?;
+        Some(format!("{}:{position}", anchor.file_path))
+    }
+
+    pub(crate) fn current_file_relative_position_label(&mut self) -> Option<String> {
+        let anchor = self.hovered_or_cursor_review_anchor()?;
+        Self::relative_anchor_position_label(&anchor)
+    }
+
+    pub(crate) fn current_file_cursor_position_label(&mut self) -> Option<String> {
+        let anchor = self.current_cursor_review_anchor()?;
+        Self::relative_anchor_position_label(&anchor)
+    }
+
+    pub(crate) fn current_file_absolute_path_label(&self) -> Option<String> {
+        let path = self.current_file_path();
+        (!path.is_empty()).then(|| self.review_absolute_path_label(Path::new(&path)))
+    }
+
+    pub(crate) fn current_file_absolute_position_label(&mut self) -> Option<String> {
+        let anchor = self.hovered_or_cursor_review_anchor()?;
+        Some(self.review_anchor_path_line_label(&anchor))
+    }
+
+    pub(crate) fn current_file_absolute_cursor_position_label(&mut self) -> Option<String> {
+        let anchor = self.current_cursor_review_anchor()?;
+        Some(self.review_anchor_path_line_label(&anchor))
+    }
+
     fn review_comment_path_line_label(&self, comment: &ReviewComment) -> String {
-        let path = Path::new(&comment.anchor.file_path);
+        self.review_anchor_path_line_label(&comment.anchor)
+    }
+
+    fn review_absolute_path_label(&self, path: &Path) -> String {
         let abs = if path.is_absolute() {
             path.to_path_buf()
         } else {
-            self.review_repo_root
+            self.review_workspace_root_override
                 .as_deref()
+                .or_else(|| self.review_repo_root.as_deref().map(Path::new))
+                .or_else(|| self.multi_diff.repo_root())
                 .map(PathBuf::from)
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
                 .join(path)
         };
-        let label = collapse_home_path(&abs);
-        match review_anchor_start_location_label(&comment.anchor) {
+        collapse_home_path(&abs)
+    }
+
+    fn review_anchor_path_line_label(&self, anchor: &ReviewAnchor) -> String {
+        let label = self.review_absolute_path_label(Path::new(&anchor.file_path));
+        match review_anchor_start_location_label(anchor) {
             Some(location) => format!("{label}:{location}"),
             None => label,
         }
@@ -4286,14 +4402,45 @@ impl App {
             let _ = self.start_file_comment();
             return;
         }
+        if let Some(row) = self.review_line_add_row {
+            if self.start_line_comment_at_screen_row_on_side(row, self.review_line_add_side) {
+                return;
+            }
+        }
         let Some(anchor) = self.resolve_line_review_anchor() else {
             return;
         };
         self.open_review_editor(anchor);
     }
 
-    pub fn start_line_comment_at_screen_row(&mut self, row: u16) -> bool {
-        self.start_line_comment_at_screen_row_on_side(row, None)
+    pub(crate) fn review_anchor_at_screen_row_on_side(
+        &mut self,
+        row: u16,
+        preferred_side: Option<ReviewSide>,
+    ) -> Option<ReviewAnchor> {
+        let (_, y, _, height) = self.diff_view_area?;
+        if row < y || row >= y.saturating_add(height) {
+            return None;
+        }
+        let display_idx = if self.view_mode == ViewMode::Split {
+            preferred_side.and_then(|side| {
+                self.review_split_line_rows.iter().find_map(
+                    |(target_row, target_side, display_idx)| {
+                        (*target_row == row && *target_side == side).then_some(*display_idx)
+                    },
+                )
+            })
+        } else {
+            let local_row = row.saturating_sub(y) as usize;
+            self.review_unified_line_rows
+                .iter()
+                .find_map(|(target_row, display_idx)| {
+                    (*target_row == local_row).then_some(*display_idx)
+                })
+        }
+        .or_else(|| self.review_display_idx_for_screen_row(row));
+        let display_idx = display_idx?;
+        self.resolve_line_review_anchor_at_display_idx_on_side(display_idx, preferred_side)
     }
 
     pub(crate) fn start_line_comment_at_screen_row_on_side(
@@ -4304,18 +4451,7 @@ impl App {
         if !self.review_mode {
             return false;
         }
-        let Some((_, y, _, height)) = self.diff_view_area else {
-            return false;
-        };
-        if row < y || row >= y.saturating_add(height) {
-            return false;
-        }
-        let Some(display_idx) = self.review_display_idx_for_screen_row(row) else {
-            return false;
-        };
-        let Some(anchor) =
-            self.resolve_line_review_anchor_at_display_idx_on_side(display_idx, preferred_side)
-        else {
+        let Some(anchor) = self.review_anchor_at_screen_row_on_side(row, preferred_side) else {
             return false;
         };
         self.open_review_editor(anchor);
@@ -7047,7 +7183,11 @@ impl App {
                 strip_other_side(comment);
                 continue;
             };
-            if self.multi_diff.diff_status(file_index) != oyo_core::multi::DiffStatus::Ready {
+            let status = self.multi_diff.diff_status(file_index);
+            if status == oyo_core::multi::DiffStatus::Loading {
+                continue;
+            }
+            if status != oyo_core::multi::DiffStatus::Ready {
                 strip_other_side(comment);
                 continue;
             }

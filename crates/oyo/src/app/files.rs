@@ -1535,6 +1535,8 @@ impl App {
             .map(|hit| (hit.key, hit.direction));
         let (review_line_add_row, review_line_add_hover) =
             self.review_line_add_hover_at(column, row);
+        let review_line_add_side =
+            review_line_add_row.and_then(|_| self.review_side_at_screen_column(column));
         let review_preview_hit = self.review_preview_boxes.iter().rev().find_map(|hit| {
             let end_x = hit.x.saturating_add(hit.width);
             let end_y = hit.y.saturating_add(hit.height);
@@ -1629,6 +1631,7 @@ impl App {
             && self.selection_toolbar_hover == selection_hover
             && self.fold_context_hover == fold_context_hover
             && self.review_line_add_row == review_line_add_row
+            && self.review_line_add_side == review_line_add_side
             && self.review_line_add_hover == review_line_add_hover
             && self.review_preview_hover == review_preview_hover
             && self.review_preview_hover_id == review_preview_hover_id
@@ -1647,6 +1650,7 @@ impl App {
         self.selection_toolbar_hover = selection_hover;
         self.fold_context_hover = fold_context_hover;
         self.review_line_add_row = review_line_add_row;
+        self.review_line_add_side = review_line_add_side;
         self.review_line_add_hover = review_line_add_hover;
         self.review_preview_hover = review_preview_hover;
         self.review_preview_hover_id = review_preview_hover_id;
@@ -2188,7 +2192,7 @@ impl App {
                 .then_some(index)
             })
             .collect();
-        let Ok(refreshed) = crate::build_jj_diff(&target.repo_root, &target.revision) else {
+        let Ok(refreshed) = crate::build_jj_diff(&target.repo_root, &target.revision, None) else {
             return false;
         };
         if let Some(target) = self.jj_watch_target.as_mut() {
@@ -2351,7 +2355,7 @@ impl App {
     pub fn refresh_all_files(&mut self) {
         if let Some(target) = self.jj_watch_target.clone() {
             let working_copy_stamp = crate::jj_working_copy_stamp(&target.repo_root);
-            if let Ok(refreshed) = crate::build_jj_diff(&target.repo_root, &target.revision) {
+            if let Ok(refreshed) = crate::build_jj_diff(&target.repo_root, &target.revision, None) {
                 if let Some(target) = self.jj_watch_target.as_mut() {
                     target.working_copy_stamp = working_copy_stamp;
                 }
@@ -2362,7 +2366,7 @@ impl App {
         }
     }
 
-    fn replace_multi_diff(&mut self, mut refreshed: oyo_core::MultiFileDiff) {
+    pub(crate) fn replace_multi_diff(&mut self, mut refreshed: oyo_core::MultiFileDiff) {
         let recent_changes: HashMap<PathBuf, Option<Instant>> = self
             .multi_diff
             .files
@@ -2379,7 +2383,18 @@ impl App {
         let scroll_offset = self.scroll_offset;
         let horizontal_scroll = self.horizontal_scroll;
         self.multi_diff = refreshed;
+        if let Some(request) = self
+            .multi_diff
+            .take_pending_content_for(self.multi_diff.selected_index)
+        {
+            let content = super::load_content_request_sync(request);
+            self.multi_diff
+                .apply_prepared_content(self.multi_diff.selected_index, content);
+            self.multi_diff
+                .ensure_full_navigator(self.multi_diff.selected_index);
+        }
         self.reset_after_file_list_refresh();
+        self.start_content_loading();
         for (index, file) in self.multi_diff.files.iter().enumerate() {
             if let Some(until) = recent_changes.get(&file.path) {
                 self.file_recently_changed_until[index] = *until;
@@ -2403,6 +2418,9 @@ impl App {
         self.mark_diff_changed();
         self.diff_worker_tx = None;
         self.diff_worker_rx = None;
+        self.content_generation = self.content_generation.wrapping_add(1);
+        self.content_worker_rx = None;
+        self.content_loading.clear();
         self.diff_inflight = None;
         self.diff_queue.clear();
         self.diff_refresh_restore_end = None;
@@ -2445,6 +2463,13 @@ impl App {
     pub fn stats(&mut self) -> (usize, usize) {
         if self.multi_diff.file_count() == 0 || self.current_file_is_binary() {
             return (0, 0);
+        }
+        if self.multi_diff.current_file_diff_status() != oyo_core::multi::DiffStatus::Ready {
+            return self
+                .multi_diff
+                .current_file()
+                .map(|file| (file.insertions, file.deletions))
+                .unwrap_or((0, 0));
         }
         let diff = self.multi_diff.current_navigator().diff();
         (diff.insertions, diff.deletions)

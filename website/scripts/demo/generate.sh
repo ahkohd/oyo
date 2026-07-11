@@ -37,11 +37,11 @@ cargo build --manifest-path "$ROOT/Cargo.toml" --release --bin oy
 echo "==> setting up fixture"
 bash "$HERE/setup-repo.sh"
 
-# 3. Hero casts. Dark = evergarden-winter, light = everforest (a real light theme).
+# 3. Hero casts. Both modes use evergarden-winter (now has a light variant).
 echo "==> recording hero (dark + light)"
 OYO_DEMO_THEME=evergarden-winter OYO_DEMO_MODE=dark \
   bash "$HERE/record.sh" "$PUBLIC/demo.cast"
-OYO_DEMO_THEME=everforest OYO_DEMO_MODE=light \
+OYO_DEMO_THEME=evergarden-winter OYO_DEMO_MODE=light \
   bash "$HERE/record.sh" "$PUBLIC/demo-light.cast"
 
 # 4. Two-mode clips (scroll / step), light + dark.
@@ -50,9 +50,9 @@ OYO_DEMO_THEME=evergarden-winter OYO_DEMO_MODE=dark \
   bash "$HERE/record-mini.sh" "$PUBLIC/scroll-mode.cast" scroll
 OYO_DEMO_THEME=evergarden-winter OYO_DEMO_MODE=dark \
   bash "$HERE/record-mini.sh" "$PUBLIC/step-mode.cast" step
-OYO_DEMO_THEME=everforest OYO_DEMO_MODE=light \
+OYO_DEMO_THEME=evergarden-winter OYO_DEMO_MODE=light \
   bash "$HERE/record-mini.sh" "$PUBLIC/scroll-mode-light.cast" scroll
-OYO_DEMO_THEME=everforest OYO_DEMO_MODE=light \
+OYO_DEMO_THEME=evergarden-winter OYO_DEMO_MODE=light \
   bash "$HERE/record-mini.sh" "$PUBLIC/step-mode-light.cast" step
 
 # 5. README GIF, rendered from the dark hero cast (the .cast already carries

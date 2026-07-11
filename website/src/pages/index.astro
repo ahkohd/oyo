@@ -432,6 +432,12 @@ d = [<span class="str">"diff"</span>, <span class="str">"--tool"</span>, <span c
         function mount() {
           var m = mode();
           if (m === mounted) return; // theme unchanged, keep playing
+          // Hold the current height across the swap so the container can't
+          // collapse (or shrink to the new player's transient narrow render)
+          // and shove the page around. Measure BEFORE dispose() (it empties the
+          // container); crop() restores the exact height after.
+          var prevH = el.offsetHeight;
+          if (prevH) el.style.minHeight = prevH + "px";
           if (player) {
             try {
               player.dispose();
@@ -582,6 +588,12 @@ d = [<span class="str">"diff"</span>, <span class="str">"--tool"</span>, <span c
             }
             function mount(m) {
               if (m === mounted) return; // theme unchanged, keep playing
+              // Hold height across the swap. dispose() empties the container and
+              // the review cards get no persistent height from crop(), so measure
+              // BEFORE disposing — otherwise prevH is already the collapsed value
+              // and the card jumps on theme toggle.
+              var prevH = el.offsetHeight;
+              if (prevH) el.style.minHeight = prevH + "px";
               // Drop the old player and its coordinator registration.
               if (p) {
                 if (window.__coord) {
@@ -605,10 +617,10 @@ d = [<span class="str">"diff"</span>, <span class="str">"--tool"</span>, <span c
                     fit: "width",
                     poster: "npt:0:04",
                     // The TUI casts paint their own truecolor background, but the
-                    // CLI "team" card doesn't — it inherits the player's terminal
-                    // theme. solarized-light's bg (#fdf6e3) matches the light TUI
-                    // casts' background exactly, so all three cards agree in light
-                    // mode; dark keeps the default.
+                    // CLI "team" card doesn't — it inherits the player theme's
+                    // default fg. The card's bg is forced to --term-cast-bg
+                    // (evergarden-winter light #eef1ea) via CSS; solarized-light
+                    // just supplies a readable dark foreground. Dark keeps default.
                     theme: m === "light" ? "solarized-light" : "asciinema",
                   },
                 );

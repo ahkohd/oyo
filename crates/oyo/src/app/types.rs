@@ -315,6 +315,13 @@ pub(crate) struct DiffRequest {
     pub(crate) new: Arc<str>,
 }
 
+pub(crate) struct ContentResponse {
+    pub generation: u64,
+    pub file_index: usize,
+    pub identity: oyo_core::multi::PendingFileContent,
+    pub content: oyo_core::multi::PreparedFileContent,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct DiffResponse {
     pub(crate) file_index: usize,

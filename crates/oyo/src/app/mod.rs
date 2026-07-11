@@ -29,6 +29,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime};
 
 mod blame;
+mod content_worker;
 mod diff_worker;
 mod file_panel;
 mod files;
@@ -42,6 +43,7 @@ mod syntax;
 mod types;
 mod utils;
 
+pub(crate) use content_worker::load_content_request_sync;
 pub(crate) use types::{
     AnimationPhase, BlameDisplay, BlameRenderCache, BlameRenderKey, FoldContextDirection,
     FoldContextHit, FoldContextKey, FoldContextRegion, FoldContextRenderRow, PeekMode, PeekScope,
@@ -50,8 +52,8 @@ pub(crate) use types::{
 };
 use types::{
     BlameCacheKey, BlamePrefetchKey, BlamePrefetchRange, BlameRequest, BlameResponse,
-    BlameStepHint, DiffRequest, DiffResponse, FoldContextExpansion, HunkBounds, HunkEdge,
-    HunkEdgeHint, HunkStart, NoStepState, StepEdge, StepEdgeHint, SyntaxScopeCache,
+    BlameStepHint, ContentResponse, DiffRequest, DiffResponse, FoldContextExpansion, HunkBounds,
+    HunkEdge, HunkEdgeHint, HunkStart, NoStepState, StepEdge, StepEdgeHint, SyntaxScopeCache,
 };
 use utils::{allow_overscroll_state, copy_to_clipboard, max_scroll};
 pub(crate) use utils::{display_metrics, fold_context_label, is_conflict_marker, is_fold_line};
@@ -666,6 +668,9 @@ pub struct App {
     /// Worker thread for diff computation
     diff_worker_tx: Option<mpsc::Sender<DiffRequest>>,
     diff_worker_rx: Option<mpsc::Receiver<DiffResponse>>,
+    content_worker_rx: Option<mpsc::Receiver<ContentResponse>>,
+    content_generation: u64,
+    content_loading: FxHashMap<usize, oyo_core::multi::PendingFileContent>,
     /// Extra display rows after each line (blame wrapping).
     pub(crate) blame_extra_rows: Option<Vec<usize>>,
     /// One-shot blame hint for the active change
@@ -704,6 +709,8 @@ pub struct App {
     syntax_warmup_target_at: Option<Instant>,
     /// Syntax highlighter (lazy initialized)
     syntax_engine: Option<SyntaxEngine>,
+    /// Background startup load for the syntax highlighter
+    syntax_engine_rx: Option<std::sync::mpsc::Receiver<SyntaxEngine>>,
     /// Per-file syntax cache (old/new spans)
     syntax_caches: Vec<Option<SyntaxCache>>,
     /// Per-file named syntax scopes used by folded context bands
@@ -945,6 +952,14 @@ pub struct App {
     pub(crate) review_editor_toolbar_hover: Option<ReviewEditorToolbarAction>,
     /// Hovered row for the add-comment button.
     pub(crate) review_line_add_row: Option<u16>,
+    /// Hovered diff side in split view.
+    pub(crate) review_line_add_side: Option<review::ReviewSide>,
+    /// Last diff-line anchor hovered by the mouse.
+    pub(crate) last_hovered_review_anchor: Option<(u64, review::ReviewAnchor)>,
+    /// Rendered unified rows mapped back to review lines.
+    pub(crate) review_unified_line_rows: Vec<(usize, usize)>,
+    /// Rendered split rows mapped back to review lines.
+    pub(crate) review_split_line_rows: Vec<(u16, review::ReviewSide, usize)>,
     /// Click hitbox for the add-comment button.
     pub(crate) review_line_add_hit: Option<ReviewLineAddHit>,
     /// True when the add-comment button is hovered.
@@ -1305,6 +1320,9 @@ impl App {
             diff_refresh_restore_end: None,
             diff_worker_tx: None,
             diff_worker_rx: None,
+            content_worker_rx: None,
+            content_generation: 0,
+            content_loading: FxHashMap::default(),
             blame_extra_rows: None,
             blame_step_hint: None,
             blame_hunk_hint: None,
@@ -1324,6 +1342,7 @@ impl App {
             syntax_warmup_target_applied: None,
             syntax_warmup_target_at: None,
             syntax_engine: None,
+            syntax_engine_rx: None,
             syntax_caches: vec![None; file_count],
             fold_scope_caches: vec![None; file_count],
             show_syntax_scopes: false,
@@ -1445,6 +1464,10 @@ impl App {
             review_editor_toolbar_scroll: 0,
             review_editor_toolbar_hover: None,
             review_line_add_row: None,
+            review_line_add_side: None,
+            last_hovered_review_anchor: None,
+            review_unified_line_rows: Vec::new(),
+            review_split_line_rows: Vec::new(),
             review_line_add_hit: None,
             review_line_add_hover: false,
             preview_link_boxes: Vec::new(),
@@ -1645,6 +1668,7 @@ impl App {
         )));
         if matches!(self.syntax_mode, SyntaxMode::Off) {
             self.syntax_engine = None;
+            self.syntax_engine_rx = None;
             self.syntax_caches = vec![None; self.multi_diff.file_count()];
         }
     }
@@ -1974,7 +1998,7 @@ impl App {
         self.diff_revision
     }
 
-    fn invalidate_fold_context_view(&mut self) {
+    fn clear_fold_context_caches(&mut self) {
         self.fold_context_revision = self.fold_context_revision.wrapping_add(1);
         self.fold_context_regions.clear();
         self.fold_context_hits.clear();
@@ -1989,6 +2013,10 @@ impl App {
         self.hunk_bounds_split_cache = None;
         self.last_wrap_display_len = None;
         self.last_wrap_active_idx = None;
+    }
+
+    fn invalidate_fold_context_view(&mut self) {
+        self.clear_fold_context_caches();
         self.reset_search_for_file_switch();
         self.needs_scroll_to_active = true;
         self.centered_once = false;
@@ -2983,6 +3011,7 @@ impl App {
 
         dirty |= self.expire_recent_file_changes(now);
         dirty |= self.toast_tick();
+        dirty |= self.poll_content_responses();
         dirty |= self.poll_diff_responses();
         dirty |= self.maybe_queue_idle_diff();
         dirty |= self.maybe_check_file_changes();

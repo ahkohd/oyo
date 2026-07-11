@@ -392,7 +392,14 @@ impl ResolvedTheme {
     /// Get base insert color (for animation start/end)
     pub fn insert_base(&self) -> Color {
         let rgb = color::hsl_to_rgb(self.insert.base);
-        Color::Rgb(rgb.r, rgb.g, rgb.b)
+        contrast_safe_diff_foreground(
+            Color::Rgb(rgb.r, rgb.g, rgb.b),
+            self.diff_added_bg,
+            self.diff_context,
+            self.background
+                .and_then(color::relative_luminance)
+                .is_some_and(|luminance| luminance > 0.5),
+        )
     }
 
     /// Get dimmed version of delete color for inactive spans
@@ -403,7 +410,14 @@ impl ResolvedTheme {
     /// Get base delete color (for animation start/end)
     pub fn delete_base(&self) -> Color {
         let rgb = color::hsl_to_rgb(self.delete.base);
-        Color::Rgb(rgb.r, rgb.g, rgb.b)
+        contrast_safe_diff_foreground(
+            Color::Rgb(rgb.r, rgb.g, rgb.b),
+            self.diff_removed_bg,
+            self.diff_context,
+            self.background
+                .and_then(color::relative_luminance)
+                .is_some_and(|luminance| luminance > 0.5),
+        )
     }
 
     /// Get dimmed version of modify color for inactive spans
@@ -420,6 +434,35 @@ impl ResolvedTheme {
     /// Get dimmed version of warning for autoplay flash
     pub fn warning_dim(&self) -> Color {
         color::dim_color(self.warning)
+    }
+}
+
+fn contrast_safe_diff_foreground(
+    base: Color,
+    background: Option<Color>,
+    fallback: Color,
+    light_mode: bool,
+) -> Color {
+    if !light_mode {
+        return base;
+    }
+    let Some(background) = background else {
+        return base;
+    };
+    if color::contrast_ratio(base, background).unwrap_or(4.5) >= 4.5 {
+        return base;
+    }
+    if color::contrast_ratio(fallback, background).unwrap_or(0.0) >= 4.5 {
+        return fallback;
+    }
+    let black = Color::Rgb(0, 0, 0);
+    let white = Color::Rgb(255, 255, 255);
+    if color::contrast_ratio(black, background).unwrap_or(0.0)
+        >= color::contrast_ratio(white, background).unwrap_or(0.0)
+    {
+        black
+    } else {
+        white
     }
 }
 
@@ -1902,6 +1945,45 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn light_theme_diff_foregrounds_meet_contrast_floor() {
+        for name in ["everforest", "github", "flexoki"] {
+            let theme = ThemeConfig {
+                name: Some(name.to_string()),
+                ..ThemeConfig::default()
+            }
+            .resolve(true);
+            for (foreground, background) in [
+                (theme.insert_base(), theme.diff_added_bg.unwrap()),
+                (theme.delete_base(), theme.diff_removed_bg.unwrap()),
+            ] {
+                assert!(
+                    color::contrast_ratio(foreground, background).unwrap() >= 4.5,
+                    "{name}: {foreground:?} on {background:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn dark_diff_foregrounds_stay_on_the_theme_gradient() {
+        let theme = ThemeConfig {
+            name: Some("everforest".to_string()),
+            ..ThemeConfig::default()
+        }
+        .resolve(false);
+        let insert = color::hsl_to_rgb(theme.insert.base);
+        let delete = color::hsl_to_rgb(theme.delete.base);
+        assert_eq!(
+            theme.insert_base(),
+            Color::Rgb(insert.r, insert.g, insert.b)
+        );
+        assert_eq!(
+            theme.delete_base(),
+            Color::Rgb(delete.r, delete.g, delete.b)
+        );
+    }
 
     #[test]
     fn ui_defaults_to_no_step_mode() {

@@ -9,6 +9,20 @@ use std::time::{Duration, Instant};
 
 static VIEW_DEBUG_ENV_LOCK: Mutex<()> = Mutex::new(());
 
+#[test]
+fn syntax_cache_creation_invalidates_plain_render_cache() {
+    let diff = MultiFileDiff::from_file_pair(
+        "test.rs".into(),
+        "test.rs".into(),
+        "fn main() {}\n".into(),
+        "fn main() { 1; }\n".into(),
+    );
+    let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+    assert_eq!(app.syntax_cache_epoch(), 0);
+    assert!(app.ensure_syntax_cache().is_some());
+    assert_eq!(app.syntax_cache_epoch(), 1);
+}
+
 fn run_git(repo: &std::path::Path, args: &[&str]) {
     assert!(std::process::Command::new("git")
         .arg("-C")
@@ -553,6 +567,150 @@ fn review_line_add_rows_skip_reserved_comment_notes() {
     assert_eq!(app.review_display_idx_for_screen_row(15), Some(2));
     assert_eq!(app.review_line_add_hover_at(38, 12), (None, false));
     assert_eq!(app.review_line_add_hover_at(38, 15), (Some(15), true));
+}
+
+#[test]
+fn last_diff_hover_persists_after_mouse_leaves_in_normal_mode() {
+    let diff = MultiFileDiff::from_file_pair(
+        std::path::PathBuf::from("a.txt"),
+        std::path::PathBuf::from("a.txt"),
+        "old\n".to_string(),
+        "new\n".to_string(),
+    );
+    let mut app = App::new(diff, ViewMode::UnifiedPane, 100, false, None);
+    app.diff_view_area = Some((0, 10, 40, 4));
+    app.set_diff_selection_cells(vec![vec!["x".to_string(); 40]; 4]);
+
+    app.remember_diff_line_hover(10, 10);
+    assert_eq!(
+        app.current_file_relative_position_label().as_deref(),
+        Some("a.txt:R1")
+    );
+    app.remember_diff_line_hover(80, 20);
+    assert_eq!(
+        app.current_file_relative_position_label().as_deref(),
+        Some("a.txt:R1")
+    );
+}
+
+#[test]
+fn rendered_unified_hover_tracks_the_exact_line_past_virtual_rows() {
+    let diff = MultiFileDiff::from_file_pair(
+        std::path::PathBuf::from("a.txt"),
+        std::path::PathBuf::from("a.txt"),
+        "one\ntwo\nthree\nfour\nfive\n".to_string(),
+        "one\nTWO\nthree\nfour\nFIVE\n".to_string(),
+    );
+    let mut app = App::new(diff, ViewMode::UnifiedPane, 100, false, None);
+    app.handle_file_enter();
+    let backend = ratatui::backend::TestBackend::new(100, 24);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| crate::ui::draw(frame, &mut app))
+        .unwrap();
+    let local_row = app
+        .review_unified_line_rows
+        .iter()
+        .find_map(|(row, idx)| (*idx == 4).then_some(*row))
+        .unwrap();
+    let (x, y, _, _) = app.diff_view_area.unwrap();
+
+    app.remember_diff_line_hover(x.saturating_add(10), y.saturating_add(local_row as u16));
+
+    assert_eq!(
+        app.current_file_relative_position_label().as_deref(),
+        Some("a.txt:R5")
+    );
+    assert_eq!(
+        app.current_file_cursor_position_label().as_deref(),
+        Some("a.txt:R2")
+    );
+}
+
+#[test]
+fn line_comment_key_uses_hovered_diff_row_and_split_side() {
+    for (mode, side, row, display_idx) in [
+        (ViewMode::UnifiedPane, None, 11, 1),
+        (ViewMode::Split, Some(review::ReviewSide::Old), 10, 0),
+        (ViewMode::Split, Some(review::ReviewSide::New), 10, 0),
+    ] {
+        let diff = MultiFileDiff::from_file_pair(
+            std::path::PathBuf::from("a.txt"),
+            std::path::PathBuf::from("a.txt"),
+            "one\ntwo\n".to_string(),
+            "ONE\nTWO\n".to_string(),
+        );
+        let mut app = App::new(diff, mode, 100, false, None);
+        app.review_mode = true;
+        app.diff_view_area = Some((0, 10, 80, 4));
+        app.review_line_add_row = Some(row);
+        app.review_line_add_side = side;
+        if mode == ViewMode::Split {
+            assert_eq!(
+                app.review_side_at_screen_column(20),
+                Some(review::ReviewSide::Old)
+            );
+            assert_eq!(
+                app.review_side_at_screen_column(60),
+                Some(review::ReviewSide::New)
+            );
+        }
+
+        app.start_line_comment();
+
+        let anchor = &app.review_editor.as_ref().unwrap().anchor;
+        assert_eq!(anchor.display_idx_hint, Some(display_idx));
+        if let Some(side) = side {
+            assert_eq!(anchor.side, Some(side));
+        }
+    }
+}
+
+#[test]
+fn rendered_split_hover_targets_the_line_under_each_pane() {
+    let diff = MultiFileDiff::from_file_pair(
+        std::path::PathBuf::from("a.txt"),
+        std::path::PathBuf::from("a.txt"),
+        "one\ntwo\nthree\nfour\n".to_string(),
+        "ONE\ntwo\nTHREE\nfour\n".to_string(),
+    );
+    let mut app = App::new(diff, ViewMode::Split, 100, false, None);
+    app.review_mode = true;
+    let backend = ratatui::backend::TestBackend::new(120, 28);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| crate::ui::draw(frame, &mut app))
+        .unwrap();
+
+    let (x, _, width, _) = app.diff_view_area.unwrap();
+    let old_row = app
+        .review_split_line_rows
+        .iter()
+        .find_map(|(row, side, idx)| {
+            (*side == review::ReviewSide::Old && *idx == 2).then_some(*row)
+        })
+        .unwrap();
+    assert!(app.update_topbar_hover(x.saturating_add(10), old_row));
+    assert_eq!(app.review_line_add_side, Some(review::ReviewSide::Old));
+    app.start_line_comment();
+    let anchor = &app.review_editor.as_ref().unwrap().anchor;
+    assert_eq!(anchor.side, Some(review::ReviewSide::Old));
+    assert_eq!(anchor.old_range.unwrap().start, 3);
+
+    app.review_cancel_editor();
+    let new_row = app
+        .review_split_line_rows
+        .iter()
+        .find_map(|(row, side, idx)| {
+            (*side == review::ReviewSide::New && *idx == 2).then_some(*row)
+        })
+        .unwrap();
+    assert!(app.update_topbar_hover(x.saturating_add(width.saturating_mul(3) / 4), new_row,));
+    assert_eq!(app.review_line_add_side, Some(review::ReviewSide::New));
+    app.start_line_comment();
+    let anchor = &app.review_editor.as_ref().unwrap().anchor;
+    assert_eq!(anchor.side, Some(review::ReviewSide::New));
+    assert_eq!(anchor.new_range.unwrap().start, 3);
 }
 
 #[test]
@@ -2353,7 +2511,7 @@ fn test_jj_watch_tracks_empty_start_additions_and_removals() {
     std::fs::write(repo.join("README.md"), "base\n").expect("write base");
     run_jj(&repo, &["commit", "-m", "base"]);
 
-    let diff = crate::build_jj_diff(&repo, "@").expect("initial jj diff");
+    let diff = crate::build_jj_diff(&repo, "@", None).expect("initial jj diff");
     let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, Some("@".into()));
     app.set_jj_watch_target(repo.clone(), "@".into());
     assert_eq!(app.multi_diff.file_count(), 0);
@@ -2707,6 +2865,110 @@ fn test_refresh_current_file_queues_deferred_diff_and_restores_decorations() {
     assert!(!app.multi_diff.current_navigator().diff().hunks.is_empty());
 
     let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn content_worker_replaces_loading_placeholder_without_moving_scroll() {
+    let root = std::env::temp_dir().join(format!(
+        "oyo-content-worker-{}-{:?}",
+        std::process::id(),
+        Instant::now()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("old.txt"), "old\n").unwrap();
+    std::fs::write(root.join("new.txt"), "new\n").unwrap();
+    let file = oyo_core::multi::FileEntry {
+        path: "file.txt".into(),
+        old_path: None,
+        old_source_path: None,
+        new_source_path: None,
+        display_name: "file.txt".to_string(),
+        status: oyo_core::git::FileStatus::Modified,
+        insertions: 1,
+        deletions: 1,
+        binary: false,
+    };
+    let diff = MultiFileDiff::from_pending_files(
+        Some(root.clone()),
+        vec![(
+            file,
+            oyo_core::multi::ContentSource::File(root.join("old.txt")),
+            oyo_core::multi::ContentSource::File(root.join("new.txt")),
+        )],
+        true,
+    );
+    let mut app = App::new(diff, ViewMode::UnifiedPane, 100, false, None);
+    app.scroll_offset = 7;
+    assert_eq!(app.multi_diff.diff_status(0), DiffStatus::Loading);
+    assert!(app.start_content_loading());
+    assert_eq!(app.content_loading_count(), 1);
+    for _ in 0..100 {
+        if app.poll_content_responses() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(app.content_loading_count(), 0);
+    assert_eq!(app.multi_diff.diff_status(0), DiffStatus::Ready);
+    assert_eq!(app.multi_diff.file_contents(0), Some(("old\n", "new\n")));
+    assert_eq!(app.scroll_offset, 7);
+    assert_eq!(app.stats(), (1, 1));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn replacing_diff_restarts_pending_content_loading() {
+    let root = std::env::temp_dir().join(format!(
+        "oyo-content-replace-{}-{:?}",
+        std::process::id(),
+        Instant::now()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("old.txt"), "old\n").unwrap();
+    std::fs::write(root.join("new.txt"), "new\n").unwrap();
+    let entries = (0..2)
+        .map(|idx| {
+            let file = oyo_core::multi::FileEntry {
+                path: format!("file-{idx}.txt").into(),
+                old_path: None,
+                old_source_path: None,
+                new_source_path: None,
+                display_name: format!("file-{idx}.txt"),
+                status: oyo_core::git::FileStatus::Modified,
+                insertions: 1,
+                deletions: 1,
+                binary: false,
+            };
+            (
+                file,
+                oyo_core::multi::ContentSource::File(root.join("old.txt")),
+                oyo_core::multi::ContentSource::File(root.join("new.txt")),
+            )
+        })
+        .collect();
+    let initial = MultiFileDiff::from_file_pair(
+        "file-0.txt".into(),
+        "file-0.txt".into(),
+        "before\n".into(),
+        "after\n".into(),
+    );
+    let mut app = App::new(initial, ViewMode::UnifiedPane, 100, false, None);
+    let replacement = MultiFileDiff::from_pending_files(Some(root.clone()), entries, true);
+
+    app.replace_multi_diff(replacement);
+
+    assert_eq!(app.multi_diff.diff_status(0), DiffStatus::Ready);
+    assert_eq!(app.multi_diff.diff_status(1), DiffStatus::Loading);
+    assert_eq!(app.content_loading_count(), 1);
+    for _ in 0..100 {
+        if app.poll_content_responses() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(app.multi_diff.diff_status(1), DiffStatus::Ready);
+    assert_eq!(app.content_loading_count(), 0);
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]

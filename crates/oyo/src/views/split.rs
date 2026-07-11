@@ -36,16 +36,12 @@ fn split_new_bg_kind(kind: LineKind) -> LineKind {
 }
 
 fn line_num_style_for_kind(kind: LineKind, app: &App) -> Style {
-    let insert_base = color::gradient_color(&app.theme.insert, 0.5);
-    let delete_base = color::gradient_color(&app.theme.delete, 0.5);
+    let insert_base = app.theme.insert_base();
+    let delete_base = app.theme.delete_base();
     let modify_base = color::gradient_color(&app.theme.modify, 0.5);
     match kind {
-        LineKind::Inserted | LineKind::PendingInsert => {
-            Style::default().fg(Color::Rgb(insert_base.r, insert_base.g, insert_base.b))
-        }
-        LineKind::Deleted | LineKind::PendingDelete => {
-            Style::default().fg(Color::Rgb(delete_base.r, delete_base.g, delete_base.b))
-        }
+        LineKind::Inserted | LineKind::PendingInsert => Style::default().fg(insert_base),
+        LineKind::Deleted | LineKind::PendingDelete => Style::default().fg(delete_base),
         LineKind::Modified | LineKind::PendingModify => {
             Style::default().fg(Color::Rgb(modify_base.r, modify_base.g, modify_base.b))
         }
@@ -613,6 +609,7 @@ pub fn render_split(frame: &mut Frame, app: &mut App, area: Rect) {
         _ => (true, true),
     };
 
+    app.clear_review_split_line_rows();
     render_old_pane(
         frame,
         app,
@@ -1393,8 +1390,26 @@ fn render_old_pane(
             if let Some(bg_lines) = bg_lines.as_mut() {
                 super::push_wrapped_bg_line(bg_lines, visible_width, wrap_count, line_bg_line);
             }
+            let line_display_row = display_row;
+            let line_content_row = content_lines.len();
             content_lines.push(Line::from(display_spans));
             display_row = display_row.saturating_add(wrap_count);
+            for wrapped_row in 0..wrap_count {
+                let local_row = if app.line_wrap {
+                    line_display_row
+                        .saturating_add(wrapped_row)
+                        .checked_sub(scroll_offset)
+                } else {
+                    Some(line_content_row.saturating_add(wrapped_row))
+                };
+                if let Some(local_row) = local_row.filter(|row| *row < area.height as usize) {
+                    app.add_review_split_line_row(
+                        area.y.saturating_add(local_row as u16),
+                        crate::app::review::ReviewSide::Old,
+                        idx,
+                    );
+                }
+            }
             if app.line_wrap && wrap_count > 1 {
                 let (wrap_marker, wrap_style) = if show_extent {
                     (
@@ -2431,8 +2446,26 @@ fn render_new_pane(
             if let Some(bg_lines) = bg_lines.as_mut() {
                 super::push_wrapped_bg_line(bg_lines, visible_width, wrap_count, line_bg_line);
             }
+            let line_display_row = display_row;
+            let line_content_row = content_lines.len();
             content_lines.push(Line::from(display_spans));
             display_row = display_row.saturating_add(wrap_count);
+            for wrapped_row in 0..wrap_count {
+                let local_row = if app.line_wrap {
+                    line_display_row
+                        .saturating_add(wrapped_row)
+                        .checked_sub(scroll_offset)
+                } else {
+                    Some(line_content_row.saturating_add(wrapped_row))
+                };
+                if let Some(local_row) = local_row.filter(|row| *row < area.height as usize) {
+                    app.add_review_split_line_row(
+                        area.y.saturating_add(local_row as u16),
+                        crate::app::review::ReviewSide::New,
+                        idx,
+                    );
+                }
+            }
 
             // Build marker line
             let marker_style = fold_bg.map_or(active_style, |bg| active_style.bg(bg));

@@ -773,6 +773,8 @@ enum InputMode {
     GitRange { from: String, to: String },
     /// jj revision or revset
     JjRevision { rev: String },
+    /// One file in a non-colocated jj workspace
+    JjFile { path: PathBuf },
     /// No valid input
     None,
 }
@@ -793,6 +795,10 @@ struct BuiltDiff {
 /// Detect if we're being called as a git external diff tool
 /// Git calls: oy path old-file old-hex old-mode new-file new-hex new-mode
 fn detect_input_mode(paths: &[PathBuf]) -> InputMode {
+    detect_input_mode_in(paths, &std::env::current_dir().unwrap_or_default())
+}
+
+fn detect_input_mode_in(paths: &[PathBuf], cwd: &Path) -> InputMode {
     if paths.len() == 7 {
         // Git external diff format
         let display_path = paths[0].clone();
@@ -809,9 +815,14 @@ fn detect_input_mode(paths: &[PathBuf]) -> InputMode {
             new_path: paths[1].clone(),
         }
     } else if paths.len() == 1 {
-        let cwd = std::env::current_dir().unwrap_or_default();
         let value = paths[0].to_string_lossy();
-        if is_jj_repo(&cwd) && should_treat_as_jj_revision(&paths[0], &value) {
+        let argument_path = if paths[0].is_absolute() {
+            paths[0].clone()
+        } else {
+            cwd.join(&paths[0])
+        };
+        let path_exists = argument_path.exists();
+        if is_jj_repo(cwd) && should_treat_as_jj_revision(path_exists, &value) {
             let rev =
                 if value.as_ref() != "@" && !value.contains("..") && jj_bookmark_exists(&value) {
                     jj_bookmark_revset(&value)
@@ -819,8 +830,21 @@ fn detect_input_mode(paths: &[PathBuf]) -> InputMode {
                     value.to_string()
                 };
             InputMode::JjRevision { rev }
-        } else if !paths[0].exists() && oyo_core::git::is_git_repo(&cwd) {
-            git_ref_input_mode(&cwd, &value).unwrap_or_else(|| InputMode::GitFile {
+        } else if path_exists && is_jj_repo(cwd) && !oyo_core::git::is_git_repo(cwd) {
+            let repo_root = jj_workspace_root(cwd).unwrap_or_else(|| cwd.to_path_buf());
+            let path = argument_path
+                .canonicalize()
+                .ok()
+                .and_then(|path| {
+                    repo_root
+                        .canonicalize()
+                        .ok()
+                        .and_then(|root| path.strip_prefix(root).ok().map(Path::to_path_buf))
+                })
+                .unwrap_or_else(|| paths[0].clone());
+            InputMode::JjFile { path }
+        } else if !path_exists && oyo_core::git::is_git_repo(cwd) {
+            git_ref_input_mode(cwd, &value).unwrap_or_else(|| InputMode::GitFile {
                 path: paths[0].clone(),
             })
         } else {
@@ -829,8 +853,7 @@ fn detect_input_mode(paths: &[PathBuf]) -> InputMode {
             }
         }
     } else if paths.is_empty() {
-        let cwd = std::env::current_dir().unwrap_or_default();
-        if is_jj_repo(&cwd) {
+        if is_jj_repo(cwd) {
             InputMode::JjRevision {
                 rev: default_jj_review_revision(),
             }
@@ -1500,6 +1523,7 @@ fn apply_config_to_app(app: &mut App, config: &config::Config, args: &Args, ligh
     app.ui_theme_name = config.ui.theme.name.clone();
     app.time_format = TimeFormatter::new(&config.ui.time);
     app.theme_is_light = light_mode;
+    app.start_syntax_engine_load();
 
     if args.step {
         app.stepping = true;
@@ -1904,21 +1928,43 @@ fn jj_summary_paths(status: oyo_core::git::FileStatus, path: &str) -> (Option<St
     )
 }
 
-fn jj_diff_summary(repo_root: &Path, rev: &str) -> Result<(String, String, String)> {
+fn jj_diff_summary(
+    repo_root: &Path,
+    rev: &str,
+    path: Option<&Path>,
+) -> Result<(String, String, String)> {
+    let path = path.map(|path| path.to_string_lossy());
     if rev.contains("..") {
         let (from, to) = parse_range(rev)?;
         let base = format!("fork_point(({from}) | ({to}))");
-        let summary = run_jj(
-            repo_root,
-            &["diff", "--from", &base, "--to", &to, "--summary"],
-        )?;
+        let summary = if let Some(path) = path.as_deref() {
+            run_jj(
+                repo_root,
+                &[
+                    "diff",
+                    "--from",
+                    &base,
+                    "--to",
+                    &to,
+                    "--summary",
+                    "--",
+                    path,
+                ],
+            )?
+        } else {
+            run_jj(
+                repo_root,
+                &["diff", "--from", &base, "--to", &to, "--summary"],
+            )?
+        };
         Ok((summary, base, to))
     } else {
-        Ok((
-            run_jj(repo_root, &["diff", "-r", rev, "--summary"])?,
-            format!("({rev})-"),
-            rev.to_string(),
-        ))
+        let summary = if let Some(path) = path.as_deref() {
+            run_jj(repo_root, &["diff", "-r", rev, "--summary", "--", path])?
+        } else {
+            run_jj(repo_root, &["diff", "-r", rev, "--summary"])?
+        };
+        Ok((summary, format!("({rev})-"), rev.to_string()))
     }
 }
 
@@ -1945,49 +1991,234 @@ pub(crate) fn jj_diff_file_signature(
     repo_root: &Path,
     rev: &str,
 ) -> Result<Vec<(oyo_core::git::FileStatus, Option<PathBuf>, PathBuf)>> {
-    let (summary, _, _) = jj_diff_summary(repo_root, rev)?;
+    let (summary, _, _) = jj_diff_summary(repo_root, rev, None)?;
     Ok(jj_summary_entries(&summary))
 }
 
-fn build_jj_diff(repo_root: &Path, rev: &str) -> Result<MultiFileDiff> {
-    let (summary, old_rev, new_rev) = jj_diff_summary(repo_root, rev)?;
+type JjBatchSides = (Vec<Option<Vec<u8>>>, Vec<Option<Vec<u8>>>);
+type JjGitContent = (PathBuf, String, String);
+
+fn jj_git_content(repo_root: &Path, old_rev: &str, new_rev: &str) -> Result<JjGitContent> {
+    let git_root = PathBuf::from(run_jj(repo_root, &["git", "root"])?.trim());
+    if [old_rev, new_rev].into_iter().any(|rev| {
+        run_jj(
+            repo_root,
+            &["log", "--no-graph", "-r", rev, "-T", "conflict"],
+        )
+        .is_ok_and(|value| value.trim() == "true")
+    }) {
+        anyhow::bail!("jj conflict content needs file show");
+    }
+    let old_commit = run_jj(
+        repo_root,
+        &["log", "--no-graph", "-r", old_rev, "-T", "commit_id"],
+    )?
+    .trim()
+    .to_string();
+    let new_commit = run_jj(
+        repo_root,
+        &["log", "--no-graph", "-r", new_rev, "-T", "commit_id"],
+    )?
+    .trim()
+    .to_string();
+    Ok((git_root, old_commit, new_commit))
+}
+
+fn jj_git_batch_sides(
+    git_content: &JjGitContent,
+    entries: &[(oyo_core::git::FileStatus, Option<PathBuf>, PathBuf)],
+) -> Result<JjBatchSides> {
+    let (git_root, old_commit, new_commit) = git_content;
+    let old_specs = entries
+        .iter()
+        .filter(|(status, _, _)| *status != oyo_core::git::FileStatus::Added)
+        .map(|(_, old_path, path)| {
+            format!(
+                "{old_commit}:{}",
+                old_path.as_deref().unwrap_or(path).display()
+            )
+        })
+        .collect::<Vec<_>>();
+    let new_specs = entries
+        .iter()
+        .filter(|(status, _, _)| *status != oyo_core::git::FileStatus::Deleted)
+        .map(|(_, _, path)| format!("{new_commit}:{}", path.display()))
+        .collect::<Vec<_>>();
+    Ok((
+        oyo_core::git::get_objects_batch(git_root, &old_specs, 32 * 1024 * 1024)?,
+        oyo_core::git::get_objects_batch(git_root, &new_specs, 32 * 1024 * 1024)?,
+    ))
+}
+
+fn build_jj_diff(repo_root: &Path, rev: &str, path: Option<&Path>) -> Result<MultiFileDiff> {
+    let (summary, old_rev, new_rev) = jj_diff_summary(repo_root, rev, path)?;
+    let mut entries = jj_summary_entries(&summary);
+    if entries.is_empty() {
+        if let Some(path) = path {
+            entries.push((
+                oyo_core::git::FileStatus::Modified,
+                None,
+                path.to_path_buf(),
+            ));
+        }
+    }
+    let git_content = jj_git_content(repo_root, &old_rev, &new_rev).ok();
+    let colocated = repo_root.join(".git").exists();
+    if entries.len() > 4 {
+        let stats = git_content
+            .as_ref()
+            .and_then(|(git_root, old_commit, new_commit)| {
+                oyo_core::git::get_diff_numstat(git_root, &[format!("{old_commit}..{new_commit}")])
+                    .ok()
+            });
+        let pending = entries
+            .into_iter()
+            .map(|(status, old_path, path)| {
+                let (old, new) = if let Some((git_root, old_commit, new_commit)) = &git_content {
+                    let old = if status == oyo_core::git::FileStatus::Added {
+                        oyo_core::multi::ContentSource::Empty
+                    } else {
+                        oyo_core::multi::ContentSource::GitObject {
+                            repo_root: git_root.clone(),
+                            spec: format!(
+                                "{old_commit}:{}",
+                                old_path.as_deref().unwrap_or(&path).display()
+                            ),
+                        }
+                    };
+                    let new = if status == oyo_core::git::FileStatus::Deleted {
+                        oyo_core::multi::ContentSource::Empty
+                    } else {
+                        oyo_core::multi::ContentSource::GitObject {
+                            repo_root: git_root.clone(),
+                            spec: format!("{new_commit}:{}", path.display()),
+                        }
+                    };
+                    (old, new)
+                } else {
+                    let old = if status == oyo_core::git::FileStatus::Added {
+                        oyo_core::multi::ContentSource::Empty
+                    } else {
+                        oyo_core::multi::ContentSource::JjFile {
+                            repo_root: repo_root.to_path_buf(),
+                            revision: old_rev.clone(),
+                            path: old_path.clone().unwrap_or_else(|| path.clone()),
+                        }
+                    };
+                    let new = if status == oyo_core::git::FileStatus::Deleted {
+                        oyo_core::multi::ContentSource::Empty
+                    } else {
+                        oyo_core::multi::ContentSource::JjFile {
+                            repo_root: repo_root.to_path_buf(),
+                            revision: new_rev.clone(),
+                            path: path.clone(),
+                        }
+                    };
+                    (old, new)
+                };
+                let (insertions, deletions) = stats
+                    .as_ref()
+                    .and_then(|stats| stats.get(&path).copied())
+                    .unwrap_or((0, 0));
+                let file = oyo_core::multi::FileEntry {
+                    display_name: path.display().to_string(),
+                    path,
+                    old_path,
+                    old_source_path: None,
+                    new_source_path: None,
+                    status,
+                    insertions,
+                    deletions,
+                    binary: false,
+                };
+                (file, old, new)
+            })
+            .collect();
+        let mut diff = MultiFileDiff::from_pending_files(
+            Some(repo_root.to_path_buf()),
+            pending,
+            stats.is_some(),
+        );
+        if colocated {
+            if let Some((_, old_commit, new_commit)) = git_content {
+                let new_source = if rev.trim() == "@" {
+                    oyo_core::multi::BlameSource::Worktree
+                } else {
+                    oyo_core::multi::BlameSource::Commit(new_commit)
+                };
+                diff.set_blame_sources(
+                    oyo_core::multi::BlameSource::Commit(old_commit),
+                    new_source,
+                );
+            }
+        } else {
+            diff.set_blame_sources(
+                oyo_core::multi::BlameSource::JjRev(old_rev),
+                oyo_core::multi::BlameSource::JjRev(new_rev),
+            );
+        }
+        return Ok(diff);
+    }
+    let mut batched = git_content
+        .as_ref()
+        .and_then(|content| jj_git_batch_sides(content, &entries).ok())
+        .map(|(old, new)| (old.into_iter(), new.into_iter()));
     let mut files = Vec::new();
-    for (status, old_path, path) in jj_summary_entries(&summary) {
-        let old_bytes = if matches!(status, oyo_core::git::FileStatus::Added) {
-            Vec::new()
+    for (status, old_path, path) in entries {
+        let (old_bytes, old_too_large) = if matches!(status, oyo_core::git::FileStatus::Added) {
+            (Vec::new(), false)
+        } else if let Some((old, _)) = batched.as_mut() {
+            match old.next().flatten() {
+                Some(bytes) => (bytes, false),
+                None => (Vec::new(), true),
+            }
         } else {
-            run_jj_bytes(
-                repo_root,
-                &[
-                    "file",
-                    "show",
-                    "-r",
-                    &old_rev,
-                    old_path
-                        .as_deref()
-                        .unwrap_or(&path)
-                        .to_string_lossy()
-                        .as_ref(),
-                ],
-            )?
+            (
+                run_jj_bytes(
+                    repo_root,
+                    &[
+                        "file",
+                        "show",
+                        "-r",
+                        &old_rev,
+                        old_path
+                            .as_deref()
+                            .unwrap_or(&path)
+                            .to_string_lossy()
+                            .as_ref(),
+                    ],
+                )?,
+                false,
+            )
         };
-        let new_bytes = if matches!(status, oyo_core::git::FileStatus::Deleted) {
-            Vec::new()
+        let (new_bytes, new_too_large) = if matches!(status, oyo_core::git::FileStatus::Deleted) {
+            (Vec::new(), false)
+        } else if let Some((_, new)) = batched.as_mut() {
+            match new.next().flatten() {
+                Some(bytes) => (bytes, false),
+                None => (Vec::new(), true),
+            }
         } else {
-            run_jj_bytes(
-                repo_root,
-                &[
-                    "file",
-                    "show",
-                    "-r",
-                    &new_rev,
-                    path.to_string_lossy().as_ref(),
-                ],
-            )?
+            (
+                run_jj_bytes(
+                    repo_root,
+                    &[
+                        "file",
+                        "show",
+                        "-r",
+                        &new_rev,
+                        path.to_string_lossy().as_ref(),
+                    ],
+                )?,
+                false,
+            )
         };
         let old_content = String::from_utf8_lossy(&old_bytes).to_string();
         let new_content = String::from_utf8_lossy(&new_bytes).to_string();
-        let binary = old_content.contains('\0') || new_content.contains('\0');
+        let binary = old_too_large
+            || new_too_large
+            || old_content.contains('\0')
+            || new_content.contains('\0');
         files.push(RawFileDiff {
             path: path.clone(),
             old_path,
@@ -1999,10 +2230,23 @@ fn build_jj_diff(repo_root: &Path, rev: &str) -> Result<MultiFileDiff> {
             binary,
         });
     }
-    Ok(MultiFileDiff::from_raw_files(
-        Some(repo_root.to_path_buf()),
-        files,
-    ))
+    let mut diff = MultiFileDiff::from_raw_files(Some(repo_root.to_path_buf()), files);
+    if colocated {
+        if let Some((_, old_commit, new_commit)) = git_content {
+            let new_source = if rev.trim() == "@" {
+                oyo_core::multi::BlameSource::Worktree
+            } else {
+                oyo_core::multi::BlameSource::Commit(new_commit)
+            };
+            diff.set_blame_sources(oyo_core::multi::BlameSource::Commit(old_commit), new_source);
+        }
+    } else {
+        diff.set_blame_sources(
+            oyo_core::multi::BlameSource::JjRev(old_rev),
+            oyo_core::multi::BlameSource::JjRev(new_rev),
+        );
+    }
+    Ok(diff)
 }
 
 fn review_hash(value: &str) -> String {
@@ -2150,11 +2394,11 @@ fn jj_revset_resolves(revset: &str) -> bool {
     .is_ok()
 }
 
-fn should_treat_as_jj_revision(path: &Path, value: &str) -> bool {
+fn should_treat_as_jj_revision(path_exists: bool, value: &str) -> bool {
     value == "@"
         || value.contains("..")
         || jj_bookmark_exists(value)
-        || (!path.exists() && jj_revset_resolves(value))
+        || (!path_exists && jj_revset_resolves(value))
 }
 
 fn default_jj_review_revision() -> String {
@@ -2362,6 +2606,12 @@ fn review_target_metadata_for_input_mode(input_mode: &InputMode) -> ReviewTarget
             jj_target_metadata(&label, rev)
                 .unwrap_or_else(|| basic_review_target_metadata(label, "jj"))
         }
+        InputMode::JjFile { path } => {
+            let label = path.display().to_string();
+            let rev = default_jj_review_revision();
+            jj_target_metadata(&label, &rev)
+                .unwrap_or_else(|| basic_review_target_metadata(label, "jj"))
+        }
         _ => git_target_metadata_for_input_mode(input_mode),
     }
 }
@@ -2417,7 +2667,10 @@ fn configure_review_state_for_app(
     app.set_review_persist_enabled(!args.no_review_persist);
     app.set_review_filter_to_current_diff(matches!(
         input_mode,
-        InputMode::GitUncommitted | InputMode::GitStaged | InputMode::GitFile { .. }
+        InputMode::GitUncommitted
+            | InputMode::GitStaged
+            | InputMode::GitFile { .. }
+            | InputMode::JjFile { .. }
     ));
     if create {
         app.enable_review_mode();
@@ -2810,7 +3063,12 @@ fn review_log_entries_for_scope(
         .map(|app| app.review_storage_key().to_string());
     let current_diff_only = matches!(
         current_mode,
-        Some(InputMode::GitUncommitted | InputMode::GitStaged | InputMode::GitFile { .. })
+        Some(
+            InputMode::GitUncommitted
+                | InputMode::GitStaged
+                | InputMode::GitFile { .. }
+                | InputMode::JjFile { .. },
+        )
     );
     let jj_stack_change_ids = match current_mode.as_ref() {
         Some(InputMode::JjRevision { rev }) if rev.contains("..") => {
@@ -2941,6 +3199,7 @@ fn saved_review_fingerprint_for_app_target(
                         InputMode::GitUncommitted
                             | InputMode::GitStaged
                             | InputMode::GitFile { .. }
+                            | InputMode::JjFile { .. }
                     ) {
                         false
                     } else {
@@ -5940,7 +6199,7 @@ fn build_diff_from_input_mode(
     config: &config::Config,
     args: &Args,
 ) -> Result<Option<BuiltDiff>> {
-    let (multi_diff, git_branch, workspace_root) = match input_mode {
+    let (mut multi_diff, git_branch, workspace_root) = match input_mode {
         InputMode::GitExternal {
             display_path,
             old_file,
@@ -6093,8 +6352,12 @@ fn build_diff_from_input_mode(
             let changes = oyo_core::git::get_uncommitted_changes(&repo_root)
                 .context("Failed to get uncommitted changes")?;
             let branch = oyo_core::git::get_current_branch(&repo_root).ok();
-            let diff = MultiFileDiff::from_git_changes(repo_root.clone(), changes)
-                .context("Failed to create diff from git changes")?;
+            let diff = if changes.len() > 4 {
+                MultiFileDiff::from_git_changes_lazy(repo_root.clone(), changes)
+            } else {
+                MultiFileDiff::from_git_changes(repo_root.clone(), changes)
+            }
+            .context("Failed to create diff from git changes")?;
             (diff, branch, Some(repo_root))
         }
         InputMode::GitStaged => {
@@ -6114,8 +6377,12 @@ fn build_diff_from_input_mode(
             let changes = oyo_core::git::get_staged_changes(&repo_root)
                 .context("Failed to get staged changes")?;
             let branch = oyo_core::git::get_current_branch(&repo_root).ok();
-            let diff = MultiFileDiff::from_git_staged(repo_root.clone(), changes)
-                .context("Failed to create diff from staged changes")?;
+            let diff = if changes.len() > 4 {
+                MultiFileDiff::from_git_staged_lazy(repo_root.clone(), changes)
+            } else {
+                MultiFileDiff::from_git_staged(repo_root.clone(), changes)
+            }
+            .context("Failed to create diff from staged changes")?;
             (diff, branch, Some(repo_root))
         }
         InputMode::GitRange { from, to } => {
@@ -6144,23 +6411,41 @@ fn build_diff_from_input_mode(
                 let changes =
                     oyo_core::git::get_changes_between_index(&repo_root, &commit, reverse)
                         .context("Failed to get index range changes")?;
-                let diff = MultiFileDiff::from_git_index_range(
-                    repo_root.clone(),
-                    changes.clone(),
-                    commit,
-                    to_index,
-                )
+                let diff = if changes.len() > 4 {
+                    MultiFileDiff::from_git_index_range_lazy(
+                        repo_root.clone(),
+                        changes.clone(),
+                        commit,
+                        to_index,
+                    )
+                } else {
+                    MultiFileDiff::from_git_index_range(
+                        repo_root.clone(),
+                        changes.clone(),
+                        commit,
+                        to_index,
+                    )
+                }
                 .context("Failed to create diff from index range")?;
                 (changes, diff)
             } else {
                 let changes = oyo_core::git::get_changes_between(&repo_root, from, to)
                     .context("Failed to get range changes")?;
-                let diff = MultiFileDiff::from_git_range(
-                    repo_root.clone(),
-                    changes.clone(),
-                    from.clone(),
-                    to.clone(),
-                )
+                let diff = if changes.len() > 4 {
+                    MultiFileDiff::from_git_range_lazy(
+                        repo_root.clone(),
+                        changes.clone(),
+                        from.clone(),
+                        to.clone(),
+                    )
+                } else {
+                    MultiFileDiff::from_git_range(
+                        repo_root.clone(),
+                        changes.clone(),
+                        from.clone(),
+                        to.clone(),
+                    )
+                }
                 .context("Failed to create diff from range")?;
                 (changes, diff)
             };
@@ -6170,8 +6455,15 @@ fn build_diff_from_input_mode(
         InputMode::JjRevision { rev } => {
             let cwd = std::env::current_dir().unwrap_or_default();
             let repo_root = jj_workspace_root(&cwd).context("Not in a jj workspace")?;
-            let diff = build_jj_diff(&repo_root, rev)?;
+            let diff = build_jj_diff(&repo_root, rev, None)?;
             (diff, Some(rev.clone()), Some(repo_root))
+        }
+        InputMode::JjFile { path } => {
+            let cwd = std::env::current_dir().unwrap_or_default();
+            let repo_root = jj_workspace_root(&cwd).context("Not in a jj workspace")?;
+            let rev = default_jj_review_revision();
+            let diff = build_jj_diff(&repo_root, &rev, Some(path))?;
+            (diff, Some(rev), Some(repo_root))
         }
         InputMode::None => {
             anyhow::bail!(
@@ -6182,6 +6474,12 @@ fn build_diff_from_input_mode(
             );
         }
     };
+
+    if let Some(request) = multi_diff.take_pending_content_for(multi_diff.selected_index) {
+        let content = app::load_content_request_sync(request);
+        multi_diff.apply_prepared_content(multi_diff.selected_index, content);
+        multi_diff.ensure_full_navigator(multi_diff.selected_index);
+    }
 
     Ok(Some(BuiltDiff {
         multi_diff,
@@ -6323,11 +6621,15 @@ fn run() -> Result<()> {
                 }
                 _ => Some("No changes found.".to_string()),
             };
-            let built = match build_diff_from_input_mode(&input_mode, &config, &args)? {
-                Some(result) => result,
-                None => {
+            let built = match build_diff_from_input_mode(&input_mode, &config, &args) {
+                Ok(Some(result)) => result,
+                Ok(None) => {
                     exit_message = empty_message;
                     break;
+                }
+                Err(error) => {
+                    restore_terminal(&mut terminal)?;
+                    return Err(error);
                 }
             };
 
@@ -6364,6 +6666,7 @@ fn run() -> Result<()> {
                 None,
                 true,
             )?;
+            app.start_content_loading();
 
             let exit = run_app(
                 &mut terminal,
@@ -6431,14 +6734,15 @@ fn run() -> Result<()> {
         InputMode::GitRange { from, to } => Some(format!("No changes in range {}..{}.", from, to)),
         _ => Some("No changes found.".to_string()),
     };
-    let prefetched = match build_diff_from_input_mode(&input_mode, &config, &args)? {
-        Some(result) => result,
-        None => {
+    let prefetched = match build_diff_from_input_mode(&input_mode, &config, &args) {
+        Ok(Some(result)) => result,
+        Ok(None) => {
             if let Some(message) = empty_message {
                 println!("{message}");
             }
             return Ok(());
         }
+        Err(error) => return Err(error),
     };
     let mut terminal = setup_terminal()?;
     let image_picker = setup_image_picker();
@@ -6461,11 +6765,15 @@ fn run() -> Result<()> {
         let built = if let Some(result) = pending_diff.take() {
             result
         } else {
-            match build_diff_from_input_mode(&input_mode, &config, &args)? {
-                Some(result) => result,
-                None => {
+            match build_diff_from_input_mode(&input_mode, &config, &args) {
+                Ok(Some(result)) => result,
+                Ok(None) => {
                     exit_message = empty_message;
                     break;
+                }
+                Err(error) => {
+                    restore_terminal(&mut terminal)?;
+                    return Err(error);
                 }
             }
         };
@@ -6503,6 +6811,7 @@ fn run() -> Result<()> {
             None,
             true,
         )?;
+        app.start_content_loading();
 
         let exit = run_app(
             &mut terminal,
@@ -6659,6 +6968,7 @@ fn run_app(
                         continue;
                     }
                     app.reset_count();
+                    app.remember_diff_line_hover(me.column, me.row);
                     if let Some(button) = toast_mouse_button(me.kind) {
                         if app.handle_toast_click(me.column, me.row, button) {
                             continue;
@@ -7879,7 +8189,7 @@ fn run_commit_picker<B: Backend>(
 mod tests {
     use super::{
         blocks_mouse_scroll, build_jj_diff, config, dedupe_review_log_entries, detect_input_mode,
-        git_ref_input_mode, github_comment_to_review_comment, gitlab,
+        detect_input_mode_in, git_ref_input_mode, github_comment_to_review_comment, gitlab,
         ignore_github_delete_not_found, insert_review_thread_states, jj_bookmark_revset,
         jj_summary_paths, local_pr_review_revision, mouse_horizontal_scroll_delta, parse_range,
         parse_remote_url, push_pending_mouse_scroll, push_review_comments_to_provider_with,
@@ -8988,7 +9298,7 @@ mod tests {
         test_jj(&repo, &["commit", "-m", "main"]);
         test_jj(&repo, &["bookmark", "set", "main", "-r", "@-"]);
 
-        let diverged = build_jj_diff(&repo, "trunk()..feature").unwrap();
+        let diverged = build_jj_diff(&repo, "trunk()..feature", None).unwrap();
         assert!(diverged
             .files
             .iter()
@@ -9013,8 +9323,8 @@ mod tests {
             .unwrap();
         assert!(!old_range.status.success());
 
-        let range = build_jj_diff(&repo, "trunk()..feature").unwrap();
-        let explicit_range = build_jj_diff(&repo, "main..feature").unwrap();
+        let range = build_jj_diff(&repo, "trunk()..feature", None).unwrap();
+        let explicit_range = build_jj_diff(&repo, "main..feature", None).unwrap();
         assert_eq!(jj_bookmark_revset("feature"), "trunk()..feature");
         assert_eq!(
             range
@@ -9040,8 +9350,90 @@ mod tests {
             .files
             .iter()
             .any(|file| file.path == Path::new("main.txt")));
-        assert!(build_jj_diff(&repo, "@").is_ok());
+        assert!(matches!(
+            range.blame_sources(),
+            Some((
+                oyo_core::multi::BlameSource::Commit(_),
+                oyo_core::multi::BlameSource::Commit(_)
+            ))
+        ));
+        let working_copy = build_jj_diff(&repo, "@", None).unwrap();
+        assert!(matches!(
+            working_copy.blame_sources(),
+            Some((
+                oyo_core::multi::BlameSource::Commit(_),
+                oyo_core::multi::BlameSource::Worktree
+            ))
+        ));
 
+        let _ = std::fs::remove_dir_all(repo);
+    }
+
+    #[test]
+    fn non_colocated_jj_diff_uses_jj_blame_sources() {
+        if ProcessCommand::new("jj").arg("--version").output().is_err() {
+            return;
+        }
+        let repo = temp_path("jj-native-blame");
+        std::fs::create_dir_all(&repo).unwrap();
+        let init = ProcessCommand::new("jj")
+            .arg("--config")
+            .arg("signing.behavior=\"drop\"")
+            .args(["git", "init", "--no-colocate"])
+            .arg(&repo)
+            .output()
+            .unwrap();
+        assert!(
+            init.status.success(),
+            "{}",
+            String::from_utf8_lossy(&init.stderr)
+        );
+        test_jj(&repo, &["config", "set", "--repo", "user.name", "Test"]);
+        test_jj(
+            &repo,
+            &["config", "set", "--repo", "user.email", "test@example.com"],
+        );
+        std::fs::write(repo.join("file.txt"), "committed\n").unwrap();
+        std::fs::write(repo.join("clean.txt"), "clean\n").unwrap();
+        test_jj(&repo, &["commit", "-m", "base"]);
+        std::fs::write(repo.join("file.txt"), "committed\nchanged\n").unwrap();
+
+        let mode = detect_input_mode_in(&[PathBuf::from("file.txt")], &repo);
+        assert!(matches!(
+            mode,
+            InputMode::JjFile { path } if path == Path::new("file.txt")
+        ));
+        let diff = build_jj_diff(&repo, "@", Some(Path::new("file.txt"))).unwrap();
+        assert_eq!(diff.files.len(), 1);
+        assert_eq!(diff.files[0].path, Path::new("file.txt"));
+        let clean = build_jj_diff(&repo, "@", Some(Path::new("clean.txt"))).unwrap();
+        assert_eq!(clean.files.len(), 1);
+        assert_eq!(clean.files[0].path, Path::new("clean.txt"));
+        assert_eq!(
+            (clean.files[0].insertions, clean.files[0].deletions),
+            (0, 0)
+        );
+
+        assert_eq!(
+            diff.blame_sources(),
+            Some((
+                oyo_core::multi::BlameSource::JjRev("(@)-".to_string()),
+                oyo_core::multi::BlameSource::JjRev("@".to_string()),
+            ))
+        );
+        let entries = crate::blame::blame_range(
+            &repo,
+            Path::new("file.txt"),
+            1,
+            2,
+            &oyo_core::multi::BlameSource::JjRev("@".to_string()),
+        )
+        .unwrap();
+        assert_eq!(entries.len(), 2);
+        assert!(!entries[0].1.author.is_empty());
+        assert_eq!(entries[0].1.summary, "base");
+        assert!(!entries[0].1.uncommitted);
+        assert!(entries[1].1.uncommitted);
         let _ = std::fs::remove_dir_all(repo);
     }
 
