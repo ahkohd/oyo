@@ -245,6 +245,8 @@ Use `action` for supported TUI actions that do not have a dedicated control comm
 ```sh
 oy control action --session review-a normal.step_down
 oy control action --session review-a normal.step_down --count 3
+oy control action --session review-a normal.navigate_back
+oy control action --session review-a normal.navigate_forward
 ```
 
 Prefer a named control command when one exists. For example, use `next` instead of its action ID.

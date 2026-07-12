@@ -23,6 +23,7 @@ impl App {
         self.file_list_focused = true;
         self.file_filter.clear();
         self.file_list_scroll = 0;
+        self.preload_all_outdated_reconstructions();
     }
 
     pub fn show_files_sidebar(&mut self) -> bool {
@@ -48,6 +49,9 @@ impl App {
         };
         self.file_list_scroll = 0;
         self.file_list_focused = true;
+        if self.file_panel_mode == FilePanelMode::Comments {
+            self.preload_all_outdated_reconstructions();
+        }
     }
 
     pub fn handle_status_comments_mouse_down(&mut self, column: u16, row: u16) -> bool {

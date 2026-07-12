@@ -778,6 +778,8 @@ fn dispatch_normal_action(
                 | NormalAction::OpenCommentPicker
                 | NormalAction::OpenOutdatedComments
                 | NormalAction::OpenThemePicker
+                | NormalAction::NavigateBack
+                | NormalAction::NavigateForward
         )
     {
         app.reset_count();
@@ -1031,6 +1033,14 @@ fn dispatch_normal_action(
         NormalAction::OpenDashboard => {
             app.reset_count();
             app.open_dashboard = true;
+        }
+        NormalAction::NavigateBack => {
+            app.reset_count();
+            app.navigate_view_back();
+        }
+        NormalAction::NavigateForward => {
+            app.reset_count();
+            app.navigate_view_forward();
         }
         NormalAction::ScrollUp => {
             let count = repeat_count(app, key, pending_event, false)?;

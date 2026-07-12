@@ -33,7 +33,29 @@ fn run_git(repo: &std::path::Path, args: &[&str]) {
         .success());
 }
 
-fn run_jj(repo: &std::path::Path, args: &[&str]) {
+fn git_rev(repo: &std::path::Path) -> String {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .expect("read git revision");
+    assert!(output.status.success());
+    String::from_utf8(output.stdout).unwrap().trim().to_string()
+}
+
+fn finish_outdated_reconstruction(app: &mut App) {
+    for _ in 0..500 {
+        app.poll_outdated_reconstruction_responses();
+        if !app.outdated_reconstruction_pending() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    panic!("outdated reconstruction timed out");
+}
+
+fn jj_output(repo: &std::path::Path, args: &[&str]) -> String {
     let output = std::process::Command::new("jj")
         .current_dir(repo)
         .arg("-R")
@@ -48,6 +70,11 @@ fn run_jj(repo: &std::path::Path, args: &[&str]) {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    String::from_utf8(output.stdout).unwrap()
+}
+
+fn run_jj(repo: &std::path::Path, args: &[&str]) {
+    let _ = jj_output(repo, args);
 }
 
 fn tracked_watch_repo(name: &str) -> std::path::PathBuf {
@@ -2465,8 +2492,15 @@ fn live_refresh_moves_deleted_comment_to_outdated_and_restores_it() {
     assert!(app.maybe_watch_refresh_changed_files());
     assert!(app.review_comments[1].outdated);
     assert!(app.open_review_comment(0));
-    assert!(app.active_outdated_comments_view());
-    assert_eq!(app.outdated_comment_focus, Some(app.review_comments[0].id));
+    assert_eq!(
+        app.outdated_diff_title().as_deref(),
+        Some("Outdated: live.txt")
+    );
+    assert_eq!(
+        app.multi_diff.file_contents(0).map(|(_, new)| new),
+        Some("base\ntarget\n")
+    );
+    app.select_file(0);
 
     std::fs::write(&path, "base\ntarget\n").expect("restore target");
     app.refresh_current_file();
@@ -2475,6 +2509,367 @@ fn live_refresh_moves_deleted_comment_to_outdated_and_restores_it() {
 
     let _ = std::fs::remove_file(path);
     let _ = std::fs::remove_file(other_path);
+}
+
+#[test]
+fn outdated_comment_reconstruction_swaps_and_restores_live_git_diff() {
+    let _guard = DiffSettingsGuard::default();
+    let repo = std::env::temp_dir().join(format!(
+        "oyo_outdated_reconstruction_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&repo).unwrap();
+    run_git(&repo, &["init", "-q"]);
+    run_git(&repo, &["config", "user.name", "Test"]);
+    run_git(&repo, &["config", "user.email", "test@example.com"]);
+    run_git(&repo, &["config", "commit.gpgsign", "false"]);
+    std::fs::write(repo.join("a.txt"), "one\nold\n").unwrap();
+    std::fs::write(repo.join("b.txt"), "one\nold\n").unwrap();
+    run_git(&repo, &["add", "."]);
+    run_git(&repo, &["commit", "-qm", "base"]);
+    let base = git_rev(&repo);
+    std::fs::write(repo.join("a.txt"), "one\nhistorical\n").unwrap();
+    run_git(&repo, &["add", "."]);
+    run_git(&repo, &["commit", "-qm", "historical"]);
+    let historical = git_rev(&repo);
+    std::fs::write(repo.join("a.txt"), "one\nlive\n").unwrap();
+    std::fs::write(repo.join("b.txt"), "one\nlive\n").unwrap();
+    run_git(&repo, &["add", "."]);
+    run_git(&repo, &["commit", "-qm", "live"]);
+    let live = git_rev(&repo);
+    let changes = oyo_core::git::get_changes_between(&repo, &historical, &live).unwrap();
+    let diff =
+        MultiFileDiff::from_git_range(repo.clone(), changes, historical.clone(), live).unwrap();
+    let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+    app.set_review_persist_enabled(false);
+    app.enable_review_mode();
+    app.add_review_comment_from_cli(
+        "a.txt",
+        review::ReviewTargetKind::Line,
+        Some(review::ReviewSide::New),
+        None,
+        Some(review::ReviewRange { start: 2, end: 2 }),
+        "historical note".to_string(),
+    )
+    .unwrap();
+    let target = review::ReviewAnchorSnapshotTarget {
+        vcs: "git".to_string(),
+        jj_change_id: None,
+        jj_commit_id: None,
+        git_base_commit: Some(base),
+        git_head_commit: Some(historical),
+    };
+    app.review_comments[0].outdated = true;
+    let snapshot = app.review_comments[0].anchor.snapshot.as_mut().unwrap();
+    snapshot.line_text = "historical".to_string();
+    snapshot.target = Some(target.clone());
+    let mut second = app.review_comments[0].clone();
+    second.id = second.id.saturating_add(1);
+    second.body = "second historical note".to_string();
+    app.review_comments.push(second);
+
+    app.file_panel_mode = FilePanelMode::Comments;
+    app.file_list_focused = true;
+    app.file_list_area = Some((0, 0, 30, 10));
+    app.file_list_rows = vec![Some(0)];
+    assert!(app.handle_file_list_click(1, 1, false));
+    assert!(app.outdated_reconstruction_pending());
+    let spinner_backend = ratatui::backend::TestBackend::new(120, 28);
+    let mut spinner_terminal = ratatui::Terminal::new(spinner_backend).unwrap();
+    spinner_terminal
+        .draw(|frame| crate::ui::draw(frame, &mut app))
+        .unwrap();
+    let spinner_buffer = spinner_terminal.backend().buffer();
+    let spinner_text = (0..spinner_buffer.area.height)
+        .flat_map(|y| (0..spinner_buffer.area.width).map(move |x| spinner_buffer[(x, y)].symbol()))
+        .collect::<String>();
+    assert!(spinner_text.contains("Reconstructing..."), "{spinner_text}");
+    finish_outdated_reconstruction(&mut app);
+    assert_eq!(
+        app.outdated_diff_title().as_deref(),
+        Some("Outdated: a.txt")
+    );
+    assert_eq!(app.multi_diff.file_count(), 1);
+    assert!(!app.file_list_focused);
+    assert_eq!(app.file_panel_mode, FilePanelMode::Comments);
+    assert!(!app.needs_scroll_to_active);
+    assert_eq!(
+        app.multi_diff.file_contents(0).map(|(_, new)| new),
+        Some("one\nhistorical\n")
+    );
+    let backend = ratatui::backend::TestBackend::new(120, 28);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| crate::ui::draw(frame, &mut app))
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let rendered = (0..buffer.area.height)
+        .flat_map(|y| (0..buffer.area.width).map(move |x| buffer[(x, y)].symbol()))
+        .collect::<String>();
+    assert!(rendered.contains("historical"), "{rendered}");
+    assert!(rendered.contains("historical note"), "{rendered}");
+    assert!(app
+        .review_comment_overlays_for_current_file()
+        .iter()
+        .any(|overlay| overlay.id == app.review_comments[0].id));
+
+    assert!(app.open_review_comment(1));
+    assert!(app.outdated_reconstruction_pending());
+    app.select_file(1);
+    assert!(!app.outdated_reconstruction_pending());
+    for _ in 0..500 {
+        app.poll_outdated_reconstruction_responses();
+        if matches!(
+            app.outdated_reconstruction_cache
+                .get(&app.review_comments[1].id),
+            Some(review::OutdatedReconstructionState::Ready(_))
+        ) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(app.current_file_path(), "b.txt");
+    assert!(app.outdated_diff_title().is_none());
+    assert!(app.open_review_comment(1));
+    assert!(!app.outdated_reconstruction_pending());
+    assert_eq!(
+        app.outdated_diff_title().as_deref(),
+        Some("Outdated: a.txt")
+    );
+    let refreshed_live = MultiFileDiff::from_raw_files(
+        Some(repo.clone()),
+        vec![
+            oyo_core::multi::RawFileDiff {
+                path: "a.txt".into(),
+                old_path: None,
+                old_source_path: None,
+                new_source_path: None,
+                status: oyo_core::git::FileStatus::Modified,
+                old_content: "one\nhistorical\n".to_string(),
+                new_content: "one\nrefreshed a\n".to_string(),
+                binary: false,
+            },
+            oyo_core::multi::RawFileDiff {
+                path: "b.txt".into(),
+                old_path: None,
+                old_source_path: None,
+                new_source_path: None,
+                status: oyo_core::git::FileStatus::Modified,
+                old_content: "one\nold\n".to_string(),
+                new_content: "one\nrefreshed b\n".to_string(),
+                binary: false,
+            },
+        ],
+    );
+    app.replace_multi_diff(refreshed_live);
+    assert_eq!(
+        app.outdated_diff_title().as_deref(),
+        Some("Outdated: a.txt")
+    );
+    app.select_file(1);
+    assert!(app.outdated_diff_title().is_none());
+    assert_eq!(app.multi_diff.file_count(), 2);
+    assert_eq!(app.current_file_path(), "b.txt");
+    assert_eq!(
+        app.multi_diff.file_contents(1).map(|(_, new)| new),
+        Some("one\nrefreshed b\n")
+    );
+
+    let mut fallback = app.review_comments[0].clone();
+    fallback.id = fallback.id.saturating_add(100);
+    let stale_base = target.git_base_commit.clone();
+    fallback.anchor.snapshot.as_mut().unwrap().target = Some(review::ReviewAnchorSnapshotTarget {
+        vcs: "git".to_string(),
+        jj_change_id: None,
+        jj_commit_id: None,
+        git_base_commit: stale_base.clone(),
+        git_head_commit: stale_base,
+    });
+    app.review_comments.push(fallback);
+    assert!(app.open_review_comment(2));
+    finish_outdated_reconstruction(&mut app);
+    assert!(app.active_outdated_comments_view());
+    assert!(app.outdated_diff_title().is_none());
+
+    let _ = std::fs::remove_dir_all(repo);
+}
+
+#[test]
+fn outdated_comment_reconstruction_repairs_jj_evolog_and_falls_back() {
+    let _guard = DiffSettingsGuard::default();
+    if std::process::Command::new("jj")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        return;
+    }
+    let repo = std::env::temp_dir().join(format!(
+        "oyo_outdated_jj_reconstruction_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&repo).unwrap();
+    let init = std::process::Command::new("jj")
+        .arg("--config")
+        .arg("signing.behavior=\"drop\"")
+        .args(["git", "init", "--no-colocate"])
+        .arg(&repo)
+        .output()
+        .unwrap();
+    assert!(init.status.success());
+    run_jj(&repo, &["config", "set", "--repo", "user.name", "Test"]);
+    run_jj(
+        &repo,
+        &["config", "set", "--repo", "user.email", "test@example.com"],
+    );
+    std::fs::write(repo.join("a.txt"), "one\nbase\n").unwrap();
+    run_jj(&repo, &["commit", "-m", "base"]);
+    let base_commit = jj_output(&repo, &["log", "--no-graph", "-r", "@-", "-T", "commit_id"])
+        .trim()
+        .to_string();
+    std::fs::write(repo.join("a.txt"), "one\nhistorical\n").unwrap();
+    let historical_commit = jj_output(&repo, &["log", "--no-graph", "-r", "@", "-T", "commit_id"])
+        .trim()
+        .to_string();
+    std::fs::write(repo.join("a.txt"), "one\nlive\n").unwrap();
+    let current_change = jj_output(
+        &repo,
+        &[
+            "log",
+            "--no-graph",
+            "-r",
+            "@",
+            "-T",
+            "change_id.shortest(8)",
+        ],
+    )
+    .trim()
+    .to_string();
+    let diff = crate::build_jj_diff(&repo, "@", None).unwrap();
+    let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+    app.set_review_persist_enabled(false);
+    app.enable_review_mode();
+    app.add_review_comment_from_cli(
+        "a.txt",
+        review::ReviewTargetKind::Line,
+        Some(review::ReviewSide::New),
+        None,
+        Some(review::ReviewRange { start: 2, end: 2 }),
+        "historical jj note".to_string(),
+    )
+    .unwrap();
+    app.review_comments[0].outdated = true;
+    let snapshot = app.review_comments[0].anchor.snapshot.as_mut().unwrap();
+    snapshot.line_text = "historical".to_string();
+    snapshot.target = Some(review::ReviewAnchorSnapshotTarget {
+        vcs: "jj".to_string(),
+        jj_change_id: Some(current_change.clone()),
+        jj_commit_id: Some(historical_commit),
+        git_base_commit: None,
+        git_head_commit: None,
+    });
+
+    assert!(app.open_review_comment(0));
+    finish_outdated_reconstruction(&mut app);
+    assert_eq!(
+        app.outdated_diff_title().as_deref(),
+        Some("Outdated: a.txt")
+    );
+    assert_eq!(
+        app.multi_diff.file_contents(0).map(|(_, new)| new),
+        Some("one\nhistorical\n")
+    );
+    app.select_file(0);
+    assert!(app.outdated_diff_title().is_none());
+    assert_eq!(
+        app.multi_diff.file_contents(0).map(|(_, new)| new),
+        Some("one\nlive\n")
+    );
+
+    let mut stale = app.review_comments[0].clone();
+    stale.id = stale.id.saturating_add(100);
+    let stale_snapshot = stale.anchor.snapshot.as_mut().unwrap();
+    stale_snapshot.target = Some(review::ReviewAnchorSnapshotTarget {
+        vcs: "jj".to_string(),
+        jj_change_id: Some(current_change),
+        jj_commit_id: Some(base_commit.clone()),
+        git_base_commit: None,
+        git_head_commit: None,
+    });
+    app.review_comments.push(stale);
+    assert!(app.open_review_comment(1));
+    finish_outdated_reconstruction(&mut app);
+    assert_eq!(
+        app.outdated_diff_title().as_deref(),
+        Some("Outdated: a.txt")
+    );
+    assert_eq!(
+        app.multi_diff.file_contents(0).map(|(_, new)| new),
+        Some("one\nhistorical\n")
+    );
+    app.select_file(0);
+
+    let mut missing = app.review_comments[0].clone();
+    missing.id = missing.id.saturating_add(200);
+    missing.anchor.snapshot.as_mut().unwrap().target = Some(review::ReviewAnchorSnapshotTarget {
+        vcs: "jj".to_string(),
+        jj_change_id: Some("missing-change".to_string()),
+        jj_commit_id: Some(base_commit),
+        git_base_commit: None,
+        git_head_commit: None,
+    });
+    app.review_comments.push(missing);
+    assert!(app.open_review_comment(2));
+    finish_outdated_reconstruction(&mut app);
+    assert!(app.active_outdated_comments_view());
+    assert!(app.outdated_diff_title().is_none());
+
+    let _ = std::fs::remove_dir_all(repo);
+}
+
+#[test]
+fn outdated_reconstruction_preloads_from_hover_comments_and_idle() {
+    let diff = MultiFileDiff::from_file_pair(
+        "a.txt".into(),
+        "a.txt".into(),
+        "old\n".to_string(),
+        "new\n".to_string(),
+    );
+    let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+    app.set_review_persist_enabled(false);
+    app.enable_review_mode();
+    app.add_review_comment_from_cli(
+        "a.txt",
+        review::ReviewTargetKind::Line,
+        Some(review::ReviewSide::New),
+        None,
+        Some(review::ReviewRange { start: 1, end: 1 }),
+        "note".to_string(),
+    )
+    .unwrap();
+    app.review_comments[0].outdated = true;
+    let id = app.review_comments[0].id;
+
+    app.review_preview_hover_id = Some(id);
+    app.maybe_preload_hovered_outdated_reconstruction();
+    assert!(app.outdated_reconstruction_cache.contains_key(&id));
+
+    app.clear_outdated_reconstruction_cache();
+    app.show_comments_sidebar();
+    assert!(app.outdated_reconstruction_cache.contains_key(&id));
+
+    app.clear_outdated_reconstruction_cache();
+    app.last_outdated_reconstruction_idle_enqueue = Instant::now() - Duration::from_secs(1);
+    app.maybe_preload_idle_outdated_reconstruction();
+    assert!(app.outdated_reconstruction_cache.contains_key(&id));
 }
 
 #[test]
@@ -2513,6 +2908,12 @@ fn test_jj_watch_tracks_empty_start_additions_and_removals() {
 
     let diff = crate::build_jj_diff(&repo, "@", None).expect("initial jj diff");
     let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, Some("@".into()));
+    app.set_review_persist_enabled(false);
+    let (initial_change_id, initial_commit_id) = crate::jj_revision_ids(&repo, "@").unwrap();
+    let mut metadata = crate::basic_review_target_metadata("@", "jj");
+    metadata.jj_change_id = Some(initial_change_id);
+    metadata.jj_commit_id = Some(initial_commit_id.clone());
+    app.set_review_target_metadata(Some(metadata));
     app.set_jj_watch_target(repo.clone(), "@".into());
     assert_eq!(app.multi_diff.file_count(), 0);
     app.last_change_list_watch_check = Instant::now() - Duration::from_secs(2);
@@ -2521,6 +2922,13 @@ fn test_jj_watch_tracks_empty_start_additions_and_removals() {
     std::fs::write(repo.join("README.md"), "base\nbefore\n").expect("change tracked file");
     app.last_change_list_watch_check = Instant::now() - Duration::from_secs(2);
     assert!(app.tick());
+    let (_, amended_commit_id) = crate::jj_revision_ids(&repo, "@").unwrap();
+    assert_ne!(amended_commit_id, initial_commit_id);
+    assert_eq!(
+        app.review_target_metadata()
+            .and_then(|metadata| metadata.jj_commit_id.as_deref()),
+        Some(amended_commit_id.as_str())
+    );
     assert_eq!(app.current_file_path(), "README.md");
     assert_eq!(app.stats(), (1, 0));
     assert!(!app.multi_diff.current_navigator().diff().hunks.is_empty());

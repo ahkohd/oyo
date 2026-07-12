@@ -17,6 +17,8 @@ pub(crate) enum PaletteAction {
     ToggleAutoplay,
     ToggleAutoplayReverse,
     OpenDashboard,
+    NavigateBack,
+    NavigateForward,
     OpenFileSearch,
     OpenThemePicker,
     OpenCommentPicker,
@@ -389,6 +391,14 @@ impl App {
             label: "History...".to_string(),
             action: PaletteAction::OpenDashboard,
         });
+        entries.push(PaletteEntry {
+            label: "Navigate back".to_string(),
+            action: PaletteAction::NavigateBack,
+        });
+        entries.push(PaletteEntry {
+            label: "Navigate forward".to_string(),
+            action: PaletteAction::NavigateForward,
+        });
 
         if self.multi_diff.file_count() > 0 {
             entries.push(PaletteEntry {
@@ -509,6 +519,8 @@ impl App {
                 action,
                 PaletteAction::ToggleHelp
                     | PaletteAction::OpenDashboard
+                    | PaletteAction::NavigateBack
+                    | PaletteAction::NavigateForward
                     | PaletteAction::OpenThemePicker
                     | PaletteAction::OpenCommentPicker
                     | PaletteAction::OpenPrComments
@@ -534,6 +546,12 @@ impl App {
             PaletteAction::ToggleAutoplay => self.toggle_autoplay(),
             PaletteAction::ToggleAutoplayReverse => self.toggle_autoplay_reverse(),
             PaletteAction::OpenDashboard => self.open_dashboard = true,
+            PaletteAction::NavigateBack => {
+                self.navigate_view_back();
+            }
+            PaletteAction::NavigateForward => {
+                self.navigate_view_forward();
+            }
             PaletteAction::OpenFileSearch => self.start_file_search(),
             PaletteAction::OpenThemePicker => self.start_theme_picker(),
             PaletteAction::OpenCommentPicker => self.start_comment_picker(),
@@ -974,6 +992,13 @@ mod tests {
     fn palette_offers_current_file_path_and_position_in_diff_views() {
         let mut app = app();
         let entries = app.command_palette_entries();
+        assert!(entries.iter().any(|entry| {
+            entry.label == "Navigate back" && matches!(entry.action, PaletteAction::NavigateBack)
+        }));
+        assert!(entries.iter().any(|entry| {
+            entry.label == "Navigate forward"
+                && matches!(entry.action, PaletteAction::NavigateForward)
+        }));
         assert!(entries.iter().any(|entry| {
             entry.label == "Copy file path" && matches!(entry.action, PaletteAction::CopyFilePath)
         }));

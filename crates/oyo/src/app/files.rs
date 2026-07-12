@@ -87,6 +87,7 @@ impl App {
 
     // File navigation methods
     pub fn next_file(&mut self) {
+        self.restore_live_diff_after_outdated_view();
         if !self.file_filter.is_empty() {
             let indices = self.filtered_file_indices();
             if indices.is_empty() {
@@ -111,6 +112,7 @@ impl App {
     }
 
     pub fn prev_file(&mut self) {
+        self.restore_live_diff_after_outdated_view();
         if !self.file_filter.is_empty() {
             let indices = self.filtered_file_indices();
             if indices.is_empty() {
@@ -149,6 +151,7 @@ impl App {
     }
 
     pub(super) fn next_file_wrapped(&mut self) -> bool {
+        self.restore_live_diff_after_outdated_view();
         if !self.file_filter.is_empty() {
             let indices = self.filtered_file_indices();
             if indices.is_empty() {
@@ -182,6 +185,7 @@ impl App {
     }
 
     pub(super) fn prev_file_wrapped(&mut self) -> bool {
+        self.restore_live_diff_after_outdated_view();
         if !self.file_filter.is_empty() {
             let indices = self.filtered_file_indices();
             if indices.is_empty() {
@@ -215,6 +219,8 @@ impl App {
     }
 
     pub fn select_file(&mut self, index: usize) {
+        let history_origin = self.view_history_origin();
+        self.restore_live_diff_after_outdated_view();
         if index >= self.multi_diff.file_count() {
             return;
         }
@@ -229,6 +235,14 @@ impl App {
         }
         self.replace_active_topbar_tab_file(index);
         self.select_file_in_active_tab(index);
+        self.record_view_landing(
+            history_origin,
+            super::ViewHistoryRecipe::File {
+                tab_id: self.active_topbar_tab,
+                file_index: index,
+                scroll_offset: self.scroll_offset,
+            },
+        );
     }
 
     fn clear_review_action_prefixes(&mut self) {
@@ -355,6 +369,7 @@ impl App {
     }
 
     pub(crate) fn open_file_in_new_topbar_tab(&mut self, file_index: usize) {
+        self.restore_live_diff_after_outdated_view();
         if file_index >= self.multi_diff.file_count() {
             return;
         }
@@ -457,6 +472,7 @@ impl App {
     }
 
     pub(crate) fn new_topbar_tab(&mut self) {
+        self.restore_live_diff_after_outdated_view();
         if self.multi_diff.file_count() == 0 {
             return;
         }
@@ -499,6 +515,7 @@ impl App {
     }
 
     pub(crate) fn close_active_topbar_tab(&mut self) {
+        self.restore_live_diff_after_outdated_view();
         if let Some(tab_id) = self.active_topbar_tab {
             self.close_topbar_tab(tab_id);
         }
@@ -538,6 +555,8 @@ impl App {
         if self.active_topbar_tab == Some(tab_id) {
             return;
         }
+        let history_origin = self.view_history_origin();
+        self.restore_live_diff_after_outdated_view();
         if self.multi_diff.file_count() == 0 {
             return;
         }
@@ -619,6 +638,19 @@ impl App {
                 self.clear_diff_selection();
             }
         }
+        let destination = match tab.content {
+            TopbarTabContent::Help => super::ViewHistoryRecipe::Help { tab_id },
+            TopbarTabContent::PrComments => super::ViewHistoryRecipe::PrComments {
+                tab_id,
+                focus_comment_id: self.pr_comment_focus,
+            },
+            TopbarTabContent::OutdatedComments => super::ViewHistoryRecipe::OutdatedComments {
+                tab_id,
+                focus_comment_id: self.outdated_comment_focus,
+            },
+            TopbarTabContent::File(_) => super::ViewHistoryRecipe::Tab { tab_id },
+        };
+        self.record_view_landing(history_origin, destination);
     }
 
     fn set_virtual_comment_focus(&mut self, content: TopbarTabContent, focus: Option<u64>) {
@@ -634,6 +666,7 @@ impl App {
         content: TopbarTabContent,
         focus: Option<u64>,
     ) {
+        self.restore_live_diff_after_outdated_view();
         self.clear_virtual_comment_view_state();
         self.set_virtual_comment_focus(content, focus);
         self.save_active_topbar_tab_state();
@@ -659,6 +692,7 @@ impl App {
     }
 
     fn open_virtual_comments_tab(&mut self, content: TopbarTabContent, focus: Option<u64>) {
+        self.restore_live_diff_after_outdated_view();
         self.clear_virtual_comment_view_state();
         if let Some(id) = self
             .topbar_tabs
@@ -701,23 +735,82 @@ impl App {
         self.clear_diff_selection();
     }
 
+    fn open_virtual_comments_with_history(
+        &mut self,
+        content: TopbarTabContent,
+        focus: Option<u64>,
+        new_tab: bool,
+    ) {
+        let history_origin = self.view_history_origin();
+        let was_replaying = self.view_history_replaying;
+        self.view_history_replaying = true;
+        if new_tab {
+            self.open_virtual_comments_tab(content, focus);
+        } else {
+            self.open_virtual_comments_in_current_tab(content, focus);
+        }
+        self.view_history_replaying = was_replaying;
+        let Some(tab_id) = self.active_topbar_tab else {
+            return;
+        };
+        let destination = match content {
+            TopbarTabContent::PrComments => super::ViewHistoryRecipe::PrComments {
+                tab_id,
+                focus_comment_id: focus,
+            },
+            TopbarTabContent::OutdatedComments => super::ViewHistoryRecipe::OutdatedComments {
+                tab_id,
+                focus_comment_id: focus,
+            },
+            TopbarTabContent::File(_) | TopbarTabContent::Help => return,
+        };
+        self.record_view_landing(history_origin, destination);
+    }
+
     pub(crate) fn open_pr_comments_in_current_tab(&mut self, focus: Option<u64>) {
-        self.open_virtual_comments_in_current_tab(TopbarTabContent::PrComments, focus);
+        self.open_virtual_comments_with_history(TopbarTabContent::PrComments, focus, false);
     }
 
     pub(crate) fn open_pr_comments_tab(&mut self, focus: Option<u64>) {
-        self.open_virtual_comments_tab(TopbarTabContent::PrComments, focus);
+        self.open_virtual_comments_with_history(TopbarTabContent::PrComments, focus, true);
     }
 
     pub(crate) fn open_outdated_comments_in_current_tab(&mut self, focus: Option<u64>) {
-        self.open_virtual_comments_in_current_tab(TopbarTabContent::OutdatedComments, focus);
+        self.open_virtual_comments_with_history(TopbarTabContent::OutdatedComments, focus, false);
     }
 
     pub(crate) fn open_outdated_comments_tab(&mut self, focus: Option<u64>) {
-        self.open_virtual_comments_tab(TopbarTabContent::OutdatedComments, focus);
+        self.open_virtual_comments_with_history(TopbarTabContent::OutdatedComments, focus, true);
+    }
+
+    pub(crate) fn open_help_in_current_tab(&mut self) {
+        self.restore_live_diff_after_outdated_view();
+        self.save_active_topbar_tab_state();
+        let Some(tab_id) = self.active_topbar_tab else {
+            return;
+        };
+        let Some(tab) = self.topbar_tabs.iter_mut().find(|tab| tab.id == tab_id) else {
+            return;
+        };
+        tab.content = TopbarTabContent::Help;
+        tab.view_mode = ViewMode::Preview;
+        tab.scroll_offset = 0;
+        tab.horizontal_scroll = 0;
+        tab.preview_rendered = true;
+        tab.navigator_state = None;
+        self.view_mode = ViewMode::Preview;
+        self.preview_forced_by_content = false;
+        self.scroll_offset = 0;
+        self.horizontal_scroll = 0;
+        self.clear_diff_selection();
+        self.show_help = false;
     }
 
     pub(crate) fn open_help_tab(&mut self) {
+        let history_origin = self.view_history_origin();
+        let was_replaying = self.view_history_replaying;
+        self.view_history_replaying = true;
+        self.restore_live_diff_after_outdated_view();
         if let Some(id) = self
             .topbar_tabs
             .iter()
@@ -725,29 +818,33 @@ impl App {
             .map(|tab| tab.id)
         {
             self.select_topbar_tab(id);
-            return;
+        } else {
+            self.save_active_topbar_tab_state();
+            let id = self.next_topbar_tab_id;
+            self.next_topbar_tab_id = self.next_topbar_tab_id.saturating_add(1);
+            self.topbar_tabs.push(TopbarTab {
+                id,
+                content: TopbarTabContent::Help,
+                view_mode: ViewMode::Preview,
+                step_view_mode: self.step_view_mode,
+                stepping: self.stepping,
+                scroll_offset: 0,
+                horizontal_scroll: 0,
+                preview_rendered: true,
+                navigator_state: None,
+            });
+            self.active_topbar_tab = Some(id);
+            self.view_mode = ViewMode::Preview;
+            self.preview_forced_by_content = false;
+            self.scroll_offset = 0;
+            self.horizontal_scroll = 0;
+            self.clear_diff_selection();
+            self.show_help = false;
         }
-        self.save_active_topbar_tab_state();
-        let id = self.next_topbar_tab_id;
-        self.next_topbar_tab_id = self.next_topbar_tab_id.saturating_add(1);
-        self.topbar_tabs.push(TopbarTab {
-            id,
-            content: TopbarTabContent::Help,
-            view_mode: ViewMode::Preview,
-            step_view_mode: self.step_view_mode,
-            stepping: self.stepping,
-            scroll_offset: 0,
-            horizontal_scroll: 0,
-            preview_rendered: true,
-            navigator_state: None,
-        });
-        self.active_topbar_tab = Some(id);
-        self.view_mode = ViewMode::Preview;
-        self.preview_forced_by_content = false;
-        self.scroll_offset = 0;
-        self.horizontal_scroll = 0;
-        self.clear_diff_selection();
-        self.show_help = false;
+        self.view_history_replaying = was_replaying;
+        if let Some(tab_id) = self.active_topbar_tab {
+            self.record_view_landing(history_origin, super::ViewHistoryRecipe::Help { tab_id });
+        }
     }
 
     pub(crate) fn active_topbar_content(&self) -> Option<TopbarTabContent> {
@@ -1654,6 +1751,7 @@ impl App {
         self.review_line_add_hover = review_line_add_hover;
         self.review_preview_hover = review_preview_hover;
         self.review_preview_hover_id = review_preview_hover_id;
+        self.maybe_preload_hovered_outdated_reconstruction();
         self.review_preview_edit_hover = review_preview_edit_hover;
         self.review_preview_reply_hover = review_preview_reply_hover;
         self.review_preview_resolve_hover = review_preview_resolve_hover;
@@ -1966,12 +2064,14 @@ impl App {
     }
 
     pub(super) fn file_indices_for_query(&self, query: &str) -> Vec<usize> {
+        let files = self
+            .outdated_live_files()
+            .unwrap_or(self.multi_diff.files.as_slice());
         if query.is_empty() {
-            return (0..self.multi_diff.files.len()).collect();
+            return (0..files.len()).collect();
         }
         let query = query.to_ascii_lowercase();
-        self.multi_diff
-            .files
+        files
             .iter()
             .enumerate()
             .filter(|(_, file)| file.display_name.to_ascii_lowercase().contains(&query))
@@ -2172,6 +2272,11 @@ impl App {
         if working_copy_stamp == target.working_copy_stamp {
             return false;
         }
+        if let Some((change_id, commit_id)) =
+            crate::jj_revision_ids(&target.repo_root, &target.revision)
+        {
+            self.update_jj_review_target_ids(change_id, commit_id);
+        }
         let Ok(signature) = crate::jj_diff_file_signature(&target.repo_root, &target.revision)
         else {
             return false;
@@ -2356,17 +2461,59 @@ impl App {
         if let Some(target) = self.jj_watch_target.clone() {
             let working_copy_stamp = crate::jj_working_copy_stamp(&target.repo_root);
             if let Ok(refreshed) = crate::build_jj_diff(&target.repo_root, &target.revision, None) {
+                if let Some((change_id, commit_id)) =
+                    crate::jj_revision_ids(&target.repo_root, &target.revision)
+                {
+                    self.update_jj_review_target_ids(change_id, commit_id);
+                }
                 if let Some(target) = self.jj_watch_target.as_mut() {
                     target.working_copy_stamp = working_copy_stamp;
                 }
                 self.replace_multi_diff(refreshed);
             }
-        } else if self.multi_diff.refresh_all_from_git() {
-            self.reset_after_file_list_refresh();
+        } else if self.outdated_diff_view.is_some() {
+            self.clear_outdated_reconstruction_cache();
+            let view = self.outdated_diff_view.as_mut().unwrap();
+            view.cache_on_restore = false;
+            let repo_root = view.live_backup.repo_root().map(Path::to_path_buf);
+            let refreshed = view.live_backup.refresh_all_from_git();
+            if refreshed {
+                if let Some(repo_root) = repo_root {
+                    self.refresh_git_review_target_commits(&repo_root);
+                }
+            }
+        } else {
+            let repo_root = self.multi_diff.repo_root().map(Path::to_path_buf);
+            if self.multi_diff.refresh_all_from_git() {
+                if let Some(repo_root) = repo_root {
+                    self.refresh_git_review_target_commits(&repo_root);
+                }
+                self.reset_after_file_list_refresh(true);
+            }
         }
     }
 
     pub(crate) fn replace_multi_diff(&mut self, mut refreshed: oyo_core::MultiFileDiff) {
+        self.clear_outdated_reconstruction_cache();
+        if let Some(view) = self.outdated_diff_view.as_mut() {
+            view.cache_on_restore = false;
+            let selected_path = view
+                .live_backup
+                .current_file()
+                .map(|file| file.path.clone());
+            if let Some(index) = selected_path
+                .and_then(|path| refreshed.files.iter().position(|file| file.path == path))
+            {
+                refreshed.select_file(index);
+            }
+            if let Some(request) = refreshed.take_pending_content_for(refreshed.selected_index) {
+                let content = super::load_content_request_sync(request);
+                refreshed.apply_prepared_content(refreshed.selected_index, content);
+                refreshed.ensure_full_navigator(refreshed.selected_index);
+            }
+            view.live_backup = refreshed;
+            return;
+        }
         let recent_changes: HashMap<PathBuf, Option<Instant>> = self
             .multi_diff
             .files
@@ -2393,7 +2540,7 @@ impl App {
             self.multi_diff
                 .ensure_full_navigator(self.multi_diff.selected_index);
         }
-        self.reset_after_file_list_refresh();
+        self.reset_after_file_list_refresh(true);
         self.start_content_loading();
         for (index, file) in self.multi_diff.files.iter().enumerate() {
             if let Some(until) = recent_changes.get(&file.path) {
@@ -2414,7 +2561,10 @@ impl App {
         }
     }
 
-    fn reset_after_file_list_refresh(&mut self) {
+    pub(crate) fn reset_after_file_list_refresh(&mut self, repair_comments: bool) {
+        if repair_comments {
+            self.clear_outdated_reconstruction_cache();
+        }
         self.mark_diff_changed();
         self.diff_worker_tx = None;
         self.diff_worker_rx = None;
@@ -2449,7 +2599,9 @@ impl App {
         self.git_index_baseline = self.git_index_stamp();
         self.files_changed_on_disk = false;
         self.invalidate_review_repo_file_cache();
-        self.repair_review_comments_after_diff_refresh();
+        if repair_comments {
+            self.repair_review_comments_after_diff_refresh();
+        }
     }
 
     /// Get the total number of lines in the current view

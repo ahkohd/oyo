@@ -1222,6 +1222,7 @@ name = "oyo"
 version = "0.1.45"
 dependencies = [
  "anyhow",
+ "base64",
  "clap",
  "crossterm",
  "csv",

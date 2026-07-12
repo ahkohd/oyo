@@ -1880,6 +1880,48 @@ fn run_jj(repo_root: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+pub(crate) fn jj_revision_ids(repo_root: &Path, revision: &str) -> Option<(String, String)> {
+    let output = run_jj(
+        repo_root,
+        &[
+            "log",
+            "--no-graph",
+            "-r",
+            revision,
+            "-T",
+            "change_id.shortest(8) ++ \"\\t\" ++ commit_id.shortest(8)",
+        ],
+    )
+    .ok()?;
+    let (change_id, commit_id) = output.trim().split_once('\t')?;
+    Some((change_id.to_string(), commit_id.to_string()))
+}
+
+pub(crate) fn jj_evolog_commit_ids(repo_root: &Path, change_id: &str, limit: usize) -> Vec<String> {
+    run_jj(
+        repo_root,
+        &[
+            "evolog",
+            "-r",
+            change_id,
+            "--no-graph",
+            "-n",
+            &limit.to_string(),
+            "-T",
+            "self.commit().commit_id() ++ \"\\n\"",
+        ],
+    )
+    .map(|output| {
+        output
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_string)
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
 pub(crate) fn jj_working_copy_stamp(repo_root: &Path) -> Option<String> {
     run_jj(
         repo_root,
@@ -2523,7 +2565,7 @@ fn jj_target_metadata(label: &str, rev: &str) -> Option<ReviewTargetMetadata> {
     })
 }
 
-fn git_commit(root: &Path, rev: &str) -> Option<String> {
+pub(crate) fn git_commit(root: &Path, rev: &str) -> Option<String> {
     if rev == INDEX_REF {
         return None;
     }

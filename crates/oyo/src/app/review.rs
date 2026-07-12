@@ -8,6 +8,7 @@ use crate::config::{
     ReviewHookStdin,
 };
 use crate::toasts::ToastEvent;
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use crossterm::event::KeyEvent;
 use keymap::{parser::parse_seq, ToKeyMap};
 use oyo_core::{ChangeKind, LineKind, ViewLine};
@@ -17,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{hash_map::DefaultHasher, BTreeMap, BTreeSet};
 use std::fs;
 use std::hash::{Hash, Hasher};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -53,6 +54,22 @@ pub(crate) struct ReviewRange {
     pub(crate) end: usize,
 }
 
+pub(crate) enum OutdatedReconstructionState {
+    Pending,
+    Ready(Box<oyo_core::MultiFileDiff>),
+    Failed,
+}
+
+pub(crate) struct OutdatedReconstructionRequest {
+    pub(crate) comment: ReviewComment,
+    pub(crate) repo_root: PathBuf,
+}
+
+pub(crate) struct OutdatedReconstructionResponse {
+    pub(crate) comment_id: u64,
+    pub(crate) diff: Option<oyo_core::MultiFileDiff>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ReviewAnchorSnapshotTarget {
@@ -67,6 +84,15 @@ pub(crate) struct ReviewAnchorSnapshotTarget {
     pub(crate) git_head_commit: Option<String>,
 }
 
+const CAPTURED_FILE_MAX_BYTES: usize = 256 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CapturedFile {
+    pub(crate) data: String,
+    pub(crate) orig_len: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ReviewAnchorSnapshot {
@@ -79,6 +105,40 @@ pub(crate) struct ReviewAnchorSnapshot {
     pub(crate) context_after: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) target: Option<ReviewAnchorSnapshotTarget>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) old_file: Option<CapturedFile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) new_file: Option<CapturedFile>,
+}
+
+fn capture_file(content: &str) -> Option<CapturedFile> {
+    if content.len() > CAPTURED_FILE_MAX_BYTES {
+        return None;
+    }
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder.write_all(content.as_bytes()).ok()?;
+    let compressed = encoder.finish().ok()?;
+    Some(CapturedFile {
+        data: BASE64.encode(compressed),
+        orig_len: content.len(),
+    })
+}
+
+fn decode_captured_file(captured: &CapturedFile) -> Option<String> {
+    if captured.orig_len > CAPTURED_FILE_MAX_BYTES {
+        return None;
+    }
+    let compressed = BASE64.decode(&captured.data).ok()?;
+    let decoder = flate2::read::GzDecoder::new(compressed.as_slice());
+    let mut bytes = Vec::with_capacity(captured.orig_len);
+    decoder
+        .take((CAPTURED_FILE_MAX_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() != captured.orig_len {
+        return None;
+    }
+    String::from_utf8(bytes).ok()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1096,9 +1156,14 @@ fn line_anchor_matches(anchor: &ReviewAnchor, line: &ViewLine) -> bool {
     }
 }
 
-fn review_comment_is_inline_visible(comment: &ReviewComment, file_path: &str) -> bool {
+fn review_comment_is_inline_visible(
+    comment: &ReviewComment,
+    file_path: &str,
+    reconstructed_comment_id: Option<u64>,
+) -> bool {
     !comment.deleted
-        && !comment.outdated
+        && reconstructed_comment_id.is_none_or(|id| comment.id == id)
+        && (!comment.outdated || reconstructed_comment_id == Some(comment.id))
         && comment.anchor.kind != ReviewTargetKind::PullRequest
         && comment.anchor.file_path == file_path
 }
@@ -1696,6 +1761,41 @@ impl App {
         self.review_target_metadata.as_ref()
     }
 
+    pub(crate) fn update_jj_review_target_ids(&mut self, change_id: String, commit_id: String) {
+        let Some(mut metadata) = self.review_target_metadata.clone() else {
+            return;
+        };
+        if metadata.vcs != "jj"
+            || (metadata.jj_change_id.as_deref() == Some(change_id.as_str())
+                && metadata.jj_commit_id.as_deref() == Some(commit_id.as_str()))
+        {
+            return;
+        }
+        metadata.jj_change_id = Some(change_id);
+        metadata.jj_commit_id = Some(commit_id);
+        self.set_review_target_metadata(Some(metadata));
+    }
+
+    pub(crate) fn refresh_git_review_target_commits(&mut self, repo_root: &Path) {
+        let Some(mut metadata) = self.review_target_metadata.clone() else {
+            return;
+        };
+        if metadata.vcs != "git" {
+            return;
+        }
+        if let Some(base) = metadata.git_base_ref.as_deref() {
+            if let Some(commit) = crate::git_commit(repo_root, base) {
+                metadata.git_base_commit = Some(commit);
+            }
+        }
+        if let Some(head) = metadata.git_head_ref.as_deref() {
+            if let Some(commit) = crate::git_commit(repo_root, head) {
+                metadata.git_head_commit = Some(commit);
+            }
+        }
+        self.set_review_target_metadata(Some(metadata));
+    }
+
     fn fill_review_anchor_snapshot(&self, anchor: &mut ReviewAnchor) {
         if anchor.snapshot.is_none() {
             anchor.snapshot = self.review_anchor_snapshot(anchor);
@@ -1717,6 +1817,8 @@ impl App {
             context_before,
             context_after,
             target: review_anchor_snapshot_target(self.review_target_metadata.as_ref()),
+            old_file: capture_file(old_content),
+            new_file: capture_file(new_content),
         })
     }
 
@@ -2112,6 +2214,347 @@ impl App {
         self.open_review_comment(order[position])
     }
 
+    fn reconstructed_diff_places_anchor(
+        comment: &ReviewComment,
+        diff: &oyo_core::MultiFileDiff,
+    ) -> bool {
+        if diff.file_count() != 1 {
+            return false;
+        }
+        let Some(snapshot) = comment.anchor.snapshot.as_ref() else {
+            return false;
+        };
+        let Some(side) = snapshot_review_side(snapshot) else {
+            return false;
+        };
+        let Some((old_content, new_content)) = diff.file_contents(0) else {
+            return false;
+        };
+        let content = match side {
+            ReviewSide::Old => old_content,
+            ReviewSide::New => new_content,
+        };
+        let current_line = anchor_line_number(&comment.anchor, side).or(Some(snapshot.line_number));
+        best_snapshot_line_match(content, snapshot, current_line).is_some()
+    }
+
+    fn reconstruct_captured_outdated_comment_diff(
+        comment: &ReviewComment,
+    ) -> Option<oyo_core::MultiFileDiff> {
+        let snapshot = comment.anchor.snapshot.as_ref()?;
+        let old_content = decode_captured_file(snapshot.old_file.as_ref()?)?;
+        let new_content = decode_captured_file(snapshot.new_file.as_ref()?)?;
+        let path = PathBuf::from(&comment.anchor.file_path);
+        let diff =
+            oyo_core::MultiFileDiff::from_file_pair(path.clone(), path, old_content, new_content);
+        Self::reconstructed_diff_places_anchor(comment, &diff).then_some(diff)
+    }
+
+    fn reconstruct_outdated_comment_diff(
+        repo_root: &Path,
+        comment: &ReviewComment,
+    ) -> Option<oyo_core::MultiFileDiff> {
+        let target = comment.anchor.snapshot.as_ref()?.target.as_ref()?;
+        let repo_root = repo_root.to_path_buf();
+        let path = PathBuf::from(&comment.anchor.file_path);
+        match target.vcs.as_str() {
+            "jj" => {
+                let mut seen = FxHashSet::default();
+                for revision in [
+                    target.jj_commit_id.as_deref(),
+                    target.jj_change_id.as_deref(),
+                ]
+                .into_iter()
+                .flatten()
+                .map(str::to_string)
+                .chain(
+                    target
+                        .jj_change_id
+                        .as_deref()
+                        .into_iter()
+                        .flat_map(|change_id| {
+                            crate::jj_evolog_commit_ids(&repo_root, change_id, 30)
+                        }),
+                ) {
+                    if !seen.insert(revision.clone()) {
+                        continue;
+                    }
+                    let Ok(diff) = crate::build_jj_diff(&repo_root, &revision, Some(&path)) else {
+                        continue;
+                    };
+                    if Self::reconstructed_diff_places_anchor(comment, &diff) {
+                        return Some(diff);
+                    }
+                }
+                None
+            }
+            "git" => {
+                let base = target.git_base_commit.as_deref()?;
+                let head = target.git_head_commit.as_deref()?;
+                let changes = oyo_core::git::get_changes_between(&repo_root, base, head)
+                    .ok()?
+                    .into_iter()
+                    .filter(|file| {
+                        file.path == path || file.old_path.as_deref() == Some(path.as_path())
+                    })
+                    .collect::<Vec<_>>();
+                if changes.is_empty() {
+                    return None;
+                }
+                let diff = oyo_core::MultiFileDiff::from_git_range(
+                    repo_root,
+                    changes,
+                    base.to_string(),
+                    head.to_string(),
+                )
+                .ok()?;
+                Self::reconstructed_diff_places_anchor(comment, &diff).then_some(diff)
+            }
+            _ => None,
+        }
+    }
+
+    fn ensure_outdated_reconstruction_worker(&mut self) {
+        if self.outdated_reconstruction_tx.is_some() {
+            return;
+        }
+        let (request_tx, request_rx) = std::sync::mpsc::channel::<OutdatedReconstructionRequest>();
+        let (response_tx, response_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            while let Ok(request) = request_rx.recv() {
+                let comment_id = request.comment.id;
+                let diff =
+                    App::reconstruct_outdated_comment_diff(&request.repo_root, &request.comment);
+                if response_tx
+                    .send(OutdatedReconstructionResponse { comment_id, diff })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        self.outdated_reconstruction_tx = Some(request_tx);
+        self.outdated_reconstruction_rx = Some(response_rx);
+    }
+
+    pub(crate) fn enqueue_outdated_reconstruction(&mut self, comment_id: u64) -> bool {
+        if self.outdated_reconstruction_cache.contains_key(&comment_id) {
+            return false;
+        }
+        let Some(comment) = self
+            .review_comments
+            .iter()
+            .find(|comment| comment.id == comment_id && comment.outdated && !comment.deleted)
+            .cloned()
+        else {
+            return false;
+        };
+        if let Some(diff) = Self::reconstruct_captured_outdated_comment_diff(&comment) {
+            self.outdated_reconstruction_cache.insert(
+                comment_id,
+                OutdatedReconstructionState::Ready(Box::new(diff)),
+            );
+            return true;
+        }
+        let Some(repo_root) = self.multi_diff.repo_root().map(Path::to_path_buf) else {
+            self.outdated_reconstruction_cache
+                .insert(comment_id, OutdatedReconstructionState::Failed);
+            return false;
+        };
+        self.ensure_outdated_reconstruction_worker();
+        let request = OutdatedReconstructionRequest { comment, repo_root };
+        if self
+            .outdated_reconstruction_tx
+            .as_ref()
+            .is_some_and(|tx| tx.send(request).is_ok())
+        {
+            self.outdated_reconstruction_cache
+                .insert(comment_id, OutdatedReconstructionState::Pending);
+            true
+        } else {
+            self.outdated_reconstruction_cache
+                .insert(comment_id, OutdatedReconstructionState::Failed);
+            false
+        }
+    }
+
+    pub(crate) fn preload_all_outdated_reconstructions(&mut self) {
+        for id in self.outdated_comment_ids() {
+            self.enqueue_outdated_reconstruction(id);
+        }
+    }
+
+    pub(crate) fn maybe_preload_hovered_outdated_reconstruction(&mut self) {
+        if let Some(id) = self.review_preview_hover_id {
+            self.enqueue_outdated_reconstruction(id);
+        }
+    }
+
+    pub(crate) fn maybe_preload_idle_outdated_reconstruction(&mut self) -> bool {
+        if self.last_outdated_reconstruction_idle_enqueue.elapsed() < Duration::from_millis(500) {
+            return false;
+        }
+        let next = self
+            .outdated_comment_ids()
+            .into_iter()
+            .find(|id| !self.outdated_reconstruction_cache.contains_key(id));
+        let Some(id) = next else {
+            return false;
+        };
+        self.last_outdated_reconstruction_idle_enqueue = Instant::now();
+        self.enqueue_outdated_reconstruction(id)
+    }
+
+    pub(crate) fn poll_outdated_reconstruction_responses(&mut self) -> bool {
+        let mut responses = Vec::new();
+        if let Some(rx) = self.outdated_reconstruction_rx.as_ref() {
+            while let Ok(response) = rx.try_recv() {
+                responses.push(response);
+            }
+        }
+        let mut dirty = false;
+        for response in responses {
+            if !matches!(
+                self.outdated_reconstruction_cache.get(&response.comment_id),
+                Some(OutdatedReconstructionState::Pending)
+            ) {
+                continue;
+            }
+            let state = response
+                .diff
+                .map(|diff| OutdatedReconstructionState::Ready(Box::new(diff)))
+                .unwrap_or(OutdatedReconstructionState::Failed);
+            self.outdated_reconstruction_cache
+                .insert(response.comment_id, state);
+            dirty = true;
+            if self
+                .pending_outdated_reconstruction
+                .as_ref()
+                .is_some_and(|(id, _)| *id == response.comment_id)
+            {
+                self.pending_outdated_reconstruction = None;
+                let comment = self
+                    .review_comments
+                    .iter()
+                    .find(|comment| comment.id == response.comment_id)
+                    .cloned();
+                match (
+                    comment,
+                    self.outdated_reconstruction_cache
+                        .remove(&response.comment_id),
+                ) {
+                    (Some(comment), Some(OutdatedReconstructionState::Ready(diff))) => {
+                        self.show_reconstructed_outdated_diff(&comment, *diff);
+                    }
+                    (Some(comment), _) => {
+                        self.outdated_reconstruction_cache
+                            .insert(response.comment_id, OutdatedReconstructionState::Failed);
+                        self.open_outdated_comments_in_current_tab(Some(comment.id));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        dirty
+    }
+
+    pub(crate) fn clear_outdated_reconstruction_cache(&mut self) {
+        self.outdated_reconstruction_cache.clear();
+        self.pending_outdated_reconstruction = None;
+        if let Some(view) = self.outdated_diff_view.as_mut() {
+            view.cache_on_restore = false;
+        }
+    }
+
+    fn show_reconstructed_outdated_diff(
+        &mut self,
+        comment: &ReviewComment,
+        mut reconstructed: oyo_core::MultiFileDiff,
+    ) {
+        reconstructed.select_file(0);
+        let active_tab_id = self.active_topbar_tab;
+        let active_tab_content = active_tab_id.and_then(|id| {
+            self.topbar_tabs
+                .iter()
+                .find(|tab| tab.id == id)
+                .map(|tab| tab.content)
+        });
+        let live_backup = std::mem::replace(&mut self.multi_diff, reconstructed);
+        self.outdated_diff_view = Some(super::OutdatedDiffView {
+            comment_id: comment.id,
+            file_path: comment.anchor.file_path.clone(),
+            live_backup,
+            active_tab_id,
+            active_tab_content,
+            cache_on_restore: true,
+        });
+        if let Some(id) = active_tab_id {
+            if let Some(tab) = self.topbar_tabs.iter_mut().find(|tab| tab.id == id) {
+                tab.content = super::TopbarTabContent::File(0);
+                tab.navigator_state = None;
+            }
+        }
+        self.reset_after_file_list_refresh(false);
+        self.file_list_focused = false;
+        self.stop_file_filter();
+        self.scroll_to_review_anchor(&comment.anchor);
+    }
+
+    pub(crate) fn restore_live_diff_after_outdated_view(&mut self) -> bool {
+        let cancelled_pending = self.pending_outdated_reconstruction.take().is_some();
+        let Some(view) = self.outdated_diff_view.take() else {
+            return cancelled_pending;
+        };
+        let reconstructed = std::mem::replace(&mut self.multi_diff, view.live_backup);
+        if view.cache_on_restore {
+            self.outdated_reconstruction_cache.insert(
+                view.comment_id,
+                OutdatedReconstructionState::Ready(Box::new(reconstructed)),
+            );
+        }
+        if let Some(id) = view.active_tab_id {
+            if let Some(tab) = self.topbar_tabs.iter_mut().find(|tab| tab.id == id) {
+                if let Some(content) = view.active_tab_content {
+                    tab.content = content;
+                }
+                tab.navigator_state = None;
+            }
+        }
+        self.reset_after_file_list_refresh(false);
+        self.start_content_loading();
+        true
+    }
+
+    pub(crate) fn outdated_live_files(&self) -> Option<&[oyo_core::multi::FileEntry]> {
+        self.outdated_diff_view
+            .as_ref()
+            .map(|view| view.live_backup.files.as_slice())
+    }
+
+    pub(crate) fn outdated_live_selected_index(&self) -> Option<usize> {
+        self.outdated_diff_view
+            .as_ref()
+            .map(|view| view.live_backup.selected_index)
+    }
+
+    pub(crate) fn outdated_diff_title(&self) -> Option<String> {
+        self.outdated_diff_view
+            .as_ref()
+            .map(|view| {
+                debug_assert_eq!(self.active_review_comment_id, Some(view.comment_id));
+                format!("Outdated: {}", view.file_path)
+            })
+            .or_else(|| {
+                self.pending_outdated_reconstruction
+                    .as_ref()
+                    .map(|(_, file)| format!("Outdated: {file}"))
+            })
+    }
+
+    pub(crate) fn outdated_reconstruction_pending(&self) -> bool {
+        self.pending_outdated_reconstruction.is_some()
+    }
+
     pub fn open_review_comment(&mut self, index: usize) -> bool {
         let Some(comment) = self
             .review_comments
@@ -2121,21 +2564,61 @@ impl App {
         else {
             return false;
         };
+        let history_origin = self.view_history_origin();
+        let was_replaying = self.view_history_replaying;
+        self.view_history_replaying = true;
         self.active_review_comment_id = Some(comment.id);
         self.flash_review_preview(comment.anchor.anchor_key.clone());
         if self.review_editor_active() {
             self.review_cancel_editor();
         }
         if comment.outdated {
-            self.open_outdated_comments_in_current_tab(Some(comment.id));
-            return true;
-        }
-        if comment.anchor.kind == ReviewTargetKind::PullRequest {
+            self.restore_live_diff_after_outdated_view();
+            if let Some(diff) = Self::reconstruct_captured_outdated_comment_diff(&comment) {
+                self.show_reconstructed_outdated_diff(&comment, diff);
+            } else {
+                match self.outdated_reconstruction_cache.remove(&comment.id) {
+                    Some(OutdatedReconstructionState::Ready(diff)) => {
+                        self.show_reconstructed_outdated_diff(&comment, *diff);
+                    }
+                    Some(OutdatedReconstructionState::Failed) => {
+                        self.outdated_reconstruction_cache
+                            .insert(comment.id, OutdatedReconstructionState::Failed);
+                        self.open_outdated_comments_in_current_tab(Some(comment.id));
+                    }
+                    Some(OutdatedReconstructionState::Pending) => {
+                        self.outdated_reconstruction_cache
+                            .insert(comment.id, OutdatedReconstructionState::Pending);
+                        self.pending_outdated_reconstruction =
+                            Some((comment.id, comment.anchor.file_path.clone()));
+                    }
+                    None => {
+                        self.enqueue_outdated_reconstruction(comment.id);
+                        if matches!(
+                            self.outdated_reconstruction_cache.get(&comment.id),
+                            Some(OutdatedReconstructionState::Failed)
+                        ) {
+                            self.open_outdated_comments_in_current_tab(Some(comment.id));
+                        } else {
+                            self.pending_outdated_reconstruction =
+                                Some((comment.id, comment.anchor.file_path.clone()));
+                        }
+                    }
+                }
+            }
+        } else if comment.anchor.kind == ReviewTargetKind::PullRequest {
             self.open_pr_comments_in_current_tab(Some(comment.id));
-            return true;
+        } else {
+            self.select_file(comment.anchor.file_index);
+            self.scroll_to_review_anchor(&comment.anchor);
         }
-        self.select_file(comment.anchor.file_index);
-        self.scroll_to_review_anchor(&comment.anchor);
+        self.view_history_replaying = was_replaying;
+        self.record_view_landing(
+            history_origin,
+            super::ViewHistoryRecipe::Comment {
+                comment_id: comment.id,
+            },
+        );
         true
     }
 
@@ -4038,11 +4521,12 @@ impl App {
             return 0;
         }
         let file_path = self.current_file_path();
+        let reconstructed_comment_id = self.outdated_diff_view.as_ref().map(|view| view.comment_id);
         let anchors = self
             .review_comments
             .iter()
             .filter(|comment| {
-                review_comment_is_inline_visible(comment, &file_path)
+                review_comment_is_inline_visible(comment, &file_path, reconstructed_comment_id)
                     && comment.anchor.kind == ReviewTargetKind::Line
             })
             .map(|comment| comment.anchor.anchor_key.as_str())
@@ -4057,10 +4541,11 @@ impl App {
             return FxHashSet::default();
         }
         let file_path = self.current_file_path();
+        let reconstructed_comment_id = self.outdated_diff_view.as_ref().map(|view| view.comment_id);
         self.review_comments
             .iter()
             .filter(|comment| {
-                review_comment_is_inline_visible(comment, &file_path)
+                review_comment_is_inline_visible(comment, &file_path, reconstructed_comment_id)
                     && comment.anchor.kind == ReviewTargetKind::Line
             })
             .filter_map(|comment| {
@@ -4086,6 +4571,7 @@ impl App {
             return Vec::new();
         }
 
+        let reconstructed_comment_id = self.outdated_diff_view.as_ref().map(|view| view.comment_id);
         let editing_comment_id = self
             .review_editor
             .as_ref()
@@ -4094,7 +4580,9 @@ impl App {
         let mut comments = self
             .review_comments
             .iter()
-            .filter(|comment| review_comment_is_inline_visible(comment, &file_path))
+            .filter(|comment| {
+                review_comment_is_inline_visible(comment, &file_path, reconstructed_comment_id)
+            })
             .filter(|comment| editing_comment_id != Some(comment.id))
             .collect::<Vec<_>>();
         let mut thread_order = BTreeMap::new();
@@ -5419,6 +5907,7 @@ impl App {
 
     fn touch_review_state(&mut self) {
         self.review_revision = self.review_revision.saturating_add(1);
+        self.clear_outdated_reconstruction_cache();
     }
 
     fn mark_or_remove_review_comment(&mut self, idx: usize) {
@@ -7517,7 +8006,13 @@ impl App {
             return false;
         }
         let Some(file_index) = file_index else {
-            return false;
+            if self.review_comments[comment_idx].resolved
+                || self.review_comments[comment_idx].outdated
+            {
+                return false;
+            }
+            self.review_comments[comment_idx].outdated = true;
+            return true;
         };
         let Some(side) = snapshot_review_side(&snapshot) else {
             return false;
@@ -8254,6 +8749,30 @@ mod tests {
     }
 
     #[test]
+    fn missing_diff_file_marks_unresolved_comment_outdated_and_opens_fallback() {
+        let mut app = test_app_with_new_content("one\ntwo\ntarget\nfour\nfive\nsix\n");
+        app.add_review_comment_from_cli(
+            "new.txt",
+            ReviewTargetKind::Line,
+            Some(ReviewSide::New),
+            None,
+            Some(ReviewRange { start: 3, end: 3 }),
+            "please fix".to_string(),
+        )
+        .unwrap();
+        app.review_comments[0].anchor.file_index = 99;
+
+        assert!(app.reconcile_review_comment_anchor(0, None));
+        assert!(app.review_comments[0].outdated);
+        let snapshot = app.review_comments[0].anchor.snapshot.as_mut().unwrap();
+        snapshot.old_file = None;
+        snapshot.new_file = None;
+        assert!(app.open_review_comment(0));
+        assert!(app.active_outdated_comments_view());
+        assert_eq!(app.outdated_comment_focus, Some(app.review_comments[0].id));
+    }
+
+    #[test]
     fn anchor_drift_reanchors_shifted_comment_idempotently() {
         let mut app = test_app_with_new_content("one\ntwo\ntarget\nfour\nfive\nsix\n");
         app.add_review_comment_from_cli(
@@ -8403,6 +8922,129 @@ mod tests {
     }
 
     #[test]
+    fn captured_file_round_trips_and_respects_cap() {
+        let content = "hello\n".repeat(1_000);
+        let captured = capture_file(&content).unwrap();
+        assert!(captured.data.len() < content.len());
+        assert_eq!(
+            decode_captured_file(&captured).as_deref(),
+            Some(content.as_str())
+        );
+        assert!(capture_file(&"x".repeat(CAPTURED_FILE_MAX_BYTES + 1)).is_none());
+        assert!(decode_captured_file(&CapturedFile {
+            data: "not base64".to_string(),
+            orig_len: 10,
+        })
+        .is_none());
+    }
+
+    #[test]
+    fn captured_snapshot_round_trips_and_old_json_defaults_to_none() {
+        let captured = capture_file("old\n").unwrap();
+        let snapshot = ReviewAnchorSnapshot {
+            side: "new".to_string(),
+            line_number: 1,
+            line_text: "new".to_string(),
+            context_before: Vec::new(),
+            context_after: Vec::new(),
+            target: None,
+            old_file: Some(captured.clone()),
+            new_file: Some(capture_file("new\n").unwrap()),
+        };
+        let json = serde_json::to_string(&snapshot).unwrap();
+        let round_trip: ReviewAnchorSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(round_trip.old_file, Some(captured));
+        let old: ReviewAnchorSnapshot = serde_json::from_str(
+            r#"{"side":"new","lineNumber":1,"lineText":"new","contextBefore":[],"contextAfter":[]}"#,
+        )
+        .unwrap();
+        assert!(old.old_file.is_none());
+        assert!(old.new_file.is_none());
+    }
+
+    #[test]
+    fn outdated_comment_reconstructs_from_capture_without_repository() {
+        let mut app = test_app_with_new_content("one\ntwo\ncaptured\nfour\nfive\nsix\n");
+        app.add_review_comment_from_cli(
+            "new.txt",
+            ReviewTargetKind::Line,
+            Some(ReviewSide::New),
+            None,
+            Some(ReviewRange { start: 3, end: 3 }),
+            "captured note".to_string(),
+        )
+        .unwrap();
+        app.review_comments[0].outdated = true;
+        app.multi_diff = MultiFileDiff::from_file_pair(
+            "old.txt".into(),
+            "new.txt".into(),
+            "one\ntwo\nold\nfour\nfive\nsix\n".to_string(),
+            "one\ntwo\nold\nfour\nfive\nsix\n".to_string(),
+        );
+
+        let tab_count = app.topbar_tabs.len();
+        assert!(app.open_review_comment(0));
+        assert_eq!(app.topbar_tabs.len(), tab_count);
+        assert!(!app.outdated_reconstruction_pending());
+        assert_eq!(
+            app.outdated_diff_title().as_deref(),
+            Some("Outdated: new.txt")
+        );
+        assert_eq!(
+            app.multi_diff.file_contents(0).map(|(_, new)| new),
+            Some("one\ntwo\ncaptured\nfour\nfive\nsix\n")
+        );
+        assert_eq!(app.view_history.len(), 2);
+        assert!(matches!(
+            app.current_view_history_recipe(),
+            Some(crate::app::ViewHistoryRecipe::Comment { comment_id })
+                if comment_id == app.review_comments[0].id
+        ));
+        assert!(app.navigate_view_back());
+        assert!(app.outdated_diff_title().is_none());
+        assert!(app.navigate_view_forward());
+        assert_eq!(app.topbar_tabs.len(), tab_count);
+        assert_eq!(
+            app.outdated_diff_title().as_deref(),
+            Some("Outdated: new.txt")
+        );
+        app.select_file(0);
+        assert!(app.outdated_diff_title().is_none());
+        assert!(app.navigate_view_back());
+        assert_eq!(
+            app.outdated_diff_title().as_deref(),
+            Some("Outdated: new.txt")
+        );
+    }
+
+    #[test]
+    fn corrupt_capture_falls_back_without_repository() {
+        let mut app = test_app_with_new_content("one\ntwo\ntarget\nfour\nfive\nsix\n");
+        app.add_review_comment_from_cli(
+            "new.txt",
+            ReviewTargetKind::Line,
+            Some(ReviewSide::New),
+            None,
+            Some(ReviewRange { start: 3, end: 3 }),
+            "note".to_string(),
+        )
+        .unwrap();
+        app.review_comments[0].outdated = true;
+        app.review_comments[0]
+            .anchor
+            .snapshot
+            .as_mut()
+            .unwrap()
+            .new_file = Some(CapturedFile {
+            data: "broken".to_string(),
+            orig_len: 6,
+        });
+
+        assert!(app.open_review_comment(0));
+        assert!(app.active_outdated_comments_view());
+    }
+
+    #[test]
     fn outdated_comment_navigation_opens_focused_snapshot_view() {
         let mut app = test_app();
         let mut comment = line_comment();
@@ -8416,6 +9058,8 @@ mod tests {
             context_before: vec!["fn answer() {".to_string()],
             context_after: vec!["}".to_string()],
             target: None,
+            old_file: None,
+            new_file: None,
         });
         app.review_comments.push(comment);
 
@@ -8851,6 +9495,8 @@ mod tests {
             context_before: Vec::new(),
             context_after: Vec::new(),
             target: None,
+            old_file: None,
+            new_file: None,
         });
 
         assert!(!app.reconcile_review_comment_anchor(1, Some(0)));

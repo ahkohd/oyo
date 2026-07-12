@@ -153,6 +153,8 @@ oy control play --session review-a --from current --to end --delay 700ms
 oy control pause --session review-a
 oy control cancel --session review-a
 oy control action --session review-a normal.step_down --count 3
+oy control action --session review-a normal.navigate_back
+oy control action --session review-a normal.navigate_forward
 oy control rename --session review-a review-b
 ```
 

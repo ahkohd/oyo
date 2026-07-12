@@ -26,6 +26,7 @@ crossterm = { workspace = true, features = ["use-dev-tty"] }
 keymap = { workspace = true, features = ["crossterm"] }
 clap = { workspace = true }
 flate2 = { workspace = true }
+base64 = { workspace = true }
 csv = { workspace = true }
 tokio = { workspace = true }
 toml = { workspace = true }

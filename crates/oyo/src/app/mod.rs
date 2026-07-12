@@ -33,6 +33,7 @@ mod content_worker;
 mod diff_worker;
 mod file_panel;
 mod files;
+mod history;
 mod navigation;
 mod palette;
 mod playback;
@@ -188,12 +189,47 @@ pub(crate) struct TopbarTab {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ViewHistoryRecipe {
+    File {
+        tab_id: Option<usize>,
+        file_index: usize,
+        scroll_offset: usize,
+    },
+    Comment {
+        comment_id: u64,
+    },
+    PrComments {
+        tab_id: usize,
+        focus_comment_id: Option<u64>,
+    },
+    OutdatedComments {
+        tab_id: usize,
+        focus_comment_id: Option<u64>,
+    },
+    Help {
+        tab_id: usize,
+    },
+    Tab {
+        tab_id: usize,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct TopbarTabHit {
     pub tab_id: usize,
     pub row: u16,
     pub start_col: u16,
     pub end_col: u16,
     pub close_col: Option<u16>,
+}
+
+struct OutdatedDiffView {
+    comment_id: u64,
+    file_path: String,
+    live_backup: MultiFileDiff,
+    active_tab_id: Option<usize>,
+    active_tab_content: Option<TopbarTabContent>,
+    cache_on_restore: bool,
 }
 
 /// A clickable hyperlink region in the markdown preview (screen coordinates).
@@ -459,6 +495,11 @@ pub struct App {
     last_change_list_watch_check: Instant,
     /// jj workspace and revision to rescan in watch mode.
     jj_watch_target: Option<JjWatchTarget>,
+    /// Historical diff shown temporarily for an outdated comment.
+    outdated_diff_view: Option<OutdatedDiffView>,
+    view_history: Vec<ViewHistoryRecipe>,
+    view_history_cursor: usize,
+    view_history_replaying: bool,
     /// Baseline git index stamp for staged/index-backed diffs
     git_index_baseline: FileDiskStamp,
     /// Message shown when a git diff currently has no files
@@ -825,6 +866,11 @@ pub struct App {
     review_session_baseline: Vec<review::ReviewComment>,
     /// Comment selected from the comments sidebar.
     active_review_comment_id: Option<u64>,
+    outdated_reconstruction_cache: FxHashMap<u64, review::OutdatedReconstructionState>,
+    outdated_reconstruction_tx: Option<mpsc::Sender<review::OutdatedReconstructionRequest>>,
+    outdated_reconstruction_rx: Option<mpsc::Receiver<review::OutdatedReconstructionResponse>>,
+    pending_outdated_reconstruction: Option<(u64, String)>,
+    last_outdated_reconstruction_idle_enqueue: Instant,
     /// Active inline comment editor state
     review_editor: Option<review::ReviewEditorState>,
     /// Last rendered editor wrap width, used for arrow navigation.
@@ -1179,6 +1225,10 @@ impl App {
             file_recently_changed_until: vec![None; file_count],
             last_change_list_watch_check: Instant::now(),
             jj_watch_target: None,
+            outdated_diff_view: None,
+            view_history: Vec::new(),
+            view_history_cursor: 0,
+            view_history_replaying: false,
             git_index_baseline: FileDiskStamp::default(),
             no_changes_message: None,
             no_changes_dashboard_hit: None,
@@ -1400,6 +1450,11 @@ impl App {
             review_comments: Vec::new(),
             review_session_baseline: Vec::new(),
             active_review_comment_id: None,
+            outdated_reconstruction_cache: FxHashMap::default(),
+            outdated_reconstruction_tx: None,
+            outdated_reconstruction_rx: None,
+            pending_outdated_reconstruction: None,
+            last_outdated_reconstruction_idle_enqueue: Instant::now(),
             review_editor: None,
             review_editor_wrap_width: 0,
             review_dir_path: None,
@@ -3013,6 +3068,8 @@ impl App {
         dirty |= self.toast_tick();
         dirty |= self.poll_content_responses();
         dirty |= self.poll_diff_responses();
+        dirty |= self.poll_outdated_reconstruction_responses();
+        dirty |= self.outdated_reconstruction_pending();
         dirty |= self.maybe_queue_idle_diff();
         dirty |= self.maybe_check_file_changes();
         dirty |= self.maybe_watch_refresh_git_files();
@@ -3104,6 +3161,7 @@ impl App {
         }
 
         dirty |= self.maybe_warm_syntax_cache();
+        dirty |= self.maybe_preload_idle_outdated_reconstruction();
         dirty
     }
 }

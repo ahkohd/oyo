@@ -1331,6 +1331,12 @@ fn apply_action(app: &mut App, id: &str, count: usize) -> Result<()> {
         }
         "normal.prev_file" => repeat(count, || app.prev_file()),
         "normal.next_file" => repeat(count, || app.next_file()),
+        "normal.navigate_back" => {
+            app.navigate_view_back();
+        }
+        "normal.navigate_forward" => {
+            app.navigate_view_forward();
+        }
         "normal.toggle_autoplay" => app.toggle_autoplay(),
         "normal.toggle_autoplay_reverse" => app.toggle_autoplay_reverse(),
         "normal.toggle_view_mode" => app.toggle_view_mode(),

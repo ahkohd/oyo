@@ -178,6 +178,8 @@ Use each mode as `[keybindings.<mode>]`.
 | `toggle_view_mode` | `tab` | Cycle view modes |
 | `toggle_view_mode_reverse` | `backtab` | Cycle view modes in reverse |
 | `open_dashboard` | `ctrl-r` | Open History |
+| `navigate_back` | `alt-left` | Return to the previous file, tab or comment |
+| `navigate_forward` | `alt-right` | Move forward through view history |
 | `scroll_up` | `K` | Scroll up |
 | `scroll_down` | `J` | Scroll down |
 | `half_page_up` | `ctrl-u` | Scroll up half a page |

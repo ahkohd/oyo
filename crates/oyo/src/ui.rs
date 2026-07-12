@@ -1974,33 +1974,44 @@ fn topbar_tab_spans(app: &mut App, area: Rect, max_width: usize) -> Vec<Span<'st
         if remaining < 4 {
             break;
         }
-        let (file_name, changed) = match tab.content {
-            TopbarTabContent::File(file_index) => {
-                let Some(file) = app.multi_diff.files.get(file_index) else {
-                    continue;
-                };
-                let file_name = file
-                    .display_name
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or(&file.display_name)
-                    .to_string();
-                let changed = if app.file_changed_on_disk(file_index) {
-                    "*"
-                } else {
-                    ""
-                };
-                (file_name, changed)
-            }
-            TopbarTabContent::Help => ("Help".to_string(), ""),
-            TopbarTabContent::PrComments => (
-                format!(
-                    "{} comments",
-                    app.review_provider_kind().long_review_noun_title()
+        let reconstructed_title = (app.active_topbar_tab == Some(tab.id))
+            .then(|| app.outdated_diff_title())
+            .flatten();
+        let (file_name, changed) = if let Some(title) = reconstructed_title {
+            (title, "")
+        } else {
+            match tab.content {
+                TopbarTabContent::File(file_index) => {
+                    let Some(file) = app
+                        .outdated_live_files()
+                        .and_then(|files| files.get(file_index))
+                        .or_else(|| app.multi_diff.files.get(file_index))
+                    else {
+                        continue;
+                    };
+                    let file_name = file
+                        .display_name
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or(&file.display_name)
+                        .to_string();
+                    let changed = if app.file_changed_on_disk(file_index) {
+                        "*"
+                    } else {
+                        ""
+                    };
+                    (file_name, changed)
+                }
+                TopbarTabContent::Help => ("Help".to_string(), ""),
+                TopbarTabContent::PrComments => (
+                    format!(
+                        "{} comments",
+                        app.review_provider_kind().long_review_noun_title()
+                    ),
+                    "",
                 ),
-                "",
-            ),
-            TopbarTabContent::OutdatedComments => ("Outdated comments".to_string(), ""),
+                TopbarTabContent::OutdatedComments => ("Outdated comments".to_string(), ""),
+            }
         };
         let closeable = app.topbar_close_allowed(tab.id);
         let show_close = closeable && app.topbar_hover_tab == Some(tab.id);
@@ -2467,7 +2478,11 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
         None
     };
 
-    let files = &app.multi_diff.files;
+    let outdated_files = app.outdated_live_files().map(<[_]>::to_vec);
+    let files = outdated_files.as_deref().unwrap_or(&app.multi_diff.files);
+    let selected_file = app
+        .outdated_live_selected_index()
+        .unwrap_or(app.multi_diff.selected_index);
 
     let mut added = 0usize;
     let mut modified = 0usize;
@@ -2738,7 +2753,7 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
             FileStatus::Renamed => Style::default().fg(app.theme.info),
         };
 
-        let is_selected = file_idx == app.multi_diff.selected_index;
+        let is_selected = file_idx == selected_file;
         let is_hovered = app.file_list_hover == Some(file_idx);
         let selected_bg = if is_selected {
             if app.file_list_focused {
@@ -5410,6 +5425,28 @@ fn append_embedded_doc(out: &mut String, title: &str, text: &str) {
 }
 
 fn draw_diff_view(frame: &mut Frame, app: &mut App, area: Rect) {
+    if app.outdated_reconstruction_pending() {
+        frame.render_widget(Clear, area);
+        if let Some(background) = app.theme.background {
+            frame.render_widget(
+                Block::default().style(Style::default().bg(background)),
+                area,
+            );
+        }
+        let row = Rect::new(
+            area.x,
+            area.y.saturating_add(area.height / 2),
+            area.width,
+            1.min(area.height),
+        );
+        frame.render_widget(
+            Paragraph::new(format!("{} Reconstructing...", diff_spinner_frame()))
+                .style(Style::default().fg(app.theme.text))
+                .alignment(Alignment::Center),
+            row,
+        );
+        return;
+    }
     if app.multi_diff.file_count() == 0
         && app.active_topbar_content() != Some(TopbarTabContent::Help)
     {
