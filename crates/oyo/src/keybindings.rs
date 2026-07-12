@@ -12,6 +12,8 @@ pub(crate) enum KeybindingMode {
     ReviewEditor,
     CommandPalette,
     FileSearch,
+    CommentPicker,
+    ThemePicker,
     FileFilter,
     Goto,
     Search,
@@ -29,6 +31,8 @@ impl KeybindingMode {
             Self::ReviewEditor => "review_editor",
             Self::CommandPalette => "command_palette",
             Self::FileSearch => "file_search",
+            Self::CommentPicker => "comment_picker",
+            Self::ThemePicker => "theme_picker",
             Self::FileFilter => "file_filter",
             Self::Goto => "goto",
             Self::Search => "search",
@@ -40,9 +44,12 @@ impl KeybindingMode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[allow(clippy::enum_variant_names)]
 pub(crate) enum GlobalAction {
     OpenCommandPalette,
     OpenFileSearch,
+    OpenCommentPicker,
+    OpenThemePicker,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -76,6 +83,7 @@ pub(crate) enum NormalAction {
     ToggleAutoplayReverse,
     ToggleViewMode,
     ToggleViewModeReverse,
+    OpenDashboard,
     ScrollUp,
     ScrollDown,
     HalfPageUp,
@@ -99,10 +107,13 @@ pub(crate) enum NormalAction {
     Refresh,
     ToggleFilePanel,
     ToggleFoldContext,
+    ExpandAllFolds,
     OpenSearchOrFileFilter,
     OpenGoto,
     SearchNext,
     SearchPrev,
+    FocusNextComment,
+    FocusPrevComment,
     NextConflict,
     PrevConflict,
     LineComment,
@@ -113,6 +124,9 @@ pub(crate) enum NormalAction {
     ToggleHelp,
     OpenCommandPalette,
     OpenFileSearch,
+    OpenCommentPicker,
+    OpenOutdatedComments,
+    OpenThemePicker,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -163,6 +177,7 @@ pub(crate) enum LineInputAction {
 pub(crate) enum SelectionAction {
     Cancel,
     Copy,
+    ShowActions,
     Left,
     Right,
     Up,
@@ -192,6 +207,7 @@ pub(crate) enum DashboardAction {
     StartFilter,
     ClearPin,
     TogglePin,
+    SelectHovered,
     Accept,
     SelectNext,
     SelectPrev,
@@ -253,10 +269,12 @@ macro_rules! binding_action {
 binding_action!(GlobalAction, [
     OpenCommandPalette => ("open_command_palette", "Command palette", ["ctrl-p"]),
     OpenFileSearch => ("open_file_search", "Quick file search", ["ctrl-shift-p"]),
+    OpenCommentPicker => ("open_comment_picker", "Comment picker", ["ctrl-shift-c"]),
+    OpenThemePicker => ("open_theme_picker", "Theme picker", ["ctrl-t"]),
 ]);
 
 binding_action!(NormalAction, [
-    Quit => ("quit", "Quit (prints comments if any)", ["q", "esc"]),
+    Quit => ("quit", "Quit", ["q"]),
     StepDown => ("step_down", "Step forward", ["j", "down"]),
     StepUp => ("step_up", "Step backward", ["k", "up"]),
     NextHunk => ("next_hunk", "Next hunk", ["l", "right"]),
@@ -283,8 +301,9 @@ binding_action!(NormalAction, [
     NextFile => ("next_file", "Next file", ["]"]),
     ToggleAutoplay => ("toggle_autoplay", "Autoplay forward", ["space"]),
     ToggleAutoplayReverse => ("toggle_autoplay_reverse", "Autoplay reverse", ["B"]),
-    ToggleViewMode => ("toggle_view_mode", "Cycle view mode", ["tab"]),
-    ToggleViewModeReverse => ("toggle_view_mode_reverse", "Cycle view mode reverse", ["backtab"]),
+    ToggleViewMode => ("toggle_view_mode", "Cycle view modes", ["tab"]),
+    ToggleViewModeReverse => ("toggle_view_mode_reverse", "Cycle view modes reverse", ["backtab"]),
+    OpenDashboard => ("open_dashboard", "Open history", ["ctrl-r"]),
     ScrollUp => ("scroll_up", "Scroll up", ["K"]),
     ScrollDown => ("scroll_down", "Scroll down", ["J"]),
     HalfPageUp => ("half_page_up", "Scroll half-page up", ["ctrl-u"]),
@@ -296,7 +315,7 @@ binding_action!(NormalAction, [
     ToggleLineWrap => ("toggle_line_wrap", "Toggle line wrap", ["w"]),
     ToggleSyntax => ("toggle_syntax", "Toggle syntax highlight", ["t"]),
     ToggleEvoSyntax => ("toggle_evo_syntax", "Toggle evo syntax", ["E"]),
-    ToggleStepping => ("toggle_stepping", "Toggle stepping", ["s"]),
+    ToggleStepping => ("toggle_stepping", "Toggle step mode", ["s"]),
     ToggleStrikethrough => ("toggle_strikethrough", "Toggle strikethrough", ["S"]),
     ScrollLeft => ("scroll_left", "Scroll left", ["H"]),
     ScrollRight => ("scroll_right", "Scroll right", ["L"]),
@@ -308,10 +327,13 @@ binding_action!(NormalAction, [
     Refresh => ("refresh", "Refresh files", ["R"]),
     ToggleFilePanel => ("toggle_file_panel", "Toggle file panel", ["ctrl-f"]),
     ToggleFoldContext => ("toggle_fold_context", "Toggle context folding", ["f"]),
+    ExpandAllFolds => ("expand_all_folds", "Expand all context folds", ["F"]),
     OpenSearchOrFileFilter => ("open_search_or_file_filter", "Search or filter files", ["/"]),
     OpenGoto => ("open_goto", "Go to line/hunk/step", [":"]),
     SearchNext => ("search_next", "Next match", ["n"]),
     SearchPrev => ("search_prev", "Previous match", ["N"]),
+    FocusNextComment => ("focus_next_comment", "Next review comment", ["}"]),
+    FocusPrevComment => ("focus_prev_comment", "Previous review comment", ["{"]),
     NextConflict => ("next_conflict", "Next conflict", ["c"]),
     PrevConflict => ("prev_conflict", "Previous conflict", ["C"]),
     LineComment => ("line_comment", "Add/update line comment", ["m"]),
@@ -321,7 +343,10 @@ binding_action!(NormalAction, [
     RemoveHunkComment => ("remove_hunk_comment", "Remove hunk comment", ["X"]),
     ToggleHelp => ("toggle_help", "Toggle help", ["?"]),
     OpenCommandPalette => ("open_command_palette", "Command palette", ["ctrl-p"]),
-    OpenFileSearch => ("open_file_search", "Quick file search", ["ctrl-shift-p"]),
+    OpenFileSearch => ("open_file_search", "Quick file search", ["ctrl-shift-p", "g f"]),
+    OpenCommentPicker => ("open_comment_picker", "Comment picker", ["g c"]),
+    OpenOutdatedComments => ("open_outdated_comments", "Outdated comments", ["g o"]),
+    OpenThemePicker => ("open_theme_picker", "Theme picker", ["ctrl-t"]),
 ]);
 
 binding_action!(HelpAction, [
@@ -332,7 +357,7 @@ binding_action!(HelpAction, [
 
 binding_action!(ReviewEditorAction, [
     Cancel => ("cancel", "Cancel editor", ["esc"]),
-    Save => ("save", "Save comment", ["ctrl-o"]),
+    Save => ("save", "Save comment", ["ctrl-s"]),
     InsertNewline => ("insert_newline", "Insert newline", ["enter"]),
     AcceptMention => ("accept_mention", "Accept mention", ["tab"]),
     Backspace => ("backspace", "Backspace", ["backspace"]),
@@ -373,6 +398,7 @@ binding_action!(FileFilterAction, [
 binding_action!(SelectionAction, [
     Cancel => ("cancel", "Cancel selection", ["esc"]),
     Copy => ("copy", "Copy selection", ["y"]),
+    ShowActions => ("show_actions", "Show selection actions", ["enter"]),
     Left => ("left", "Extend left", ["h", "left"]),
     Right => ("right", "Extend right", ["l", "right"]),
     Up => ("up", "Extend up", ["k", "up"]),
@@ -390,10 +416,11 @@ binding_action!(SelectionAction, [
 ]);
 
 binding_action!(DashboardAction, [
-    Quit => ("quit", "Quit dashboard", ["esc", "q"]),
+    Quit => ("quit", "Quit history", ["esc", "q"]),
     StartFilter => ("start_filter", "Filter commits", ["/"]),
-    ClearPin => ("clear_pin", "Clear pinned range start", ["r"]),
+    ClearPin => ("clear_pin", "Clear range", ["r"]),
     TogglePin => ("toggle_pin", "Mark range start", ["space"]),
+    SelectHovered => ("select_hovered", "Move range end to hovered item", ["e"]),
     Accept => ("accept", "Open selection", ["enter"]),
     SelectNext => ("select_next", "Select next", ["j", "down"]),
     SelectPrev => ("select_prev", "Select previous", ["k", "up"]),
@@ -424,6 +451,8 @@ pub(crate) struct Keybindings {
     review_editor: ModeBindings<ReviewEditorAction>,
     command_palette: ModeBindings<PickerAction>,
     file_search: ModeBindings<PickerAction>,
+    comment_picker: ModeBindings<PickerAction>,
+    theme_picker: ModeBindings<PickerAction>,
     file_filter: ModeBindings<FileFilterAction>,
     goto: ModeBindings<LineInputAction>,
     search: ModeBindings<LineInputAction>,
@@ -473,6 +502,8 @@ impl Keybindings {
             review_editor: ModeBindings::build(KeybindingMode::ReviewEditor, config, warnings),
             command_palette: ModeBindings::build(KeybindingMode::CommandPalette, config, warnings),
             file_search: ModeBindings::build(KeybindingMode::FileSearch, config, warnings),
+            comment_picker: ModeBindings::build(KeybindingMode::CommentPicker, config, warnings),
+            theme_picker: ModeBindings::build(KeybindingMode::ThemePicker, config, warnings),
             file_filter: ModeBindings::build(KeybindingMode::FileFilter, config, warnings),
             goto: ModeBindings::build(KeybindingMode::Goto, config, warnings),
             search: ModeBindings::build(KeybindingMode::Search, config, warnings),
@@ -487,6 +518,10 @@ impl Keybindings {
         }
     }
 
+    pub(crate) fn normal_sequence_pending(&self) -> bool {
+        self.active_sequence_mode == Some(KeybindingMode::Normal)
+    }
+
     pub(crate) fn clear_sequence(&mut self) {
         match self.active_sequence_mode.take() {
             Some(KeybindingMode::Global) => self.global.clear_sequence(),
@@ -495,6 +530,8 @@ impl Keybindings {
             Some(KeybindingMode::ReviewEditor) => self.review_editor.clear_sequence(),
             Some(KeybindingMode::CommandPalette) => self.command_palette.clear_sequence(),
             Some(KeybindingMode::FileSearch) => self.file_search.clear_sequence(),
+            Some(KeybindingMode::CommentPicker) => self.comment_picker.clear_sequence(),
+            Some(KeybindingMode::ThemePicker) => self.theme_picker.clear_sequence(),
             Some(KeybindingMode::FileFilter) => self.file_filter.clear_sequence(),
             Some(KeybindingMode::Goto) => self.goto.clear_sequence(),
             Some(KeybindingMode::Search) => self.search.clear_sequence(),
@@ -537,6 +574,20 @@ impl Keybindings {
     pub(crate) fn file_search(&mut self, key: KeyEvent) -> Dispatch<PickerAction> {
         self.prepare_mode(KeybindingMode::FileSearch);
         dispatch_mode(&mut self.active_sequence_mode, &mut self.file_search, key)
+    }
+
+    pub(crate) fn comment_picker(&mut self, key: KeyEvent) -> Dispatch<PickerAction> {
+        self.prepare_mode(KeybindingMode::CommentPicker);
+        dispatch_mode(
+            &mut self.active_sequence_mode,
+            &mut self.comment_picker,
+            key,
+        )
+    }
+
+    pub(crate) fn theme_picker(&mut self, key: KeyEvent) -> Dispatch<PickerAction> {
+        self.prepare_mode(KeybindingMode::ThemePicker);
+        dispatch_mode(&mut self.active_sequence_mode, &mut self.theme_picker, key)
     }
 
     pub(crate) fn file_filter(&mut self, key: KeyEvent) -> Dispatch<FileFilterAction> {
@@ -595,6 +646,10 @@ impl Keybindings {
 
     pub(crate) fn file_search_keys(&self, action: PickerAction) -> String {
         self.file_search.keys_label(action)
+    }
+
+    pub(crate) fn theme_picker_keys(&self, action: PickerAction) -> String {
+        self.theme_picker.keys_label(action)
     }
 
     pub(crate) fn file_filter_keys(&self, action: FileFilterAction) -> String {
@@ -751,6 +806,7 @@ fn warn_unknown_modes(config: &KeybindingsConfig, warnings: &mut Vec<String>) {
             KeybindingMode::ReviewEditor.id(),
             KeybindingMode::CommandPalette.id(),
             KeybindingMode::FileSearch.id(),
+            KeybindingMode::ThemePicker.id(),
             KeybindingMode::FileFilter.id(),
             KeybindingMode::Goto.id(),
             KeybindingMode::Search.id(),
@@ -968,6 +1024,54 @@ mod tests {
     }
 
     #[test]
+    fn escape_is_not_a_normal_quit_binding() {
+        let mut bindings = Keybindings::default();
+
+        assert_eq!(
+            bindings.normal(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty())),
+            Dispatch::Unmatched
+        );
+        assert_eq!(
+            bindings.normal(key('q')),
+            Dispatch::Matched(NormalAction::Quit)
+        );
+    }
+
+    #[test]
+    fn dashboard_e_selects_hovered() {
+        let mut bindings = Keybindings::default();
+
+        assert_eq!(
+            bindings.dashboard(key('e')),
+            Dispatch::Matched(DashboardAction::SelectHovered)
+        );
+    }
+
+    #[test]
+    fn ctrl_t_opens_theme_picker() {
+        let mut bindings = Keybindings::default();
+
+        assert_eq!(
+            bindings.global(ctrl('t')),
+            Dispatch::Matched(GlobalAction::OpenThemePicker)
+        );
+        assert_eq!(
+            bindings.normal(ctrl('t')),
+            Dispatch::Matched(NormalAction::OpenThemePicker)
+        );
+    }
+
+    #[test]
+    fn ctrl_r_opens_dashboard() {
+        let mut bindings = Keybindings::default();
+
+        assert_eq!(
+            bindings.normal(ctrl('r')),
+            Dispatch::Matched(NormalAction::OpenDashboard)
+        );
+    }
+
+    #[test]
     fn sequence_prefix_waits_and_failed_sequence_retries_latest_key() {
         let mut bindings = Keybindings::default();
 
@@ -1117,6 +1221,30 @@ mod tests {
         assert_eq!(
             bindings.normal(key),
             Dispatch::Matched(NormalAction::OpenFileSearch)
+        );
+    }
+
+    #[test]
+    fn file_picker_has_reliable_gf_fallback() {
+        let mut bindings = Keybindings::default();
+
+        assert_eq!(bindings.normal(key('g')), Dispatch::Pending);
+        assert!(bindings.normal_sequence_pending());
+        assert_eq!(
+            bindings.normal(key('f')),
+            Dispatch::Matched(NormalAction::OpenFileSearch)
+        );
+        assert!(!bindings.normal_sequence_pending());
+    }
+
+    #[test]
+    fn outdated_comments_key_uses_go_sequence() {
+        let mut bindings = Keybindings::default();
+
+        assert_eq!(bindings.normal(key('g')), Dispatch::Pending);
+        assert_eq!(
+            bindings.normal(key('o')),
+            Dispatch::Matched(NormalAction::OpenOutdatedComments)
         );
     }
 

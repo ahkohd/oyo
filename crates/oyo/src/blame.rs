@@ -50,6 +50,10 @@ pub fn blame_range(
     end: usize,
     source: &BlameSource,
 ) -> Option<Vec<(usize, BlameInfo)>> {
+    if let BlameSource::JjRev(revision) = source {
+        return blame_range_jj(repo_root, file_path, start, end, revision);
+    }
+
     let mut cmd = Command::new("git");
     cmd.arg("-C")
         .arg(repo_root)
@@ -66,6 +70,7 @@ pub fn blame_range(
         BlameSource::Commit(commit) => {
             cmd.arg(commit);
         }
+        BlameSource::JjRev(_) => unreachable!(),
     }
 
     cmd.arg("--").arg(file_path);
@@ -147,6 +152,61 @@ pub fn blame_range(
     Some(entries)
 }
 
+const JJ_ANNOTATE_TEMPLATE: &str = "commit.change_id().shortest(8) ++ \"\\x1f\" ++ commit.author().name() ++ \"\\x1f\" ++ commit.author().timestamp().format(\"%s\") ++ \"\\x1f\" ++ if(commit.current_working_copy(), \"1\", \"0\") ++ \"\\x1f\" ++ commit.description().first_line() ++ \"\\n\"";
+
+fn blame_range_jj(
+    repo_root: &Path,
+    file_path: &Path,
+    start: usize,
+    end: usize,
+    revision: &str,
+) -> Option<Vec<(usize, BlameInfo)>> {
+    let output = Command::new("jj")
+        .current_dir(repo_root)
+        .args([
+            "file",
+            "annotate",
+            "-r",
+            revision,
+            "-T",
+            JJ_ANNOTATE_TEMPLATE,
+            "--",
+        ])
+        .arg(file_path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .enumerate()
+            .filter_map(|(index, line)| {
+                let line_number = index + 1;
+                (line_number >= start && line_number <= end)
+                    .then(|| parse_jj_annotate_line(line).map(|info| (line_number, info)))?
+            })
+            .collect(),
+    )
+}
+
+fn parse_jj_annotate_line(line: &str) -> Option<BlameInfo> {
+    let mut fields = line.splitn(5, '\x1f');
+    let commit = fields.next()?.to_string();
+    let author = fields.next()?.to_string();
+    let author_time = fields.next()?.parse::<i64>().ok();
+    let uncommitted = fields.next()? == "1";
+    let summary = fields.next()?.to_string();
+    Some(BlameInfo {
+        author,
+        commit,
+        uncommitted,
+        author_time,
+        summary,
+    })
+}
+
 pub fn format_blame_github_text(
     info: &BlameInfo,
     git_user: Option<&str>,
@@ -207,5 +267,21 @@ fn short_commit(commit: &str) -> String {
         commit[..8].to_string()
     } else {
         commit.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_jj_annotate_line() {
+        let info =
+            parse_jj_annotate_line("qpvuntsm\x1fAda\x1f1710000000\x1f1\x1fworking copy").unwrap();
+        assert_eq!(info.commit, "qpvuntsm");
+        assert_eq!(info.author, "Ada");
+        assert_eq!(info.author_time, Some(1_710_000_000));
+        assert!(info.uncommitted);
+        assert_eq!(info.summary, "working copy");
     }
 }

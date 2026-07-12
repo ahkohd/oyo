@@ -1,7 +1,9 @@
 //! Git integration for detecting changed files
 
+use std::collections::HashMap;
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -122,6 +124,20 @@ pub fn get_repo_root(path: &Path) -> Result<PathBuf, GitError> {
     Ok(PathBuf::from(root))
 }
 
+fn is_oyo_review_path(path: &Path) -> bool {
+    path.starts_with(".oyo/reviews")
+}
+
+fn drop_oyo_review_changes(changes: &mut Vec<ChangedFile>) {
+    changes.retain(|change| {
+        !is_oyo_review_path(&change.path)
+            && change
+                .old_path
+                .as_ref()
+                .is_none_or(|old_path| !is_oyo_review_path(old_path))
+    });
+}
+
 /// Get list of uncommitted changed files (staged and unstaged)
 pub fn get_uncommitted_changes(repo_path: &Path) -> Result<Vec<ChangedFile>, GitError> {
     let mut changes = Vec::new();
@@ -173,6 +189,8 @@ pub fn get_uncommitted_changes(repo_path: &Path) -> Result<Vec<ChangedFile>, Git
         }
     }
 
+    drop_oyo_review_changes(&mut changes);
+
     // Deduplicate by path
     changes.sort_by(|a, b| a.path.cmp(&b.path));
     changes.dedup_by(|a, b| a.path == b.path);
@@ -198,6 +216,7 @@ pub fn get_staged_changes(repo_path: &Path) -> Result<Vec<ChangedFile>, GitError
 
     let mut changes = Vec::new();
     parse_name_status(&String::from_utf8_lossy(&output.stdout), &mut changes);
+    drop_oyo_review_changes(&mut changes);
     Ok(changes)
 }
 
@@ -253,7 +272,65 @@ pub fn get_changes_between_index(
 
     let mut changes = Vec::new();
     parse_name_status(&String::from_utf8_lossy(&output.stdout), &mut changes);
+    drop_oyo_review_changes(&mut changes);
     Ok(changes)
+}
+
+pub fn get_diff_numstat(
+    repo_path: &Path,
+    args: &[String],
+) -> Result<HashMap<PathBuf, (usize, usize)>, GitError> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .arg("diff")
+        .args(args)
+        .arg("--numstat")
+        .arg("-z")
+        .output()?;
+    if !output.status.success() {
+        return Err(GitError::CommandFailed(
+            String::from_utf8_lossy(&output.stderr).to_string(),
+        ));
+    }
+    parse_numstat(&output.stdout)
+}
+
+fn parse_numstat(output: &[u8]) -> Result<HashMap<PathBuf, (usize, usize)>, GitError> {
+    let mut records = output
+        .split(|byte| *byte == 0)
+        .filter(|part| !part.is_empty());
+    let mut stats = HashMap::new();
+    while let Some(record) = records.next() {
+        let mut fields = record.splitn(3, |byte| *byte == b'\t');
+        let insertions = fields.next().unwrap_or_default();
+        let deletions = fields.next().unwrap_or_default();
+        let path = fields.next().unwrap_or_default();
+        let count = |value: &[u8]| {
+            if value == b"-" {
+                Ok(0)
+            } else {
+                std::str::from_utf8(value)
+                    .ok()
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .ok_or_else(|| GitError::CommandFailed("Invalid git numstat count".to_string()))
+            }
+        };
+        let value = (count(insertions)?, count(deletions)?);
+        if path.is_empty() {
+            let old = records
+                .next()
+                .ok_or_else(|| GitError::CommandFailed("Invalid git numstat rename".to_string()))?;
+            let new = records
+                .next()
+                .ok_or_else(|| GitError::CommandFailed("Invalid git numstat rename".to_string()))?;
+            stats.insert(PathBuf::from(String::from_utf8_lossy(old).as_ref()), value);
+            stats.insert(PathBuf::from(String::from_utf8_lossy(new).as_ref()), value);
+        } else {
+            stats.insert(PathBuf::from(String::from_utf8_lossy(path).as_ref()), value);
+        }
+    }
+    Ok(stats)
 }
 
 /// Get recent commits with short stats
@@ -333,6 +410,84 @@ pub fn get_file_at_commit(repo_path: &Path, commit: &str, file: &Path) -> Result
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+pub fn get_objects_batch(
+    repo_path: &Path,
+    specs: &[String],
+    max_bytes: u64,
+) -> Result<Vec<Option<Vec<u8>>>, GitError> {
+    if specs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .arg("cat-file")
+        .arg("--batch")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| GitError::CommandFailed("git cat-file stdin was unavailable".to_string()))?;
+    let requests = specs.to_vec();
+    let writer = std::thread::spawn(move || -> std::io::Result<()> {
+        for spec in requests {
+            writeln!(stdin, "{spec}")?;
+        }
+        Ok(())
+    });
+    let stdout = child.stdout.take().ok_or_else(|| {
+        GitError::CommandFailed("git cat-file stdout was unavailable".to_string())
+    })?;
+    let mut reader = BufReader::new(stdout);
+    let mut objects = Vec::with_capacity(specs.len());
+    for spec in specs {
+        let mut header = String::new();
+        if reader.read_line(&mut header)? == 0 {
+            return Err(GitError::CommandFailed(format!(
+                "git cat-file returned no header for {spec}"
+            )));
+        }
+        if header.trim_end().ends_with(" missing") {
+            objects.push(Some(Vec::new()));
+            continue;
+        }
+        let size = header
+            .split_whitespace()
+            .last()
+            .and_then(|value| value.parse::<u64>().ok())
+            .ok_or_else(|| GitError::CommandFailed(format!("Invalid cat-file header: {header}")))?;
+        if size > max_bytes {
+            std::io::copy(&mut reader.by_ref().take(size), &mut std::io::sink())?;
+            objects.push(None);
+        } else {
+            let mut bytes = vec![0; size as usize];
+            reader.read_exact(&mut bytes)?;
+            objects.push(Some(bytes));
+        }
+        let mut newline = [0u8; 1];
+        reader.read_exact(&mut newline)?;
+        if newline[0] != b'\n' {
+            return Err(GitError::CommandFailed(
+                "Invalid git cat-file object terminator".to_string(),
+            ));
+        }
+    }
+    drop(reader);
+    writer
+        .join()
+        .map_err(|_| GitError::CommandFailed("git cat-file writer failed".to_string()))??;
+    let output = child.wait_with_output()?;
+    if !output.status.success() {
+        return Err(GitError::CommandFailed(
+            String::from_utf8_lossy(&output.stderr).to_string(),
+        ));
+    }
+    Ok(objects)
 }
 
 pub fn get_file_at_commit_bytes(
@@ -506,6 +661,81 @@ mod tests {
     use super::*;
 
     #[test]
+    fn batch_objects_handle_content_missing_and_size_limits() {
+        let root = std::env::temp_dir().join(format!(
+            "oyo-git-batch-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        Command::new("git")
+            .arg("init")
+            .arg("-q")
+            .arg(&root)
+            .status()
+            .unwrap();
+        std::fs::write(root.join("small.txt"), b"one").unwrap();
+        std::fs::write(root.join("large.txt"), b"12345").unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["add", "."])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args([
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-qm",
+                "fixture",
+            ])
+            .status()
+            .unwrap();
+
+        let objects = get_objects_batch(
+            &root,
+            &[
+                "HEAD:small.txt".to_string(),
+                "HEAD:missing.txt".to_string(),
+                "HEAD:large.txt".to_string(),
+            ],
+            4,
+        )
+        .unwrap();
+        assert_eq!(objects[0].as_deref(), Some(b"one".as_slice()));
+        assert_eq!(objects[1].as_deref(), Some(b"".as_slice()));
+        assert_eq!(objects[2], None);
+
+        let many = vec!["HEAD:small.txt".to_string(); 5_000];
+        let objects = get_objects_batch(&root, &many, 4).unwrap();
+        assert_eq!(objects.len(), many.len());
+        assert!(objects
+            .iter()
+            .all(|object| object.as_deref() == Some(b"one".as_slice())));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn parses_numstat_paths_renames_and_binary_files() {
+        let stats =
+            parse_numstat(b"2\t1\tfile.rs\0-\t-\timage.png\x003\t4\t\0old.rs\0new.rs\0").unwrap();
+        assert_eq!(stats[Path::new("file.rs")], (2, 1));
+        assert_eq!(stats[Path::new("image.png")], (0, 0));
+        assert_eq!(stats[Path::new("old.rs")], (3, 4));
+        assert_eq!(stats[Path::new("new.rs")], (3, 4));
+    }
+
+    #[test]
     fn test_parse_name_status() {
         let output = "M\tsrc/main.rs\nA\tsrc/new.rs\nD\tsrc/old.rs\n";
         let mut changes = Vec::new();
@@ -515,5 +745,26 @@ mod tests {
         assert_eq!(changes[0].status, FileStatus::Modified);
         assert_eq!(changes[1].status, FileStatus::Added);
         assert_eq!(changes[2].status, FileStatus::Deleted);
+    }
+
+    #[test]
+    fn drops_oyo_review_db_changes() {
+        let mut changes = vec![
+            ChangedFile {
+                path: PathBuf::from(".oyo/reviews/workspace/review.db"),
+                status: FileStatus::Untracked,
+                old_path: None,
+            },
+            ChangedFile {
+                path: PathBuf::from("src/main.rs"),
+                status: FileStatus::Modified,
+                old_path: None,
+            },
+        ];
+
+        drop_oyo_review_changes(&mut changes);
+
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].path, PathBuf::from("src/main.rs"));
     }
 }

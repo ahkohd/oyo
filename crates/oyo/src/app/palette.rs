@@ -1,4 +1,7 @@
 use super::{App, ViewMode};
+use crate::app::utils::copy_to_clipboard;
+use crate::config::{list_ui_themes, ThemeConfig};
+use crate::toasts::ToastEvent;
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum PaletteAction {
@@ -14,6 +17,19 @@ pub(crate) enum PaletteAction {
     ToggleAutoplay,
     ToggleAutoplayReverse,
     OpenDashboard,
+    OpenFileSearch,
+    OpenThemePicker,
+    OpenCommentPicker,
+    OpenPrComments,
+    OpenOutdatedComments,
+    CopyFilePath,
+    CopyFilePosition,
+    CopyAbsoluteFilePath,
+    CopyAbsoluteFilePosition,
+    CopyFileCursorPosition,
+    CopyAbsoluteFileCursorPosition,
+    CopySessionName,
+    RenameSession,
     Quit,
     RefreshCurrentFile,
     RefreshAllFiles,
@@ -27,14 +43,171 @@ pub(crate) struct PaletteEntry {
 }
 
 impl App {
-    pub fn start_command_palette(&mut self) {
-        self.command_palette_active = true;
-        self.command_palette_query.clear();
-        self.command_palette_selection = 0;
+    pub(crate) fn set_control_session_name(&mut self, name: Option<String>) {
+        self.control_session_name = name;
+    }
+
+    pub(crate) fn control_session_name(&self) -> Option<&str> {
+        self.control_session_name.as_deref()
+    }
+
+    pub(crate) fn copy_current_file_path(&mut self) {
+        let path = self.current_file_path();
+        if path.is_empty() {
+            self.notify(ToastEvent::CopyFailed);
+        } else if copy_to_clipboard(&path) {
+            self.notify(ToastEvent::CopiedPath);
+        } else {
+            self.notify(ToastEvent::CopyFailed);
+        }
+    }
+
+    pub(crate) fn copy_current_file_position(&mut self) {
+        let Some(location) = self.current_file_relative_position_label() else {
+            self.notify(ToastEvent::CopyFailed);
+            return;
+        };
+        if copy_to_clipboard(&location) {
+            self.notify(ToastEvent::CopiedPath);
+        } else {
+            self.notify(ToastEvent::CopyFailed);
+        }
+    }
+
+    pub(crate) fn copy_current_file_cursor_position(&mut self) {
+        let Some(location) = self.current_file_cursor_position_label() else {
+            self.notify(ToastEvent::CopyFailed);
+            return;
+        };
+        if copy_to_clipboard(&location) {
+            self.notify(ToastEvent::CopiedPath);
+        } else {
+            self.notify(ToastEvent::CopyFailed);
+        }
+    }
+
+    pub(crate) fn copy_current_absolute_file_path(&mut self) {
+        let Some(path) = self.current_file_absolute_path_label() else {
+            self.notify(ToastEvent::CopyFailed);
+            return;
+        };
+        if copy_to_clipboard(&path) {
+            self.notify(ToastEvent::CopiedPath);
+        } else {
+            self.notify(ToastEvent::CopyFailed);
+        }
+    }
+
+    pub(crate) fn copy_current_absolute_file_position(&mut self) {
+        let Some(location) = self.current_file_absolute_position_label() else {
+            self.notify(ToastEvent::CopyFailed);
+            return;
+        };
+        if copy_to_clipboard(&location) {
+            self.notify(ToastEvent::CopiedPath);
+        } else {
+            self.notify(ToastEvent::CopyFailed);
+        }
+    }
+
+    pub(crate) fn copy_current_absolute_file_cursor_position(&mut self) {
+        let Some(location) = self.current_file_absolute_cursor_position_label() else {
+            self.notify(ToastEvent::CopyFailed);
+            return;
+        };
+        if copy_to_clipboard(&location) {
+            self.notify(ToastEvent::CopiedPath);
+        } else {
+            self.notify(ToastEvent::CopyFailed);
+        }
+    }
+
+    pub(crate) fn copy_control_session_name(&mut self) {
+        let Some(name) = self.control_session_name.clone() else {
+            return;
+        };
+        if copy_to_clipboard(&name) {
+            self.notify(ToastEvent::CopiedSessionName);
+        } else {
+            self.notify(ToastEvent::CopyFailed);
+        }
+    }
+
+    pub(crate) fn start_session_rename(&mut self) {
+        let Some(name) = self.control_session_name.clone() else {
+            return;
+        };
+        self.session_rename_active = true;
+        self.session_rename_query = name;
+        self.reset_picker_cursor();
         self.file_filter_active = false;
         self.clear_search();
         self.clear_goto();
         self.stop_file_search();
+        self.stop_comment_picker();
+        self.stop_theme_picker();
+    }
+
+    pub(crate) fn session_rename_active(&self) -> bool {
+        self.session_rename_active
+    }
+
+    pub(crate) fn session_rename_query(&self) -> &str {
+        &self.session_rename_query
+    }
+
+    pub(crate) fn cancel_session_rename(&mut self) {
+        self.session_rename_active = false;
+        self.session_rename_query.clear();
+    }
+
+    pub(crate) fn clear_session_rename_text(&mut self) {
+        self.session_rename_query.clear();
+        self.reset_picker_cursor();
+    }
+
+    pub(crate) fn push_session_rename_char(&mut self, ch: char) {
+        self.session_rename_query.push(ch);
+        self.reset_picker_cursor();
+    }
+
+    pub(crate) fn pop_session_rename_char(&mut self) {
+        self.session_rename_query.pop();
+        self.reset_picker_cursor();
+    }
+
+    pub(crate) fn submit_session_rename(&mut self) {
+        let name = self.session_rename_query.trim();
+        if name.is_empty() {
+            self.notify(ToastEvent::SelectionActionFailed(
+                "Session name cannot be empty".to_string(),
+            ));
+            return;
+        }
+        self.pending_session_rename = Some(name.to_string());
+        self.session_rename_active = false;
+    }
+
+    pub(crate) fn take_pending_session_rename(&mut self) -> Option<String> {
+        self.pending_session_rename.take()
+    }
+
+    fn reset_picker_cursor(&mut self) {
+        self.file_filter_cursor_visible = true;
+        self.file_filter_cursor_last_blink = std::time::Instant::now();
+    }
+
+    pub fn start_command_palette(&mut self) {
+        self.command_palette_active = true;
+        self.command_palette_query.clear();
+        self.command_palette_selection = 0;
+        self.reset_picker_cursor();
+        self.file_filter_active = false;
+        self.clear_search();
+        self.clear_goto();
+        self.stop_file_search();
+        self.stop_comment_picker();
+        self.stop_theme_picker();
     }
 
     pub fn stop_command_palette(&mut self) {
@@ -56,16 +229,19 @@ impl App {
     pub fn push_command_palette_char(&mut self, ch: char) {
         self.command_palette_query.push(ch);
         self.command_palette_selection = 0;
+        self.reset_picker_cursor();
     }
 
     pub fn pop_command_palette_char(&mut self) {
         self.command_palette_query.pop();
         self.command_palette_selection = 0;
+        self.reset_picker_cursor();
     }
 
     pub fn clear_command_palette_text(&mut self) {
         self.command_palette_query.clear();
         self.command_palette_selection = 0;
+        self.reset_picker_cursor();
     }
 
     pub fn move_command_palette_selection(&mut self, delta: isize) {
@@ -143,11 +319,11 @@ impl App {
     fn command_palette_entries(&self) -> Vec<PaletteEntry> {
         let mut entries = vec![
             PaletteEntry {
-                label: "Toggle stepping".to_string(),
+                label: "Toggle step mode".to_string(),
                 action: PaletteAction::ToggleStepping,
             },
             PaletteEntry {
-                label: "Cycle view mode".to_string(),
+                label: "Cycle view modes".to_string(),
                 action: PaletteAction::ToggleViewMode,
             },
             PaletteEntry {
@@ -181,7 +357,7 @@ impl App {
                 action: PaletteAction::ToggleLineWrap,
             },
             PaletteEntry {
-                label: "Toggle context folding".to_string(),
+                label: "Cycle context folding".to_string(),
                 action: PaletteAction::ToggleFoldContext,
             },
             PaletteEntry {
@@ -198,7 +374,7 @@ impl App {
             },
         ]);
 
-        if self.is_multi_file() {
+        if self.can_show_file_panel() {
             entries.push(PaletteEntry {
                 label: "Toggle file panel".to_string(),
                 action: PaletteAction::ToggleFilePanel,
@@ -210,14 +386,68 @@ impl App {
         }
 
         entries.push(PaletteEntry {
-            label: "Pick commit".to_string(),
+            label: "History...".to_string(),
             action: PaletteAction::OpenDashboard,
+        });
+
+        if self.multi_diff.file_count() > 0 {
+            entries.push(PaletteEntry {
+                label: "Files...".to_string(),
+                action: PaletteAction::OpenFileSearch,
+            });
+        }
+
+        let diff_file_active = self.multi_diff.file_count() > 0
+            && self.view_mode != ViewMode::Preview
+            && !self.active_pr_comments_view()
+            && !self.active_outdated_comments_view();
+        if diff_file_active {
+            entries.push(PaletteEntry {
+                label: "Copy file path".to_string(),
+                action: PaletteAction::CopyFilePath,
+            });
+            entries.push(PaletteEntry {
+                label: "Copy file path and position".to_string(),
+                action: PaletteAction::CopyFilePosition,
+            });
+            entries.push(PaletteEntry {
+                label: "Copy absolute file path".to_string(),
+                action: PaletteAction::CopyAbsoluteFilePath,
+            });
+            entries.push(PaletteEntry {
+                label: "Copy absolute file path and position".to_string(),
+                action: PaletteAction::CopyAbsoluteFilePosition,
+            });
+            entries.push(PaletteEntry {
+                label: "Copy file path and cursor position".to_string(),
+                action: PaletteAction::CopyFileCursorPosition,
+            });
+            entries.push(PaletteEntry {
+                label: "Copy absolute file path and cursor position".to_string(),
+                action: PaletteAction::CopyAbsoluteFileCursorPosition,
+            });
+        }
+
+        entries.push(PaletteEntry {
+            label: "Themes...".to_string(),
+            action: PaletteAction::OpenThemePicker,
         });
 
         entries.push(PaletteEntry {
             label: "Refresh current file".to_string(),
             action: PaletteAction::RefreshCurrentFile,
         });
+
+        if self.control_session_name().is_some() {
+            entries.push(PaletteEntry {
+                label: "Copy session name".to_string(),
+                action: PaletteAction::CopySessionName,
+            });
+            entries.push(PaletteEntry {
+                label: "Rename session".to_string(),
+                action: PaletteAction::RenameSession,
+            });
+        }
 
         if self.stepping {
             entries.push(PaletteEntry {
@@ -231,6 +461,21 @@ impl App {
         }
 
         if self.review_mode {
+            entries.push(PaletteEntry {
+                label: "Comments...".to_string(),
+                action: PaletteAction::OpenCommentPicker,
+            });
+            entries.push(PaletteEntry {
+                label: format!(
+                    "{} comments",
+                    self.review_provider_kind().long_review_noun_title()
+                ),
+                action: PaletteAction::OpenPrComments,
+            });
+            entries.push(PaletteEntry {
+                label: "Outdated comments".to_string(),
+                action: PaletteAction::OpenOutdatedComments,
+            });
             for (idx, action) in self.review_actions.iter().enumerate() {
                 let show = action.show.is_empty()
                     || action.show.iter().any(|item| item == "command_palette");
@@ -264,6 +509,12 @@ impl App {
                 action,
                 PaletteAction::ToggleHelp
                     | PaletteAction::OpenDashboard
+                    | PaletteAction::OpenThemePicker
+                    | PaletteAction::OpenCommentPicker
+                    | PaletteAction::OpenPrComments
+                    | PaletteAction::OpenOutdatedComments
+                    | PaletteAction::CopySessionName
+                    | PaletteAction::RenameSession
                     | PaletteAction::Quit
                     | PaletteAction::RefreshAllFiles
             )
@@ -283,7 +534,22 @@ impl App {
             PaletteAction::ToggleAutoplay => self.toggle_autoplay(),
             PaletteAction::ToggleAutoplayReverse => self.toggle_autoplay_reverse(),
             PaletteAction::OpenDashboard => self.open_dashboard = true,
-            PaletteAction::Quit => self.should_quit = true,
+            PaletteAction::OpenFileSearch => self.start_file_search(),
+            PaletteAction::OpenThemePicker => self.start_theme_picker(),
+            PaletteAction::OpenCommentPicker => self.start_comment_picker(),
+            PaletteAction::OpenPrComments => self.open_pr_comments_in_current_tab(None),
+            PaletteAction::OpenOutdatedComments => self.open_outdated_comments_in_current_tab(None),
+            PaletteAction::CopyFilePath => self.copy_current_file_path(),
+            PaletteAction::CopyFilePosition => self.copy_current_file_position(),
+            PaletteAction::CopyAbsoluteFilePath => self.copy_current_absolute_file_path(),
+            PaletteAction::CopyAbsoluteFilePosition => self.copy_current_absolute_file_position(),
+            PaletteAction::CopyFileCursorPosition => self.copy_current_file_cursor_position(),
+            PaletteAction::CopyAbsoluteFileCursorPosition => {
+                self.copy_current_absolute_file_cursor_position()
+            }
+            PaletteAction::CopySessionName => self.copy_control_session_name(),
+            PaletteAction::RenameSession => self.start_session_rename(),
+            PaletteAction::Quit => self.request_quit(),
             PaletteAction::RefreshCurrentFile => self.refresh_current_file(),
             PaletteAction::RefreshAllFiles => self.refresh_all_files(),
             PaletteAction::ReviewAction(idx) => self.run_review_action(idx),
@@ -294,10 +560,13 @@ impl App {
         self.file_search_active = true;
         self.file_search_query.clear();
         self.file_search_selection = 0;
+        self.reset_picker_cursor();
         self.file_filter_active = false;
         self.clear_search();
         self.clear_goto();
         self.stop_command_palette();
+        self.stop_comment_picker();
+        self.stop_theme_picker();
     }
 
     pub fn stop_file_search(&mut self) {
@@ -319,16 +588,19 @@ impl App {
     pub fn push_file_search_char(&mut self, ch: char) {
         self.file_search_query.push(ch);
         self.file_search_selection = 0;
+        self.reset_picker_cursor();
     }
 
     pub fn pop_file_search_char(&mut self) {
         self.file_search_query.pop();
         self.file_search_selection = 0;
+        self.reset_picker_cursor();
     }
 
     pub fn clear_file_search_text(&mut self) {
         self.file_search_query.clear();
         self.file_search_selection = 0;
+        self.reset_picker_cursor();
     }
 
     pub fn move_file_search_selection(&mut self, delta: isize) {
@@ -399,5 +671,397 @@ impl App {
             self.file_search_selection = indices.len().saturating_sub(1);
         }
         indices
+    }
+
+    pub fn start_comment_picker(&mut self) {
+        self.comment_picker_active = true;
+        self.comment_picker_query.clear();
+        self.comment_picker_selection = 0;
+        self.reset_picker_cursor();
+        self.file_filter_active = false;
+        self.clear_search();
+        self.clear_goto();
+        self.stop_command_palette();
+        self.stop_file_search();
+        self.stop_theme_picker();
+    }
+
+    pub fn stop_comment_picker(&mut self) {
+        self.comment_picker_active = false;
+    }
+
+    pub fn comment_picker_active(&self) -> bool {
+        self.comment_picker_active
+    }
+
+    pub fn comment_picker_query(&self) -> &str {
+        &self.comment_picker_query
+    }
+
+    pub fn comment_picker_selection(&self) -> usize {
+        self.comment_picker_selection
+    }
+
+    pub fn push_comment_picker_char(&mut self, ch: char) {
+        self.comment_picker_query.push(ch);
+        self.comment_picker_selection = 0;
+        self.reset_picker_cursor();
+    }
+
+    pub fn pop_comment_picker_char(&mut self) {
+        self.comment_picker_query.pop();
+        self.comment_picker_selection = 0;
+        self.reset_picker_cursor();
+    }
+
+    pub fn clear_comment_picker_text(&mut self) {
+        self.comment_picker_query.clear();
+        self.comment_picker_selection = 0;
+        self.reset_picker_cursor();
+    }
+
+    pub fn move_comment_picker_selection(&mut self, delta: isize) {
+        let indices = self.comment_picker_filtered_indices();
+        let total = indices.len();
+        if total == 0 {
+            self.comment_picker_selection = 0;
+            return;
+        }
+        let current = self.comment_picker_selection.min(total.saturating_sub(1)) as isize;
+        let next = (current + delta).clamp(0, total.saturating_sub(1) as isize);
+        self.comment_picker_selection = next as usize;
+    }
+
+    pub fn apply_comment_picker_selection(&mut self) {
+        let indices = self.comment_picker_filtered_indices();
+        if indices.is_empty() {
+            return;
+        }
+        let idx = self
+            .comment_picker_selection
+            .min(indices.len().saturating_sub(1));
+        let comment_idx = indices[idx];
+        self.show_comments_sidebar();
+        let _ = self.open_review_comment(comment_idx);
+        self.stop_comment_picker();
+    }
+
+    pub fn set_comment_picker_list_area(
+        &mut self,
+        area: Option<(u16, u16, u16, u16)>,
+        start: usize,
+        count: usize,
+        item_height: u16,
+    ) {
+        self.comment_picker_list_area = area;
+        self.comment_picker_list_start = start;
+        self.comment_picker_list_count = count;
+        self.comment_picker_item_height = item_height.max(1);
+    }
+
+    pub fn handle_comment_picker_click(&mut self, column: u16, row: u16) -> bool {
+        let Some((x, y, width, height)) = self.comment_picker_list_area else {
+            return false;
+        };
+        if row < y || row >= y.saturating_add(height) {
+            return false;
+        }
+        if column < x || column >= x.saturating_add(width) {
+            return false;
+        }
+        let item_height = self.comment_picker_item_height.max(1);
+        let offset = row.saturating_sub(y) / item_height;
+        let offset = offset as usize;
+        if offset >= self.comment_picker_list_count {
+            return false;
+        }
+        self.comment_picker_selection = self.comment_picker_list_start.saturating_add(offset);
+        self.apply_comment_picker_selection();
+        true
+    }
+
+    pub(crate) fn comment_picker_filtered_indices(&mut self) -> Vec<usize> {
+        let mut indices = self.review_comment_indices_for_query(&self.comment_picker_query);
+        indices.sort_by(|a, b| {
+            self.review_comment_sidebar_sort_key(*b)
+                .cmp(&self.review_comment_sidebar_sort_key(*a))
+        });
+        if indices.is_empty() {
+            self.comment_picker_selection = 0;
+        } else if self.comment_picker_selection >= indices.len() {
+            self.comment_picker_selection = indices.len().saturating_sub(1);
+        }
+        indices
+    }
+
+    pub fn start_theme_picker(&mut self) {
+        if !self.theme_picker_active {
+            self.theme_picker_restore = Some((self.theme.clone(), self.ui_theme_name.clone()));
+        }
+        self.theme_picker_active = true;
+        self.theme_picker_query.clear();
+        self.reset_picker_cursor();
+        self.theme_picker_selection = self
+            .ui_theme_name
+            .as_ref()
+            .and_then(|current| list_ui_themes().iter().position(|name| name == current))
+            .unwrap_or(0);
+        self.file_filter_active = false;
+        self.clear_search();
+        self.clear_goto();
+        self.stop_command_palette();
+        self.stop_file_search();
+        self.stop_comment_picker();
+    }
+
+    pub fn stop_theme_picker(&mut self) {
+        if let Some((theme, name)) = self.theme_picker_restore.take() {
+            self.theme = theme;
+            self.ui_theme_name = name;
+        }
+        self.theme_picker_active = false;
+    }
+
+    pub fn theme_picker_active(&self) -> bool {
+        self.theme_picker_active
+    }
+
+    pub fn theme_picker_query(&self) -> &str {
+        &self.theme_picker_query
+    }
+
+    pub fn theme_picker_selection(&self) -> usize {
+        self.theme_picker_selection
+    }
+
+    pub fn push_theme_picker_char(&mut self, ch: char) {
+        self.theme_picker_query.push(ch);
+        self.theme_picker_selection = 0;
+        self.reset_picker_cursor();
+        self.preview_theme_picker_selection();
+    }
+
+    pub fn pop_theme_picker_char(&mut self) {
+        self.theme_picker_query.pop();
+        self.theme_picker_selection = 0;
+        self.reset_picker_cursor();
+        self.preview_theme_picker_selection();
+    }
+
+    pub fn clear_theme_picker_text(&mut self) {
+        self.theme_picker_query.clear();
+        self.theme_picker_selection = 0;
+        self.reset_picker_cursor();
+        self.preview_theme_picker_selection();
+    }
+
+    pub fn move_theme_picker_selection(&mut self, delta: isize) {
+        let names = self.theme_picker_filtered_names();
+        let total = names.len();
+        if total == 0 {
+            self.theme_picker_selection = 0;
+            return;
+        }
+        let current = self.theme_picker_selection.min(total.saturating_sub(1)) as isize;
+        let next = (current + delta).clamp(0, total.saturating_sub(1) as isize);
+        self.theme_picker_selection = next as usize;
+        self.preview_theme_picker_selection();
+    }
+
+    pub fn apply_theme_picker_selection(&mut self) {
+        let names = self.theme_picker_filtered_names();
+        if names.is_empty() {
+            return;
+        }
+        let idx = self
+            .theme_picker_selection
+            .min(names.len().saturating_sub(1));
+        self.apply_ui_theme(&names[idx]);
+        self.theme_picker_restore = None;
+        self.stop_theme_picker();
+    }
+
+    pub fn set_theme_picker_list_area(
+        &mut self,
+        area: Option<(u16, u16, u16, u16)>,
+        start: usize,
+        count: usize,
+        item_height: u16,
+    ) {
+        self.theme_picker_list_area = area;
+        self.theme_picker_list_start = start;
+        self.theme_picker_list_count = count;
+        self.theme_picker_item_height = item_height.max(1);
+    }
+
+    pub fn handle_theme_picker_click(&mut self, column: u16, row: u16) -> bool {
+        let Some((x, y, width, height)) = self.theme_picker_list_area else {
+            return false;
+        };
+        if row < y || row >= y.saturating_add(height) {
+            return false;
+        }
+        if column < x || column >= x.saturating_add(width) {
+            return false;
+        }
+        let item_height = self.theme_picker_item_height.max(1);
+        let offset = row.saturating_sub(y) / item_height;
+        let offset = offset as usize;
+        if offset >= self.theme_picker_list_count {
+            return false;
+        }
+        self.theme_picker_selection = self.theme_picker_list_start.saturating_add(offset);
+        self.apply_theme_picker_selection();
+        true
+    }
+
+    pub(crate) fn theme_picker_filtered_names(&mut self) -> Vec<String> {
+        let query = self.theme_picker_query.trim().to_ascii_lowercase();
+        let names = list_ui_themes()
+            .into_iter()
+            .filter(|name| query.is_empty() || name.to_ascii_lowercase().contains(&query))
+            .collect::<Vec<_>>();
+        if names.is_empty() {
+            self.theme_picker_selection = 0;
+        } else if self.theme_picker_selection >= names.len() {
+            self.theme_picker_selection = names.len().saturating_sub(1);
+        }
+        names
+    }
+
+    fn preview_theme_picker_selection(&mut self) {
+        let names = self.theme_picker_filtered_names();
+        let Some(name) = names.get(self.theme_picker_selection) else {
+            return;
+        };
+        self.apply_ui_theme(&name.clone());
+    }
+
+    pub(crate) fn apply_ui_theme(&mut self, name: &str) {
+        self.theme = ThemeConfig {
+            name: Some(name.to_string()),
+            ..ThemeConfig::default()
+        }
+        .resolve(self.theme_is_light);
+        self.ui_theme_name = Some(name.to_string());
+        self.unified_render_cache = None;
+        self.blame_render_cache = None;
+        self.blame_bar_cache.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::review::{ReviewAnchor, ReviewRange, ReviewSide, ReviewTargetKind};
+    use oyo_core::MultiFileDiff;
+    use std::path::PathBuf;
+
+    fn app() -> App {
+        let diff = MultiFileDiff::from_file_pair(
+            PathBuf::from("src/lib.rs"),
+            PathBuf::from("src/lib.rs"),
+            "same\nold\nthree\nfour\nold five\n".to_string(),
+            "same\nnew\nthree\nfour\nnew five\n".to_string(),
+        );
+        let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+        app.set_review_workspace_root(Some(PathBuf::from("/tmp/oyo-palette")));
+        app.handle_file_enter();
+        app
+    }
+
+    #[test]
+    fn palette_offers_current_file_path_and_position_in_diff_views() {
+        let mut app = app();
+        let entries = app.command_palette_entries();
+        assert!(entries.iter().any(|entry| {
+            entry.label == "Copy file path" && matches!(entry.action, PaletteAction::CopyFilePath)
+        }));
+        assert!(entries.iter().any(|entry| {
+            entry.label == "Copy file path and position"
+                && matches!(entry.action, PaletteAction::CopyFilePosition)
+        }));
+        assert!(entries.iter().any(|entry| {
+            entry.label == "Copy absolute file path"
+                && matches!(entry.action, PaletteAction::CopyAbsoluteFilePath)
+        }));
+        assert!(entries.iter().any(|entry| {
+            entry.label == "Copy absolute file path and position"
+                && matches!(entry.action, PaletteAction::CopyAbsoluteFilePosition)
+        }));
+        assert!(entries.iter().any(|entry| {
+            entry.label == "Copy file path and cursor position"
+                && matches!(entry.action, PaletteAction::CopyFileCursorPosition)
+        }));
+        assert!(entries.iter().any(|entry| {
+            entry.label == "Copy absolute file path and cursor position"
+                && matches!(entry.action, PaletteAction::CopyAbsoluteFileCursorPosition)
+        }));
+        assert_eq!(app.current_file_path(), "src/lib.rs");
+        assert_eq!(
+            app.current_file_relative_position_label().as_deref(),
+            Some("src/lib.rs:R2")
+        );
+        assert_eq!(
+            app.current_file_absolute_path_label().as_deref(),
+            Some("/tmp/oyo-palette/src/lib.rs")
+        );
+        assert_eq!(
+            app.current_file_absolute_position_label().as_deref(),
+            Some("/tmp/oyo-palette/src/lib.rs:R2")
+        );
+        app.last_hovered_review_anchor = Some((
+            app.diff_revision(),
+            ReviewAnchor {
+                file_index: 0,
+                file_path: "src/lib.rs".to_string(),
+                kind: ReviewTargetKind::Line,
+                side: Some(ReviewSide::New),
+                old_range: Some(ReviewRange { start: 5, end: 5 }),
+                new_range: Some(ReviewRange { start: 5, end: 5 }),
+                hunk_id: None,
+                display_idx_hint: Some(4),
+                anchor_key: "line|src/lib.rs|new|5".to_string(),
+                snapshot: None,
+            },
+        ));
+        assert_eq!(
+            app.current_file_relative_position_label().as_deref(),
+            Some("src/lib.rs:R5")
+        );
+        assert_eq!(
+            app.current_file_cursor_position_label().as_deref(),
+            Some("src/lib.rs:R2")
+        );
+        assert_eq!(
+            app.current_file_absolute_position_label().as_deref(),
+            Some("/tmp/oyo-palette/src/lib.rs:R5")
+        );
+        assert_eq!(
+            app.current_file_absolute_cursor_position_label().as_deref(),
+            Some("/tmp/oyo-palette/src/lib.rs:R2")
+        );
+        app.mark_diff_changed();
+        assert_eq!(
+            app.current_file_relative_position_label().as_deref(),
+            Some("src/lib.rs:R2")
+        );
+        app.last_hovered_review_anchor = None;
+        app.next_step();
+        assert_eq!(
+            app.current_file_relative_position_label().as_deref(),
+            Some("src/lib.rs:R5")
+        );
+
+        app.view_mode = ViewMode::Preview;
+        assert!(!app.command_palette_entries().iter().any(|entry| matches!(
+            entry.action,
+            PaletteAction::CopyFilePath
+                | PaletteAction::CopyFilePosition
+                | PaletteAction::CopyAbsoluteFilePath
+                | PaletteAction::CopyAbsoluteFilePosition
+                | PaletteAction::CopyFileCursorPosition
+                | PaletteAction::CopyAbsoluteFileCursorPosition
+        )));
     }
 }

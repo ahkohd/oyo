@@ -1,0 +1,8 @@
+---
+// The Agentation annotation toolbar, mounted only during `astro dev`. In a
+// production build `import.meta.env.DEV` is statically false, so the island is
+// never emitted and React/agentation are tree-shaken out of the output.
+import { Agentation } from "agentation";
+---
+
+{import.meta.env.DEV && <Agentation client:only="react" />}

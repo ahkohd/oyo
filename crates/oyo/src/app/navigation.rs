@@ -7,6 +7,7 @@ use super::{
     PeekScope, PeekState, StepEdge, StepEdgeHint, ViewMode,
 };
 use crate::config::{FoldContextMode, HunkWrapMode, ModifiedStepMode, StepWrapMode};
+use crate::toasts::ToastEvent;
 use oyo_core::{
     git::FileStatus, AnimationFrame, ChangeKind, DiffNavigator, LineKind, StepState, ViewLine,
 };
@@ -204,7 +205,11 @@ impl App {
             return;
         };
         if let Some(text) = self.text_for_yank(line) {
-            copy_to_clipboard(&text);
+            if copy_to_clipboard(&text) {
+                self.notify(ToastEvent::CopiedLine);
+            } else {
+                self.notify(ToastEvent::CopyFailed);
+            }
         }
     }
 
@@ -224,7 +229,11 @@ impl App {
         if lines.is_empty() {
             return;
         }
-        copy_to_clipboard(&lines.join("\n"));
+        if copy_to_clipboard(&lines.join("\n")) {
+            self.notify(ToastEvent::CopiedHunk);
+        } else {
+            self.notify(ToastEvent::CopyFailed);
+        }
     }
 
     pub fn yank_current_change_patch(&mut self) {
@@ -234,13 +243,21 @@ impl App {
             return;
         };
         if let Some(text) = self.patch_for_hunk(Some(line.change_id)) {
-            copy_to_clipboard(&text);
+            if copy_to_clipboard(&text) {
+                self.notify(ToastEvent::CopiedPatch);
+            } else {
+                self.notify(ToastEvent::CopyFailed);
+            }
         }
     }
 
     pub fn yank_current_hunk_patch(&mut self) {
         if let Some(text) = self.patch_for_hunk(None) {
-            copy_to_clipboard(&text);
+            if copy_to_clipboard(&text) {
+                self.notify(ToastEvent::CopiedPatch);
+            } else {
+                self.notify(ToastEvent::CopyFailed);
+            }
         }
     }
 
@@ -2093,6 +2110,7 @@ impl App {
         }
         if self.view_mode == ViewMode::Preview {
             self.stepping = !self.stepping;
+            self.notify(ToastEvent::Stepping(self.stepping));
             return;
         }
         let current_index = self.multi_diff.selected_index;
@@ -2132,6 +2150,7 @@ impl App {
             self.animation_progress = 1.0;
             self.needs_scroll_to_active = false;
         }
+        self.notify(ToastEvent::Stepping(self.stepping));
     }
 
     pub fn goto_start(&mut self) {
@@ -2490,6 +2509,7 @@ impl App {
         };
 
         if let Some(idx) = target_idx {
+            let cursor_target = view.get(idx).map(|line| (line.hunk_index, line.change_id));
             let viewport_height = self.last_viewport_height.max(1);
             if self.auto_center {
                 let half_viewport = viewport_height / 2;
@@ -2502,12 +2522,23 @@ impl App {
             self.needs_scroll_to_active = false;
             self.multi_diff.current_navigator().set_hunk_scope(false);
             if !self.stepping {
-                self.set_cursor_for_current_scroll();
+                match cursor_target {
+                    Some((Some(hidx), change_id)) => self
+                        .multi_diff
+                        .current_navigator()
+                        .set_cursor_hunk(hidx, Some(change_id)),
+                    Some((None, change_id)) => self
+                        .multi_diff
+                        .current_navigator()
+                        .set_cursor_change(Some(change_id)),
+                    None => self.multi_diff.current_navigator().clear_cursor_change(),
+                }
             }
         }
     }
 
     pub fn toggle_view_mode(&mut self) {
+        self.preview_forced_by_content = false;
         let allow_blame = self.blame_enabled;
         if !self.stepping {
             // In no-step mode, skip Evolution view as it requires stepping
@@ -2539,6 +2570,7 @@ impl App {
     }
 
     pub fn set_view_mode(&mut self, target: ViewMode) {
+        self.preview_forced_by_content = false;
         if target == ViewMode::Blame && !self.blame_enabled {
             return;
         }
@@ -2564,6 +2596,7 @@ impl App {
     }
 
     pub fn toggle_view_mode_reverse(&mut self) {
+        self.preview_forced_by_content = false;
         let allow_blame = self.blame_enabled;
         if !self.stepping {
             // In no-step mode, skip Evolution view as it requires stepping

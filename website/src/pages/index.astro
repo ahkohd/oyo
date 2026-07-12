@@ -1,0 +1,683 @@
+---
+import "@fontsource-variable/geist-mono";
+import "../styles/landing.css";
+import DevTools from "../components/DevTools.astro";
+
+const rawBase = import.meta.env.BASE_URL; // "/oyo" (no trailing slash)
+const base = rawBase.endsWith("/") ? rawBase : `${rawBase}/`;
+const docs = (slug: string) => `${base}${slug}/`;
+const repo = "https://github.com/ahkohd/oyo";
+
+// Fetch the star count at build time; refreshes on every deploy. Falls back to
+// null (button renders without a count) if the API is unreachable or rate-limited.
+let stars: number | null = null;
+try {
+  const token = process.env.GITHUB_TOKEN;
+  const res = await fetch("https://api.github.com/repos/ahkohd/oyo", {
+    headers: {
+      "User-Agent": "oyo-website",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+  });
+  if (res.ok) stars = (await res.json()).stargazers_count ?? null;
+} catch {
+  // offline build: skip the count
+}
+const fmtStars = (n: number) =>
+  n >= 1000 ? `${(n / 1000).toFixed(1).replace(/\.0$/, "")}k` : String(n);
+
+// Code samples live as raw HTML strings so their literal { } braces aren't
+// parsed as Astro expressions.
+const heroDiff = `
+<div class="dl" style="animation-delay:.02s"><span class="ln">4617</span><span> <span class="tk">fn</span> <span class="tf">draw_selection_toolbar</span>(frame, app) {</span></div>
+<div class="dl del" style="animation-delay:.08s"><span class="ln">4619</span><span>-    <span class="tk">let</span> height: <span class="tt">u16</span> = <span class="tk">if</span> has_quote { 4 } <span class="tk">else</span> { 3 };</span></div>
+<div class="dl add" style="animation-delay:.14s"><span class="ln">4619</span><span>+    <span class="tk">let</span> height: <span class="tt">u16</span> = <span class="tk">if</span> has_quote { (quote_rows + 3) <span class="tk">as</span> <span class="tt">u16</span> } <span class="tk">else</span> { 3 };</span></div>
+<div class="dl" style="animation-delay:.20s"><span class="ln">4676</span><span>     <span class="tc">// A heavy left bar plus truncated, italic preview lines.</span></span></div>
+<div class="dl del" style="animation-delay:.26s"><span class="ln">4677</span><span>-    <span class="tk">let</span> bar = <span class="tf">Span</span>::styled(<span class="ts">"| "</span>, muted);</span></div>
+<div class="dl add" style="animation-delay:.32s"><span class="ln">4677</span><span>+    <span class="tk">let</span> bar = <span class="tf">Span</span>::styled(<span class="ts">"| "</span>, quote_bar);</span></div>
+<div class="dl" style="animation-delay:.38s"><span class="ln">4693</span><span>     spans.push(bar);</span></div>
+<div class="dl" style="animation-delay:.44s"><span class="ln">4694</span><span> }</span></div>`;
+
+const miniScroll = `<span class="cur">$</span> oy
+  fn parse(input) {
+<span class="del">-     let n = input.len();</span>
+<span class="add">+     let n = input.trim().len();</span>
+      dispatch(n)
+  }`;
+
+const miniStep = `<span class="cur">$</span> oy --step
+  step 3/7  -  press j / k
+<span class="add">+     let n = input.trim().len();</span>
+      dispatch(n)          <span class="cur">< here</span>
+  }`;
+
+// Review-showcase demo fallbacks. Each renders as static ASCII now; to swap in a
+// real recording, add data-cast-dark / data-cast-light on the block and drop the
+// matching .cast into public/ (see the review section markup below).
+const demoReviewTool = `<span class="cur">$</span> oy review comment --unresolved
+  #7  src/parse.rs:42   Handle empty input.
+  #9  src/parse.rs:88   Name this constant.
+<span class="cur">$</span> oy review comment resolve 7
+  resolved #7`;
+
+const demoReviewTeam = `<span class="cur">$</span> oy review pull
+  pulled 4 comments from PR #128
+<span class="cur">$</span> oy review push
+  pushed 2 comments to PR #128`;
+
+const demoReviewAgent = `<span class="cur">$</span> agent reviewing your diff …
+<span class="add">+  #12  extract this into a helper</span>
+<span class="cur">$</span> check comment 12
+  fixed, resolved #12`;
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Oyo — your complete terminal code review tool</title>
+    <meta
+      name="description"
+      content="Oyo is a complete code review tool that lives in your terminal. Diff and review, comment on any line, resolve threads, and sync with your pull requests — for you, your team, and your coding agents."
+    />
+    <link rel="icon" href={`${base}favicon.svg`} type="image/svg+xml" />
+    <link rel="stylesheet" href={`${base}vendor/asciinema-player.css`} />
+    <meta property="og:title" content="Oyo — your complete terminal code review tool" />
+    <meta
+      property="og:description"
+      content="Diff and review, comment on any line, resolve threads, and sync with your pull requests — all from your terminal. Code review for you, your team, and your coding agents."
+    />
+    <meta property="og:type" content="website" />
+    <!-- Set the theme before paint, synced with the docs' toggle, to avoid a flash. -->
+    <script is:inline>
+      try {
+        const t = localStorage.getItem("starlight-theme");
+        if (t === "dark" || t === "light")
+          document.documentElement.dataset.theme = t;
+      } catch (e) {}
+    </script>
+  </head>
+  <body>
+    <header class="nav">
+      <div class="nav-in">
+        <a href={base} class="brand"
+          ><span class="prompt">~/</span>oy<span class="cur"></span></a
+        >
+        <nav class="nav-links">
+          <a href="#features">Features</a>
+          <a href="#install">Install</a>
+          <a href={docs("config")}>Docs</a>
+          <button
+            class="theme-toggle"
+            id="theme-toggle"
+            type="button"
+            aria-label="Toggle color theme"
+            title="Toggle theme">◐</button
+          >
+        </nav>
+      </div>
+    </header>
+
+    <main id="top">
+      <!-- ============ HERO ============ -->
+      <section class="hero">
+        <div class="wrap">
+          <h1>Oyo is your <span class="hl">complete</span> terminal code review tool.</h1>
+          <div class="hero-actions">
+            <a class="btn btn-primary" href="#install">Install</a>
+            <a class="btn btn-ghost" href={repo}>
+              <span>Star on GitHub</span>
+              {stars != null && (
+                <span class="count">
+                  <svg
+                    class="star"
+                    viewBox="0 0 24 24"
+                    fill="currentColor"
+                    aria-hidden="true"
+                    ><path
+                      d="M12 17.27 18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"
+                    ></path></svg
+                  >
+                  {fmtStars(stars)}
+                </span>
+              )}
+            </a>
+          </div>
+          <!-- Oyo, running -->
+          <div class="term reveal" style="margin-top:2.6rem;" aria-hidden="true">
+            <div class="term-tabs">
+              <span class="term-title mono">oy</span>
+            </div>
+            <div class="term-body term-body--player">
+              <div id="oy-demo" class="oy-player"></div>
+              <div id="oy-fallback" class="term-fallback" set:html={heroDiff}>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ REVIEW WITH AGENTS ============ -->
+      <section class="review" id="review">
+        <div class="wrap">
+          <p class="divider mono"><span class="hash">#</span> the whole review, in your terminal</p>
+          <h2>Code review for you, your team, and your agent.</h2>
+
+          <div class="showcase">
+            <div class="show-row">
+              <div class="show-text">
+                <span class="k mono">Diff and review</span>
+                <h3>Everything a code review needs, right where you already work.</h3>
+                <p>Read any change, comment on the exact lines, and work every thread through to resolved — the whole review, in one place.</p>
+              </div>
+              <!-- Demo: the review TUI — diff with an inline comment card, unified/split (80x18). -->
+              <div class="show-demo mini mini-player" data-cast-dark={`${base}review-tool.cast`} data-cast-light={`${base}review-tool-light.cast`} set:html={demoReviewTool}></div>
+            </div>
+
+            <div class="show-row">
+              <div class="show-text">
+                <span class="k mono">Sync with your team</span>
+                <h3>Bring your team's code reviews into the terminal.</h3>
+                <p>Pull your team's comments from GitHub, GitLab, Codeberg or self-hosted Forgejo into Oyo, work through them, reply, resolve and push your own comments back.</p>
+              </div>
+              <!-- Demo: `oy review pull` + status against a real PR (90x12, full-height panel). -->
+              <div class="show-demo mini mini-player" data-cast-dark={`${base}review-team.cast`} data-cast-light={`${base}review-team-light.cast`} set:html={demoReviewTeam}></div>
+            </div>
+
+            <div class="show-row">
+              <div class="show-text">
+                <span class="k mono">Work with your agent</span>
+                <h3>Your agent reviews — and walks you through it.</h3>
+                <p>Have it review a diff, leave comments and resolve feedback, or drive the TUI while it walks you through the changes.</p>
+              </div>
+              <!-- Demo: the agent reviews via oy review (identity, comments, resolve) — 80x18. -->
+              <div class="show-demo mini mini-player" data-cast-dark={`${base}review-agent.cast`} data-cast-light={`${base}review-agent-light.cast`} set:html={demoReviewAgent}></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ TWO MODES ============ -->
+      <section class="modes" id="modes">
+        <div class="wrap">
+          <p class="divider mono"><span class="hash">#</span> two ways to review</p>
+          <h2>One viewer, two mindsets.</h2>
+
+          <div class="modes-grid">
+            <div class="mode">
+              <div class="show-text">
+                <span class="k mono">Scroll mode</span>
+                <h3>Read the whole change at once.</h3>
+                <p>Scroll freely, jump between hunks, and search across the whole diff.</p>
+              </div>
+              <div class="show-demo mini mini-player" data-cast-dark={`${base}scroll-mode.cast`} data-cast-light={`${base}scroll-mode-light.cast`} set:html={miniScroll}></div>
+            </div>
+
+            <div class="mode">
+              <div class="show-text">
+                <span class="k mono">Step mode</span>
+                <h3>Or take it one edit at a time.</h3>
+                <p>Step through each change in sequence, or press play and watch it run.</p>
+              </div>
+              <div class="show-demo mini mini-player" data-cast-dark={`${base}step-mode.cast`} data-cast-light={`${base}step-mode-light.cast`} set:html={miniStep}></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ FEATURES ============ -->
+      <section class="features" id="features">
+        <div class="wrap">
+          <p class="divider mono"><span class="hash">#</span> what's inside</p>
+          <h2>Batteries included.</h2>
+
+          <div class="feat-grid">
+            <div class="feat"><h3>Views and tabs</h3><p>Unified, split, evolution, blame and preview — each diff in its own tab.</p></div>
+            <div class="feat"><h3>Mouse and selection</h3><p>Click files, tabs and menus, drag and scroll, or highlight text for action.</p></div>
+            <div class="feat"><h3>Rich previews</h3><p>Markdown, JSON/YAML/TOML trees, CSV tables, and images.</p></div>
+            <div class="feat"><h3>Hooks and actions</h3><p>Set up commands to run automatically on events, or on demand from the UI.</p></div>
+            <div class="feat"><h3>Watch mode</h3><p>Refreshes files as they change on disk, so the diff stays live.</p></div>
+            <div class="feat"><h3>Git and Jujutsu</h3><p>Drops in as a <span class="mono">difftool</span> for Git and a diff tool for Jujutsu.</p></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ INSTALL ============ -->
+      <section class="install" id="install">
+        <div class="wrap">
+          <p class="divider mono"><span class="hash">#</span> install</p>
+          <h2>One line, then <span style="color:var(--accent)">oy</span>.</h2>
+          <p class="lead">Pick your package manager. The binary is <span class="mono">oy</span>.</p>
+
+          <div class="tabs" role="tablist" aria-label="Install method">
+            <button role="tab" aria-selected="true" data-cmd="brew install ahkohd/oyo/oy">brew</button>
+            <button role="tab" aria-selected="false" data-cmd="cargo install oyo --locked --force">cargo</button>
+            <button role="tab" aria-selected="false" data-cmd="npm i -g @ahkohd/oyo">npm</button>
+            <button role="tab" aria-selected="false" data-cmd="paru -S oyo">paru</button>
+            <button role="tab" aria-selected="false" data-cmd="nix profile add github:ahkohd/oyo">nix</button>
+            <button role="tab" aria-selected="false" data-cmd="pi install npm:@ahkohd/pi-oyo">pi</button>
+          </div>
+          <div class="cmd">
+            <code><span class="dollar">$</span><span id="cmd-text">brew install ahkohd/oyo/oy</span></code>
+            <button class="copy" id="copy-btn" type="button">copy</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ INTEGRATE ============ -->
+      <section class="integrate">
+        <div class="wrap">
+          <p class="divider mono"><span class="hash">#</span> drop it into your workflow</p>
+          <h2>Plays nice with your VCS.</h2>
+
+          <div class="int-grid">
+            <div class="code-card">
+              <div class="h">git config</div>
+<pre><span class="c">[difftool "oy"]</span>
+    cmd = oy <span class="str">"$LOCAL"</span> <span class="str">"$REMOTE"</span>
+<span class="c">[difftool]</span>
+    prompt = false
+<span class="c">[alias]</span>
+    d = difftool -y --tool=oy</pre>
+            </div>
+            <div class="code-card">
+              <div class="h">jujutsu config</div>
+<pre><span class="c">[merge-tools.oy]</span>
+program = <span class="str">"oy"</span>
+diff-args = [<span class="str">"$left"</span>, <span class="str">"$right"</span>]
+
+<span class="c">[aliases]</span>
+d = [<span class="str">"diff"</span>, <span class="str">"--tool"</span>, <span class="str">"oy"</span>]</pre>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ KEYS ============ -->
+    </main>
+
+    <!-- ============ FOOTER ============ -->
+    <footer>
+      <div class="foot-in">
+        <div class="foot-brand">
+          <a href={base} class="brand"><span class="prompt">~/</span>oy</a>
+          <p>Diff and Review.</p>
+        </div>
+        <div class="foot-col">
+          <h4>Docs</h4>
+          <a href={docs("config")}>Configuration</a>
+          <a href={docs("theming")}>Theming</a>
+          <a href={docs("keybindings")}>Keybindings</a>
+          <a href={docs("hooks")}>Hooks</a>
+        </div>
+        <div class="foot-col">
+          <h4>Install</h4>
+          <a href={repo}>Homebrew</a>
+          <a href="https://www.npmjs.com/package/@ahkohd/oyo">npm</a>
+          <a href="https://crates.io/crates/oyo">crates.io</a>
+          <a href="https://aur.archlinux.org/packages/oyo">Arch (AUR)</a>
+          <a href={repo}>Nix</a>
+        </div>
+        <div class="foot-col">
+          <h4>Project</h4>
+          <a href="https://terminaltrove.com/oyo/">Terminal Trove</a>
+          <a href={repo}>GitHub</a>
+          <a href={`${repo}/issues`}>Issues</a>
+          <a href={`${repo}/releases`}>Releases</a>
+        </div>
+      </div>
+    </footer>
+
+    <script>
+      // Install tabs
+      const tabs = document.querySelectorAll<HTMLButtonElement>(".tabs button");
+      const cmdText = document.getElementById("cmd-text")!;
+      const copyBtn = document.getElementById("copy-btn")!;
+      tabs.forEach((t) =>
+        t.addEventListener("click", () => {
+          tabs.forEach((x) => x.setAttribute("aria-selected", "false"));
+          t.setAttribute("aria-selected", "true");
+          cmdText.textContent = t.dataset.cmd ?? "";
+          copyBtn.textContent = "copy";
+        }),
+      );
+
+      // Copy button
+      copyBtn.addEventListener("click", async () => {
+        try {
+          await navigator.clipboard.writeText(cmdText.textContent ?? "");
+          copyBtn.textContent = "copied";
+          setTimeout(() => (copyBtn.textContent = "copy"), 1400);
+        } catch (e) {
+          copyBtn.textContent = "select";
+          setTimeout(() => (copyBtn.textContent = "copy"), 1400);
+        }
+      });
+
+      // Theme toggle. Shares the docs' localStorage key so the choice persists
+      // across the landing page and the Starlight docs.
+      const root = document.documentElement;
+      const toggle = document.getElementById("theme-toggle")!;
+      const current = () => {
+        const stored = localStorage.getItem("starlight-theme");
+        if (stored === "dark" || stored === "light") return stored;
+        return window.matchMedia("(prefers-color-scheme: dark)").matches
+          ? "dark"
+          : "light";
+      };
+      toggle.addEventListener("click", () => {
+        const next = current() === "dark" ? "light" : "dark";
+        root.dataset.theme = next;
+        try {
+          localStorage.setItem("starlight-theme", next);
+        } catch (e) {}
+      });
+    </script>
+    <DevTools />
+
+    <!-- Hero demo: real oy session recorded with asciinema, played inline. -->
+    <script is:inline src={`${base}vendor/asciinema-player.min.js`}></script>
+    <script
+      is:inline
+      define:vars={{
+        castDark: `${base}demo.cast`,
+        castLight: `${base}demo-light.cast`,
+      }}
+    >
+      (function () {
+        // One coordinator for the hero and the two mode clips (treated as one
+        // unit). The main plays while it's in view (or hovered); when it plays
+        // the clips pause, and when it doesn't the clips play. Hovering a clip
+        // forces the clips and pauses the main; hovering OUT doesn't pause a
+        // clip. Only the main resuming does.
+        window.__coord = window.__coord || {
+          mainInView: true, // hero is at the top on load
+          mainHovered: false,
+          clipsHovered: false,
+          main: null,
+          clips: [],
+          sync: function () {
+            var mainPlays =
+              (this.mainInView || this.mainHovered) && !this.clipsHovered;
+            try {
+              if (this.main) {
+                if (mainPlays) this.main.play();
+                else this.main.pause();
+              }
+            } catch (e) {}
+            for (var i = 0; i < this.clips.length; i++) {
+              try {
+                if (mainPlays) this.clips[i].pause();
+                else this.clips[i].play();
+              } catch (e) {}
+            }
+          },
+        };
+        var el = document.getElementById("oy-demo");
+        var fb = document.getElementById("oy-fallback");
+        if (!el || !window.AsciinemaPlayer) return;
+        // Respect reduced-motion: keep the static fallback, no autoplay loop.
+        if (
+          window.matchMedia &&
+          window.matchMedia("(prefers-reduced-motion: reduce)").matches
+        )
+          return;
+        var mq = window.matchMedia("(prefers-color-scheme: dark)");
+        var player = null;
+        var mounted = null;
+        function mode() {
+          var t = document.documentElement.dataset.theme;
+          if (t === "light" || t === "dark") return t;
+          return mq.matches ? "dark" : "light";
+        }
+        function mount() {
+          var m = mode();
+          if (m === mounted) return; // theme unchanged, keep playing
+          // Hold the current height across the swap so the container can't
+          // collapse (or shrink to the new player's transient narrow render)
+          // and shove the page around. Measure BEFORE dispose() (it empties the
+          // container); crop() restores the exact height after.
+          var prevH = el.offsetHeight;
+          if (prevH) el.style.minHeight = prevH + "px";
+          if (player) {
+            try {
+              player.dispose();
+            } catch (e) {}
+            player = null;
+          }
+          el.innerHTML = "";
+          try {
+            player = window.AsciinemaPlayer.create(
+              m === "light" ? castLight : castDark,
+              el,
+              {
+                autoPlay: false,
+                loop: true,
+                controls: false,
+                fit: "width",
+                terminalLineHeight: 1.2,
+                poster: "npt:0:02",
+              },
+            );
+            mounted = m;
+            if (fb) fb.style.display = "none";
+            window.__coord.main = player;
+            // fit:"width" measures at create time (often before final layout),
+            // leaving the terminal narrow. Nudge a resize so it refits to the
+            // full frame width once layout has settled.
+            requestAnimationFrame(function () {
+              try {
+                window.dispatchEvent(new Event("resize"));
+              } catch (e) {}
+            });
+            // asciinema-player frames the terminal in a 0.75em border that can't
+            // be removed without breaking its layout. Instead, scale the terminal
+            // up by exactly that border so it's pushed outside the clipped player
+            // and the demo sits flush. Measured per refit, so it is font-independent.
+            var term = el.querySelector(".ap-term");
+            if (term && window.ResizeObserver) {
+              var crop = function () {
+                var cs = getComputedStyle(term);
+                var b = parseFloat(cs.borderTopWidth) || 0;
+                var w = term.clientWidth;
+                var h = term.clientHeight;
+                var rows = parseFloat(cs.getPropertyValue("--term-rows")) || 34;
+                if (b && w && h) {
+                  var row = h / rows; // one terminal row, in px
+                  term.style.transformOrigin = "center center";
+                  // Scale up by the border (flush), then shift up one row to drop
+                  // oy's blank top row.
+                  term.style.transform =
+                    "scale(" + (w + 2 * b) / w + "," + (h + 2 * b) / h + ")" +
+                    " translateY(-" + row + "px)";
+                  // Crop the frame to (rows-1) on OUR container (the player resets
+                  // its own height on playback) so the blank bottom row the shift
+                  // reveals is trimmed. Terminal is top-aligned, so this clips the
+                  // bottom. Scaled row height is (h+2b)/rows.
+                  el.style.overflow = "hidden";
+                  el.style.height = ((h + 2 * b) * (rows - 1)) / rows + "px";
+                }
+              };
+              new ResizeObserver(crop).observe(term);
+              crop();
+            }
+            window.__coord.sync();
+          } catch (e) {
+            /* leave the fallback in place */
+          }
+        }
+        mount();
+        // The main plays while it's the viewport's focus (or hovered); scrolling
+        // past it hands play to the clips.
+        if (window.IntersectionObserver) {
+          new IntersectionObserver(
+            function (entries) {
+              window.__coord.mainInView = entries[0].intersectionRatio >= 0.5;
+              window.__coord.sync();
+            },
+            { threshold: [0, 0.5, 1] },
+          ).observe(el);
+        }
+        el.addEventListener("mouseenter", function () {
+          window.__coord.mainHovered = true;
+          window.__coord.sync();
+        });
+        el.addEventListener("mouseleave", function () {
+          window.__coord.mainHovered = false;
+          window.__coord.sync();
+        });
+        // Re-mount with the matching cast when the theme changes.
+        new MutationObserver(mount).observe(document.documentElement, {
+          attributes: true,
+          attributeFilter: ["data-theme"],
+        });
+        if (mq.addEventListener) mq.addEventListener("change", mount);
+      })();
+    </script>
+
+    <!-- Two-modes clips: one unit, coordinated with the hero (see window.__coord). -->
+    <script is:inline>
+      (function () {
+        if (!window.AsciinemaPlayer) return;
+        if (
+          window.matchMedia &&
+          window.matchMedia("(prefers-reduced-motion: reduce)").matches
+        )
+          return; // keep the static ASCII fallback
+        var mq = window.matchMedia("(prefers-color-scheme: dark)");
+        function mode() {
+          var t = document.documentElement.dataset.theme;
+          if (t === "light" || t === "dark") return t;
+          return mq.matches ? "dark" : "light";
+        }
+        var remounters = [];
+        var mounts = document.querySelectorAll(".mini-player");
+        for (var i = 0; i < mounts.length; i++) {
+          (function (el) {
+            var castDark = el.getAttribute("data-cast-dark");
+            var castLight = el.getAttribute("data-cast-light");
+            if (!castDark) return;
+            var p = null;
+            var mounted = null;
+            // Same flush treatment as the hero: scale the terminal up by its
+            // border so asciinema-player's frame is pushed outside the clip.
+            function crop() {
+              // Review-showcase demos are full-height panels, not flush hero
+              // clips — skip the scale/clip treatment so the player just fits.
+              if (el.closest && el.closest(".show-row")) return;
+              var term = el.querySelector(".ap-term");
+              if (!term || !window.ResizeObserver) return;
+              var run = function () {
+                var cs = getComputedStyle(term);
+                var b = parseFloat(cs.borderTopWidth) || 0;
+                var w = term.clientWidth;
+                var h = term.clientHeight;
+                var rows =
+                  parseFloat(cs.getPropertyValue("--term-rows")) || 14;
+                if (b && w && h) {
+                  var row = h / rows;
+                  term.style.transformOrigin = "center center";
+                  term.style.transform =
+                    "scale(" + (w + 2 * b) / w + "," + (h + 2 * b) / h + ")" +
+                    " translateY(-" + row + "px)";
+                  el.style.overflow = "hidden";
+                  el.style.height = ((h + 2 * b) * (rows - 1)) / rows + "px";
+                }
+              };
+              new ResizeObserver(run).observe(term);
+              run();
+            }
+            function mount(m) {
+              if (m === mounted) return; // theme unchanged, keep playing
+              // Hold height across the swap. dispose() empties the container and
+              // the review cards get no persistent height from crop(), so measure
+              // BEFORE disposing — otherwise prevH is already the collapsed value
+              // and the card jumps on theme toggle.
+              var prevH = el.offsetHeight;
+              if (prevH) el.style.minHeight = prevH + "px";
+              // Drop the old player and its coordinator registration.
+              if (p) {
+                if (window.__coord) {
+                  var idx = window.__coord.clips.indexOf(p);
+                  if (idx >= 0) window.__coord.clips.splice(idx, 1);
+                }
+                try {
+                  p.dispose();
+                } catch (e) {}
+                p = null;
+              }
+              el.innerHTML = "";
+              try {
+                p = window.AsciinemaPlayer.create(
+                  m === "light" ? castLight : castDark,
+                  el,
+                  {
+                    autoPlay: false,
+                    loop: true,
+                    controls: false,
+                    fit: "width",
+                    poster: "npt:0:04",
+                    // The TUI casts paint their own truecolor background, but the
+                    // CLI "team" card doesn't — it inherits the player theme's
+                    // default fg. The card's bg is forced to --term-cast-bg
+                    // (evergarden-winter light #eef1ea) via CSS; solarized-light
+                    // just supplies a readable dark foreground. Dark keeps default.
+                    theme: m === "light" ? "solarized-light" : "asciinema",
+                  },
+                );
+              } catch (e) {
+                return;
+              }
+              mounted = m;
+              requestAnimationFrame(function () {
+                try {
+                  window.dispatchEvent(new Event("resize"));
+                } catch (e) {}
+              });
+              crop();
+              // Register with the shared coordinator: the two clips are one unit,
+              // so they play/pause together and stay mutually exclusive with the
+              // main. Hovering either clip forces the pair (and pauses the main);
+              // hovering out re-syncs, but a clip only pauses when the main plays.
+              if (window.__coord) {
+                window.__coord.clips.push(p);
+                window.__coord.sync();
+              }
+            }
+            // Hover listeners live on the element, so they survive re-mounts.
+            el.addEventListener("mouseenter", function () {
+              if (window.__coord) {
+                window.__coord.clipsHovered = true;
+                window.__coord.sync();
+              }
+            });
+            el.addEventListener("mouseleave", function () {
+              if (window.__coord) {
+                // Still hovered if the pointer moved onto the other clip.
+                window.__coord.clipsHovered = !!document.querySelector(
+                  ".mini-player:hover",
+                );
+                window.__coord.sync();
+              }
+            });
+            mount(mode());
+            remounters.push(function () {
+              mount(mode());
+            });
+          })(mounts[i]);
+        }
+        // Re-mount every clip with the matching cast when the theme changes.
+        function remountAll() {
+          for (var k = 0; k < remounters.length; k++) remounters[k]();
+        }
+        new MutationObserver(remountAll).observe(document.documentElement, {
+          attributes: true,
+          attributeFilter: ["data-theme"],
+        });
+        if (mq.addEventListener) mq.addEventListener("change", remountAll);
+      })();
+    </script>
+
+  </body>
+</html>

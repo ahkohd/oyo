@@ -2,7 +2,7 @@
 
 Use themes to control Oyo colours.
 
-Oyo has 2 theme types:
+Oyo has two theme types:
 
 - UI themes control the chrome, diff markers and interface elements
 - syntax themes control code token colours

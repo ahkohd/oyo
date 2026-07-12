@@ -1,0 +1,49 @@
+{
+  "project": "oyo preview samples",
+  "version": 1,
+  "features": [
+    "tabs",
+    "markdown",
+    "json",
+    "yaml",
+    "toml",
+    "csv"
+  ],
+  "limits": {
+    "rows": 180,
+    "interactive": true,
+    "remote_images": false
+  },
+  "files": [
+    {
+      "name": "preview.csv",
+      "kind": "csv",
+      "large": true
+    },
+    {
+      "name": "preview.json",
+      "kind": "json",
+      "large": false
+    },
+    {
+      "name": "preview.yaml",
+      "kind": "yaml",
+      "large": false
+    },
+    {
+      "name": "preview.toml",
+      "kind": "toml",
+      "large": false
+    }
+  ],
+  "nested": {
+    "one": {
+      "two": {
+        "three": {
+          "enabled": true,
+          "count": 4
+        }
+      }
+    }
+  }
+}

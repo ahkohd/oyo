@@ -131,22 +131,66 @@ Preview view shows the file content instead of the diff.
 In preview view:
 
 - Markdown files render as Markdown
+- JSON, YAML and TOML files show an interactive tree
+- CSV files show a table
+- PNG, JPEG, GIF, WebP and BMP files show an image preview in preview view
 - other text files show source text with syntax highlighting when syntax is on
+- source, Markdown, CSV and structured previews show change bars when `ui.diff.preview_change_bars` is on
 - deleted files preview the old side
 - other files preview the new side
-- the top-right toggle switches Markdown between rendered and source
+- the top-right toggle switches Markdown, CSV and structured previews between preview and source
+
+In JSON, YAML and TOML preview:
+
+- `j` and `k` move between values
+- `h` collapses a value or moves to its parent
+- `l` expands a value or moves to its first child
+- `space` toggles the current value
+- `c` and `C` collapse sibling values
+- `e` and `E` expand sibling values
+- `m` switches between data view and line view
+- `gg` and `G` move to the start and end
+- `ctrl-u` and `ctrl-d` jump half a page
+
+In CSV preview:
+
+- `j` and `k` move between rows
+- `h` and `l` move between cells
+- `gg` and `G` move to the start and end
 
 ## No-step mode
 
-No-step mode works like a scroll-only diff viewer.
+No-step mode is the config name for scroll mode.
 
 In no-step mode:
 
 - all changes are applied at once
+- changed lines show extent markers
 - `j` and `k` scroll
 - `h` and `l` jump between hunks
 - stepping is disabled
 - hunk preview is disabled
+
+## Context folds
+
+Oyo folds long unchanged blocks by default. It keeps 3 lines on each side and only
+adds a fold when at least 8 lines remain hidden. When syntax data identifies an
+enclosing function, method, class or section, Oyo shows its definition line dimmed
+on the right of the fold. Narrow views truncate the line before removing fold
+controls. Markdown sections use the nearest enclosing heading. Files over 512 KiB
+omit scope hints to keep folding responsive.
+
+Use the contextual shortcut beside an arrow, such as `ua` or `da`, or click the
+shortcut and arrow button to reveal 20 lines from that side. Use `F` to expand all
+folds. Use `f` to toggle between folded and full context.
+
+Fold rows are interface controls. Visual selection skips them, and copied text does
+not include them. Inline review comments keep their line and nearby context open,
+including resolved comments. Outdated comments do not open folded context. Search
+only checks rendered lines, so expand folds before searching hidden context.
+
+Set `ui.fold_context = "off"` to start with full context. Set
+`ui.fold_context_lines = 0` for the most compact expandable view.
 
 ## Scrollbar
 
@@ -198,7 +242,7 @@ Files larger than this value are shown immediately, then diffed in the backgroun
 
 Use `ui.diff.full_context_max_bytes` to choose when Oyo switches from full-context rendering to limited context rendering.
 
-If a file is deferred, Oyo first renders it in scroll-only mode. It upgrades to a full diff when background computation finishes.
+If a file is deferred, Oyo first renders it in scroll mode. It upgrades to a full diff when background computation finishes.
 
 Use `ui.diff.defer = true` to enable deferred diffing.
 
@@ -207,6 +251,8 @@ Use `ui.diff.idle_ms` to set how long Oyo waits after the last input before back
 ## Extent markers
 
 Extent markers show the current hunk or step area.
+
+In no-step mode, changed lines show extent markers all the time.
 
 Use `ui.diff.extent_marker` to choose marker colour:
 
@@ -239,15 +285,15 @@ overscroll = false      # allow EOF overscroll when centring
 scrollbar = true        # show scrollbars
 
 [ui.diff]
-bg = false
-fg = "theme"
-highlight = "text"
+bg = true
+fg = "syntax"
+highlight = "word"
 max_bytes = 16777216
 full_context_max_bytes = 2097152
 defer = true
 idle_ms = 250
-extent_marker = "neutral"
-extent_marker_scope = "progress"
+extent_marker = "diff"
+extent_marker_scope = "hunk"
 extent_marker_context = false
 
 [ui.evo]

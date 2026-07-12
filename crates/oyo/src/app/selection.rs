@@ -1,6 +1,16 @@
-use super::{App, ViewMode};
+use super::{review::ReviewSide, App, SelectionToolbarAction, SelectionToolbarHit, ViewMode};
 use crate::app::utils::copy_to_clipboard;
+use crate::config::{ReviewHookStdin, SelectionActionConfig};
+use crate::toasts::ToastEvent;
+use crossterm::event::KeyEvent;
+use keymap::{parser::parse_seq, ToKeyMap};
+use oyo_core::{AnimationFrame, LineKind};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use serde::Serialize;
+use serde_json::{json, Value};
+use std::io::Write;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DiffSelectionMode {
@@ -26,19 +36,77 @@ pub(crate) struct DiffSelectionCursor {
     col_end: u16,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SelectionActionPayload {
+    version: u8,
+    action: String,
+    file: String,
+    repo_root: String,
+    view_mode: String,
+    side: Option<String>,
+    old_range: Option<[usize; 2]>,
+    new_range: Option<[usize; 2]>,
+    scroll_offset: usize,
+    rows: Vec<u16>,
+    text: String,
+}
+
 impl App {
     pub(crate) fn set_diff_selection_cells(&mut self, cells: Vec<Vec<String>>) {
         self.diff_selection_cells = cells;
     }
 
+    pub(crate) fn set_selection_toolbar_hits(&mut self, hits: Vec<SelectionToolbarHit>) {
+        if hits.is_empty() {
+            self.selection_toolbar_rect = None;
+            self.selection_toolbar_hover = None;
+        }
+        self.selection_toolbar_hits = hits;
+    }
+
+    pub(crate) fn set_selection_toolbar_rect(&mut self, rect: Option<(u16, u16, u16, u16)>) {
+        self.selection_toolbar_rect = rect;
+    }
+
     pub(crate) fn clear_diff_selection(&mut self) {
         self.diff_selection = None;
         self.diff_selection_cursor = None;
+        self.hide_selection_toolbar();
+    }
+
+    fn hide_selection_toolbar(&mut self) {
+        self.selection_toolbar_visible = false;
+        self.selection_toolbar_rect = None;
+        self.selection_toolbar_scroll = 0;
+        self.selection_toolbar_width = None;
+        self.selection_toolbar_hits.clear();
+        self.selection_toolbar_hover = None;
+    }
+
+    pub(crate) fn selection_toolbar_visible(&self) -> bool {
+        self.selection_toolbar_visible
+    }
+
+    pub(crate) fn show_selection_toolbar(&mut self) -> bool {
+        if self.review_editor_active() || self.diff_selection_segments().is_empty() {
+            return false;
+        }
+        self.selection_toolbar_visible = true;
+        true
     }
 
     pub(crate) fn start_diff_selection(&mut self, column: u16, row: u16) -> bool {
+        if self.review_editor_active() {
+            return false;
+        }
+        if self.selection_toolbar_visible {
+            self.clear_diff_selection();
+            return true;
+        }
         self.diff_selection = None;
         self.diff_selection_cursor = None;
+        self.hide_selection_toolbar();
         let Some(point) = self.clamp_diff_selection_point(column, row) else {
             return false;
         };
@@ -68,6 +136,13 @@ impl App {
     }
 
     pub(crate) fn drag_diff_selection(&mut self, column: u16, row: u16) -> bool {
+        if self.review_editor_active() {
+            return false;
+        }
+        if self.selection_toolbar_visible {
+            return true;
+        }
+        self.hide_selection_toolbar();
         let Some(point) = self.clamp_diff_selection_point(column, row) else {
             return self.diff_selection.is_some();
         };
@@ -90,6 +165,7 @@ impl App {
         let Some((point, (col_start, col_end))) = self.selection_cursor_or_first() else {
             return false;
         };
+        self.hide_selection_toolbar();
         self.diff_selection_cursor = None;
         self.diff_selection = Some(DiffSelection {
             start: point,
@@ -152,6 +228,7 @@ impl App {
         let (col_start, col_end) = self
             .selectable_col_range(point.0)
             .unwrap_or((selection.col_start, selection.col_end));
+        self.hide_selection_toolbar();
         self.diff_selection = None;
         self.diff_selection_cursor = Some(DiffSelectionCursor {
             point,
@@ -227,6 +304,7 @@ impl App {
         let (col_start, col_end) = self
             .selectable_col_range(point.0)
             .unwrap_or((selection.col_start, selection.col_end));
+        self.hide_selection_toolbar();
         self.diff_selection = None;
         self.diff_selection_cursor = Some(DiffSelectionCursor {
             point,
@@ -236,7 +314,25 @@ impl App {
         true
     }
 
-    fn set_diff_selection_end(&mut self, point: (u16, u16)) -> bool {
+    fn set_diff_selection_end(&mut self, mut point: (u16, u16)) -> bool {
+        let Some(selection) = self.diff_selection else {
+            return false;
+        };
+        if row_nearest_col(&self.diff_selection_cells, point.1, point.0, selection).is_none() {
+            let delta_row = (point.1 as i32 - selection.end.1 as i32)
+                .clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+            let Some((_, row)) =
+                reanchor_point(&self.diff_selection_cells, selection, 0, delta_row)
+            else {
+                return false;
+            };
+            let Some(col) = row_nearest_col(&self.diff_selection_cells, row, point.0, selection)
+            else {
+                return false;
+            };
+            point = (col, row);
+        }
+        self.hide_selection_toolbar();
         let Some(selection) = self.diff_selection.as_mut() else {
             return false;
         };
@@ -246,6 +342,12 @@ impl App {
     }
 
     pub(crate) fn finish_diff_selection(&mut self, column: u16, row: u16) -> bool {
+        if self.review_editor_active() {
+            return false;
+        }
+        if self.selection_toolbar_visible {
+            return true;
+        }
         if self.diff_selection.is_none() {
             return false;
         }
@@ -256,13 +358,377 @@ impl App {
         {
             self.diff_selection = None;
             self.diff_selection_cursor = None;
+            self.hide_selection_toolbar();
+        } else {
+            self.selection_toolbar_visible = true;
         }
         true
     }
 
-    pub(crate) fn copy_diff_selection(&self) -> bool {
-        let text = selected_text(&self.diff_selection_cells, &self.diff_selection_segments());
-        copy_to_clipboard(&text)
+    pub(crate) fn copy_diff_selection(&mut self) -> bool {
+        let text = self.selected_diff_text();
+        let copied = copy_to_clipboard(&text);
+        if copied {
+            self.notify(ToastEvent::CopiedSelection);
+        } else {
+            self.notify(ToastEvent::CopyFailed);
+        }
+        copied
+    }
+
+    pub(crate) fn selected_diff_text(&self) -> String {
+        selected_text(&self.diff_selection_cells, &self.diff_selection_segments())
+    }
+
+    pub(crate) fn handle_selection_toolbar_click(&mut self, column: u16, row: u16) -> bool {
+        if !self.selection_toolbar_visible || !self.selection_toolbar_contains(column, row) {
+            return false;
+        }
+        if let Some(hit) = self.selection_toolbar_hits.iter().copied().find(|hit| {
+            column >= hit.x
+                && column < hit.x.saturating_add(hit.width)
+                && row >= hit.y
+                && row < hit.y.saturating_add(hit.height)
+        }) {
+            return self.run_selection_toolbar_action(hit.action);
+        }
+        true
+    }
+
+    pub(crate) fn dismiss_selection_toolbar_click(&mut self, column: u16, row: u16) -> bool {
+        if !self.selection_toolbar_visible || self.selection_toolbar_contains(column, row) {
+            return false;
+        }
+        self.clear_diff_selection();
+        true
+    }
+
+    fn selection_toolbar_contains(&self, column: u16, row: u16) -> bool {
+        self.selection_toolbar_rect
+            .is_some_and(|(x, y, width, height)| {
+                column >= x
+                    && column < x.saturating_add(width)
+                    && row >= y
+                    && row < y.saturating_add(height)
+            })
+    }
+
+    pub(crate) fn mouse_over_selection_toolbar(&self, column: u16, row: u16) -> bool {
+        self.selection_toolbar_visible && self.selection_toolbar_contains(column, row)
+    }
+
+    pub(crate) fn scroll_selection_toolbar_actions(&mut self, delta: isize) -> bool {
+        let action_count = self
+            .selection_actions
+            .len()
+            .saturating_add(2)
+            .saturating_add(usize::from(
+                self.review_mode() && self.view_mode != ViewMode::Preview,
+            ));
+        let max_scroll = action_count.saturating_sub(1);
+        let old = self.selection_toolbar_scroll.min(max_scroll);
+        let next = if delta.is_negative() {
+            old.saturating_sub(delta.unsigned_abs())
+        } else {
+            old.saturating_add(delta as usize).min(max_scroll)
+        };
+        self.selection_toolbar_scroll = next;
+        old != next
+    }
+
+    pub(crate) fn handle_selection_action_key(&mut self, key: KeyEvent) -> bool {
+        let Some(idx) = self.selection_actions.iter().position(|action| {
+            action
+                .key
+                .as_deref()
+                .is_some_and(|binding| key_matches_config(key, binding))
+        }) else {
+            return false;
+        };
+        self.run_selection_toolbar_action(SelectionToolbarAction::Custom(idx))
+    }
+
+    fn run_selection_toolbar_action(&mut self, action: SelectionToolbarAction) -> bool {
+        match action {
+            SelectionToolbarAction::Copy => {
+                self.copy_diff_selection();
+                self.clear_diff_selection();
+                true
+            }
+            SelectionToolbarAction::Comment => {
+                if self.view_mode == ViewMode::Preview {
+                    return false;
+                }
+                if !self.start_line_comment_for_selection() {
+                    self.start_line_comment();
+                }
+                self.clear_diff_selection();
+                true
+            }
+            SelectionToolbarAction::Cancel => {
+                self.clear_diff_selection();
+                true
+            }
+            SelectionToolbarAction::ScrollLeft => {
+                self.scroll_selection_toolbar_actions(-1);
+                true
+            }
+            SelectionToolbarAction::ScrollRight => {
+                self.scroll_selection_toolbar_actions(1);
+                true
+            }
+            SelectionToolbarAction::Custom(idx) => {
+                self.run_selection_action(idx);
+                self.clear_diff_selection();
+                true
+            }
+        }
+    }
+
+    fn start_line_comment_for_selection(&mut self) -> bool {
+        let Some(row) = self
+            .diff_selection_segments()
+            .into_iter()
+            .map(|(row, _, _)| row)
+            .min()
+        else {
+            return false;
+        };
+        let Some((_, y, _, _)) = self.diff_view_area else {
+            return false;
+        };
+        self.start_line_comment_at_screen_row_on_side(
+            y.saturating_add(row),
+            self.diff_selection_review_side(),
+        )
+    }
+
+    fn diff_selection_review_side(&self) -> Option<ReviewSide> {
+        if self.view_mode != ViewMode::Split {
+            return None;
+        }
+        let selection = self.diff_selection.or_else(|| {
+            self.diff_selection_cursor.map(|cursor| DiffSelection {
+                start: cursor.point,
+                end: cursor.point,
+                col_start: cursor.col_start,
+                col_end: cursor.col_end,
+                mode: DiffSelectionMode::Char,
+                dragged: true,
+            })
+        })?;
+        let ranges = self.diff_selection_content_ranges();
+        let [left, right] = ranges.as_slice() else {
+            return None;
+        };
+        let mid = selection
+            .col_start
+            .saturating_add(selection.col_end.saturating_sub(selection.col_start) / 2);
+        if mid >= right.0 && mid < right.1 {
+            Some(ReviewSide::New)
+        } else if mid >= left.0 && mid < left.1 {
+            Some(ReviewSide::Old)
+        } else {
+            None
+        }
+    }
+
+    fn run_selection_action(&mut self, idx: usize) {
+        let Some(action) = self.selection_actions.get(idx).cloned() else {
+            return;
+        };
+        if action.command.trim().is_empty() {
+            return;
+        }
+        let label = selection_action_label(&action);
+        let success_message = selection_action_success_message(&action, &label);
+        let failure_message = selection_action_failure_message(&action, &label);
+        let payload = self.selection_action_json(&action);
+        let mut command = Command::new(&action.command);
+        command.args(&action.args);
+        if let Some(root) = self.multi_diff.repo_root() {
+            command.current_dir(root);
+            command.env("OYO_REPO_ROOT", root);
+        }
+        command.env("OYO_SELECTION_ACTION", &label);
+        command.stdout(Stdio::null());
+        command.stderr(Stdio::null());
+        match action.stdin {
+            ReviewHookStdin::Json => command.stdin(Stdio::piped()),
+            ReviewHookStdin::None => command.stdin(Stdio::null()),
+        };
+
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(_) => {
+                self.notify(ToastEvent::SelectionActionFailed(failure_message));
+                return;
+            }
+        };
+        if matches!(action.stdin, ReviewHookStdin::Json) {
+            if let Some(mut stdin) = child.stdin.take() {
+                let _ = stdin.write_all(payload.as_bytes());
+            }
+        }
+        if !action.blocking {
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+            self.notify(ToastEvent::SelectionActionStarted(success_message));
+            return;
+        }
+        let timeout = Duration::from_millis(action.timeout_ms.max(1));
+        let started = Instant::now();
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    self.notify(if status.success() {
+                        ToastEvent::SelectionActionStarted(success_message.clone())
+                    } else {
+                        ToastEvent::SelectionActionFailed(failure_message.clone())
+                    });
+                    return;
+                }
+                Ok(None) if started.elapsed() >= timeout => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    self.notify(ToastEvent::SelectionActionFailed(failure_message.clone()));
+                    return;
+                }
+                Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+                Err(_) => {
+                    self.notify(ToastEvent::SelectionActionFailed(failure_message.clone()));
+                    return;
+                }
+            }
+        }
+    }
+
+    fn selection_action_json(&mut self, action: &SelectionActionConfig) -> String {
+        let rows = self
+            .diff_selection_segments()
+            .into_iter()
+            .map(|(row, _, _)| row)
+            .collect::<Vec<_>>();
+        let (old_range, new_range, side) = self.selected_line_metadata(&rows);
+        let file = self
+            .multi_diff
+            .files
+            .get(self.multi_diff.selected_index)
+            .map(|file| file.display_name.clone())
+            .unwrap_or_default();
+        let repo_root = self
+            .multi_diff
+            .repo_root()
+            .map(|path| path.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let payload = SelectionActionPayload {
+            version: 1,
+            action: selection_action_label(action),
+            file,
+            repo_root,
+            view_mode: format!("{:?}", self.view_mode),
+            side,
+            old_range,
+            new_range,
+            scroll_offset: self.render_scroll_offset(),
+            rows,
+            text: self.selected_diff_text(),
+        };
+        serde_json::to_string(&payload).unwrap_or_default()
+    }
+
+    pub(crate) fn control_selection_json(&mut self) -> Value {
+        let selection = self.diff_selection;
+        let cursor = self.diff_selection_cursor;
+        if selection.is_none() && cursor.is_none() {
+            return json!({ "active": false });
+        }
+        let rows = self
+            .diff_selection_segments()
+            .into_iter()
+            .map(|(row, _, _)| row)
+            .collect::<Vec<_>>();
+        let metadata_rows = if rows.is_empty() {
+            cursor
+                .map(|cursor| vec![cursor.point.1])
+                .unwrap_or_default()
+        } else {
+            rows.clone()
+        };
+        let (old_range, new_range, side) = self.selected_line_metadata(&metadata_rows);
+        let file = self
+            .multi_diff
+            .files
+            .get(self.multi_diff.selected_index)
+            .map(|file| file.display_name.clone())
+            .unwrap_or_default();
+        let kind = selection
+            .map(|selection| match selection.mode {
+                DiffSelectionMode::Char => "char",
+                DiffSelectionMode::Line => "line",
+                DiffSelectionMode::Block => "block",
+            })
+            .unwrap_or("cursor");
+        json!({
+            "active": true,
+            "rangeActive": selection.is_some(),
+            "kind": kind,
+            "file": file,
+            "side": side,
+            "oldRange": range_json(old_range),
+            "newRange": range_json(new_range),
+            "rows": rows,
+            "start": selection.map(|selection| point_json(selection.start)),
+            "end": selection.map(|selection| point_json(selection.end)),
+            "cursor": cursor.map(|cursor| point_json(cursor.point)),
+        })
+    }
+
+    fn selected_line_metadata(
+        &mut self,
+        rows: &[u16],
+    ) -> (Option<[usize; 2]>, Option<[usize; 2]>, Option<String>) {
+        let render_scroll = self.render_scroll_offset();
+        let view = self.current_view_with_frame(AnimationFrame::Idle);
+        let mut old_min = None::<usize>;
+        let mut old_max = None::<usize>;
+        let mut new_min = None::<usize>;
+        let mut new_max = None::<usize>;
+        let mut old_side = false;
+        let mut new_side = false;
+        for row in rows {
+            let Some(line) = view.get(render_scroll.saturating_add(*row as usize)) else {
+                continue;
+            };
+            if let Some(old_line) = line.old_line {
+                old_min = Some(old_min.map_or(old_line, |value| value.min(old_line)));
+                old_max = Some(old_max.map_or(old_line, |value| value.max(old_line)));
+            }
+            if let Some(new_line) = line.new_line {
+                new_min = Some(new_min.map_or(new_line, |value| value.min(new_line)));
+                new_max = Some(new_max.map_or(new_line, |value| value.max(new_line)));
+            }
+            match line.kind {
+                LineKind::Deleted | LineKind::PendingDelete => old_side = true,
+                LineKind::Inserted | LineKind::PendingInsert => new_side = true,
+                LineKind::Context | LineKind::Modified | LineKind::PendingModify => {
+                    old_side = true;
+                    new_side = true;
+                }
+            }
+        }
+        let side = match (old_side, new_side) {
+            (true, false) => Some("old".to_string()),
+            (false, true) => Some("new".to_string()),
+            (true, true) => Some("both".to_string()),
+            (false, false) => None,
+        };
+        (
+            old_min.zip(old_max).map(|(start, end)| [start, end]),
+            new_min.zip(new_max).map(|(start, end)| [start, end]),
+            side,
+        )
     }
 
     pub(crate) fn diff_selection_active(&self) -> bool {
@@ -310,9 +776,23 @@ impl App {
     }
 
     fn diff_selection_segments(&self) -> Vec<(u16, u16, u16)> {
+        let excluded_rows = self.diff_selection_excluded_rows();
         self.diff_selection
             .map(selection_segments)
             .unwrap_or_default()
+            .into_iter()
+            .filter(|(row, _, _)| !excluded_rows.contains(row))
+            .collect()
+    }
+
+    pub(crate) fn diff_selection_excluded_rows(&self) -> Vec<u16> {
+        let Some((_, y, _, height)) = self.diff_view_area else {
+            return Vec::new();
+        };
+        self.fold_context_screen_rows
+            .iter()
+            .filter_map(|row| row.checked_sub(y).filter(|local_row| *local_row < height))
+            .collect()
     }
 
     pub(crate) fn diff_selection_content_ranges(&self) -> Vec<(u16, u16)> {
@@ -409,6 +889,16 @@ impl App {
         }
         Some((col, row))
     }
+}
+
+fn range_json(range: Option<[usize; 2]>) -> Value {
+    range
+        .map(|[start, end]| json!({ "start": start, "end": end }))
+        .unwrap_or(Value::Null)
+}
+
+fn point_json((column, row): (u16, u16)) -> Value {
+    json!({ "column": column, "row": row })
 }
 
 fn reanchor_point(
@@ -651,6 +1141,75 @@ fn excluded_cols(
     excluded
 }
 
+fn selection_action_label(action: &SelectionActionConfig) -> String {
+    if action.label.trim().is_empty() {
+        action.id.clone()
+    } else {
+        action.label.clone()
+    }
+}
+
+fn selection_action_success_message(action: &SelectionActionConfig, label: &str) -> String {
+    action
+        .message
+        .as_deref()
+        .filter(|message| !message.trim().is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            if label.trim().is_empty() {
+                "Selection action started".to_string()
+            } else {
+                format!("{label} started")
+            }
+        })
+}
+
+fn selection_action_failure_message(action: &SelectionActionConfig, label: &str) -> String {
+    action
+        .failure_message
+        .as_deref()
+        .filter(|message| !message.trim().is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            if label.trim().is_empty() {
+                "Selection action failed".to_string()
+            } else {
+                format!("{label} failed")
+            }
+        })
+}
+
+fn key_matches_config(key: KeyEvent, binding: &str) -> bool {
+    let Ok(seq) = parse_seq(binding) else {
+        return false;
+    };
+    if seq.len() != 1 {
+        return false;
+    }
+    key.to_keymap().ok().as_ref() == seq.first()
+}
+
+fn strip_review_card_border(line: String) -> Option<String> {
+    let trimmed = line.trim();
+    if trimmed.starts_with('╰') && trimmed.ends_with('╯') {
+        return None;
+    }
+    if let Some(inner) = trimmed
+        .strip_prefix("│ ")
+        .and_then(|line| line.strip_suffix(" │"))
+    {
+        return Some(inner.trim_end().to_string());
+    }
+    if let Some(inner) = trimmed
+        .strip_prefix("╭ ")
+        .and_then(|line| line.strip_suffix('╮'))
+    {
+        let title = inner.trim().trim_end_matches('─').trim_end().to_string();
+        return (!title.is_empty()).then_some(title);
+    }
+    Some(line)
+}
+
 fn selected_text(cells: &[Vec<String>], segments: &[(u16, u16, u16)]) -> String {
     let mut lines = Vec::new();
     for (row, start_col, end_col) in segments.iter().copied() {
@@ -667,7 +1226,9 @@ fn selected_text(cells: &[Vec<String>], segments: &[(u16, u16, u16)]) -> String 
         while line.ends_with(' ') {
             line.pop();
         }
-        lines.push(line);
+        if let Some(line) = strip_review_card_border(line) {
+            lines.push(line);
+        }
     }
     lines.join("\n").trim_end().to_string()
 }

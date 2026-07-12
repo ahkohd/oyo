@@ -5,15 +5,22 @@ use crate::config::{
     BlameMode, DiffExtentMarkerMode, DiffExtentMarkerScope, DiffForegroundMode, DiffHighlightMode,
     FileCountMode, FilePanelPosition, FoldContextMode, HunkWrapMode, MentionFileScope,
     MentionFinder, ModifiedStepMode, ResolvedTheme, ReviewActionConfig, ReviewHookConfig,
-    StepWrapMode, SyntaxMode,
+    SelectionActionConfig, StepWrapMode, SyntaxMode,
 };
+use crate::csv_preview::CsvPreviewState;
 use crate::keybindings::Keybindings;
-use crate::syntax::{SyntaxCache, SyntaxEngine};
+use crate::structured_preview::StructuredPreviewState;
+use crate::syntax::{EnclosingScopeRange, SyntaxCache, SyntaxEngine};
 use crate::time_format::TimeFormatter;
+use crate::toasts::{toast_builder, ToastEvent};
 use oyo_core::{
     multi::DiffStatus, AnimationFrame, LineKind, MultiFileDiff, StepDirection, StepState, ViewLine,
 };
-use ratatui::style::Color;
+use ratatui::{layout::Size, style::Color};
+use ratatui_comfy_toaster::{
+    ToastEngine, ToastEngineBuilder, ToastInteraction, ToastMouseButton, ToastPosition,
+};
+use ratatui_image::{picker::Picker, protocol::Protocol};
 use regex::Regex;
 use rustc_hash::FxHashMap;
 use std::collections::VecDeque;
@@ -22,30 +29,34 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime};
 
 mod blame;
+mod content_worker;
 mod diff_worker;
 mod file_panel;
 mod files;
 mod navigation;
 mod palette;
 mod playback;
-mod review;
+pub(crate) mod review;
 mod search;
 mod selection;
 mod syntax;
 mod types;
 mod utils;
 
+pub(crate) use content_worker::load_content_request_sync;
 pub(crate) use types::{
-    AnimationPhase, BlameDisplay, BlameRenderCache, BlameRenderKey, PeekMode, PeekScope, PeekState,
-    UnifiedRenderKey, UnifiedRenderModel, ViewMode, DIFF_VIEW_MIN_WIDTH, FILE_PANEL_MIN_WIDTH,
+    AnimationPhase, BlameDisplay, BlameRenderCache, BlameRenderKey, FoldContextDirection,
+    FoldContextHit, FoldContextKey, FoldContextRegion, FoldContextRenderRow, PeekMode, PeekScope,
+    PeekState, UnifiedRenderKey, UnifiedRenderModel, ViewMode, DIFF_VIEW_MIN_WIDTH,
+    FILE_PANEL_MIN_WIDTH,
 };
 use types::{
     BlameCacheKey, BlamePrefetchKey, BlamePrefetchRange, BlameRequest, BlameResponse,
-    BlameStepHint, DiffRequest, DiffResponse, HunkBounds, HunkEdge, HunkEdgeHint, HunkStart,
-    NoStepState, StepEdge, StepEdgeHint, SyntaxScopeCache,
+    BlameStepHint, ContentResponse, DiffRequest, DiffResponse, FoldContextExpansion, HunkBounds,
+    HunkEdge, HunkEdgeHint, HunkStart, NoStepState, StepEdge, StepEdgeHint, SyntaxScopeCache,
 };
-use utils::{allow_overscroll_state, max_scroll};
-pub(crate) use utils::{display_metrics, is_conflict_marker, is_fold_line};
+use utils::{allow_overscroll_state, copy_to_clipboard, max_scroll};
+pub(crate) use utils::{display_metrics, fold_context_label, is_conflict_marker, is_fold_line};
 
 type UnifiedHunkCacheKey = (usize, ViewMode, FoldContextMode, bool, usize, usize, usize);
 type SplitHunkCacheKey = (usize, FoldContextMode, bool, bool, usize, usize, usize);
@@ -72,6 +83,12 @@ pub(crate) struct DiffScrollbarState {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FilePanelMode {
+    Files,
+    Comments,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct FilePanelScrollbarState {
     pub x: u16,
     pub y: u16,
@@ -83,9 +100,78 @@ pub(crate) struct FilePanelScrollbarState {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FileContextMenuAction {
+    Open,
+    OpenInNewTab,
+    CopyPath,
+}
+
+impl FileContextMenuAction {
+    pub(crate) const ALL: [Self; 3] = [Self::Open, Self::OpenInNewTab, Self::CopyPath];
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReviewCommentContextMenuAction {
+    Body,
+    Id,
+    FileLine,
+    Url,
+    MarkdownQuote,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ReviewCommentContextMenu {
+    pub comment_id: u64,
+    pub x: u16,
+    pub y: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ReviewCommentContextMenuHit {
+    pub action: ReviewCommentContextMenuAction,
+    pub x: u16,
+    pub y: u16,
+    pub width: u16,
+    pub height: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct FileContextMenu {
+    pub file_index: usize,
+    pub x: u16,
+    pub y: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct FileContextMenuHit {
+    pub action: FileContextMenuAction,
+    pub x: u16,
+    pub y: u16,
+    pub width: u16,
+    pub height: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct StatusModeMenu {
+    pub x: u16,
+    pub y: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct StatusModeMenuHit {
+    pub mode: ViewMode,
+    pub x: u16,
+    pub y: u16,
+    pub width: u16,
+    pub height: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TopbarTabContent {
     File(usize),
     Help,
+    PrComments,
+    OutdatedComments,
 }
 
 #[derive(Clone, Debug)]
@@ -117,6 +203,66 @@ pub(crate) struct PreviewLinkBox {
     pub y: u16,
     pub width: u16,
     pub url: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ImagePreviewSignature {
+    pub path: PathBuf,
+    pub size: Size,
+    pub len: u64,
+    pub modified: Option<SystemTime>,
+}
+
+pub(crate) struct ImagePreviewCache {
+    pub signature: ImagePreviewSignature,
+    pub protocol: Protocol,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ReviewLineAddHit {
+    pub x: u16,
+    pub y: u16,
+    pub width: u16,
+    pub height: u16,
+    pub row: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReviewEditorToolbarAction {
+    Save,
+    Cancel,
+    Mention,
+    ScrollLeft,
+    ScrollRight,
+    Custom(usize),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ReviewEditorToolbarHit {
+    pub action: ReviewEditorToolbarAction,
+    pub x: u16,
+    pub y: u16,
+    pub width: u16,
+    pub height: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SelectionToolbarAction {
+    Copy,
+    Comment,
+    Cancel,
+    ScrollLeft,
+    ScrollRight,
+    Custom(usize),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SelectionToolbarHit {
+    pub action: SelectionToolbarAction,
+    pub x: u16,
+    pub y: u16,
+    pub width: u16,
+    pub height: u16,
 }
 
 pub(crate) fn diff_scrollbar_thumb(
@@ -158,12 +304,21 @@ fn scrollbar_row_to_offset(
     Some((thumb_top as usize).saturating_mul(max_scroll) / max_thumb_top as usize)
 }
 
+#[derive(Clone)]
+pub(crate) struct JjWatchTarget {
+    pub(crate) repo_root: PathBuf,
+    pub(crate) revision: String,
+    pub(crate) working_copy_stamp: Option<String>,
+}
+
 /// The main application state
 pub struct App {
     /// Multi-file diff manager
     pub multi_diff: MultiFileDiff,
     /// Current view mode
     pub view_mode: ViewMode,
+    /// Current view is preview because the active content cannot use diff views.
+    pub(crate) preview_forced_by_content: bool,
     /// Animation speed in milliseconds
     pub animation_speed: u64,
     /// Whether autoplay is enabled
@@ -182,9 +337,11 @@ pub struct App {
     files_visited: Vec<bool>,
     /// Whether to quit
     pub should_quit: bool,
+    /// Whether quitting requires confirmation
+    pub confirm_quit: bool,
     /// Runtime keyboard bindings and sequence state
     pub(crate) keybindings: Keybindings,
-    /// Whether to open the commit picker dashboard
+    /// Whether to open History.
     pub open_dashboard: bool,
     /// Current animation phase
     pub animation_phase: AnimationPhase,
@@ -202,6 +359,11 @@ pub struct App {
     pub file_panel_width: u16,
     /// File panel position
     pub file_panel_position: FilePanelPosition,
+    pub(crate) file_panel_mode: FilePanelMode,
+    pub(crate) file_panel_mode_toggle_hit: Option<(u16, u16, u16, u16)>,
+    pub(crate) file_panel_mode_toggle_hover: bool,
+    pub(crate) file_panel_root_hit: Option<(u16, u16, u16, u16)>,
+    pub(crate) file_panel_root_hover: bool,
     /// File panel full area (x, y, width, height)
     pub file_panel_rect: Option<(u16, u16, u16, u16)>,
     /// Diff content area (x, y, width, height)
@@ -210,6 +372,18 @@ pub struct App {
     pub(crate) diff_selection: Option<selection::DiffSelection>,
     /// Cursor used by selection mode when no range is active
     pub(crate) diff_selection_cursor: Option<selection::DiffSelectionCursor>,
+    /// True when selection actions can be shown.
+    pub(crate) selection_toolbar_visible: bool,
+    /// Selection toolbar area.
+    pub(crate) selection_toolbar_rect: Option<(u16, u16, u16, u16)>,
+    /// First action shown in the selection toolbar.
+    pub(crate) selection_toolbar_scroll: usize,
+    /// Preferred selection toolbar width while it stays open.
+    pub(crate) selection_toolbar_width: Option<u16>,
+    /// Selection toolbar hitboxes.
+    pub(crate) selection_toolbar_hits: Vec<SelectionToolbarHit>,
+    /// Action currently hovered in the selection toolbar (for the click affordance).
+    pub(crate) selection_toolbar_hover: Option<SelectionToolbarAction>,
     /// Last rendered diff cells for mouse selection copy
     pub(crate) diff_selection_cells: Vec<Vec<String>>,
     /// True when dragging the file panel separator
@@ -220,8 +394,25 @@ pub struct App {
     pub file_list_area: Option<(u16, u16, u16, u16)>,
     /// File list row mapping for mouse selection
     pub file_list_rows: Vec<Option<usize>>,
+    /// File list item currently under the mouse.
+    pub(crate) file_list_hover: Option<usize>,
+    pub(crate) file_context_menu: Option<FileContextMenu>,
+    pub(crate) file_context_menu_hits: Vec<FileContextMenuHit>,
+    pub(crate) file_context_menu_hover: Option<FileContextMenuAction>,
+    /// True when the mouse is over the file panel.
+    pub(crate) file_panel_hover: bool,
     /// File list filter input area (x, y, width, height)
     pub file_filter_area: Option<(u16, u16, u16, u16)>,
+    /// File list filter clear button area (x, y, width, height)
+    pub(crate) file_filter_clear_hit: Option<(u16, u16, u16, u16)>,
+    /// True when the mouse is over the file filter clear button.
+    pub(crate) file_filter_clear_hover: bool,
+    /// True when the mouse is over the file filter input.
+    pub(crate) file_filter_hover: bool,
+    /// Whether the fake file filter cursor is currently visible.
+    pub(crate) file_filter_cursor_visible: bool,
+    /// Last fake file filter cursor blink.
+    file_filter_cursor_last_blink: Instant,
     /// When to show per-file +/- counts in the file panel
     pub file_count_mode: FileCountMode,
     /// File list filter text
@@ -262,12 +453,24 @@ pub struct App {
     file_disk_baseline: Vec<FileDiskStamp>,
     /// Per-file changed-on-disk flags (same indexing as multi_diff.files)
     file_disk_changed: Vec<bool>,
-    /// Last time we checked git path/status changes
-    last_git_watch_check: Instant,
+    /// Watch-mode indicator expiry for recently refreshed files.
+    file_recently_changed_until: Vec<Option<Instant>>,
+    /// Last time we checked VCS path/status changes.
+    last_change_list_watch_check: Instant,
+    /// jj workspace and revision to rescan in watch mode.
+    jj_watch_target: Option<JjWatchTarget>,
     /// Baseline git index stamp for staged/index-backed diffs
     git_index_baseline: FileDiskStamp,
     /// Message shown when a git diff currently has no files
     pub no_changes_message: Option<String>,
+    /// Open History action area on the no changes screen.
+    pub(crate) no_changes_dashboard_hit: Option<(u16, u16, u16, u16)>,
+    /// True when the no changes History action is hovered.
+    pub(crate) no_changes_dashboard_hover: bool,
+    /// Quit action area on the no changes screen.
+    pub(crate) no_changes_quit_hit: Option<(u16, u16, u16, u16)>,
+    /// True when the no changes quit action is hovered.
+    pub(crate) no_changes_quit_hover: bool,
     /// Defer heavy view rebuild by one frame (for large-file jumps)
     view_build_defer: bool,
     /// True while a deferred view rebuild is pending
@@ -284,10 +487,24 @@ pub struct App {
     max_line_widths_no_step: Vec<usize>,
     /// Line wrap mode (when true, horizontal scroll is ignored)
     pub line_wrap: bool,
-    /// Collapse long unchanged (context) blocks
+    /// Collapse long unchanged blocks
     pub fold_context: FoldContextMode,
-    /// Default fold context mode (restored when toggling)
-    fold_context_default: FoldContextMode,
+    /// Context lines kept on each side of an expandable fold
+    pub(crate) fold_context_lines: usize,
+    /// Per-gap expansion state
+    fold_context_expansions: FxHashMap<FoldContextKey, FoldContextExpansion>,
+    /// Expandable gaps in the current rendered view
+    fold_context_regions: Vec<FoldContextRegion>,
+    /// Mouse targets for expandable fold controls
+    pub(crate) fold_context_hits: Vec<FoldContextHit>,
+    /// Visible screen rows occupied by fold affordances
+    pub(crate) fold_context_screen_rows: Vec<u16>,
+    /// Hovered expandable fold control
+    pub(crate) fold_context_hover: Option<(FoldContextKey, FoldContextDirection)>,
+    /// Pending contextual fold action prefix
+    pub(crate) fold_context_prefix: Option<FoldContextDirection>,
+    /// Invalidates views after fold expansion changes
+    fold_context_revision: u64,
     /// Cached wrapped display length (for line wrap centering)
     last_wrap_display_len: Option<usize>,
     /// Cached wrapped active display index (for line wrap centering)
@@ -301,18 +518,51 @@ pub struct App {
     pub(crate) topbar_tabs: Vec<TopbarTab>,
     pub(crate) active_topbar_tab: Option<usize>,
     next_topbar_tab_id: usize,
+    pub(crate) topbar_tab_scroll: usize,
     pub(crate) topbar_tab_hits: Vec<TopbarTabHit>,
     pub(crate) topbar_plus_hit: Option<(u16, u16, u16, u16)>,
+    pub(crate) topbar_scroll_left_hit: Option<(u16, u16, u16, u16)>,
+    pub(crate) topbar_scroll_right_hit: Option<(u16, u16, u16, u16)>,
     pub(crate) preview_toggle_hit: Option<(u16, u16, u16, u16)>,
+    pub(crate) topbar_sidebar_toggle_hit: Option<(u16, u16, u16, u16)>,
+    pub(crate) status_mode_hit: Option<(u16, u16, u16, u16)>,
+    pub(crate) status_mode_menu: Option<StatusModeMenu>,
+    pub(crate) status_mode_menu_hits: Vec<StatusModeMenuHit>,
+    pub(crate) status_mode_menu_hover: Option<ViewMode>,
+    pub(crate) status_comments_hit: Option<(u16, u16, u16, u16)>,
+    pub(crate) status_file_hit: Option<(u16, u16, u16, u16)>,
+    pub(crate) binary_preview_hit: Option<(u16, u16, u16, u16)>,
+    pub(crate) review_file_comment_hit: Option<(u16, u16, u16, u16)>,
+    pub(crate) topbar_area: Option<(u16, u16, u16, u16)>,
     pub(crate) topbar_hover_tab: Option<usize>,
     pub(crate) topbar_hover_close: Option<usize>,
     pub(crate) topbar_plus_hover: bool,
+    pub(crate) topbar_scroll_left_hover: bool,
+    pub(crate) topbar_scroll_right_hover: bool,
+    pub(crate) preview_toggle_hover: bool,
+    pub(crate) topbar_sidebar_toggle_hover: bool,
+    pub(crate) status_comments_hover: bool,
+    pub(crate) status_file_hover: bool,
+    pub(crate) binary_preview_hover: bool,
+    pub(crate) review_file_comment_hover: bool,
     pub(crate) topbar_drag_target: Option<usize>,
     topbar_drag_tab: Option<usize>,
+    pub(crate) structured_previews: FxHashMap<usize, StructuredPreviewState>,
+    pub(crate) csv_previews: FxHashMap<usize, CsvPreviewState>,
+    pub(crate) image_picker: Option<Picker>,
+    pub(crate) image_preview_cache: Option<ImagePreviewCache>,
     /// Show strikethrough on deleted text
     pub strikethrough_deletions: bool,
     /// Show +/- sign column in the gutter (unified/evolution)
     pub gutter_signs: bool,
+    /// Show toast notifications.
+    pub toasts_enabled: bool,
+    /// Toast notification engine.
+    pub(crate) toast_engine: ToastEngine<()>,
+    /// Toast screen position.
+    pub(crate) toast_position: ToastPosition,
+    /// Show change bars in previews with source-line mapping.
+    pub preview_change_bars: bool,
     /// Whether user has manually toggled the file panel (overrides auto-hide)
     pub file_panel_manually_set: bool,
     /// Whether to show the file path popup (Ctrl+G)
@@ -335,10 +585,14 @@ pub struct App {
     pub extent_marker: String,
     /// Marker for right pane extent lines
     pub extent_marker_right: String,
+    /// Marker for deleted hunk extent lines
+    pub extent_marker_deleted: String,
     /// Clear active change after next render (for one-frame animation styling)
     pub clear_active_on_next_render: bool,
     /// Resolved theme (colors, gradients)
     pub theme: ResolvedTheme,
+    /// Current named UI theme, if any.
+    pub(crate) ui_theme_name: Option<String>,
     /// Time formatting rules
     pub time_format: TimeFormatter,
     /// Whether the UI theme is in light mode
@@ -409,9 +663,14 @@ pub struct App {
     diff_queue: VecDeque<usize>,
     /// Currently computing diff (file index)
     diff_inflight: Option<usize>,
+    /// Refreshed file that should return to the no-step end state when ready.
+    diff_refresh_restore_end: Option<usize>,
     /// Worker thread for diff computation
     diff_worker_tx: Option<mpsc::Sender<DiffRequest>>,
     diff_worker_rx: Option<mpsc::Receiver<DiffResponse>>,
+    content_worker_rx: Option<mpsc::Receiver<ContentResponse>>,
+    content_generation: u64,
+    content_loading: FxHashMap<usize, oyo_core::multi::PendingFileContent>,
     /// Extra display rows after each line (blame wrapping).
     pub(crate) blame_extra_rows: Option<Vec<usize>>,
     /// One-shot blame hint for the active change
@@ -450,8 +709,12 @@ pub struct App {
     syntax_warmup_target_at: Option<Instant>,
     /// Syntax highlighter (lazy initialized)
     syntax_engine: Option<SyntaxEngine>,
+    /// Background startup load for the syntax highlighter
+    syntax_engine_rx: Option<std::sync::mpsc::Receiver<SyntaxEngine>>,
     /// Per-file syntax cache (old/new spans)
     syntax_caches: Vec<Option<SyntaxCache>>,
+    /// Per-file named syntax scopes used by folded context bands
+    fold_scope_caches: Vec<Option<Vec<EnclosingScopeRange>>>,
     /// Show syntax scope debug label in the status bar
     show_syntax_scopes: bool,
     /// Cached syntax scope label for the active line
@@ -470,6 +733,24 @@ pub struct App {
     search_query: String,
     /// True when search input is active
     search_active: bool,
+    /// Search input cursor blink state.
+    pub(crate) search_cursor_visible: bool,
+    /// Last search cursor blink update.
+    search_cursor_last_blink: Instant,
+    /// Floating search bar hitbox.
+    pub(crate) search_bar_hit: Option<(u16, u16, u16, u16)>,
+    /// Previous match button hitbox.
+    pub(crate) search_prev_hit: Option<(u16, u16, u16, u16)>,
+    /// Next match button hitbox.
+    pub(crate) search_next_hit: Option<(u16, u16, u16, u16)>,
+    /// Clear search button hitbox.
+    pub(crate) search_clear_hit: Option<(u16, u16, u16, u16)>,
+    /// Previous match button hover state.
+    pub(crate) search_prev_hover: bool,
+    /// Next match button hover state.
+    pub(crate) search_next_hover: bool,
+    /// Clear search button hover state.
+    pub(crate) search_clear_hover: bool,
     /// Command palette query
     command_palette_query: String,
     /// True when command palette is active
@@ -498,30 +779,191 @@ pub struct App {
     file_search_list_count: usize,
     /// Quick file search list item height (rows per item)
     file_search_item_height: u16,
+    /// Comment picker query
+    comment_picker_query: String,
+    /// True when comment picker is active
+    comment_picker_active: bool,
+    /// Selected comment picker entry
+    comment_picker_selection: usize,
+    /// Comment picker list area (x, y, width, height)
+    comment_picker_list_area: Option<(u16, u16, u16, u16)>,
+    /// Comment picker list start index
+    comment_picker_list_start: usize,
+    /// Comment picker visible list count
+    comment_picker_list_count: usize,
+    /// Comment picker list item height (rows per item)
+    comment_picker_item_height: u16,
+    /// Theme picker query
+    theme_picker_query: String,
+    /// True when theme picker is active
+    theme_picker_active: bool,
+    /// Selected theme picker entry
+    theme_picker_selection: usize,
+    /// Theme picker list area (x, y, width, height)
+    theme_picker_list_area: Option<(u16, u16, u16, u16)>,
+    /// Theme picker list start index
+    theme_picker_list_start: usize,
+    /// Theme picker visible list count
+    theme_picker_list_count: usize,
+    /// Theme picker list item height (rows per item)
+    theme_picker_item_height: u16,
+    /// Theme to restore if the theme picker is cancelled.
+    theme_picker_restore: Option<(ResolvedTheme, Option<String>)>,
+    /// Name of the local control session, if one is running.
+    control_session_name: Option<String>,
+    /// Session rename prompt text.
+    session_rename_query: String,
+    /// True when session rename input is active.
+    session_rename_active: bool,
+    /// Pending session name to apply to the control session.
+    pending_session_rename: Option<String>,
     /// Comment capture state enabled for the current app session
     review_mode: bool,
     /// Collected review comments for current session
     review_comments: Vec<review::ReviewComment>,
+    /// Review comments as loaded at session start.
+    review_session_baseline: Vec<review::ReviewComment>,
+    /// Comment selected from the comments sidebar.
+    active_review_comment_id: Option<u64>,
     /// Active inline comment editor state
     review_editor: Option<review::ReviewEditorState>,
-    /// Autosave path for current review session
-    review_session_path: Option<PathBuf>,
+    /// Last rendered editor wrap width, used for arrow navigation.
+    review_editor_wrap_width: usize,
+    /// Directory for current review database.
+    review_dir_path: Option<PathBuf>,
+    /// SQLite database path for the current review workspace.
+    review_db_path: Option<PathBuf>,
+    /// Last seen review database file stamp.
+    review_db_stamp: FileDiskStamp,
+    /// Last time the review database was checked for external changes.
+    last_review_db_check: Instant,
+    /// Base directory override for review files.
+    review_base_dir_override: Option<PathBuf>,
+    /// Workspace root override for review identity.
+    review_workspace_root_override: Option<PathBuf>,
     /// Whether review comments/session state should be loaded/saved across runs.
     review_persist_enabled: bool,
-    /// If true, start review with a clean session (ignores/removes any saved state).
-    review_clear_session_on_start: bool,
-    /// Diff fingerprint used for resume/autosave matching
+    /// Whether loaded comments should be limited to files in the current diff.
+    review_filter_to_current_diff: bool,
+    /// Diff fingerprint used for export and hook metadata.
     review_diff_fingerprint: String,
+    /// Stable key used for review storage.
+    review_storage_key: String,
     /// Repository root key used in review session metadata
     review_repo_root: Option<String>,
+    /// Target metadata saved with review state.
+    review_target_metadata: Option<review::ReviewTargetMetadata>,
+    /// Pull request discovered for a branch or worktree review.
+    review_pull_request_target: Option<review::ReviewPullRequestTarget>,
+    /// Author copied from Git or jj config for new comments.
+    review_author: Option<review::ReviewAuthor>,
     /// Session creation timestamp for persisted review state
     review_session_created_at: u64,
     /// Next comment id for this session
     review_next_comment_id: u64,
-    /// Review output prepared on submit+quit
-    review_submission_output: Option<String>,
     /// Click hitboxes for rendered review comment previews
     review_preview_boxes: Vec<review::ReviewPreviewBox>,
+    /// Hovered rendered review comment preview.
+    pub(crate) review_preview_hover: Option<String>,
+    pub(crate) review_preview_hover_id: Option<u64>,
+    /// Hovered edit action on a rendered review comment preview.
+    pub(crate) review_preview_edit_hover: Option<String>,
+    /// Hovered reply action on a rendered review comment preview.
+    pub(crate) review_preview_reply_hover: Option<String>,
+    /// Hovered resolve action on a rendered review comment preview.
+    pub(crate) review_preview_resolve_hover: Option<String>,
+    /// Hovered delete action on a rendered review comment preview.
+    pub(crate) review_preview_delete_hover: Option<String>,
+    /// Hovered overflow action on a rendered review comment preview.
+    pub(crate) review_preview_overflow_hover: Option<String>,
+    /// Review comment overflow menu.
+    pub(crate) review_comment_context_menu: Option<ReviewCommentContextMenu>,
+    /// Review comment overflow menu hits.
+    pub(crate) review_comment_context_menu_hits: Vec<ReviewCommentContextMenuHit>,
+    /// Hovered review comment overflow action.
+    pub(crate) review_comment_context_menu_hover: Option<ReviewCommentContextMenuAction>,
+    /// Review card to flash after sidebar navigation.
+    review_preview_flash: Option<(String, Instant)>,
+    /// Pending quit confirmation.
+    quit_confirmation: bool,
+    /// Pending review deletion confirmation.
+    review_delete_confirmation: Option<review::ReviewDeleteConfirmation>,
+    /// Click hitboxes for review deletion confirmation.
+    pub(crate) review_delete_confirmation_hits: Vec<review::ReviewDeleteConfirmationHit>,
+    /// Hovered review deletion confirmation action.
+    pub(crate) review_delete_confirmation_hover: Option<review::ReviewDeleteConfirmationAction>,
+    /// Comments sidebar sync button hitbox.
+    pub(crate) comments_sidebar_sync_hit: Option<(u16, u16, u16, u16)>,
+    /// Comments sidebar discard button hitbox.
+    pub(crate) comments_sidebar_discard_hit: Option<(u16, u16, u16, u16)>,
+    /// Comments sidebar sync button hover.
+    pub(crate) comments_sidebar_sync_hover: bool,
+    /// Comments sidebar discard button hover.
+    pub(crate) comments_sidebar_discard_hover: bool,
+    /// Comments sidebar overflow hitbox.
+    pub(crate) comments_sidebar_overflow_hit: Option<(u16, u16, u16, u16)>,
+    /// Comments sidebar overflow button hover.
+    pub(crate) comments_sidebar_overflow_hover: bool,
+    /// Comments sidebar overflow menu is open.
+    pub(crate) comments_sidebar_overflow_open: bool,
+    /// Comments sidebar overflow menu hits.
+    pub(crate) comments_sidebar_overflow_hits: Vec<review::ReviewSidebarOverflowHit>,
+    /// Comments sidebar overflow menu hover.
+    pub(crate) comments_sidebar_overflow_menu_hover: Option<review::ReviewSyncAction>,
+    /// Remote picker state for review sync.
+    review_remote_picker: Option<review::ReviewRemotePickerState>,
+    /// Remote picker hits.
+    pub(crate) review_remote_picker_hits: Vec<review::ReviewRemotePickerHit>,
+    /// Remote picker hover index.
+    pub(crate) review_remote_picker_hover: Option<usize>,
+    /// Pull request comment selected in the virtual PR comments view.
+    pub(crate) pr_comment_focus: Option<u64>,
+    /// Outdated comment selected in the virtual outdated comments view.
+    pub(crate) outdated_comment_focus: Option<u64>,
+    /// Click hitboxes for pull request comment view actions.
+    pub(crate) pr_comment_hits: Vec<review::PrCommentHit>,
+    /// Click hitbox for the add pull request comment row.
+    pub(crate) pr_comment_add_hit: Option<(u16, u16, u16, u16)>,
+    /// Pull request comment action currently hovered.
+    pub(crate) pr_comment_action_hover: Option<review::PrCommentHitAction>,
+    /// Pull request comment action key currently hovered.
+    pub(crate) pr_comment_action_hover_key: Option<String>,
+    /// Add pull request comment row is hovered.
+    pub(crate) pr_comment_add_hover: bool,
+    /// Waiting for a pull request reply key.
+    pub(crate) pr_reply_prefix: bool,
+    /// Waiting for a review edit key.
+    pub(crate) review_edit_prefix: bool,
+    /// Waiting for a review reply key.
+    pub(crate) review_reply_prefix: bool,
+    /// Waiting for a review resolve key.
+    pub(crate) review_resolve_prefix: bool,
+    /// Waiting for a review delete key.
+    pub(crate) review_delete_prefix: bool,
+    /// Waiting for a review overflow key.
+    pub(crate) review_overflow_prefix: bool,
+    /// Click hitboxes for review editor actions.
+    pub(crate) review_editor_toolbar_hits: Vec<ReviewEditorToolbarHit>,
+    /// Review editor action area.
+    pub(crate) review_editor_toolbar_rect: Option<(u16, u16, u16, u16)>,
+    /// First action shown in the review editor toolbar.
+    pub(crate) review_editor_toolbar_scroll: usize,
+    /// Action currently hovered in the review editor toolbar.
+    pub(crate) review_editor_toolbar_hover: Option<ReviewEditorToolbarAction>,
+    /// Hovered row for the add-comment button.
+    pub(crate) review_line_add_row: Option<u16>,
+    /// Hovered diff side in split view.
+    pub(crate) review_line_add_side: Option<review::ReviewSide>,
+    /// Last diff-line anchor hovered by the mouse.
+    pub(crate) last_hovered_review_anchor: Option<(u64, review::ReviewAnchor)>,
+    /// Rendered unified rows mapped back to review lines.
+    pub(crate) review_unified_line_rows: Vec<(usize, usize)>,
+    /// Rendered split rows mapped back to review lines.
+    pub(crate) review_split_line_rows: Vec<(u16, review::ReviewSide, usize)>,
+    /// Click hitbox for the add-comment button.
+    pub(crate) review_line_add_hit: Option<ReviewLineAddHit>,
+    /// True when the add-comment button is hovered.
+    pub(crate) review_line_add_hover: bool,
     /// Click hitboxes for hyperlinks in the markdown preview
     preview_link_boxes: Vec<PreviewLinkBox>,
     /// Active inline mention picker state for comment editor
@@ -540,6 +982,12 @@ pub struct App {
     pub review_hooks: Vec<ReviewHookConfig>,
     /// User-visible review commands.
     pub review_actions: Vec<ReviewActionConfig>,
+    /// Built-in review sync requested from the UI.
+    review_sync_requested: Option<review::ReviewSyncRequest>,
+    /// Review comment provider work shown in the footer.
+    review_sync_status: Option<review::ReviewSyncAction>,
+    /// User-visible selection commands.
+    pub selection_actions: Vec<SelectionActionConfig>,
     /// Non-fatal review hook warnings to print after TUI exits.
     review_hook_warnings: Vec<String>,
     /// Last matched display index for search navigation
@@ -550,6 +998,10 @@ pub struct App {
     search_target: Option<usize>,
     /// Cached search regex (case-insensitive)
     search_regex: Option<Regex>,
+    /// Monotonic revision for search state changes (cache invalidation)
+    search_revision: u64,
+    /// Current preview lines, updated by the renderer for search.
+    preview_search_lines: Vec<String>,
     /// Goto query (":" command)
     goto_query: String,
     /// True when goto input is active
@@ -568,6 +1020,8 @@ pub struct App {
     pub last_viewport_height: usize,
     /// Cached view lines for the current state/frame
     view_cache: Option<ViewCache>,
+    /// Revision of diff content used by render caches.
+    diff_revision: u64,
     /// Cached render model for unified view
     pub(crate) unified_render_cache: Option<UnifiedRenderModel>,
     /// Windowed render start (for large-file partial rendering)
@@ -595,6 +1049,10 @@ struct ViewCacheKey {
     show_hunk_extent_while_stepping: bool,
     placeholder_view: bool,
     fold_context: FoldContextMode,
+    fold_context_revision: u64,
+    fold_comment_revision: u64,
+    search_revision: u64,
+    diff_revision: u64,
     viewport_height: usize,
     windowed: bool,
     window_start: usize,
@@ -646,6 +1104,7 @@ impl App {
         let mut app = Self {
             multi_diff,
             view_mode,
+            preview_forced_by_content: false,
             animation_speed,
             autoplay,
             autoplay_reverse: false,
@@ -655,6 +1114,7 @@ impl App {
             no_step_visited: vec![false; file_count],
             files_visited: vec![false; file_count],
             should_quit: false,
+            confirm_quit: true,
             keybindings: Keybindings::default(),
             open_dashboard: false,
             animation_phase: AnimationPhase::Idle,
@@ -665,16 +1125,37 @@ impl App {
             file_panel_visible: true,
             file_panel_width: 30,
             file_panel_position: FilePanelPosition::Left,
+            file_panel_mode: FilePanelMode::Files,
+            file_panel_mode_toggle_hit: None,
+            file_panel_mode_toggle_hover: false,
+            file_panel_root_hit: None,
+            file_panel_root_hover: false,
             file_panel_rect: None,
             diff_view_area: None,
             diff_selection: None,
             diff_selection_cursor: None,
+            selection_toolbar_visible: false,
+            selection_toolbar_rect: None,
+            selection_toolbar_scroll: 0,
+            selection_toolbar_width: None,
+            selection_toolbar_hits: Vec::new(),
+            selection_toolbar_hover: None,
             diff_selection_cells: Vec::new(),
             file_panel_resizing: false,
             file_list_scroll: 0,
             file_list_area: None,
             file_list_rows: Vec::new(),
+            file_list_hover: None,
+            file_context_menu: None,
+            file_context_menu_hits: Vec::new(),
+            file_context_menu_hover: None,
+            file_panel_hover: false,
             file_filter_area: None,
+            file_filter_clear_hit: None,
+            file_filter_clear_hover: false,
+            file_filter_hover: false,
+            file_filter_cursor_visible: true,
+            file_filter_cursor_last_blink: Instant::now(),
             file_count_mode: FileCountMode::Active,
             file_filter: String::new(),
             file_filter_active: false,
@@ -695,9 +1176,15 @@ impl App {
             last_fs_check: Instant::now(),
             file_disk_baseline: vec![FileDiskStamp::default(); file_count],
             file_disk_changed: vec![false; file_count],
-            last_git_watch_check: Instant::now(),
+            file_recently_changed_until: vec![None; file_count],
+            last_change_list_watch_check: Instant::now(),
+            jj_watch_target: None,
             git_index_baseline: FileDiskStamp::default(),
             no_changes_message: None,
+            no_changes_dashboard_hit: None,
+            no_changes_dashboard_hover: false,
+            no_changes_quit_hit: None,
+            no_changes_quit_hover: false,
             view_build_defer: false,
             view_build_pending: false,
             horizontal_scroll: 0,
@@ -706,8 +1193,15 @@ impl App {
             max_line_widths_step: vec![0; file_count],
             max_line_widths_no_step: vec![0; file_count],
             line_wrap: false,
-            fold_context: FoldContextMode::Off,
-            fold_context_default: FoldContextMode::Off,
+            fold_context: FoldContextMode::default(),
+            fold_context_lines: 3,
+            fold_context_expansions: FxHashMap::default(),
+            fold_context_regions: Vec::new(),
+            fold_context_hits: Vec::new(),
+            fold_context_screen_rows: Vec::new(),
+            fold_context_hover: None,
+            fold_context_prefix: None,
+            fold_context_revision: 0,
             last_wrap_display_len: None,
             last_wrap_active_idx: None,
             scrollbar_visible: true,
@@ -731,16 +1225,47 @@ impl App {
                 .collect(),
             active_topbar_tab: (file_count > 0).then_some(1),
             next_topbar_tab_id: 2,
+            topbar_tab_scroll: 0,
             topbar_tab_hits: Vec::new(),
             topbar_plus_hit: None,
+            topbar_scroll_left_hit: None,
+            topbar_scroll_right_hit: None,
             preview_toggle_hit: None,
+            topbar_sidebar_toggle_hit: None,
+            status_mode_hit: None,
+            status_mode_menu: None,
+            status_mode_menu_hits: Vec::new(),
+            status_mode_menu_hover: None,
+            status_comments_hit: None,
+            status_file_hit: None,
+            binary_preview_hit: None,
+            review_file_comment_hit: None,
+            topbar_area: None,
             topbar_hover_tab: None,
             topbar_hover_close: None,
             topbar_plus_hover: false,
+            topbar_scroll_left_hover: false,
+            topbar_scroll_right_hover: false,
+            preview_toggle_hover: false,
+            topbar_sidebar_toggle_hover: false,
+            status_comments_hover: false,
+            status_file_hover: false,
+            binary_preview_hover: false,
+            review_file_comment_hover: false,
             topbar_drag_target: None,
             topbar_drag_tab: None,
+            structured_previews: FxHashMap::default(),
+            csv_previews: FxHashMap::default(),
+            image_picker: None,
+            image_preview_cache: None,
             strikethrough_deletions: false,
             gutter_signs: true,
+            toasts_enabled: true,
+            toast_engine: ToastEngineBuilder::new(ratatui::layout::Rect::default())
+                .max_queue_depth(3)
+                .build(),
+            toast_position: ToastPosition::BottomRight,
+            preview_change_bars: true,
             file_panel_manually_set: false,
             show_path_popup: false,
             file_panel_auto_hidden: false,
@@ -750,20 +1275,22 @@ impl App {
             centered_once: false,
             primary_marker: "▶".to_string(),
             primary_marker_right: "◀".to_string(),
-            extent_marker: "▌".to_string(),
+            extent_marker: "┃".to_string(),
             extent_marker_right: "▐".to_string(),
+            extent_marker_deleted: "╏".to_string(),
             clear_active_on_next_render: false,
             theme: ResolvedTheme::default(),
+            ui_theme_name: None,
             time_format: TimeFormatter::default(),
             theme_is_light: false,
             stepping: true,
             hunk_wrap: HunkWrapMode::None,
             step_wrap: StepWrapMode::None,
-            diff_bg: false,
-            diff_fg: DiffForegroundMode::Theme,
-            diff_highlight: DiffHighlightMode::Text,
-            diff_extent_marker: DiffExtentMarkerMode::Neutral,
-            diff_extent_marker_scope: DiffExtentMarkerScope::Progress,
+            diff_bg: true,
+            diff_fg: DiffForegroundMode::Syntax,
+            diff_highlight: DiffHighlightMode::Word,
+            diff_extent_marker: DiffExtentMarkerMode::Diff,
+            diff_extent_marker_scope: DiffExtentMarkerScope::Hunk,
             diff_extent_marker_context: false,
             blame_enabled: false,
             blame_mode: BlameMode::OneShot,
@@ -790,13 +1317,17 @@ impl App {
             diff_last_input: Instant::now(),
             diff_queue: VecDeque::new(),
             diff_inflight: None,
+            diff_refresh_restore_end: None,
             diff_worker_tx: None,
             diff_worker_rx: None,
+            content_worker_rx: None,
+            content_generation: 0,
+            content_loading: FxHashMap::default(),
             blame_extra_rows: None,
             blame_step_hint: None,
             blame_hunk_hint: None,
             unified_modified_step_mode: ModifiedStepMode::Mixed,
-            split_align_lines: false,
+            split_align_lines: true,
             split_align_fill: "╱".to_string(),
             evo_syntax: crate::config::EvoSyntaxMode::Context,
             syntax_mode: SyntaxMode::On,
@@ -811,7 +1342,9 @@ impl App {
             syntax_warmup_target_applied: None,
             syntax_warmup_target_at: None,
             syntax_engine: None,
+            syntax_engine_rx: None,
             syntax_caches: vec![None; file_count],
+            fold_scope_caches: vec![None; file_count],
             show_syntax_scopes: false,
             syntax_scope_cache: None,
             peek_state: None,
@@ -821,6 +1354,15 @@ impl App {
             step_view_mode: view_mode,
             search_query: String::new(),
             search_active: false,
+            search_cursor_visible: true,
+            search_cursor_last_blink: Instant::now(),
+            search_bar_hit: None,
+            search_prev_hit: None,
+            search_next_hit: None,
+            search_clear_hit: None,
+            search_prev_hover: false,
+            search_next_hover: false,
+            search_clear_hover: false,
             command_palette_query: String::new(),
             command_palette_active: false,
             command_palette_selection: 0,
@@ -835,18 +1377,99 @@ impl App {
             file_search_list_start: 0,
             file_search_list_count: 0,
             file_search_item_height: 1,
+            comment_picker_query: String::new(),
+            comment_picker_active: false,
+            comment_picker_selection: 0,
+            comment_picker_list_area: None,
+            comment_picker_list_start: 0,
+            comment_picker_list_count: 0,
+            comment_picker_item_height: 1,
+            theme_picker_query: String::new(),
+            theme_picker_active: false,
+            theme_picker_selection: 0,
+            theme_picker_list_area: None,
+            theme_picker_list_start: 0,
+            theme_picker_list_count: 0,
+            theme_picker_item_height: 1,
+            theme_picker_restore: None,
+            control_session_name: None,
+            session_rename_query: String::new(),
+            session_rename_active: false,
+            pending_session_rename: None,
             review_mode: false,
             review_comments: Vec::new(),
+            review_session_baseline: Vec::new(),
+            active_review_comment_id: None,
             review_editor: None,
-            review_session_path: None,
+            review_editor_wrap_width: 0,
+            review_dir_path: None,
+            review_db_path: None,
+            review_db_stamp: FileDiskStamp::default(),
+            last_review_db_check: Instant::now(),
+            review_base_dir_override: None,
+            review_workspace_root_override: None,
             review_persist_enabled: true,
-            review_clear_session_on_start: false,
+            review_filter_to_current_diff: false,
             review_diff_fingerprint: String::new(),
+            review_storage_key: String::new(),
             review_repo_root: None,
+            review_target_metadata: None,
+            review_pull_request_target: None,
+            review_author: None,
             review_session_created_at: 0,
             review_next_comment_id: 1,
-            review_submission_output: None,
             review_preview_boxes: Vec::new(),
+            review_preview_hover: None,
+            review_preview_hover_id: None,
+            review_preview_edit_hover: None,
+            review_preview_reply_hover: None,
+            review_preview_resolve_hover: None,
+            review_preview_delete_hover: None,
+            review_preview_overflow_hover: None,
+            review_comment_context_menu: None,
+            review_comment_context_menu_hits: Vec::new(),
+            review_comment_context_menu_hover: None,
+            review_preview_flash: None,
+            quit_confirmation: false,
+            review_delete_confirmation: None,
+            review_delete_confirmation_hits: Vec::new(),
+            review_delete_confirmation_hover: None,
+            comments_sidebar_sync_hit: None,
+            comments_sidebar_discard_hit: None,
+            comments_sidebar_sync_hover: false,
+            comments_sidebar_discard_hover: false,
+            comments_sidebar_overflow_hit: None,
+            comments_sidebar_overflow_hover: false,
+            comments_sidebar_overflow_open: false,
+            comments_sidebar_overflow_hits: Vec::new(),
+            comments_sidebar_overflow_menu_hover: None,
+            review_remote_picker: None,
+            review_remote_picker_hits: Vec::new(),
+            review_remote_picker_hover: None,
+            pr_comment_focus: None,
+            outdated_comment_focus: None,
+            pr_comment_hits: Vec::new(),
+            pr_comment_add_hit: None,
+            pr_comment_action_hover: None,
+            pr_comment_action_hover_key: None,
+            pr_comment_add_hover: false,
+            pr_reply_prefix: false,
+            review_edit_prefix: false,
+            review_reply_prefix: false,
+            review_resolve_prefix: false,
+            review_delete_prefix: false,
+            review_overflow_prefix: false,
+            review_editor_toolbar_hits: Vec::new(),
+            review_editor_toolbar_rect: None,
+            review_editor_toolbar_scroll: 0,
+            review_editor_toolbar_hover: None,
+            review_line_add_row: None,
+            review_line_add_side: None,
+            last_hovered_review_anchor: None,
+            review_unified_line_rows: Vec::new(),
+            review_split_line_rows: Vec::new(),
+            review_line_add_hit: None,
+            review_line_add_hover: false,
             preview_link_boxes: Vec::new(),
             review_mention_picker: None,
             review_mention_file_scope: MentionFileScope::default(),
@@ -856,11 +1479,16 @@ impl App {
             review_revision: 0,
             review_hooks: Vec::new(),
             review_actions: Vec::new(),
+            review_sync_requested: None,
+            review_sync_status: None,
+            selection_actions: Vec::new(),
             review_hook_warnings: Vec::new(),
             search_last_target: None,
             needs_scroll_to_search: false,
             search_target: None,
             search_regex: None,
+            search_revision: 0,
+            preview_search_lines: Vec::new(),
             goto_query: String::new(),
             goto_active: false,
             snap_frame: None,
@@ -870,6 +1498,7 @@ impl App {
             hunk_edge_hint: None,
             last_viewport_height: 0,
             view_cache: None,
+            diff_revision: 0,
             unified_render_cache: None,
             view_window_start: 0,
             view_window_total_len: None,
@@ -877,6 +1506,61 @@ impl App {
         app.rebuild_file_disk_baseline();
         app.git_index_baseline = app.git_index_stamp();
         app
+    }
+
+    pub(crate) fn request_quit(&mut self) {
+        if !self.confirm_quit {
+            self.submit_review_and_quit();
+            return;
+        }
+        self.quit_confirmation = true;
+        self.review_delete_confirmation_hits.clear();
+        self.review_delete_confirmation_hover = None;
+    }
+
+    pub(crate) fn force_quit(&mut self) {
+        self.should_quit = true;
+    }
+
+    pub(crate) fn quit_confirmation_active(&self) -> bool {
+        self.quit_confirmation
+    }
+
+    pub(crate) fn cancel_quit_confirmation(&mut self) {
+        self.quit_confirmation = false;
+        self.review_delete_confirmation_hits.clear();
+        self.review_delete_confirmation_hover = None;
+    }
+
+    fn confirm_pending_quit(&mut self) {
+        self.cancel_quit_confirmation();
+        self.submit_review_and_quit();
+    }
+
+    pub(crate) fn handle_quit_confirmation_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
+        match key.code {
+            crossterm::event::KeyCode::Enter
+            | crossterm::event::KeyCode::Char('y' | 'Y' | 'q' | 'Q') => self.confirm_pending_quit(),
+            _ => self.cancel_quit_confirmation(),
+        }
+        true
+    }
+
+    pub(crate) fn handle_quit_confirmation_click(&mut self, column: u16, row: u16) -> bool {
+        let Some(action) = self.review_delete_confirmation_hits.iter().find_map(|hit| {
+            (column >= hit.x
+                && column < hit.x.saturating_add(hit.width)
+                && row >= hit.y
+                && row < hit.y.saturating_add(hit.height))
+            .then_some(hit.action)
+        }) else {
+            return true;
+        };
+        match action {
+            review::ReviewDeleteConfirmationAction::Confirm => self.confirm_pending_quit(),
+            review::ReviewDeleteConfirmationAction::Cancel => self.cancel_quit_confirmation(),
+        }
+        true
     }
 
     /// Add a digit to the pending count (vim-style command counts)
@@ -895,6 +1579,58 @@ impl App {
     /// Reset pending count without using it
     pub fn reset_count(&mut self) {
         self.pending_count = None;
+    }
+
+    pub(crate) fn notify(&mut self, event: ToastEvent) {
+        if self.toasts_enabled {
+            let bg = self.toast_bg();
+            self.toast_engine
+                .show_toast(toast_builder(event, bg).position(self.toast_position));
+        }
+    }
+
+    /// Toast body background — the app/diff-viewer background so the toast reads
+    /// as part of the window. When the theme is transparent (no background), a
+    /// dark surface is derived from the theme's own text color so it harmonizes
+    /// with the palette instead of using an unrelated hardcoded color. The crate
+    /// draws the message in white, so light themes fall back to dark.
+    pub(crate) fn toast_bg(&self) -> Color {
+        if self.theme_is_light {
+            return Color::Rgb(0x26, 0x28, 0x2c);
+        }
+        self.theme
+            .background
+            .or(self.theme.background_panel)
+            .or(self.theme.background_element)
+            .or_else(|| crate::color::blend_colors(Color::Rgb(0, 0, 0), self.theme.text, 0.10))
+            .unwrap_or(Color::Rgb(0x1b, 0x1c, 0x1e))
+    }
+
+    pub(crate) fn toast_tick(&mut self) -> bool {
+        self.toasts_enabled && self.toast_engine.tick()
+    }
+
+    pub(crate) fn handle_toast_click(
+        &mut self,
+        column: u16,
+        row: u16,
+        button: ToastMouseButton,
+    ) -> bool {
+        if !self.toasts_enabled {
+            return false;
+        }
+        match self.toast_engine.handle_click(column, row, button) {
+            ToastInteraction::Dismissed => true,
+            ToastInteraction::CopyRequested(text) => {
+                if copy_to_clipboard(&text) {
+                    self.notify(ToastEvent::CopiedToast);
+                } else {
+                    self.notify(ToastEvent::CopyFailed);
+                }
+                true
+            }
+            ToastInteraction::None => false,
+        }
     }
 
     pub fn toggle_help(&mut self) {
@@ -918,6 +1654,7 @@ impl App {
 
     pub fn toggle_zen(&mut self) {
         self.zen_mode = !self.zen_mode;
+        self.notify(ToastEvent::Zen(self.zen_mode));
     }
 
     pub fn toggle_syntax(&mut self) {
@@ -925,8 +1662,13 @@ impl App {
             SyntaxMode::On => SyntaxMode::Off,
             SyntaxMode::Off => SyntaxMode::On,
         };
+        self.notify(ToastEvent::Syntax(matches!(
+            self.syntax_mode,
+            SyntaxMode::On
+        )));
         if matches!(self.syntax_mode, SyntaxMode::Off) {
             self.syntax_engine = None;
+            self.syntax_engine_rx = None;
             self.syntax_caches = vec![None; self.multi_diff.file_count()];
         }
     }
@@ -936,15 +1678,33 @@ impl App {
             crate::config::EvoSyntaxMode::Context => crate::config::EvoSyntaxMode::Full,
             crate::config::EvoSyntaxMode::Full => crate::config::EvoSyntaxMode::Context,
         };
+        self.notify(ToastEvent::EvoSyntaxFull(matches!(
+            self.evo_syntax,
+            crate::config::EvoSyntaxMode::Full
+        )));
     }
 
     pub fn scroll_up(&mut self) {
         self.centered_once = false;
+        if self.view_mode == ViewMode::Preview && self.active_preview_rendered() {
+            if let Some(state) = self.active_structured_preview_mut() {
+                state.scroll_up(1);
+                self.sync_scroll_from_structured_preview();
+                return;
+            }
+        }
         self.scroll_offset = self.scroll_offset.saturating_sub(1);
     }
 
     pub fn scroll_down(&mut self) {
         self.centered_once = false;
+        if self.view_mode == ViewMode::Preview && self.active_preview_rendered() {
+            if let Some(state) = self.active_structured_preview_mut() {
+                state.scroll_down(1);
+                self.sync_scroll_from_structured_preview();
+                return;
+            }
+        }
         self.scroll_offset = self.scroll_offset.saturating_add(1);
     }
 
@@ -1114,6 +1874,32 @@ impl App {
         }
     }
 
+    pub(crate) fn mouse_over_diff_view(&self, column: u16, row: u16) -> bool {
+        self.diff_view_area.is_some_and(|(x, y, width, height)| {
+            column >= x
+                && column < x.saturating_add(width)
+                && row >= y
+                && row < y.saturating_add(height)
+        })
+    }
+
+    pub(crate) fn scroll_diff_horizontally(&mut self, delta: isize) -> bool {
+        if self.line_wrap || self.view_mode == ViewMode::Preview {
+            return false;
+        }
+        if self.diff_view_area.is_none() {
+            return false;
+        }
+        let old = self.horizontal_scroll;
+        let amount = delta.unsigned_abs().saturating_mul(4);
+        if delta.is_negative() {
+            self.horizontal_scroll = self.horizontal_scroll.saturating_sub(amount);
+        } else {
+            self.horizontal_scroll = self.horizontal_scroll.saturating_add(amount);
+        }
+        old != self.horizontal_scroll
+    }
+
     /// Go to start of line (horizontal scroll = 0), like vim's 0
     pub fn scroll_to_line_start(&mut self) {
         self.horizontal_scroll = 0;
@@ -1191,6 +1977,7 @@ impl App {
 
     pub fn toggle_line_wrap(&mut self) {
         self.line_wrap = !self.line_wrap;
+        self.notify(ToastEvent::LineWrap(self.line_wrap));
         // Reset horizontal scroll when enabling wrap
         if self.line_wrap {
             self.horizontal_scroll = 0;
@@ -1201,28 +1988,230 @@ impl App {
         self.centered_once = false;
     }
 
-    pub fn toggle_fold_context(&mut self) {
-        if self.fold_context.is_enabled() {
-            self.fold_context = FoldContextMode::Off;
-        } else if self.fold_context_default.is_enabled() {
-            self.fold_context = self.fold_context_default;
-        } else {
-            self.fold_context = FoldContextMode::On;
-        }
+    pub(crate) fn mark_diff_changed(&mut self) {
+        self.diff_revision = self.diff_revision.wrapping_add(1);
+        self.view_cache = None;
+        self.unified_render_cache = None;
+    }
+
+    pub(crate) fn diff_revision(&self) -> u64 {
+        self.diff_revision
+    }
+
+    fn clear_fold_context_caches(&mut self) {
+        self.fold_context_revision = self.fold_context_revision.wrapping_add(1);
+        self.fold_context_regions.clear();
+        self.fold_context_hits.clear();
+        self.fold_context_screen_rows.clear();
+        self.fold_context_hover = None;
+        self.fold_context_prefix = None;
+        self.view_cache = None;
+        self.unified_render_cache = None;
+        self.hunk_starts_unified_cache = None;
+        self.hunk_bounds_unified_cache = None;
+        self.hunk_starts_split_cache = None;
+        self.hunk_bounds_split_cache = None;
         self.last_wrap_display_len = None;
         self.last_wrap_active_idx = None;
+    }
+
+    fn invalidate_fold_context_view(&mut self) {
+        self.clear_fold_context_caches();
+        self.reset_search_for_file_switch();
         self.needs_scroll_to_active = true;
         self.centered_once = false;
         self.blame_render_cache = None;
     }
 
+    pub fn toggle_fold_context(&mut self) {
+        self.fold_context = self.fold_context.next();
+        self.fold_context_expansions.clear();
+        self.invalidate_fold_context_view();
+        self.notify(ToastEvent::FoldContext(self.fold_context));
+    }
+
     pub fn set_fold_context_mode(&mut self, mode: FoldContextMode) {
         self.fold_context = mode;
-        self.fold_context_default = mode;
+        self.fold_context_expansions.clear();
+        self.invalidate_fold_context_view();
+    }
+
+    pub(crate) fn set_fold_context_lines(&mut self, lines: usize) {
+        self.fold_context_lines = lines;
+        self.invalidate_fold_context_view();
+    }
+
+    pub(crate) fn fold_context_region_for_line(
+        &self,
+        line: &ViewLine,
+    ) -> Option<FoldContextRegion> {
+        if !self.fold_context.is_enabled() || !is_fold_line(line) {
+            return None;
+        }
+        self.fold_context_regions
+            .iter()
+            .find(|region| {
+                region.key.file_index == self.multi_diff.selected_index
+                    && region.key.start_change_id == line.change_id
+            })
+            .cloned()
+    }
+
+    pub(crate) fn clear_fold_context_hits(&mut self) {
+        self.fold_context_hits.clear();
+        self.fold_context_screen_rows.clear();
+    }
+
+    pub(crate) fn add_fold_context_render_rows(
+        &mut self,
+        area: ratatui::layout::Rect,
+        rows: &[FoldContextRenderRow],
+        viewport_start: usize,
+    ) {
+        let viewport_end = viewport_start.saturating_add(area.height as usize);
+        for row in rows {
+            if row.row < viewport_start || row.row >= viewport_end {
+                continue;
+            }
+            let y = area
+                .y
+                .saturating_add(row.row.saturating_sub(viewport_start) as u16);
+            if !self.fold_context_screen_rows.contains(&y) {
+                self.fold_context_screen_rows.push(y);
+            }
+            for (x, width, direction) in [
+                (row.top_x, row.top_width, FoldContextDirection::Top),
+                (row.bottom_x, row.bottom_width, FoldContextDirection::Bottom),
+            ] {
+                if x >= area.width {
+                    continue;
+                }
+                self.fold_context_hits.push(FoldContextHit {
+                    x: area.x.saturating_add(x),
+                    y,
+                    width: width.min(area.width.saturating_sub(x)),
+                    height: 1,
+                    key: row.key,
+                    direction,
+                });
+            }
+        }
+    }
+
+    pub(crate) fn handle_fold_context_click(&mut self, column: u16, row: u16) -> bool {
+        let Some(hit) = self
+            .fold_context_hits
+            .iter()
+            .find(|hit| {
+                column >= hit.x
+                    && column < hit.x.saturating_add(hit.width)
+                    && row >= hit.y
+                    && row < hit.y.saturating_add(hit.height)
+            })
+            .copied()
+        else {
+            return false;
+        };
+        self.expand_context_fold(hit.key, hit.direction)
+    }
+
+    fn expand_context_fold(
+        &mut self,
+        key: FoldContextKey,
+        direction: FoldContextDirection,
+    ) -> bool {
+        let Some(hidden_lines) = self
+            .fold_context_regions
+            .iter()
+            .find(|region| region.key == key)
+            .map(|region| region.hidden_lines)
+        else {
+            return false;
+        };
+        let amount = hidden_lines.min(20);
+        let expansion = self.fold_context_expansions.entry(key).or_default();
+        match direction {
+            FoldContextDirection::Top => {
+                expansion.top = expansion.top.saturating_add(amount);
+                self.scroll_offset = self.scroll_offset.saturating_add(amount);
+            }
+            FoldContextDirection::Bottom => {
+                expansion.bottom = expansion.bottom.saturating_add(amount);
+            }
+        }
+        self.invalidate_fold_context_view();
+        self.needs_scroll_to_active = false;
+        true
+    }
+
+    fn visible_context_fold_keys(&self) -> Vec<FoldContextKey> {
+        let mut keys = Vec::new();
+        for hit in &self.fold_context_hits {
+            if !keys.contains(&hit.key) {
+                keys.push(hit.key);
+            }
+        }
+        keys
+    }
+
+    pub(crate) fn has_visible_context_folds(&self) -> bool {
+        !self.fold_context_hits.is_empty()
+    }
+
+    fn expand_visible_context_fold(&mut self, idx: usize, direction: FoldContextDirection) -> bool {
+        let Some(key) = self.visible_context_fold_keys().get(idx).copied() else {
+            return false;
+        };
+        self.expand_context_fold(key, direction)
+    }
+
+    pub(crate) fn expand_visible_context_fold_letter(
+        &mut self,
+        letter: char,
+        direction: FoldContextDirection,
+    ) -> bool {
+        let letter = letter.to_ascii_lowercase();
+        if !letter.is_ascii_lowercase() {
+            return false;
+        }
+        self.expand_visible_context_fold((letter as u8 - b'a') as usize, direction)
+    }
+
+    pub(crate) fn expand_visible_context_fold_number(
+        &mut self,
+        number: usize,
+        direction: FoldContextDirection,
+    ) -> bool {
+        if number == 0 {
+            return false;
+        }
+        self.expand_visible_context_fold(number - 1, direction)
+    }
+
+    pub(crate) fn expand_all_context_folds(&mut self) -> bool {
+        if !self.fold_context.is_enabled() {
+            return false;
+        }
+        self.current_view_with_frame(AnimationFrame::Idle);
+        if self.fold_context_regions.is_empty() {
+            return false;
+        }
+        for region in self.fold_context_regions.clone() {
+            self.fold_context_expansions.insert(
+                region.key,
+                FoldContextExpansion {
+                    top: usize::MAX,
+                    bottom: 0,
+                },
+            );
+        }
+        self.invalidate_fold_context_view();
+        true
     }
 
     pub fn toggle_strikethrough_deletions(&mut self) {
         self.strikethrough_deletions = !self.strikethrough_deletions;
+        self.notify(ToastEvent::Strikethrough(self.strikethrough_deletions));
     }
 
     fn wrap_to_file_hunk(&mut self, forward: bool, stepping: bool) -> bool {
@@ -1410,6 +2399,7 @@ impl App {
         window_start: usize,
     ) -> ViewCacheKey {
         let idx = self.multi_diff.selected_index;
+        let fold_comment_revision = self.review_fold_anchor_revision();
         let state = self.multi_diff.current_navigator().state();
         ViewCacheKey {
             file_index: idx,
@@ -1427,6 +2417,10 @@ impl App {
             show_hunk_extent_while_stepping: state.show_hunk_extent_while_stepping,
             placeholder_view: self.multi_diff.current_navigator_is_placeholder(),
             fold_context: self.fold_context,
+            fold_context_revision: self.fold_context_revision,
+            fold_comment_revision,
+            search_revision: self.search_revision,
+            diff_revision: self.diff_revision,
             viewport_height: self.last_viewport_height,
             windowed,
             window_start,
@@ -1479,7 +2473,7 @@ impl App {
     }
 
     fn compute_view_window(&mut self) -> Option<ViewWindow> {
-        if self.line_wrap {
+        if self.line_wrap || self.fold_context.is_enabled() {
             return None;
         }
         if !self.multi_diff.current_file_is_large() {
@@ -1686,7 +2680,31 @@ impl App {
                 }
             }
         }
-        let view = utils::fold_context_view(view, self.fold_context);
+        let fold_comment_anchors = self.review_fold_anchor_change_ids(&view);
+        let (view, mut fold_context_regions) = utils::fold_context_view(
+            view,
+            self.fold_context,
+            self.multi_diff.selected_index,
+            self.fold_context_lines,
+            &self.fold_context_expansions,
+            &fold_comment_anchors,
+        );
+        if !fold_context_regions.is_empty() {
+            self.ensure_current_fold_scope_cache();
+            if let Some(ranges) = self
+                .fold_scope_caches
+                .get(self.multi_diff.selected_index)
+                .and_then(|cache| cache.as_deref())
+            {
+                for region in &mut fold_context_regions {
+                    region.scope_hint = region.scope_line.and_then(|line| {
+                        crate::syntax::enclosing_scope_definition(ranges, line.saturating_sub(1))
+                            .map(str::to_string)
+                    });
+                }
+            }
+        }
+        self.fold_context_regions = fold_context_regions;
         let lines = std::sync::Arc::new(view);
         let applied_start = window_start_override.unwrap_or(window_start);
         let applied_total = window_total_override.or(window.map(|w| w.total_len));
@@ -1726,11 +2744,15 @@ impl App {
     }
 
     /// Ensure active change is visible if needed (called from views after stepping)
-    pub fn ensure_active_visible_if_needed(&mut self, viewport_height: usize) {
+    pub fn ensure_active_visible_if_needed(
+        &mut self,
+        viewport_height: usize,
+        viewport_width: usize,
+    ) {
         if !self.current_file_diff_ready() {
             return;
         }
-        if self.handle_search_scroll_if_needed(viewport_height) {
+        if self.handle_search_scroll_if_needed(viewport_height, viewport_width) {
             return;
         }
         if !self.needs_scroll_to_active {
@@ -1926,6 +2948,7 @@ impl App {
             || self.syntax_warmup_pending()
             || self.step_edge_hint.is_some()
             || self.hunk_edge_hint.is_some()
+            || self.review_sync_status.is_some()
         {
             Duration::from_millis(100)
         } else {
@@ -1951,11 +2974,51 @@ impl App {
             }
         }
 
+        let text_cursor_active = self.file_filter_active
+            || self.command_palette_active
+            || self.file_search_active
+            || self.comment_picker_active
+            || self.theme_picker_active
+            || self.session_rename_active
+            || self.review_remote_picker.is_some();
+        if text_cursor_active
+            && now.duration_since(self.file_filter_cursor_last_blink) >= Duration::from_millis(500)
+        {
+            self.file_filter_cursor_visible = !self.file_filter_cursor_visible;
+            self.file_filter_cursor_last_blink = now;
+            dirty = true;
+        }
+        if self.search_active
+            && now.duration_since(self.search_cursor_last_blink) >= Duration::from_millis(500)
+        {
+            self.search_cursor_visible = !self.search_cursor_visible;
+            self.search_cursor_last_blink = now;
+            dirty = true;
+        }
+
+        if self.review_sync_status.is_some() {
+            dirty = true;
+        }
+
+        if self
+            .review_preview_flash
+            .as_ref()
+            .is_some_and(|(_, until)| now >= *until)
+        {
+            self.review_preview_flash = None;
+            dirty = true;
+        }
+
+        dirty |= self.expire_recent_file_changes(now);
+        dirty |= self.toast_tick();
+        dirty |= self.poll_content_responses();
         dirty |= self.poll_diff_responses();
         dirty |= self.maybe_queue_idle_diff();
         dirty |= self.maybe_check_file_changes();
         dirty |= self.maybe_watch_refresh_git_files();
+        dirty |= self.maybe_watch_refresh_jj_files();
         dirty |= self.maybe_watch_refresh_changed_files();
+        dirty |= self.maybe_watch_reload_review_state();
 
         if self.multi_diff.file_count() == 0 {
             return dirty;

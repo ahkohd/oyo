@@ -64,18 +64,19 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
         app.clamp_horizontal_scroll_cached(visible_width);
     }
     if app.current_file_is_binary() {
-        render_empty_state(frame, area, &app.theme, false, true);
+        super::render_binary_empty_state(frame, app, area);
         return;
     }
 
     // Clone markers to avoid borrow conflicts
     let primary_marker = app.primary_marker.clone();
     let extent_marker = app.extent_marker.clone();
+    let extent_marker_deleted = app.extent_marker_deleted.clone();
 
     if app.line_wrap {
-        app.handle_search_scroll_if_needed(visible_height);
+        app.handle_search_scroll_if_needed(visible_height, visible_width);
     } else {
-        app.ensure_active_visible_if_needed(visible_height);
+        app.ensure_active_visible_if_needed(visible_height, visible_width);
     }
     let animation_frame = app.animation_frame();
     let show_extent = app.stepping && !app.multi_diff.current_navigator().state().is_at_start();
@@ -335,10 +336,12 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let query = app.search_query().trim().to_ascii_lowercase();
     let has_query = !query.is_empty();
-    let mut review_preview_rows: Vec<(usize, usize, String)> = Vec::new();
-    let mut review_preview_before_idx: std::collections::HashMap<usize, Vec<(String, String)>> =
-        std::collections::HashMap::new();
-    let mut review_preview_after_idx: std::collections::HashMap<usize, Vec<(String, String)>> =
+    let mut review_preview_rows: Vec<(u64, usize, usize, String)> = Vec::new();
+    let mut review_preview_before_idx: std::collections::HashMap<
+        usize,
+        Vec<(u64, String, String)>,
+    > = std::collections::HashMap::new();
+    let mut review_preview_after_idx: std::collections::HashMap<usize, Vec<(u64, String, String)>> =
         std::collections::HashMap::new();
     if app.review_mode()
         && !app.review_editor_active()
@@ -350,12 +353,12 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
                 review_preview_before_idx
                     .entry(overlay.display_idx)
                     .or_default()
-                    .push((overlay.anchor_key, text));
+                    .push((overlay.id, overlay.anchor_key, text));
             } else {
                 review_preview_after_idx
                     .entry(overlay.display_idx)
                     .or_default()
-                    .push((overlay.anchor_key, text));
+                    .push((overlay.id, overlay.anchor_key, text));
             }
         }
     }
@@ -439,7 +442,7 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
         }
 
         if let Some(previews) = review_preview_before_idx.get(&display_idx) {
-            for (anchor_key, preview_text) in previews {
+            for (id, anchor_key, preview_text) in previews {
                 let virtual_style = Style::default()
                     .fg(app.theme.text_muted)
                     .add_modifier(Modifier::ITALIC);
@@ -481,7 +484,7 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
                         gutter_lines.push(Line::from(Span::raw(" ")));
                     }
                 }
-                review_preview_rows.push((row_idx, virtual_wrap, anchor_key.clone()));
+                review_preview_rows.push((*id, row_idx, virtual_wrap, anchor_key.clone()));
             }
         }
 
@@ -542,7 +545,11 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
             )
         } else if show_extent {
             (
-                extent_marker.as_str(),
+                super::extent_marker_text(
+                    extent_marker.as_str(),
+                    extent_marker_deleted.as_str(),
+                    view_line,
+                ),
                 super::extent_marker_style(
                     app,
                     view_line.kind,
@@ -701,7 +708,7 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
         }
 
         if let Some(previews) = review_preview_after_idx.get(&display_idx) {
-            for (anchor_key, preview_text) in previews {
+            for (id, anchor_key, preview_text) in previews {
                 let virtual_style = Style::default()
                     .fg(app.theme.text_muted)
                     .add_modifier(Modifier::ITALIC);
@@ -743,7 +750,7 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
                         gutter_lines.push(Line::from(Span::raw(" ")));
                     }
                 }
-                review_preview_rows.push((row_idx, virtual_wrap, anchor_key.clone()));
+                review_preview_rows.push((*id, row_idx, virtual_wrap, anchor_key.clone()));
             }
         }
 
@@ -1016,7 +1023,7 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
         {
             let viewport_start = if app.line_wrap { scroll_offset } else { 0 };
             let viewport_end = viewport_start.saturating_add(content_area.height as usize);
-            for (row_idx, row_span, anchor_key) in &review_preview_rows {
+            for (id, row_idx, row_span, anchor_key) in &review_preview_rows {
                 let start = *row_idx;
                 let end = start.saturating_add((*row_span).max(1));
                 let visible_start = start.max(viewport_start);
@@ -1029,11 +1036,12 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
                 if height == 0 {
                     continue;
                 }
-                app.add_review_preview_box(
+                app.add_review_comment_preview_box(
                     content_area.x,
                     content_area.y.saturating_add(local_row as u16),
                     content_area.width,
                     height,
+                    *id,
                     anchor_key.clone(),
                 );
             }

@@ -33,10 +33,52 @@ pub struct FileEntry {
     pub binary: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct RawFileDiff {
+    pub path: PathBuf,
+    pub old_path: Option<PathBuf>,
+    pub old_source_path: Option<PathBuf>,
+    pub new_source_path: Option<PathBuf>,
+    pub status: FileStatus,
+    pub old_content: String,
+    pub new_content: String,
+    pub binary: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileSide {
     Old,
     New,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContentSource {
+    Empty,
+    File(PathBuf),
+    GitObject {
+        repo_root: PathBuf,
+        spec: String,
+    },
+    JjFile {
+        repo_root: PathBuf,
+        revision: String,
+        path: PathBuf,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingFileContent {
+    pub file_index: usize,
+    pub old: ContentSource,
+    pub new: ContentSource,
+}
+
+pub struct PreparedFileContent {
+    old: Arc<str>,
+    new: Arc<str>,
+    binary: bool,
+    precomputed: Option<PrecomputedDiff>,
+    status: DiffStatus,
 }
 
 #[derive(Debug, Clone)]
@@ -70,6 +112,12 @@ pub struct MultiFileDiff {
     precomputed_diffs: Vec<Option<PrecomputedDiff>>,
     /// Diff readiness state per file
     diff_statuses: Vec<DiffStatus>,
+    /// Content requests not yet handed to the UI worker.
+    pending_content: Vec<Option<PendingFileContent>>,
+    /// Keep provider stats stable when real content arrives.
+    stats_authoritative: bool,
+    /// Blame sources supplied by non-Git frontends backed by Git objects.
+    blame_sources_override: Option<(BlameSource, BlameSource)>,
 }
 
 #[derive(Debug, Clone)]
@@ -86,10 +134,12 @@ pub enum BlameSource {
     Worktree,
     Index,
     Commit(String),
+    JjRev(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiffStatus {
+    Loading,
     Ready,
     Deferred,
     Computing,
@@ -109,7 +159,8 @@ static DIFF_MAX_BYTES: AtomicU64 = AtomicU64::new(DEFAULT_DIFF_MAX_BYTES);
 static FULL_CONTEXT_MAX_BYTES: AtomicU64 = AtomicU64::new(DEFAULT_FULL_CONTEXT_MAX_BYTES);
 static DIFF_DEFER: AtomicBool = AtomicBool::new(true);
 
-pub const DEFAULT_SCAN_IGNORE_GLOBS: &[&str] = &[".git/**", ".jj/**", ".hg/**", ".svn/**"];
+pub const DEFAULT_SCAN_IGNORE_GLOBS: &[&str] =
+    &[".git/**", ".jj/**", ".hg/**", ".svn/**", ".oyo/reviews/**"];
 
 #[derive(Debug, Clone)]
 pub struct DirectoryScanOptions {
@@ -204,6 +255,25 @@ impl MultiFileDiff {
         }
         let bytes = crate::git::get_staged_content_bytes(repo_root, path).unwrap_or_default();
         Self::decode_bytes(bytes)
+    }
+
+    fn read_git_batch_or_binary(
+        repo_root: &Path,
+        specs: Vec<Option<String>>,
+    ) -> Result<Vec<(String, bool)>, MultiDiffError> {
+        let requested = specs.iter().flatten().cloned().collect::<Vec<_>>();
+        let mut objects =
+            crate::git::get_objects_batch(repo_root, &requested, Self::MAX_TEXT_BYTES)?.into_iter();
+        Ok(specs
+            .into_iter()
+            .map(|spec| match spec {
+                None => (String::new(), false),
+                Some(_) => match objects.next().flatten() {
+                    Some(bytes) => Self::decode_bytes(bytes),
+                    None => (String::new(), true),
+                },
+            })
+            .collect())
     }
 
     fn diff_strings(old: &str, new: &str) -> crate::diff::DiffResult {
@@ -326,6 +396,334 @@ impl MultiFileDiff {
         (old_content, new_content, None, DiffStatus::Ready)
     }
 
+    pub fn from_pending_files(
+        repo_root: Option<PathBuf>,
+        entries: Vec<(FileEntry, ContentSource, ContentSource)>,
+        stats_authoritative: bool,
+    ) -> Self {
+        let count = entries.len();
+        let mut files = Vec::with_capacity(count);
+        let mut pending_content = Vec::with_capacity(count);
+        for (file_index, (file, old, new)) in entries.into_iter().enumerate() {
+            files.push(file);
+            pending_content.push(Some(PendingFileContent {
+                file_index,
+                old,
+                new,
+            }));
+        }
+        Self {
+            files,
+            selected_index: 0,
+            navigators: (0..count).map(|_| None).collect(),
+            navigator_is_placeholder: vec![false; count],
+            repo_root,
+            git_mode: None,
+            source_roots: None,
+            old_contents: vec![Arc::from(""); count],
+            new_contents: vec![Arc::from(""); count],
+            precomputed_diffs: (0..count)
+                .map(|_| {
+                    Some(PrecomputedDiff::Placeholder(Self::context_only_diff(
+                        "Loading file...",
+                    )))
+                })
+                .collect(),
+            diff_statuses: vec![DiffStatus::Loading; count],
+            pending_content,
+            stats_authoritative,
+            blame_sources_override: None,
+        }
+    }
+
+    /// Create from already loaded file contents.
+    pub fn from_raw_files(repo_root: Option<PathBuf>, raw_files: Vec<RawFileDiff>) -> Self {
+        let eager_stats = raw_files.len() <= 4;
+        let mut files = Vec::new();
+        let mut old_contents = Vec::new();
+        let mut new_contents = Vec::new();
+        let mut precomputed_diffs = Vec::new();
+        let mut diff_statuses = Vec::new();
+
+        for raw in raw_files {
+            let binary = raw.binary;
+            let (insertions, deletions) = if eager_stats {
+                Self::diff_stats(&raw.old_content, &raw.new_content, binary)
+            } else {
+                (0, 0)
+            };
+            let (old_content, new_content, precomputed, diff_status) =
+                Self::maybe_defer_diff(raw.old_content, raw.new_content, binary);
+
+            files.push(FileEntry {
+                display_name: raw.path.display().to_string(),
+                path: raw.path,
+                old_path: raw.old_path,
+                old_source_path: raw.old_source_path,
+                new_source_path: raw.new_source_path,
+                status: raw.status,
+                insertions,
+                deletions,
+                binary,
+            });
+            old_contents.push(Arc::from(old_content));
+            new_contents.push(Arc::from(new_content));
+            precomputed_diffs.push(precomputed);
+            diff_statuses.push(diff_status);
+        }
+
+        let navigators: Vec<Option<DiffNavigator>> = (0..files.len()).map(|_| None).collect();
+        let navigator_is_placeholder = vec![false; files.len()];
+        Self {
+            files,
+            selected_index: 0,
+            navigators,
+            navigator_is_placeholder,
+            repo_root,
+            git_mode: None,
+            source_roots: None,
+            old_contents,
+            new_contents,
+            precomputed_diffs,
+            diff_statuses,
+            pending_content: Vec::new(),
+            stats_authoritative: false,
+            blame_sources_override: None,
+        }
+    }
+
+    fn from_git_pending(
+        repo_root: PathBuf,
+        changes: Vec<ChangedFile>,
+        stats: std::collections::HashMap<PathBuf, (usize, usize)>,
+        git_mode: GitDiffMode,
+        sources: impl Fn(&ChangedFile) -> (ContentSource, ContentSource),
+    ) -> Self {
+        let mut files = Vec::with_capacity(changes.len());
+        let mut pending_content = Vec::with_capacity(changes.len());
+        for (file_index, change) in changes.into_iter().enumerate() {
+            let (old, new) = sources(&change);
+            let (insertions, deletions) = stats.get(&change.path).copied().unwrap_or_else(|| {
+                if change.status == FileStatus::Untracked {
+                    std::fs::read_to_string(repo_root.join(&change.path))
+                        .map(|content| (content.lines().count(), 0))
+                        .unwrap_or((0, 0))
+                } else {
+                    (0, 0)
+                }
+            });
+            files.push(FileEntry {
+                display_name: change.path.display().to_string(),
+                path: change.path,
+                old_path: change.old_path,
+                old_source_path: None,
+                new_source_path: None,
+                status: change.status,
+                insertions,
+                deletions,
+                binary: false,
+            });
+            pending_content.push(Some(PendingFileContent {
+                file_index,
+                old,
+                new,
+            }));
+        }
+        let count = files.len();
+        Self {
+            files,
+            selected_index: 0,
+            navigators: (0..count).map(|_| None).collect(),
+            navigator_is_placeholder: vec![false; count],
+            repo_root: Some(repo_root),
+            git_mode: Some(git_mode),
+            source_roots: None,
+            old_contents: vec![Arc::from(""); count],
+            new_contents: vec![Arc::from(""); count],
+            precomputed_diffs: (0..count)
+                .map(|_| {
+                    Some(PrecomputedDiff::Placeholder(Self::context_only_diff(
+                        "Loading file...",
+                    )))
+                })
+                .collect(),
+            diff_statuses: vec![DiffStatus::Loading; count],
+            pending_content,
+            stats_authoritative: true,
+            blame_sources_override: None,
+        }
+    }
+
+    pub fn from_git_changes_lazy(
+        repo_root: PathBuf,
+        changes: Vec<ChangedFile>,
+    ) -> Result<Self, MultiDiffError> {
+        let stats = match crate::git::get_diff_numstat(&repo_root, &["HEAD".to_string()]) {
+            Ok(stats) => stats,
+            Err(_)
+                if changes.iter().all(|change| {
+                    matches!(change.status, FileStatus::Added | FileStatus::Untracked)
+                }) =>
+            {
+                crate::git::get_diff_numstat(
+                    &repo_root,
+                    &["4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_string()],
+                )
+                .unwrap_or_default()
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let root = repo_root.clone();
+        Ok(Self::from_git_pending(
+            repo_root,
+            changes,
+            stats,
+            GitDiffMode::Uncommitted,
+            move |change| {
+                let old = match change.status {
+                    FileStatus::Added | FileStatus::Untracked => ContentSource::Empty,
+                    _ => ContentSource::GitObject {
+                        repo_root: root.clone(),
+                        spec: format!(
+                            "HEAD:{}",
+                            change.old_path.as_deref().unwrap_or(&change.path).display()
+                        ),
+                    },
+                };
+                let new = match change.status {
+                    FileStatus::Deleted => ContentSource::Empty,
+                    _ => ContentSource::File(root.join(&change.path)),
+                };
+                (old, new)
+            },
+        ))
+    }
+
+    pub fn from_git_staged_lazy(
+        repo_root: PathBuf,
+        changes: Vec<ChangedFile>,
+    ) -> Result<Self, MultiDiffError> {
+        let stats = crate::git::get_diff_numstat(&repo_root, &["--cached".to_string()])?;
+        let root = repo_root.clone();
+        Ok(Self::from_git_pending(
+            repo_root,
+            changes,
+            stats,
+            GitDiffMode::Staged,
+            move |change| {
+                let old = match change.status {
+                    FileStatus::Added | FileStatus::Untracked => ContentSource::Empty,
+                    _ => ContentSource::GitObject {
+                        repo_root: root.clone(),
+                        spec: format!(
+                            "HEAD:{}",
+                            change.old_path.as_deref().unwrap_or(&change.path).display()
+                        ),
+                    },
+                };
+                let new = match change.status {
+                    FileStatus::Deleted => ContentSource::Empty,
+                    _ => ContentSource::GitObject {
+                        repo_root: root.clone(),
+                        spec: format!(":{}", change.path.display()),
+                    },
+                };
+                (old, new)
+            },
+        ))
+    }
+
+    pub fn from_git_index_range_lazy(
+        repo_root: PathBuf,
+        changes: Vec<ChangedFile>,
+        from: String,
+        to_index: bool,
+    ) -> Result<Self, MultiDiffError> {
+        let mut args = vec!["--cached".to_string()];
+        if !to_index {
+            args.push("-R".to_string());
+        }
+        args.push(from.clone());
+        let stats = crate::git::get_diff_numstat(&repo_root, &args)?;
+        let root = repo_root.clone();
+        let mode_from = from.clone();
+        Ok(Self::from_git_pending(
+            repo_root,
+            changes,
+            stats,
+            GitDiffMode::IndexRange { from, to_index },
+            move |change| {
+                let old = match change.status {
+                    FileStatus::Added | FileStatus::Untracked => ContentSource::Empty,
+                    _ if to_index => ContentSource::GitObject {
+                        repo_root: root.clone(),
+                        spec: format!(
+                            "{mode_from}:{}",
+                            change.old_path.as_deref().unwrap_or(&change.path).display()
+                        ),
+                    },
+                    _ => ContentSource::GitObject {
+                        repo_root: root.clone(),
+                        spec: format!(
+                            ":{}",
+                            change.old_path.as_deref().unwrap_or(&change.path).display()
+                        ),
+                    },
+                };
+                let new = match change.status {
+                    FileStatus::Deleted => ContentSource::Empty,
+                    _ if to_index => ContentSource::GitObject {
+                        repo_root: root.clone(),
+                        spec: format!(":{}", change.path.display()),
+                    },
+                    _ => ContentSource::GitObject {
+                        repo_root: root.clone(),
+                        spec: format!("{mode_from}:{}", change.path.display()),
+                    },
+                };
+                (old, new)
+            },
+        ))
+    }
+
+    pub fn from_git_range_lazy(
+        repo_root: PathBuf,
+        changes: Vec<ChangedFile>,
+        from: String,
+        to: String,
+    ) -> Result<Self, MultiDiffError> {
+        let stats = crate::git::get_diff_numstat(&repo_root, &[format!("{from}..{to}")])?;
+        let root = repo_root.clone();
+        let old_rev = from.clone();
+        let new_rev = to.clone();
+        Ok(Self::from_git_pending(
+            repo_root,
+            changes,
+            stats,
+            GitDiffMode::Range { from, to },
+            move |change| {
+                let old = match change.status {
+                    FileStatus::Added | FileStatus::Untracked => ContentSource::Empty,
+                    _ => ContentSource::GitObject {
+                        repo_root: root.clone(),
+                        spec: format!(
+                            "{old_rev}:{}",
+                            change.old_path.as_deref().unwrap_or(&change.path).display()
+                        ),
+                    },
+                };
+                let new = match change.status {
+                    FileStatus::Deleted => ContentSource::Empty,
+                    _ => ContentSource::GitObject {
+                        repo_root: root.clone(),
+                        spec: format!("{new_rev}:{}", change.path.display()),
+                    },
+                };
+                (old, new)
+            },
+        ))
+    }
+
     /// Create from a list of changed files (git mode)
     pub fn from_git_changes(
         repo_root: PathBuf,
@@ -336,13 +734,35 @@ impl MultiFileDiff {
         let mut new_contents = Vec::new();
         let mut precomputed_diffs = Vec::new();
         let mut diff_statuses = Vec::new();
-        for change in changes {
-            // Get old and new content
-            let (old_content, old_binary) = match change.status {
-                FileStatus::Added | FileStatus::Untracked => (String::new(), false),
-                _ => Self::read_git_commit_or_binary(&repo_root, "HEAD", &change.path),
-            };
-
+        let stats = match crate::git::get_diff_numstat(&repo_root, &["HEAD".to_string()]) {
+            Ok(stats) => stats,
+            Err(_)
+                if changes.iter().all(|change| {
+                    matches!(change.status, FileStatus::Added | FileStatus::Untracked)
+                }) =>
+            {
+                crate::git::get_diff_numstat(
+                    &repo_root,
+                    &["4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_string()],
+                )
+                .unwrap_or_default()
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let old_sides = Self::read_git_batch_or_binary(
+            &repo_root,
+            changes
+                .iter()
+                .map(|change| match change.status {
+                    FileStatus::Added | FileStatus::Untracked => None,
+                    _ => Some(format!(
+                        "HEAD:{}",
+                        change.old_path.as_deref().unwrap_or(&change.path).display()
+                    )),
+                })
+                .collect(),
+        )?;
+        for (change, (old_content, old_binary)) in changes.into_iter().zip(old_sides) {
             let (new_content, new_binary) = match change.status {
                 FileStatus::Deleted => (String::new(), false),
                 _ => {
@@ -352,7 +772,13 @@ impl MultiFileDiff {
             };
 
             let binary = old_binary || new_binary;
-            let (insertions, deletions) = Self::diff_stats(&old_content, &new_content, binary);
+            let (insertions, deletions) = stats.get(&change.path).copied().unwrap_or_else(|| {
+                if change.status == FileStatus::Untracked && !binary {
+                    (new_content.lines().count(), 0)
+                } else {
+                    (0, 0)
+                }
+            });
             let (old_content, new_content, precomputed, diff_status) =
                 Self::maybe_defer_diff(old_content, new_content, binary);
 
@@ -389,6 +815,9 @@ impl MultiFileDiff {
             new_contents,
             precomputed_diffs,
             diff_statuses,
+            pending_content: Vec::new(),
+            stats_authoritative: true,
+            blame_sources_override: None,
         })
     }
 
@@ -402,23 +831,35 @@ impl MultiFileDiff {
         let mut new_contents = Vec::new();
         let mut precomputed_diffs = Vec::new();
         let mut diff_statuses = Vec::new();
-        for change in changes {
-            let old_path = change
-                .old_path
-                .clone()
-                .unwrap_or_else(|| change.path.clone());
-            let (old_content, old_binary) = match change.status {
-                FileStatus::Added | FileStatus::Untracked => (String::new(), false),
-                _ => Self::read_git_commit_or_binary(&repo_root, "HEAD", &old_path),
-            };
-
-            let (new_content, new_binary) = match change.status {
-                FileStatus::Deleted => (String::new(), false),
-                _ => Self::read_git_index_or_binary(&repo_root, &change.path),
-            };
-
+        let stats = crate::git::get_diff_numstat(&repo_root, &["--cached".to_string()])?;
+        let old_sides = Self::read_git_batch_or_binary(
+            &repo_root,
+            changes
+                .iter()
+                .map(|change| match change.status {
+                    FileStatus::Added | FileStatus::Untracked => None,
+                    _ => Some(format!(
+                        "HEAD:{}",
+                        change.old_path.as_deref().unwrap_or(&change.path).display()
+                    )),
+                })
+                .collect(),
+        )?;
+        let new_sides = Self::read_git_batch_or_binary(
+            &repo_root,
+            changes
+                .iter()
+                .map(|change| match change.status {
+                    FileStatus::Deleted => None,
+                    _ => Some(format!(":{}", change.path.display())),
+                })
+                .collect(),
+        )?;
+        for ((change, (old_content, old_binary)), (new_content, new_binary)) in
+            changes.into_iter().zip(old_sides).zip(new_sides)
+        {
             let binary = old_binary || new_binary;
-            let (insertions, deletions) = Self::diff_stats(&old_content, &new_content, binary);
+            let (insertions, deletions) = stats.get(&change.path).copied().unwrap_or((0, 0));
             let (old_content, new_content, precomputed, diff_status) =
                 Self::maybe_defer_diff(old_content, new_content, binary);
 
@@ -455,6 +896,9 @@ impl MultiFileDiff {
             new_contents,
             precomputed_diffs,
             diff_statuses,
+            pending_content: Vec::new(),
+            stats_authoritative: true,
+            blame_sources_override: None,
         })
     }
 
@@ -470,35 +914,45 @@ impl MultiFileDiff {
         let mut new_contents = Vec::new();
         let mut precomputed_diffs = Vec::new();
         let mut diff_statuses = Vec::new();
-        for change in changes {
-            let old_path = change
-                .old_path
-                .clone()
-                .unwrap_or_else(|| change.path.clone());
-            let (old_content, old_binary, new_content, new_binary) = if to_index {
-                let (old_content, old_binary) = match change.status {
-                    FileStatus::Added | FileStatus::Untracked => (String::new(), false),
-                    _ => Self::read_git_commit_or_binary(&repo_root, &from, &old_path),
-                };
-                let (new_content, new_binary) = match change.status {
-                    FileStatus::Deleted => (String::new(), false),
-                    _ => Self::read_git_index_or_binary(&repo_root, &change.path),
-                };
-                (old_content, old_binary, new_content, new_binary)
-            } else {
-                let (old_content, old_binary) = match change.status {
-                    FileStatus::Added | FileStatus::Untracked => (String::new(), false),
-                    _ => Self::read_git_index_or_binary(&repo_root, &old_path),
-                };
-                let (new_content, new_binary) = match change.status {
-                    FileStatus::Deleted => (String::new(), false),
-                    _ => Self::read_git_commit_or_binary(&repo_root, &from, &change.path),
-                };
-                (old_content, old_binary, new_content, new_binary)
-            };
-
+        let mut stat_args = vec!["--cached".to_string()];
+        if !to_index {
+            stat_args.push("-R".to_string());
+        }
+        stat_args.push(from.clone());
+        let stats = crate::git::get_diff_numstat(&repo_root, &stat_args)?;
+        let old_sides = Self::read_git_batch_or_binary(
+            &repo_root,
+            changes
+                .iter()
+                .map(|change| match change.status {
+                    FileStatus::Added | FileStatus::Untracked => None,
+                    _ if to_index => Some(format!(
+                        "{from}:{}",
+                        change.old_path.as_deref().unwrap_or(&change.path).display()
+                    )),
+                    _ => Some(format!(
+                        ":{}",
+                        change.old_path.as_deref().unwrap_or(&change.path).display()
+                    )),
+                })
+                .collect(),
+        )?;
+        let new_sides = Self::read_git_batch_or_binary(
+            &repo_root,
+            changes
+                .iter()
+                .map(|change| match change.status {
+                    FileStatus::Deleted => None,
+                    _ if to_index => Some(format!(":{}", change.path.display())),
+                    _ => Some(format!("{from}:{}", change.path.display())),
+                })
+                .collect(),
+        )?;
+        for ((change, (old_content, old_binary)), (new_content, new_binary)) in
+            changes.into_iter().zip(old_sides).zip(new_sides)
+        {
             let binary = old_binary || new_binary;
-            let (insertions, deletions) = Self::diff_stats(&old_content, &new_content, binary);
+            let (insertions, deletions) = stats.get(&change.path).copied().unwrap_or((0, 0));
             let (old_content, new_content, precomputed, diff_status) =
                 Self::maybe_defer_diff(old_content, new_content, binary);
 
@@ -535,6 +989,9 @@ impl MultiFileDiff {
             new_contents,
             precomputed_diffs,
             diff_statuses,
+            pending_content: Vec::new(),
+            stats_authoritative: true,
+            blame_sources_override: None,
         })
     }
 
@@ -550,23 +1007,35 @@ impl MultiFileDiff {
         let mut new_contents = Vec::new();
         let mut precomputed_diffs = Vec::new();
         let mut diff_statuses = Vec::new();
-        for change in changes {
-            let old_path = change
-                .old_path
-                .clone()
-                .unwrap_or_else(|| change.path.clone());
-            let (old_content, old_binary) = match change.status {
-                FileStatus::Added | FileStatus::Untracked => (String::new(), false),
-                _ => Self::read_git_commit_or_binary(&repo_root, &from, &old_path),
-            };
-
-            let (new_content, new_binary) = match change.status {
-                FileStatus::Deleted => (String::new(), false),
-                _ => Self::read_git_commit_or_binary(&repo_root, &to, &change.path),
-            };
-
+        let stats = crate::git::get_diff_numstat(&repo_root, &[format!("{from}..{to}")])?;
+        let old_sides = Self::read_git_batch_or_binary(
+            &repo_root,
+            changes
+                .iter()
+                .map(|change| match change.status {
+                    FileStatus::Added | FileStatus::Untracked => None,
+                    _ => Some(format!(
+                        "{from}:{}",
+                        change.old_path.as_deref().unwrap_or(&change.path).display()
+                    )),
+                })
+                .collect(),
+        )?;
+        let new_sides = Self::read_git_batch_or_binary(
+            &repo_root,
+            changes
+                .iter()
+                .map(|change| match change.status {
+                    FileStatus::Deleted => None,
+                    _ => Some(format!("{to}:{}", change.path.display())),
+                })
+                .collect(),
+        )?;
+        for ((change, (old_content, old_binary)), (new_content, new_binary)) in
+            changes.into_iter().zip(old_sides).zip(new_sides)
+        {
             let binary = old_binary || new_binary;
-            let (insertions, deletions) = Self::diff_stats(&old_content, &new_content, binary);
+            let (insertions, deletions) = stats.get(&change.path).copied().unwrap_or((0, 0));
             let (old_content, new_content, precomputed, diff_status) =
                 Self::maybe_defer_diff(old_content, new_content, binary);
 
@@ -603,6 +1072,9 @@ impl MultiFileDiff {
             new_contents,
             precomputed_diffs,
             diff_statuses,
+            pending_content: Vec::new(),
+            stats_authoritative: true,
+            blame_sources_override: None,
         })
     }
 
@@ -726,6 +1198,9 @@ impl MultiFileDiff {
             new_contents,
             precomputed_diffs,
             diff_statuses,
+            pending_content: Vec::new(),
+            stats_authoritative: false,
+            blame_sources_override: None,
         })
     }
 
@@ -788,6 +1263,9 @@ impl MultiFileDiff {
             new_contents: vec![Arc::from(new_content)],
             precomputed_diffs: vec![precomputed],
             diff_statuses: vec![diff_status],
+            pending_content: Vec::new(),
+            stats_authoritative: false,
+            blame_sources_override: None,
         }
     }
 
@@ -835,6 +1313,9 @@ impl MultiFileDiff {
             new_contents,
             precomputed_diffs,
             diff_statuses,
+            pending_content: Vec::new(),
+            stats_authoritative: false,
+            blame_sources_override: None,
         }
     }
 
@@ -861,6 +1342,12 @@ impl MultiFileDiff {
                     self.new_contents[self.selected_index].as_ref(),
                 )
             };
+            if !placeholder && !self.stats_authoritative {
+                if let Some(file) = self.files.get_mut(self.selected_index) {
+                    file.insertions = diff.insertions;
+                    file.deletions = diff.deletions;
+                }
+            }
             let navigator = DiffNavigator::new(
                 diff,
                 self.old_contents[self.selected_index].clone(),
@@ -880,13 +1367,75 @@ impl MultiFileDiff {
         self.files.get(self.selected_index)
     }
 
+    pub fn take_pending_content_for(&mut self, idx: usize) -> Option<PendingFileContent> {
+        self.pending_content.get_mut(idx)?.take()
+    }
+
+    pub fn take_pending_content(&mut self) -> Vec<PendingFileContent> {
+        self.pending_content
+            .iter_mut()
+            .filter_map(Option::take)
+            .collect()
+    }
+
+    pub fn pending_content_count(&self) -> usize {
+        self.diff_statuses
+            .iter()
+            .filter(|status| **status == DiffStatus::Loading)
+            .count()
+    }
+
+    pub fn prepare_file_content(
+        old_bytes: Option<Vec<u8>>,
+        new_bytes: Option<Vec<u8>>,
+    ) -> PreparedFileContent {
+        let (old, old_binary) = old_bytes
+            .map(Self::decode_bytes)
+            .unwrap_or_else(|| (String::new(), true));
+        let (new, new_binary) = new_bytes
+            .map(Self::decode_bytes)
+            .unwrap_or_else(|| (String::new(), true));
+        let (old, new, mut precomputed, status) =
+            Self::maybe_defer_diff(old, new, old_binary || new_binary);
+        if status == DiffStatus::Ready {
+            precomputed = Some(PrecomputedDiff::Ready(Self::diff_strings(&old, &new)));
+        }
+        PreparedFileContent {
+            old: Arc::from(old),
+            new: Arc::from(new),
+            binary: old_binary || new_binary,
+            precomputed,
+            status,
+        }
+    }
+
+    pub fn apply_prepared_content(&mut self, idx: usize, content: PreparedFileContent) -> bool {
+        if self.diff_status(idx) != DiffStatus::Loading {
+            return false;
+        }
+        self.old_contents[idx] = content.old;
+        self.new_contents[idx] = content.new;
+        self.precomputed_diffs[idx] = content.precomputed;
+        self.diff_statuses[idx] = content.status;
+        self.files[idx].binary = content.binary;
+        self.navigators[idx] = None;
+        self.navigator_is_placeholder[idx] = false;
+        true
+    }
+
     pub fn file_contents(&self, idx: usize) -> Option<(&str, &str)> {
+        if self.diff_status(idx) == DiffStatus::Loading {
+            return None;
+        }
         let old = self.old_contents.get(idx)?;
         let new = self.new_contents.get(idx)?;
         Some((old.as_ref(), new.as_ref()))
     }
 
     pub fn file_contents_arc(&self, idx: usize) -> Option<(Arc<str>, Arc<str>)> {
+        if self.diff_status(idx) == DiffStatus::Loading {
+            return None;
+        }
         let old = self.old_contents.get(idx)?;
         let new = self.new_contents.get(idx)?;
         Some((old.clone(), new.clone()))
@@ -953,7 +1502,8 @@ impl MultiFileDiff {
         matches!(
             self.diff_statuses.get(self.selected_index),
             Some(
-                DiffStatus::Deferred
+                DiffStatus::Loading
+                    | DiffStatus::Deferred
                     | DiffStatus::Computing
                     | DiffStatus::Failed
                     | DiffStatus::Disabled
@@ -1010,9 +1560,11 @@ impl MultiFileDiff {
         if let Some(slot) = self.precomputed_diffs.get_mut(idx) {
             *slot = Some(PrecomputedDiff::Ready(diff));
         }
-        if let Some(file) = self.files.get_mut(idx) {
-            file.insertions = insertions;
-            file.deletions = deletions;
+        if !self.stats_authoritative {
+            if let Some(file) = self.files.get_mut(idx) {
+                file.insertions = insertions;
+                file.deletions = deletions;
+            }
         }
     }
 
@@ -1174,8 +1726,15 @@ impl MultiFileDiff {
         }
     }
 
-    /// Blame sources for old/new content when in git mode.
+    pub fn set_blame_sources(&mut self, old: BlameSource, new: BlameSource) {
+        self.blame_sources_override = Some((old, new));
+    }
+
+    /// Blame sources for old/new content.
     pub fn blame_sources(&self) -> Option<(BlameSource, BlameSource)> {
+        if let Some(sources) = &self.blame_sources_override {
+            return Some(sources.clone());
+        }
         let mode = self.git_mode.as_ref()?;
         let sources = match mode {
             GitDiffMode::Uncommitted => (
@@ -1385,7 +1944,7 @@ impl MultiFileDiff {
 
     /// Refresh a file from disk (re-read and re-diff)
     pub fn refresh_file(&mut self, idx: usize) {
-        if idx >= self.files.len() {
+        if idx >= self.files.len() || self.diff_status(idx) == DiffStatus::Loading {
             return;
         }
         let file = &self.files[idx];
@@ -1455,8 +2014,12 @@ impl MultiFileDiff {
                 }
                 _ => {
                     let old_content = self.old_contents[idx].as_ref().to_string();
-                    let (old_content, old_binary) = self
-                        .source_path(idx, FileSide::Old)
+                    let old_source_path = file.old_source_path.clone().or_else(|| {
+                        self.source_roots.as_ref().map(|roots| {
+                            roots.old.join(file.old_path.as_ref().unwrap_or(&file.path))
+                        })
+                    });
+                    let (old_content, old_binary) = old_source_path
                         .filter(|path| path.is_file())
                         .map(|path| Self::read_text_or_binary(&path))
                         .unwrap_or((old_content, false));
@@ -1574,6 +2137,16 @@ mod tests {
         std::env::temp_dir().join(format!("oyo-core-{name}-{}-{nanos}", std::process::id()))
     }
 
+    fn run_git(root: &Path, args: &[&str]) {
+        assert!(std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .status()
+            .unwrap()
+            .success());
+    }
+
     fn write_file(path: &Path, content: &str) {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).unwrap();
@@ -1586,6 +2159,111 @@ mod tests {
             .iter()
             .map(|file| file.display_name.clone())
             .collect()
+    }
+
+    #[test]
+    fn lazy_git_diff_builds_metadata_before_loading_content() {
+        let root = temp_dir("lazy-git-content");
+        std::fs::create_dir_all(&root).unwrap();
+        assert!(std::process::Command::new("git")
+            .arg("init")
+            .arg("-q")
+            .arg(&root)
+            .status()
+            .unwrap()
+            .success());
+        run_git(&root, &["config", "user.email", "test@example.com"]);
+        run_git(&root, &["config", "user.name", "Test"]);
+        for idx in 0..5 {
+            write_file(&root.join(format!("file-{idx}.txt")), "old\n");
+        }
+        run_git(&root, &["add", "."]);
+        run_git(&root, &["commit", "-qm", "base"]);
+        for idx in 0..5 {
+            write_file(&root.join(format!("file-{idx}.txt")), "new\n");
+        }
+
+        let changes = crate::git::get_uncommitted_changes(&root).unwrap();
+        let mut diff = MultiFileDiff::from_git_changes_lazy(root.clone(), changes).unwrap();
+        assert_eq!(diff.file_count(), 5);
+        assert!(diff
+            .diff_statuses
+            .iter()
+            .all(|status| *status == DiffStatus::Loading));
+        assert_eq!((diff.files[0].insertions, diff.files[0].deletions), (1, 1));
+        assert!(diff.file_contents(0).is_none());
+        diff.refresh_file(1);
+        assert_eq!(diff.diff_status(1), DiffStatus::Loading);
+        assert!(diff.file_contents(1).is_none());
+
+        let pending = diff.take_pending_content();
+        assert_eq!(pending.len(), 5);
+        let content =
+            MultiFileDiff::prepare_file_content(Some(b"old\n".to_vec()), Some(b"new\n".to_vec()));
+        assert!(diff.apply_prepared_content(0, content));
+        assert_eq!(diff.diff_status(0), DiffStatus::Ready);
+        assert_eq!(diff.file_contents(0), Some(("old\n", "new\n")));
+        diff.current_navigator();
+        assert_eq!((diff.files[0].insertions, diff.files[0].deletions), (1, 1));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn uncommitted_diff_supports_staged_files_before_the_first_commit() {
+        let root = temp_dir("unborn-head");
+        std::fs::create_dir_all(&root).unwrap();
+        assert!(std::process::Command::new("git")
+            .arg("init")
+            .arg("-q")
+            .arg(&root)
+            .status()
+            .unwrap()
+            .success());
+        write_file(&root.join("new.txt"), "one\ntwo\n");
+        assert!(std::process::Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["add", "new.txt"])
+            .status()
+            .unwrap()
+            .success());
+
+        let changes = crate::git::get_uncommitted_changes(&root).unwrap();
+        let diff = MultiFileDiff::from_git_changes(root.clone(), changes).unwrap();
+        assert_eq!(diff.files.len(), 1);
+        assert_eq!(diff.files[0].insertions, 2);
+        assert_eq!(diff.files[0].deletions, 0);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn raw_file_refresh_keeps_immutable_old_content() {
+        let root = temp_dir("raw-refresh");
+        let path = root.join("README.md");
+        write_file(&path, "base\nbefore\nduring\n");
+        let mut diff = MultiFileDiff::from_raw_files(
+            Some(root.clone()),
+            vec![RawFileDiff {
+                path: PathBuf::from("README.md"),
+                old_path: None,
+                old_source_path: None,
+                new_source_path: Some(path),
+                status: FileStatus::Modified,
+                old_content: "base\n".to_string(),
+                new_content: "base\nbefore\n".to_string(),
+                binary: false,
+            }],
+        );
+
+        diff.refresh_file(0);
+
+        assert_eq!(
+            diff.file_contents(0),
+            Some(("base\n", "base\nbefore\nduring\n"))
+        );
+        assert_eq!(diff.files[0].insertions, 2);
+        assert_eq!(diff.files[0].deletions, 0);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

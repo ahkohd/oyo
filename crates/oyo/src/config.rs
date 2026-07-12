@@ -16,12 +16,13 @@
 //! strikethrough_deletions = false
 //! gutter_signs = true
 //! # [ui.split]
-//! # align_lines = false
+//! # align_lines = true
 //! # align_fill = "╱"
 //! primary_marker = "▶"
 //! primary_marker_right = "◀"
-//! extent_marker = "▌"
+//! extent_marker_left = "┃"
 //! extent_marker_right = "▐"
+//! extent_marker_deleted = "╏"
 //! # [navigation.wrap]
 //! # step = "none"
 //! # hunk = "none"
@@ -71,18 +72,21 @@
 //! [keybindings.global]
 //! open_command_palette = ["ctrl-p"]
 //! open_file_search = ["ctrl-shift-p"]
+//! open_theme_picker = ["ctrl-t"]
 //!
 //! [keybindings.normal]
 //! # Unmodified 1-9 are reserved for counts.
 //! step_down = ["j", "down"]
 //! step_up = ["k", "up"]
+//! open_dashboard = ["ctrl-r"]
 //! goto_start = ["g g", "home"]
 //! start_selection = ["v"]
 //! start_line_selection = ["V"]
 //! start_block_selection = ["ctrl-v"]
 //!
 //! [keybindings.review_editor]
-//! save = ["ctrl-o"]
+//! save = ["ctrl-s"]
+//! clear = ["ctrl-u"]
 //!
 //! [keybindings.selection]
 //! copy = ["y"]
@@ -388,7 +392,14 @@ impl ResolvedTheme {
     /// Get base insert color (for animation start/end)
     pub fn insert_base(&self) -> Color {
         let rgb = color::hsl_to_rgb(self.insert.base);
-        Color::Rgb(rgb.r, rgb.g, rgb.b)
+        contrast_safe_diff_foreground(
+            Color::Rgb(rgb.r, rgb.g, rgb.b),
+            self.diff_added_bg,
+            self.diff_context,
+            self.background
+                .and_then(color::relative_luminance)
+                .is_some_and(|luminance| luminance > 0.5),
+        )
     }
 
     /// Get dimmed version of delete color for inactive spans
@@ -399,7 +410,14 @@ impl ResolvedTheme {
     /// Get base delete color (for animation start/end)
     pub fn delete_base(&self) -> Color {
         let rgb = color::hsl_to_rgb(self.delete.base);
-        Color::Rgb(rgb.r, rgb.g, rgb.b)
+        contrast_safe_diff_foreground(
+            Color::Rgb(rgb.r, rgb.g, rgb.b),
+            self.diff_removed_bg,
+            self.diff_context,
+            self.background
+                .and_then(color::relative_luminance)
+                .is_some_and(|luminance| luminance > 0.5),
+        )
     }
 
     /// Get dimmed version of modify color for inactive spans
@@ -416,6 +434,35 @@ impl ResolvedTheme {
     /// Get dimmed version of warning for autoplay flash
     pub fn warning_dim(&self) -> Color {
         color::dim_color(self.warning)
+    }
+}
+
+fn contrast_safe_diff_foreground(
+    base: Color,
+    background: Option<Color>,
+    fallback: Color,
+    light_mode: bool,
+) -> Color {
+    if !light_mode {
+        return base;
+    }
+    let Some(background) = background else {
+        return base;
+    };
+    if color::contrast_ratio(base, background).unwrap_or(4.5) >= 4.5 {
+        return base;
+    }
+    if color::contrast_ratio(fallback, background).unwrap_or(0.0) >= 4.5 {
+        return fallback;
+    }
+    let black = Color::Rgb(0, 0, 0);
+    let white = Color::Rgb(255, 255, 255);
+    if color::contrast_ratio(black, background).unwrap_or(0.0)
+        >= color::contrast_ratio(white, background).unwrap_or(0.0)
+    {
+        black
+    } else {
+        white
     }
 }
 
@@ -728,12 +775,16 @@ pub struct UiConfig {
     pub watch: bool,
     /// Allow overscroll near EOF when centering
     pub overscroll: bool,
+    /// Confirm before quitting the TUI
+    pub confirm_quit: bool,
     /// Default view mode: "unified", "split", or "evolution"
     pub view_mode: Option<String>,
     /// Enable line wrapping (default: false, uses horizontal scroll instead)
     pub line_wrap: bool,
-    /// Collapse long unchanged (context) blocks ("off", "on", or "counts")
+    /// Collapse long unchanged blocks ("off" or "expandable")
     pub fold_context: FoldContextMode,
+    /// Context lines kept on each side of an expandable fold
+    pub fold_context_lines: usize,
     /// Show diff and file panel scrollbars (default: true)
     pub scrollbar: bool,
     /// Show strikethrough on deleted text
@@ -754,18 +805,32 @@ pub struct UiConfig {
     pub blame: BlameConfig,
     /// Time display settings
     pub time: TimeConfig,
+    /// Toast notification settings
+    pub toasts: ToastConfig,
     /// Enable stepping (default: false). If false, shows all changes (no-step behavior)
     pub stepping: bool,
     /// Marker for primary active line (left pane / unified pane)
     pub primary_marker: String,
     /// Marker for right pane primary line (defaults to ◀)
     pub primary_marker_right: Option<String>,
-    /// Marker for hunk extent lines (left pane / unified pane)
+    /// Marker for hunk extent lines (legacy name for left pane / unified pane)
     pub extent_marker: String,
+    /// Marker for hunk extent lines (left pane / unified pane)
+    pub extent_marker_left: Option<String>,
     /// Marker for right pane extent lines (defaults to ▐)
     pub extent_marker_right: Option<String>,
+    /// Marker for deleted hunk extent lines
+    pub extent_marker_deleted: String,
     /// Theme configuration
     pub theme: ThemeConfig,
+}
+
+impl UiConfig {
+    pub fn extent_marker_left(&self) -> &str {
+        self.extent_marker_left
+            .as_deref()
+            .unwrap_or(&self.extent_marker)
+    }
 }
 
 impl Default for UiConfig {
@@ -776,9 +841,11 @@ impl Default for UiConfig {
             auto_center: true,
             watch: true,
             overscroll: false,
+            confirm_quit: true,
             view_mode: None,
             line_wrap: false,
-            fold_context: FoldContextMode::Off,
+            fold_context: FoldContextMode::Expandable,
+            fold_context_lines: 3,
             scrollbar: true,
             strikethrough_deletions: false,
             gutter_signs: true,
@@ -789,12 +856,55 @@ impl Default for UiConfig {
             diff: DiffConfig::default(),
             blame: BlameConfig::default(),
             time: TimeConfig::default(),
+            toasts: ToastConfig::default(),
             stepping: false,
             primary_marker: "▶".to_string(),
             primary_marker_right: None,
-            extent_marker: "▌".to_string(),
+            extent_marker: "┃".to_string(),
+            extent_marker_left: None,
             extent_marker_right: None,
+            extent_marker_deleted: "╏".to_string(),
             theme: ThemeConfig::default(),
+        }
+    }
+}
+
+/// Toast notification configuration.
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(default)]
+pub struct ToastConfig {
+    pub enabled: bool,
+    pub position: ToastPositionConfig,
+}
+
+impl Default for ToastConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            position: ToastPositionConfig::BottomRight,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ToastPositionConfig {
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    #[default]
+    BottomRight,
+    Center,
+}
+
+impl ToastPositionConfig {
+    pub fn toast_position(self) -> ratatui_comfy_toaster::ToastPosition {
+        match self {
+            Self::TopLeft => ratatui_comfy_toaster::ToastPosition::TopLeft,
+            Self::TopRight => ratatui_comfy_toaster::ToastPosition::TopRight,
+            Self::BottomLeft => ratatui_comfy_toaster::ToastPosition::BottomLeft,
+            Self::BottomRight => ratatui_comfy_toaster::ToastPosition::BottomRight,
+            Self::Center => ratatui_comfy_toaster::ToastPosition::Center,
         }
     }
 }
@@ -847,7 +957,7 @@ pub struct SplitViewConfig {
 impl Default for SplitViewConfig {
     fn default() -> Self {
         Self {
-            align_lines: false,
+            align_lines: true,
             align_fill: "╱".to_string(),
         }
     }
@@ -919,6 +1029,9 @@ pub struct DiffConfig {
     /// Show extent markers on unchanged context lines within a hunk
     #[serde(default = "diff_extent_marker_context_default")]
     pub extent_marker_context: bool,
+    /// Show change bars in source, Markdown, CSV and structured previews
+    #[serde(default = "diff_preview_change_bars_default")]
+    pub preview_change_bars: bool,
 }
 
 impl Default for DiffConfig {
@@ -934,20 +1047,21 @@ impl Default for DiffConfig {
             extent_marker: diff_extent_marker_default(),
             extent_marker_scope: diff_extent_marker_scope_default(),
             extent_marker_context: diff_extent_marker_context_default(),
+            preview_change_bars: diff_preview_change_bars_default(),
         }
     }
 }
 
 fn diff_bg_default() -> bool {
-    false
+    true
 }
 
 fn diff_fg_default() -> DiffForegroundMode {
-    DiffForegroundMode::Theme
+    DiffForegroundMode::Syntax
 }
 
 fn diff_highlight_default() -> DiffHighlightMode {
-    DiffHighlightMode::Text
+    DiffHighlightMode::Word
 }
 
 fn diff_max_bytes_default() -> u64 {
@@ -967,15 +1081,19 @@ fn diff_idle_ms_default() -> u64 {
 }
 
 fn diff_extent_marker_default() -> DiffExtentMarkerMode {
-    DiffExtentMarkerMode::Neutral
+    DiffExtentMarkerMode::Diff
 }
 
 fn diff_extent_marker_scope_default() -> DiffExtentMarkerScope {
-    DiffExtentMarkerScope::Progress
+    DiffExtentMarkerScope::Hunk
 }
 
 fn diff_extent_marker_context_default() -> bool {
     false
+}
+
+fn diff_preview_change_bars_default() -> bool {
+    true
 }
 
 /// Context folding display mode
@@ -983,21 +1101,23 @@ fn diff_extent_marker_context_default() -> bool {
 #[serde(rename_all = "snake_case")]
 pub enum FoldContextMode {
     /// No folding
-    #[default]
     Off,
-    /// Fold with a minimal marker
-    On,
-    /// Fold with a line count marker
-    Counts,
+    /// Expandable folds with surrounding context
+    #[default]
+    #[serde(alias = "on")]
+    Expandable,
 }
 
 impl FoldContextMode {
     pub fn is_enabled(self) -> bool {
-        !matches!(self, FoldContextMode::Off)
+        matches!(self, Self::Expandable)
     }
 
-    pub fn show_counts(self) -> bool {
-        matches!(self, FoldContextMode::Counts)
+    pub fn next(self) -> Self {
+        match self {
+            Self::Off => Self::Expandable,
+            Self::Expandable => Self::Off,
+        }
     }
 }
 /// Evolution view syntax scope
@@ -1533,11 +1653,95 @@ impl Default for ReviewActionConfig {
     }
 }
 
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+#[allow(dead_code)]
+pub struct ReviewProviderCommandConfig {
+    pub command: String,
+    pub args: Vec<String>,
+    #[serde(default = "default_hook_timeout_ms")]
+    pub timeout_ms: u64,
+}
+
+impl Default for ReviewProviderCommandConfig {
+    fn default() -> Self {
+        Self {
+            command: String::new(),
+            args: Vec::new(),
+            timeout_ms: default_hook_timeout_ms(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+#[serde(default)]
+#[allow(dead_code)]
+pub struct ReviewProviderCommandsConfig {
+    pub whoami: Option<ReviewProviderCommandConfig>,
+    pub pr_find: Option<ReviewProviderCommandConfig>,
+    pub pr_get: Option<ReviewProviderCommandConfig>,
+    pub comments_list: Option<ReviewProviderCommandConfig>,
+    pub comments_create: Option<ReviewProviderCommandConfig>,
+    pub comments_update: Option<ReviewProviderCommandConfig>,
+    pub comments_delete: Option<ReviewProviderCommandConfig>,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+#[serde(default)]
+#[allow(dead_code)]
+pub struct ReviewProviderConfig {
+    pub hosts: Vec<String>,
+    pub commands: ReviewProviderCommandsConfig,
+}
+
 #[derive(Debug, Deserialize, Clone, Default)]
 #[serde(default)]
 pub struct ReviewConfig {
+    pub dir: Option<PathBuf>,
+    pub providers: BTreeMap<String, ReviewProviderConfig>,
     pub hooks: Vec<ReviewHookConfig>,
     pub actions: Vec<ReviewActionConfig>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct SelectionActionConfig {
+    pub id: String,
+    pub label: String,
+    pub key: Option<String>,
+    pub message: Option<String>,
+    pub failure_message: Option<String>,
+    pub command: String,
+    pub args: Vec<String>,
+    #[serde(default = "default_hook_stdin")]
+    pub stdin: ReviewHookStdin,
+    #[serde(default = "default_hook_blocking")]
+    pub blocking: bool,
+    #[serde(default = "default_hook_timeout_ms")]
+    pub timeout_ms: u64,
+}
+
+impl Default for SelectionActionConfig {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            label: String::new(),
+            key: None,
+            message: None,
+            failure_message: None,
+            command: String::new(),
+            args: Vec::new(),
+            stdin: ReviewHookStdin::Json,
+            blocking: true,
+            timeout_ms: default_hook_timeout_ms(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+#[serde(default)]
+pub struct SelectionConfig {
+    pub actions: Vec<SelectionActionConfig>,
 }
 
 /// User keybinding overrides grouped by keybinding mode.
@@ -1605,12 +1809,14 @@ pub struct Config {
     pub no_step: NoStepConfig,
     pub comments: CommentsConfig,
     pub review: ReviewConfig,
+    pub selection: SelectionConfig,
     pub editor: EditorConfig,
     pub keybindings: KeybindingsConfig,
 }
 
 fn append_config_array(path: &[String]) -> bool {
     matches!(path, [review, name] if review == "review" && matches!(name.as_str(), "hooks" | "actions"))
+        || matches!(path, [selection, name] if selection == "selection" && name == "actions")
 }
 
 fn merge_config_value_at(base: &mut toml::Value, overlay: toml::Value, path: &mut Vec<String>) {
@@ -1741,6 +1947,45 @@ mod tests {
     use super::*;
 
     #[test]
+    fn light_theme_diff_foregrounds_meet_contrast_floor() {
+        for name in ["everforest", "github", "flexoki"] {
+            let theme = ThemeConfig {
+                name: Some(name.to_string()),
+                ..ThemeConfig::default()
+            }
+            .resolve(true);
+            for (foreground, background) in [
+                (theme.insert_base(), theme.diff_added_bg.unwrap()),
+                (theme.delete_base(), theme.diff_removed_bg.unwrap()),
+            ] {
+                assert!(
+                    color::contrast_ratio(foreground, background).unwrap() >= 4.5,
+                    "{name}: {foreground:?} on {background:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn dark_diff_foregrounds_stay_on_the_theme_gradient() {
+        let theme = ThemeConfig {
+            name: Some("everforest".to_string()),
+            ..ThemeConfig::default()
+        }
+        .resolve(false);
+        let insert = color::hsl_to_rgb(theme.insert.base);
+        let delete = color::hsl_to_rgb(theme.delete.base);
+        assert_eq!(
+            theme.insert_base(),
+            Color::Rgb(insert.r, insert.g, insert.b)
+        );
+        assert_eq!(
+            theme.delete_base(),
+            Color::Rgb(delete.r, delete.g, delete.b)
+        );
+    }
+
+    #[test]
     fn ui_defaults_to_no_step_mode() {
         assert!(!Config::default().ui.stepping);
     }
@@ -1751,7 +1996,146 @@ mod tests {
     }
 
     #[test]
-    fn extra_config_merges_tables_and_appends_review_hooks() {
+    fn quit_confirmation_defaults_on_and_can_be_disabled() {
+        assert!(Config::default().ui.confirm_quit);
+        let config: Config = toml::from_str("[ui]\nconfirm_quit = false\n").unwrap();
+        assert!(!config.ui.confirm_quit);
+    }
+
+    #[test]
+    fn context_folding_defaults_on_and_has_no_dense_mode() {
+        assert_eq!(
+            Config::default().ui.fold_context,
+            FoldContextMode::Expandable
+        );
+        for (value, expected) in [
+            ("off", FoldContextMode::Off),
+            ("expandable", FoldContextMode::Expandable),
+            ("on", FoldContextMode::Expandable),
+        ] {
+            let config: Config =
+                toml::from_str(&format!("[ui]\nfold_context = \"{value}\"\n")).unwrap();
+            assert_eq!(config.ui.fold_context, expected);
+        }
+        for value in ["dense", "counts"] {
+            assert!(
+                toml::from_str::<Config>(&format!("[ui]\nfold_context = \"{value}\"\n")).is_err()
+            );
+        }
+        let config: Config = toml::from_str("[ui]\nfold_context_lines = 0\n").unwrap();
+        assert_eq!(config.ui.fold_context_lines, 0);
+    }
+
+    #[test]
+    fn extent_marker_left_overrides_legacy_extent_marker() {
+        let config: Config = toml::from_str(
+            r#"
+[ui]
+extent_marker = "A"
+extent_marker_left = "B"
+extent_marker_deleted = "D"
+"#,
+        )
+        .unwrap();
+        assert_eq!(config.ui.extent_marker_left(), "B");
+        assert_eq!(config.ui.extent_marker_deleted, "D");
+    }
+
+    #[test]
+    fn legacy_extent_marker_still_sets_left_marker() {
+        let config: Config = toml::from_str(
+            r#"
+[ui]
+extent_marker = "A"
+"#,
+        )
+        .unwrap();
+        assert_eq!(config.ui.extent_marker_left(), "A");
+    }
+
+    #[test]
+    fn preview_change_bars_are_on_by_default() {
+        assert!(Config::default().ui.diff.preview_change_bars);
+    }
+
+    #[test]
+    fn toasts_are_on_by_default() {
+        assert!(Config::default().ui.toasts.enabled);
+        assert_eq!(
+            Config::default().ui.toasts.position,
+            ToastPositionConfig::BottomRight
+        );
+    }
+
+    #[test]
+    fn toast_position_can_be_changed() {
+        let config: Config = toml::from_str(
+            r#"
+[ui.toasts]
+position = "top_left"
+"#,
+        )
+        .unwrap();
+        assert_eq!(config.ui.toasts.position, ToastPositionConfig::TopLeft);
+    }
+
+    #[test]
+    fn toasts_can_be_disabled() {
+        let config: Config = toml::from_str(
+            r#"
+[ui.toasts]
+enabled = false
+"#,
+        )
+        .unwrap();
+        assert!(!config.ui.toasts.enabled);
+    }
+
+    #[test]
+    fn preview_change_bars_can_be_disabled() {
+        let config: Config = toml::from_str(
+            r#"
+[ui.diff]
+preview_change_bars = false
+"#,
+        )
+        .unwrap();
+        assert!(!config.ui.diff.preview_change_bars);
+    }
+
+    #[test]
+    fn review_provider_contract_config_parses() {
+        let config: Config = toml::from_str(
+            r#"
+[review.providers.example]
+hosts = ["git.example.com"]
+
+[review.providers.example.commands.whoami]
+command = "example-oyo-provider"
+args = ["whoami"]
+
+[review.providers.example.commands.comments_list]
+command = "example-oyo-provider"
+args = ["comments", "list"]
+timeout_ms = 10000
+"#,
+        )
+        .unwrap();
+
+        let provider = config.review.providers.get("example").unwrap();
+        assert_eq!(provider.hosts, vec!["git.example.com"]);
+        assert_eq!(
+            provider.commands.whoami.as_ref().unwrap().command,
+            "example-oyo-provider"
+        );
+        assert_eq!(
+            provider.commands.comments_list.as_ref().unwrap().timeout_ms,
+            10000
+        );
+    }
+
+    #[test]
+    fn extra_config_merges_tables_and_appends_actions() {
         let mut base: toml::Value = toml::from_str(
             r#"
 [ui]
@@ -1782,6 +2166,14 @@ command = "extra-hook"
 [[review.actions]]
 id = "send"
 command = "send-hook"
+
+[[selection.actions]]
+id = "ask"
+label = "Ask agent"
+key = "a"
+message = "Sent to agent"
+failure_message = "Could not send to agent"
+command = "ask-hook"
 "#,
         )
         .unwrap();
@@ -1794,6 +2186,17 @@ command = "send-hook"
         assert_eq!(config.review.hooks[0].id, "base");
         assert_eq!(config.review.hooks[1].id, "extra");
         assert_eq!(config.review.actions.len(), 1);
+        assert_eq!(config.selection.actions.len(), 1);
+        assert_eq!(config.selection.actions[0].id, "ask");
+        assert_eq!(config.selection.actions[0].key.as_deref(), Some("a"));
+        assert_eq!(
+            config.selection.actions[0].message.as_deref(),
+            Some("Sent to agent")
+        );
+        assert_eq!(
+            config.selection.actions[0].failure_message.as_deref(),
+            Some("Could not send to agent")
+        );
         assert_eq!(
             config.keybindings.modes["normal"]["step_down"],
             vec!["down".to_string()]

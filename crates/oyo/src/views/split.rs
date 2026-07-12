@@ -2,8 +2,9 @@
 
 use super::{
     apply_line_bg, apply_spans_bg, clear_leading_ws_bg, diff_line_bg, expand_tabs_in_spans,
-    pad_spans_bg, pending_tail_text, render_empty_state, slice_spans, spans_to_text, spans_width,
-    truncate_text, view_spans_to_text, wrap_count_for_spans, wrap_count_for_text, TAB_WIDTH,
+    pad_spans_bg, pending_tail_text, render_empty_state, render_review_note_avatar,
+    review_note_block, review_note_lines, slice_spans, spans_to_text, spans_width, truncate_text,
+    view_spans_to_text, wrap_count_for_spans, wrap_count_for_text, TAB_WIDTH,
 };
 use crate::app::{is_conflict_marker, is_fold_line, AnimationPhase, App};
 use crate::color;
@@ -16,7 +17,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Paragraph, Wrap},
     Frame,
 };
 
@@ -35,21 +36,21 @@ fn split_new_bg_kind(kind: LineKind) -> LineKind {
 }
 
 fn line_num_style_for_kind(kind: LineKind, app: &App) -> Style {
-    let insert_base = color::gradient_color(&app.theme.insert, 0.5);
-    let delete_base = color::gradient_color(&app.theme.delete, 0.5);
+    let insert_base = app.theme.insert_base();
+    let delete_base = app.theme.delete_base();
     let modify_base = color::gradient_color(&app.theme.modify, 0.5);
     match kind {
-        LineKind::Inserted | LineKind::PendingInsert => {
-            Style::default().fg(Color::Rgb(insert_base.r, insert_base.g, insert_base.b))
-        }
-        LineKind::Deleted | LineKind::PendingDelete => {
-            Style::default().fg(Color::Rgb(delete_base.r, delete_base.g, delete_base.b))
-        }
+        LineKind::Inserted | LineKind::PendingInsert => Style::default().fg(insert_base),
+        LineKind::Deleted | LineKind::PendingDelete => Style::default().fg(delete_base),
         LineKind::Modified | LineKind::PendingModify => {
             Style::default().fg(Color::Rgb(modify_base.r, modify_base.g, modify_base.b))
         }
         LineKind::Context => Style::default().fg(app.theme.diff_line_number),
     }
+}
+
+fn align_fill_color(app: &App) -> Color {
+    color::dim_color(app.theme.text_muted)
 }
 
 fn align_fill_span(app: &App, width: usize) -> Span<'static> {
@@ -73,13 +74,12 @@ fn align_fill_span(app: &App, width: usize) -> Span<'static> {
             .take(width)
             .collect()
     };
-    let mut fg = color::dim_color(app.theme.text_muted);
-    if let Some(bg) = app.theme.background {
-        if let Some(blended) = color::blend_colors(bg, fg, 0.5) {
-            fg = blended;
-        }
-    }
-    Span::styled(text, Style::default().fg(fg).add_modifier(Modifier::DIM))
+    Span::styled(
+        text,
+        Style::default()
+            .fg(align_fill_color(app))
+            .add_modifier(Modifier::DIM),
+    )
 }
 
 fn align_fill_gutter_span(app: &App, width: usize) -> Span<'static> {
@@ -90,18 +90,19 @@ fn align_fill_gutter_span(app: &App, width: usize) -> Span<'static> {
     for ch in app.split_align_fill.chars().cycle().take(width) {
         out.push(ch);
     }
-    let mut fg = color::dim_color(app.theme.text_muted);
-    if let Some(bg) = app.theme.background {
-        if let Some(blended) = color::blend_colors(bg, fg, 0.5) {
-            fg = blended;
-        }
-    }
-    Span::styled(out, Style::default().fg(fg).add_modifier(Modifier::DIM))
+    Span::styled(
+        out,
+        Style::default()
+            .fg(align_fill_color(app))
+            .add_modifier(Modifier::DIM),
+    )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn push_virtual_line_old(
     text: &str,
     app: &App,
+    line_number_width: u16,
     visible_width: usize,
     max_line_width: &mut usize,
     content_lines: &mut Vec<Line>,
@@ -131,14 +132,10 @@ fn push_virtual_line_old(
         super::push_wrapped_bg_line(bg_lines, visible_width, virtual_wrap, None);
     }
     content_lines.push(Line::from(display_virtual));
-    gutter_lines.push(Line::from(vec![
-        Span::raw(" "),
-        Span::raw("    "),
-        Span::raw(" "),
-    ]));
+    gutter_lines.push(blank_gutter_line(line_number_width));
     if app.line_wrap && virtual_wrap > 1 {
         for _ in 1..virtual_wrap {
-            gutter_lines.push(Line::from(Span::raw(" ")));
+            gutter_lines.push(blank_gutter_line(line_number_width));
         }
     }
     virtual_wrap
@@ -148,6 +145,7 @@ fn push_virtual_line_old(
 fn push_virtual_line_new(
     text: &str,
     app: &App,
+    line_number_width: u16,
     visible_width: usize,
     max_line_width: &mut usize,
     content_lines: &mut Vec<Line>,
@@ -178,28 +176,184 @@ fn push_virtual_line_new(
         super::push_wrapped_bg_line(bg_lines, visible_width, virtual_wrap, None);
     }
     content_lines.push(Line::from(display_virtual));
-    gutter_lines.push(Line::from(vec![Span::raw("    "), Span::raw(" ")]));
+    gutter_lines.push(blank_gutter_line(line_number_width));
     marker_lines.push(Line::from(Span::raw(" ")));
     if app.line_wrap && virtual_wrap > 1 {
         for _ in 1..virtual_wrap {
-            gutter_lines.push(Line::from(vec![Span::raw("    "), Span::raw(" ")]));
+            gutter_lines.push(blank_gutter_line(line_number_width));
             marker_lines.push(Line::from(Span::raw(" ")));
         }
     }
     virtual_wrap
 }
 
-/// Width of the fixed line number gutter
-const GUTTER_WIDTH: u16 = 6; // "▶1234 " or " 1234 "
+#[allow(clippy::too_many_arguments)]
+fn push_review_note_lines_old(
+    note_lines: &[Line<'static>],
+    _anchor_key: &str,
+    app: &App,
+    line_number_width: u16,
+    visible_width: usize,
+    max_line_width: &mut usize,
+    content_lines: &mut Vec<Line>,
+    gutter_lines: &mut Vec<Line>,
+    mut bg_lines: Option<&mut Vec<Line<'static>>>,
+) -> usize {
+    let mut row_span = 0usize;
+    let gutter_width = split_gutter_width(line_number_width) as usize;
+    let total_width = visible_width.saturating_add(gutter_width);
+    for note_line in note_lines {
+        let mut spans = vec![Span::raw(" ")];
+        spans.extend(note_line.spans.clone());
+        let mut spans = expand_tabs_in_spans(&spans, TAB_WIDTH);
+        if app.line_wrap {
+            spans = super::fit_review_note_footer(spans, total_width);
+        }
+        *max_line_width = (*max_line_width).max(spans_width(&spans).saturating_sub(gutter_width));
+        let wrap = if app.line_wrap {
+            super::review_note_wrap_count(&spans, total_width)
+        } else {
+            1
+        };
+        row_span = row_span.saturating_add(wrap);
+        if let Some(lines) = bg_lines.as_mut() {
+            super::push_wrapped_bg_line(lines, visible_width, wrap, None);
+        }
+        let gutter_spans = slice_spans(&spans, 0, gutter_width);
+        let content_spans = slice_spans(&spans, gutter_width, visible_width);
+        content_lines.push(Line::from(content_spans));
+        gutter_lines.push(Line::from(gutter_spans));
+        if app.line_wrap && wrap > 1 {
+            for _ in 1..wrap {
+                gutter_lines.push(blank_gutter_line(line_number_width));
+            }
+        }
+    }
+    row_span
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_review_note_lines_new(
+    note_lines: &[Line<'static>],
+    _anchor_key: &str,
+    app: &App,
+    line_number_width: u16,
+    visible_width: usize,
+    max_line_width: &mut usize,
+    content_lines: &mut Vec<Line>,
+    gutter_lines: &mut Vec<Line>,
+    marker_lines: &mut Vec<Line>,
+    mut bg_lines: Option<&mut Vec<Line<'static>>>,
+) -> usize {
+    let mut row_span = 0usize;
+    let gutter_width = split_gutter_width(line_number_width) as usize;
+    let total_width = visible_width.saturating_add(gutter_width);
+    for note_line in note_lines {
+        let mut spans = vec![Span::raw(" ")];
+        spans.extend(note_line.spans.clone());
+        let mut spans = expand_tabs_in_spans(&spans, TAB_WIDTH);
+        if app.line_wrap {
+            spans = super::fit_review_note_footer(spans, total_width);
+        }
+        *max_line_width = (*max_line_width).max(spans_width(&spans).saturating_sub(gutter_width));
+        let wrap = if app.line_wrap {
+            super::review_note_wrap_count(&spans, total_width)
+        } else {
+            1
+        };
+        row_span = row_span.saturating_add(wrap);
+        if let Some(lines) = bg_lines.as_mut() {
+            super::push_wrapped_bg_line(lines, visible_width, wrap, None);
+        }
+        let gutter_spans = slice_spans(&spans, 0, gutter_width);
+        let content_spans = slice_spans(&spans, gutter_width, visible_width);
+        content_lines.push(Line::from(content_spans));
+        gutter_lines.push(Line::from(gutter_spans));
+        marker_lines.push(Line::from(Span::raw(" ")));
+        if app.line_wrap && wrap > 1 {
+            for _ in 1..wrap {
+                gutter_lines.push(blank_gutter_line(line_number_width));
+                marker_lines.push(Line::from(Span::raw(" ")));
+            }
+        }
+    }
+    row_span
+}
+
+const MIN_LINE_NUMBER_WIDTH: u16 = 4;
 const OLD_BORDER_WIDTH: u16 = 1;
-const NEW_GUTTER_WIDTH: u16 = 5; // "1234 "
 const NEW_MARKER_WIDTH: u16 = 1;
+
+fn split_line_number_width(view_lines: &[ViewLine]) -> u16 {
+    let max_line = view_lines
+        .iter()
+        .filter_map(|line| line.old_line.max(line.new_line))
+        .max()
+        .unwrap_or(0);
+    decimal_width(max_line).max(MIN_LINE_NUMBER_WIDTH)
+}
+
+fn decimal_width(value: usize) -> u16 {
+    if value == 0 {
+        1
+    } else {
+        value.ilog10() as u16 + 1
+    }
+}
+
+fn split_gutter_width(line_number_width: u16) -> u16 {
+    line_number_width.saturating_add(2)
+}
+
+fn blank_line_number(line_number_width: u16) -> String {
+    " ".repeat(line_number_width as usize)
+}
+
+fn format_line_number(line_number: usize, line_number_width: u16) -> String {
+    if line_number == 0 {
+        blank_line_number(line_number_width)
+    } else {
+        format!(
+            "{:>width$}",
+            line_number,
+            width = line_number_width as usize
+        )
+    }
+}
+
+fn blank_gutter_line(line_number_width: u16) -> Line<'static> {
+    Line::from(vec![
+        Span::raw(" "),
+        Span::raw(blank_line_number(line_number_width)),
+        Span::raw(" "),
+    ])
+}
+
+fn render_split_divider(frame: &mut Frame, app: &App, area: Rect) {
+    if area.width == 0 {
+        return;
+    }
+    let bg = app.theme.background;
+    let fg = bg
+        .and_then(|bg| color::blend_colors(bg, app.theme.border_subtle, 0.12))
+        .unwrap_or(app.theme.text_muted);
+    let mut style = Style::default().fg(fg).add_modifier(Modifier::DIM);
+    if let Some(bg) = bg {
+        style = style.bg(bg);
+    }
+    let buffer = frame.buffer_mut();
+    for row in area.y..area.y.saturating_add(area.height) {
+        if let Some(cell) = buffer.cell_mut((area.x, row)) {
+            cell.set_symbol("▕").set_style(style);
+        }
+    }
+}
 
 fn add_review_preview_boxes_for_rows(
     app: &mut App,
     content_area: Rect,
     scroll_offset: usize,
-    rows: &[(usize, usize, String)],
+    rows: &[super::ReviewPreviewRow],
 ) {
     if rows.is_empty() || content_area.width == 0 || content_area.height == 0 {
         return;
@@ -207,9 +361,9 @@ fn add_review_preview_boxes_for_rows(
 
     let viewport_start = if app.line_wrap { scroll_offset } else { 0 };
     let viewport_end = viewport_start.saturating_add(content_area.height as usize);
-    for (row_idx, row_span, anchor_key) in rows {
-        let start = *row_idx;
-        let end = start.saturating_add((*row_span).max(1));
+    for row in rows {
+        let start = row.row_idx;
+        let end = start.saturating_add(row.row_span.max(1));
         let visible_start = start.max(viewport_start);
         let visible_end = end.min(viewport_end);
         if visible_start >= visible_end {
@@ -220,13 +374,96 @@ fn add_review_preview_boxes_for_rows(
         if height == 0 {
             continue;
         }
-        app.add_review_preview_box(
+        app.add_review_comment_preview_box(
             content_area.x,
             content_area.y.saturating_add(local_row as u16),
             content_area.width,
             height,
-            anchor_key.clone(),
+            row.id,
+            row.anchor_key.clone(),
         );
+        let action_x = |x| {
+            content_area
+                .x
+                .saturating_add(1)
+                .saturating_add(row.indent)
+                .saturating_add(x)
+        };
+        if let Some((offset, x, width)) = row.actions.edit {
+            let action_row = start.saturating_add(offset);
+            if action_row >= viewport_start && action_row < viewport_end {
+                app.add_review_preview_edit_box(
+                    action_x(x),
+                    content_area
+                        .y
+                        .saturating_add((action_row - viewport_start) as u16),
+                    width,
+                    1,
+                    row.id,
+                    row.anchor_key.clone(),
+                );
+            }
+        }
+        if let Some((offset, x, width)) = row.actions.reply {
+            let action_row = start.saturating_add(offset);
+            if action_row >= viewport_start && action_row < viewport_end {
+                app.add_review_preview_reply_box(
+                    action_x(x),
+                    content_area
+                        .y
+                        .saturating_add((action_row - viewport_start) as u16),
+                    width,
+                    1,
+                    row.id,
+                    row.anchor_key.clone(),
+                );
+            }
+        }
+        if let Some((offset, x, width)) = row.actions.resolve {
+            let action_row = start.saturating_add(offset);
+            if action_row >= viewport_start && action_row < viewport_end {
+                app.add_review_preview_resolve_box(
+                    action_x(x),
+                    content_area
+                        .y
+                        .saturating_add((action_row - viewport_start) as u16),
+                    width,
+                    1,
+                    row.id,
+                    row.anchor_key.clone(),
+                );
+            }
+        }
+        if let Some((offset, x, width)) = row.actions.delete {
+            let action_row = start.saturating_add(offset);
+            if action_row >= viewport_start && action_row < viewport_end {
+                app.add_review_preview_delete_box(
+                    action_x(x),
+                    content_area
+                        .y
+                        .saturating_add((action_row - viewport_start) as u16),
+                    width,
+                    1,
+                    row.id,
+                    row.anchor_key.clone(),
+                );
+            }
+        }
+        if let Some((offset, x, width)) = row.actions.overflow {
+            let action_row = start.saturating_add(offset);
+            if action_row >= viewport_start && action_row < viewport_end {
+                app.add_review_preview_overflow_box(
+                    action_x(x),
+                    content_area
+                        .y
+                        .saturating_add((action_row - viewport_start) as u16),
+                    width,
+                    1,
+                    row.id,
+                    row.anchor_key.clone(),
+                );
+            }
+        }
     }
 }
 
@@ -235,20 +472,16 @@ pub fn render_split(frame: &mut Frame, app: &mut App, area: Rect) {
     let (area, scrollbar_area) = super::reserve_diff_scrollbar_lane(app, area);
     let visible_height = area.height as usize;
     if app.current_file_is_binary() {
-        render_empty_state(frame, area, &app.theme, false, true);
+        super::render_binary_empty_state(frame, app, area);
         return;
-    }
-    if app.line_wrap {
-        app.handle_search_scroll_if_needed(visible_height);
-    } else {
-        app.ensure_active_visible_if_needed(visible_height);
     }
     let show_extent = app.stepping && !app.multi_diff.current_navigator().state().is_at_start();
     app.multi_diff
         .current_navigator()
         .set_show_hunk_extent_while_stepping(show_extent);
     let view_lines = app.current_view_with_frame(AnimationFrame::Idle);
-    let mut scroll_offset = app.render_scroll_offset();
+    let line_number_width = split_line_number_width(&view_lines);
+    let gutter_width = split_gutter_width(line_number_width);
     let step_direction = app.multi_diff.current_step_direction();
     let preview_hunk = app.multi_diff.current_navigator().state().current_hunk;
     let debug_enabled = super::view_debug_enabled();
@@ -265,10 +498,17 @@ pub fn render_split(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let old_width = chunks[0]
         .width
-        .saturating_sub(GUTTER_WIDTH + OLD_BORDER_WIDTH) as usize;
+        .saturating_sub(gutter_width + OLD_BORDER_WIDTH) as usize;
     let new_width = chunks[1]
         .width
-        .saturating_sub(NEW_GUTTER_WIDTH + NEW_MARKER_WIDTH) as usize;
+        .saturating_sub(gutter_width + NEW_MARKER_WIDTH) as usize;
+    let search_width = old_width.min(new_width);
+    if app.line_wrap {
+        app.handle_search_scroll_if_needed(visible_height, search_width);
+    } else {
+        app.ensure_active_visible_if_needed(visible_height, search_width);
+    }
+    let mut scroll_offset = app.render_scroll_offset();
     let debug_extra = if debug_enabled {
         Some(format!(
             "split old_width={} new_width={} align_lines={}",
@@ -276,6 +516,29 @@ pub fn render_split(frame: &mut Frame, app: &mut App, area: Rect) {
         ))
     } else {
         None
+    };
+
+    let review_note_rows = if app.review_mode() {
+        app.review_comment_overlays_for_current_file()
+            .into_iter()
+            .map(|overlay| {
+                let width = if overlay.prefer_right {
+                    new_width
+                } else {
+                    old_width
+                };
+                review_note_lines(
+                    app,
+                    &overlay,
+                    width
+                        .saturating_add(gutter_width as usize)
+                        .saturating_sub(1),
+                )
+                .len()
+            })
+            .sum::<usize>()
+    } else {
+        0
     };
 
     let total_len = if app.line_wrap {
@@ -288,6 +551,7 @@ pub fn render_split(frame: &mut Frame, app: &mut App, area: Rect) {
             step_direction,
             app.split_align_lines,
         );
+        let display_len = display_len.saturating_add(review_note_rows);
         app.ensure_active_visible_if_needed_wrapped(visible_height, display_len, active_idx);
         app.render_total_lines(display_len)
     } else {
@@ -299,7 +563,7 @@ pub fn render_split(frame: &mut Frame, app: &mut App, area: Rect) {
             step_direction,
             app.split_align_lines,
         );
-        app.render_total_lines(display_len)
+        app.render_total_lines(display_len.saturating_add(review_note_rows))
     };
     let scroll_before = app.scroll_offset;
     app.clamp_scroll(total_len, visible_height, app.allow_overscroll());
@@ -345,6 +609,7 @@ pub fn render_split(frame: &mut Frame, app: &mut App, area: Rect) {
         _ => (true, true),
     };
 
+    app.clear_review_split_line_rows();
     render_old_pane(
         frame,
         app,
@@ -352,6 +617,7 @@ pub fn render_split(frame: &mut Frame, app: &mut App, area: Rect) {
         hunk_overflow,
         show_virtual_old,
         scroll_offset,
+        line_number_width,
     );
     render_new_pane(
         frame,
@@ -360,6 +626,7 @@ pub fn render_split(frame: &mut Frame, app: &mut App, area: Rect) {
         hunk_overflow,
         show_virtual_new,
         scroll_offset,
+        line_number_width,
     );
     super::render_diff_scrollbar(
         frame,
@@ -391,14 +658,17 @@ fn render_old_pane(
     hunk_overflow: Option<(bool, bool)>,
     show_virtual_pane: bool,
     scroll_offset: usize,
+    line_number_width: u16,
 ) {
     // Clone markers to avoid borrow conflicts
     let primary_marker = app.primary_marker.clone();
     let extent_marker = app.extent_marker.clone();
+    let extent_marker_deleted = app.extent_marker_deleted.clone();
 
     let view_lines = app.current_view_with_frame(AnimationFrame::Idle);
     let visible_height = area.height as usize;
-    let visible_width = area.width.saturating_sub(GUTTER_WIDTH + 1) as usize; // +1 for border
+    let gutter_width = split_gutter_width(line_number_width);
+    let visible_width = area.width.saturating_sub(gutter_width + OLD_BORDER_WIDTH) as usize;
     let syntax_window = if app.line_wrap {
         Some(super::syntax_highlight_window(
             scroll_offset,
@@ -409,11 +679,12 @@ fn render_old_pane(
     };
     let warmup_window = super::syntax_highlight_window(scroll_offset, visible_height);
     let debug_target = app.syntax_scope_target(&view_lines);
-    let mut bg_lines: Option<Vec<Line<'static>>> = if app.line_wrap && app.diff_bg {
-        Some(Vec::new())
-    } else {
-        None
-    };
+    let mut bg_lines: Option<Vec<Line<'static>>> =
+        if app.line_wrap && (app.diff_bg || app.fold_context.is_enabled()) {
+            Some(Vec::new())
+        } else {
+            None
+        };
     let (preview_mode, preview_hunk) = {
         let state = app.multi_diff.current_navigator().state();
         (state.hunk_preview_mode, state.current_hunk)
@@ -541,7 +812,7 @@ fn render_old_pane(
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Length(GUTTER_WIDTH),
+            Constraint::Length(gutter_width),
             Constraint::Min(0),
             Constraint::Length(1), // For border
         ])
@@ -553,36 +824,54 @@ fn render_old_pane(
 
     let mut gutter_lines: Vec<Line> = Vec::new();
     let mut content_lines: Vec<Line> = Vec::new();
-    let mut review_preview_rows: Vec<(usize, usize, String)> = Vec::new();
+    let mut review_preview_rows: Vec<super::ReviewPreviewRow> = Vec::new();
+    let mut review_avatar_rows = Vec::new();
+    let mut fold_context_rows = Vec::new();
+    let mut visible_fold_index = 0;
     let mut line_idx = 0;
     let mut display_row = 0usize;
     let query = app.search_query().trim().to_ascii_lowercase();
     let has_query = !query.is_empty();
     let mut max_line_width: usize = 0;
 
-    let mut review_preview_before_idx: std::collections::HashMap<usize, Vec<(String, String)>> =
-        std::collections::HashMap::new();
-    let mut review_preview_after_idx: std::collections::HashMap<usize, Vec<(String, String)>> =
-        std::collections::HashMap::new();
-    if app.review_mode()
-        && !app.review_editor_active()
-        && app.view_mode == crate::app::ViewMode::Split
-    {
+    let mut review_preview_before_idx: std::collections::HashMap<
+        usize,
+        Vec<(
+            String,
+            super::ReviewNoteBlock,
+            crate::app::review::ReviewCommentOverlay,
+        )>,
+    > = std::collections::HashMap::new();
+    let mut review_preview_after_idx: std::collections::HashMap<
+        usize,
+        Vec<(
+            String,
+            super::ReviewNoteBlock,
+            crate::app::review::ReviewCommentOverlay,
+        )>,
+    > = std::collections::HashMap::new();
+    if app.review_mode() && app.view_mode == crate::app::ViewMode::Split {
         for overlay in app.review_comment_overlays_for_current_file() {
             if overlay.prefer_right {
                 continue;
             }
-            let text = app.review_preview_hint_text(&overlay);
+            let block = review_note_block(
+                app,
+                &overlay,
+                visible_width
+                    .saturating_add(split_gutter_width(line_number_width) as usize)
+                    .saturating_sub(1),
+            );
             if overlay.is_hunk {
                 review_preview_before_idx
                     .entry(overlay.display_idx)
                     .or_default()
-                    .push((overlay.anchor_key, text));
+                    .push((overlay.anchor_key.clone(), block, overlay));
             } else {
                 review_preview_after_idx
                     .entry(overlay.display_idx)
                     .or_default()
-                    .push((overlay.anchor_key, text));
+                    .push((overlay.anchor_key.clone(), block, overlay));
             }
         }
     }
@@ -620,6 +909,7 @@ fn render_old_pane(
                 let virtual_rows = push_virtual_line_old(
                     text,
                     app,
+                    line_number_width,
                     visible_width,
                     &mut max_line_width,
                     &mut content_lines,
@@ -632,44 +922,30 @@ fn render_old_pane(
         }
 
         if let Some(previews) = review_preview_before_idx.get(&idx) {
-            for (anchor_key, preview_text) in previews {
-                let virtual_style = Style::default()
-                    .fg(app.theme.text_muted)
-                    .add_modifier(Modifier::ITALIC);
-                let mut virtual_spans = vec![Span::styled(preview_text.clone(), virtual_style)];
-                virtual_spans = expand_tabs_in_spans(&virtual_spans, TAB_WIDTH);
-
-                let virtual_width = spans_width(&virtual_spans);
-                max_line_width = max_line_width.max(virtual_width);
-
-                let virtual_wrap = if app.line_wrap {
-                    wrap_count_for_spans(&virtual_spans, visible_width)
-                } else {
-                    1
-                };
+            for (anchor_key, block, overlay) in previews {
                 let row_idx = display_row;
-
-                let mut display_virtual = virtual_spans;
-                if !app.line_wrap {
-                    display_virtual =
-                        slice_spans(&display_virtual, app.horizontal_scroll, visible_width);
+                let row_span = push_review_note_lines_old(
+                    &block.lines,
+                    anchor_key,
+                    app,
+                    line_number_width,
+                    visible_width,
+                    &mut max_line_width,
+                    &mut content_lines,
+                    &mut gutter_lines,
+                    bg_lines.as_mut(),
+                );
+                if let Some(avatar) = &block.avatar {
+                    review_avatar_rows
+                        .push((row_idx.saturating_add(avatar.row_offset), avatar.clone()));
                 }
-                if let Some(bg_lines) = bg_lines.as_mut() {
-                    super::push_wrapped_bg_line(bg_lines, visible_width, virtual_wrap, None);
-                }
-                content_lines.push(Line::from(display_virtual));
-                gutter_lines.push(Line::from(vec![
-                    Span::raw(" "),
-                    Span::raw("    "),
-                    Span::raw(" "),
-                ]));
-                if app.line_wrap && virtual_wrap > 1 {
-                    for _ in 1..virtual_wrap {
-                        gutter_lines.push(Line::from(Span::raw(" ")));
-                    }
-                }
-                review_preview_rows.push((row_idx, virtual_wrap, anchor_key.clone()));
-                display_row = display_row.saturating_add(virtual_wrap);
+                review_preview_rows.push(super::review_preview_row(
+                    row_idx,
+                    row_span,
+                    anchor_key.clone(),
+                    overlay,
+                ));
+                display_row = display_row.saturating_add(row_span);
             }
         }
 
@@ -681,7 +957,7 @@ fn render_old_pane(
             };
             let fill_span = align_fill_span(app, visible_width);
             let marker_fill = Span::raw(" ");
-            let gutter_fill = align_fill_gutter_span(app, 4);
+            let gutter_fill = align_fill_gutter_span(app, line_number_width as usize);
             let sign_fill = align_fill_gutter_span(app, 1);
             gutter_lines.push(Line::from(vec![marker_fill, gutter_fill, sign_fill]));
             if let Some(bg_lines) = bg_lines.as_mut() {
@@ -692,7 +968,7 @@ fn render_old_pane(
             if app.line_wrap && wrap_count > 1 {
                 for _ in 1..wrap_count {
                     let marker_fill = Span::raw(" ");
-                    let gutter_fill = align_fill_gutter_span(app, 4);
+                    let gutter_fill = align_fill_gutter_span(app, line_number_width as usize);
                     let sign_fill = align_fill_gutter_span(app, 1);
                     gutter_lines.push(Line::from(vec![marker_fill, gutter_fill, sign_fill]));
                     if let Some(bg_lines) = bg_lines.as_mut() {
@@ -703,44 +979,30 @@ fn render_old_pane(
                 }
             }
             if let Some(previews) = review_preview_after_idx.get(&idx) {
-                for (anchor_key, preview_text) in previews {
-                    let virtual_style = Style::default()
-                        .fg(app.theme.text_muted)
-                        .add_modifier(Modifier::ITALIC);
-                    let mut virtual_spans = vec![Span::styled(preview_text.clone(), virtual_style)];
-                    virtual_spans = expand_tabs_in_spans(&virtual_spans, TAB_WIDTH);
-
-                    let virtual_width = spans_width(&virtual_spans);
-                    max_line_width = max_line_width.max(virtual_width);
-
-                    let virtual_wrap = if app.line_wrap {
-                        wrap_count_for_spans(&virtual_spans, visible_width)
-                    } else {
-                        1
-                    };
+                for (anchor_key, block, overlay) in previews {
                     let row_idx = display_row;
-
-                    let mut display_virtual = virtual_spans;
-                    if !app.line_wrap {
-                        display_virtual =
-                            slice_spans(&display_virtual, app.horizontal_scroll, visible_width);
+                    let row_span = push_review_note_lines_old(
+                        &block.lines,
+                        anchor_key,
+                        app,
+                        line_number_width,
+                        visible_width,
+                        &mut max_line_width,
+                        &mut content_lines,
+                        &mut gutter_lines,
+                        bg_lines.as_mut(),
+                    );
+                    if let Some(avatar) = &block.avatar {
+                        review_avatar_rows
+                            .push((row_idx.saturating_add(avatar.row_offset), avatar.clone()));
                     }
-                    if let Some(bg_lines) = bg_lines.as_mut() {
-                        super::push_wrapped_bg_line(bg_lines, visible_width, virtual_wrap, None);
-                    }
-                    content_lines.push(Line::from(display_virtual));
-                    gutter_lines.push(Line::from(vec![
-                        Span::raw(" "),
-                        Span::raw("    "),
-                        Span::raw(" "),
-                    ]));
-                    if app.line_wrap && virtual_wrap > 1 {
-                        for _ in 1..virtual_wrap {
-                            gutter_lines.push(Line::from(Span::raw(" ")));
-                        }
-                    }
-                    review_preview_rows.push((row_idx, virtual_wrap, anchor_key.clone()));
-                    display_row = display_row.saturating_add(virtual_wrap);
+                    review_preview_rows.push(super::review_preview_row(
+                        row_idx,
+                        row_span,
+                        anchor_key.clone(),
+                        overlay,
+                    ));
+                    display_row = display_row.saturating_add(row_span);
                 }
             }
 
@@ -753,6 +1015,7 @@ fn render_old_pane(
                     let virtual_rows = push_virtual_line_old(
                         text,
                         app,
+                        line_number_width,
                         visible_width,
                         &mut max_line_width,
                         &mut content_lines,
@@ -769,22 +1032,25 @@ fn render_old_pane(
         }
 
         let fold_line = is_fold_line(view_line);
+        let fold_bg = fold_line.then(|| super::fold_context_background(app));
         let old_line_num = view_line
             .old_line
             .or(if fold_line { Some(0) } else { None });
         if let Some(old_line_num) = old_line_num {
             let line_num_str = if old_line_num == 0 {
-                "    ".to_string()
+                blank_line_number(line_number_width)
             } else {
-                format!("{:4}", old_line_num)
+                format_line_number(old_line_num, line_number_width)
             };
             let bg_kind = split_old_bg_kind(view_line.kind);
             let line_num_style = line_num_style_for_kind(bg_kind, app);
-            let line_bg_gutter = if app.diff_bg {
-                diff_line_bg(bg_kind, &app.theme)
-            } else {
-                None
-            };
+            let line_bg_gutter = fold_bg.or_else(|| {
+                if app.diff_bg {
+                    diff_line_bg(bg_kind, &app.theme)
+                } else {
+                    None
+                }
+            });
 
             let show_extent = super::show_extent_marker(app, view_line);
             // Gutter marker: primary marker for focus, extent marker for hunk nav, blank otherwise
@@ -797,7 +1063,11 @@ fn render_old_pane(
                 )
             } else if show_extent {
                 (
-                    extent_marker.as_str(),
+                    super::extent_marker_text(
+                        extent_marker.as_str(),
+                        extent_marker_deleted.as_str(),
+                        view_line,
+                    ),
                     super::extent_marker_style(
                         app,
                         view_line.kind,
@@ -821,7 +1091,7 @@ fn render_old_pane(
                     .into_iter()
                     .enumerate()
                     .map(|(idx, span)| {
-                        if idx == 0 {
+                        if idx == 0 && !fold_line {
                             span
                         } else {
                             Span::styled(span.content, span.style.bg(bg))
@@ -832,6 +1102,33 @@ fn render_old_pane(
             gutter_lines.push(Line::from(gutter_spans));
 
             let display_idx = line_idx;
+            let fold_row = if app.line_wrap {
+                display_row
+            } else {
+                content_lines.len()
+            };
+            let viewport_start = if app.line_wrap { scroll_offset } else { 0 };
+            let fold_action_idx = (app.fold_context.is_enabled()
+                && fold_line
+                && fold_row >= viewport_start
+                && fold_row < viewport_start.saturating_add(visible_height))
+            .then(|| {
+                let idx = visible_fold_index;
+                visible_fold_index += 1;
+                idx
+            });
+            let fold_band =
+                super::fold_context_band(app, view_line, visible_width, fold_action_idx);
+            if let Some(band) = fold_band.as_ref() {
+                fold_context_rows.push(crate::app::FoldContextRenderRow {
+                    row: fold_row,
+                    key: band.key,
+                    top_x: band.top_x,
+                    top_width: band.top_width,
+                    bottom_x: band.bottom_x,
+                    bottom_width: band.bottom_width,
+                });
+            }
             let syntax_line_num = if old_line_num == 0 {
                 None
             } else {
@@ -859,8 +1156,14 @@ fn render_old_pane(
             // Build content line
             let mut content_spans: Vec<Span<'static>> = Vec::new();
             let mut used_syntax = false;
-            if fold_line {
-                content_spans.push(Span::styled("…", Style::default().fg(app.theme.text_muted)));
+            if let Some(band) = fold_band.as_ref() {
+                content_spans = band.spans.clone();
+                used_syntax = true;
+            } else if fold_line {
+                content_spans.push(Span::styled(
+                    view_line.content.clone(),
+                    Style::default().fg(app.theme.text_muted),
+                ));
                 used_syntax = true;
             } else {
                 let pure_context = matches!(view_line.kind, LineKind::Context)
@@ -986,11 +1289,13 @@ fn render_old_pane(
                 }
             }
 
-            let line_bg_line = if app.diff_bg {
-                diff_line_bg(bg_kind, &app.theme)
-            } else {
-                None
-            };
+            let line_bg_line = fold_bg.or_else(|| {
+                if app.diff_bg {
+                    diff_line_bg(bg_kind, &app.theme)
+                } else {
+                    None
+                }
+            });
             if let Some(bg) = line_bg_line {
                 content_spans = apply_line_bg(content_spans, bg, visible_width, app.line_wrap);
             }
@@ -1085,12 +1390,34 @@ fn render_old_pane(
             if let Some(bg_lines) = bg_lines.as_mut() {
                 super::push_wrapped_bg_line(bg_lines, visible_width, wrap_count, line_bg_line);
             }
+            let line_display_row = display_row;
+            let line_content_row = content_lines.len();
             content_lines.push(Line::from(display_spans));
             display_row = display_row.saturating_add(wrap_count);
+            for wrapped_row in 0..wrap_count {
+                let local_row = if app.line_wrap {
+                    line_display_row
+                        .saturating_add(wrapped_row)
+                        .checked_sub(scroll_offset)
+                } else {
+                    Some(line_content_row.saturating_add(wrapped_row))
+                };
+                if let Some(local_row) = local_row.filter(|row| *row < area.height as usize) {
+                    app.add_review_split_line_row(
+                        area.y.saturating_add(local_row as u16),
+                        crate::app::review::ReviewSide::Old,
+                        idx,
+                    );
+                }
+            }
             if app.line_wrap && wrap_count > 1 {
                 let (wrap_marker, wrap_style) = if show_extent {
                     (
-                        extent_marker.as_str(),
+                        super::extent_marker_text(
+                            extent_marker.as_str(),
+                            extent_marker_deleted.as_str(),
+                            view_line,
+                        ),
                         super::extent_marker_style(
                             app,
                             view_line.kind,
@@ -1104,7 +1431,9 @@ fn render_old_pane(
                 };
                 for _ in 1..wrap_count {
                     if let Some(bg) = line_bg_gutter {
-                        let pad = " ".repeat(GUTTER_WIDTH as usize - 1);
+                        let pad = " ".repeat(
+                            split_gutter_width(line_number_width).saturating_sub(1) as usize,
+                        );
                         gutter_lines.push(Line::from(vec![
                             Span::styled(wrap_marker, wrap_style),
                             Span::styled(pad, Style::default().bg(bg)),
@@ -1116,44 +1445,30 @@ fn render_old_pane(
             }
 
             if let Some(previews) = review_preview_after_idx.get(&idx) {
-                for (anchor_key, preview_text) in previews {
-                    let virtual_style = Style::default()
-                        .fg(app.theme.text_muted)
-                        .add_modifier(Modifier::ITALIC);
-                    let mut virtual_spans = vec![Span::styled(preview_text.clone(), virtual_style)];
-                    virtual_spans = expand_tabs_in_spans(&virtual_spans, TAB_WIDTH);
-
-                    let virtual_width = spans_width(&virtual_spans);
-                    max_line_width = max_line_width.max(virtual_width);
-
-                    let virtual_wrap = if app.line_wrap {
-                        wrap_count_for_spans(&virtual_spans, visible_width)
-                    } else {
-                        1
-                    };
+                for (anchor_key, block, overlay) in previews {
                     let row_idx = display_row;
-
-                    let mut display_virtual = virtual_spans;
-                    if !app.line_wrap {
-                        display_virtual =
-                            slice_spans(&display_virtual, app.horizontal_scroll, visible_width);
+                    let row_span = push_review_note_lines_old(
+                        &block.lines,
+                        anchor_key,
+                        app,
+                        line_number_width,
+                        visible_width,
+                        &mut max_line_width,
+                        &mut content_lines,
+                        &mut gutter_lines,
+                        bg_lines.as_mut(),
+                    );
+                    if let Some(avatar) = &block.avatar {
+                        review_avatar_rows
+                            .push((row_idx.saturating_add(avatar.row_offset), avatar.clone()));
                     }
-                    if let Some(bg_lines) = bg_lines.as_mut() {
-                        super::push_wrapped_bg_line(bg_lines, visible_width, virtual_wrap, None);
-                    }
-                    content_lines.push(Line::from(display_virtual));
-                    gutter_lines.push(Line::from(vec![
-                        Span::raw(" "),
-                        Span::raw("    "),
-                        Span::raw(" "),
-                    ]));
-                    if app.line_wrap && virtual_wrap > 1 {
-                        for _ in 1..virtual_wrap {
-                            gutter_lines.push(Line::from(Span::raw(" ")));
-                        }
-                    }
-                    review_preview_rows.push((row_idx, virtual_wrap, anchor_key.clone()));
-                    display_row = display_row.saturating_add(virtual_wrap);
+                    review_preview_rows.push(super::review_preview_row(
+                        row_idx,
+                        row_span,
+                        anchor_key.clone(),
+                        overlay,
+                    ));
+                    display_row = display_row.saturating_add(row_span);
                 }
             }
 
@@ -1166,6 +1481,7 @@ fn render_old_pane(
                     let virtual_rows = push_virtual_line_old(
                         text,
                         app,
+                        line_number_width,
                         visible_width,
                         &mut max_line_width,
                         &mut content_lines,
@@ -1186,6 +1502,7 @@ fn render_old_pane(
                     let virtual_rows = push_virtual_line_old(
                         text,
                         app,
+                        line_number_width,
                         visible_width,
                         &mut max_line_width,
                         &mut content_lines,
@@ -1223,14 +1540,10 @@ fn render_old_pane(
                 }
                 content_lines.push(Line::from(display_virtual));
                 display_row = display_row.saturating_add(virtual_wrap);
-                gutter_lines.push(Line::from(vec![
-                    Span::raw(" "),
-                    Span::raw("    "),
-                    Span::raw(" "),
-                ]));
+                gutter_lines.push(blank_gutter_line(line_number_width));
                 if app.line_wrap && virtual_wrap > 1 {
                     for _ in 1..virtual_wrap {
-                        gutter_lines.push(Line::from(Span::raw(" ")));
+                        gutter_lines.push(blank_gutter_line(line_number_width));
                     }
                 }
             }
@@ -1261,14 +1574,10 @@ fn render_old_pane(
                 }
                 content_lines.push(Line::from(display_virtual));
                 display_row = display_row.saturating_add(virtual_wrap);
-                gutter_lines.push(Line::from(vec![
-                    Span::raw(" "),
-                    Span::raw("    "),
-                    Span::raw(" "),
-                ]));
+                gutter_lines.push(blank_gutter_line(line_number_width));
                 if app.line_wrap && virtual_wrap > 1 {
                     for _ in 1..virtual_wrap {
-                        gutter_lines.push(Line::from(Span::raw(" ")));
+                        gutter_lines.push(blank_gutter_line(line_number_width));
                     }
                 }
             }
@@ -1282,7 +1591,7 @@ fn render_old_pane(
                     } else {
                         1
                     };
-                    gutter_lines.push(Line::from(Span::raw(" ")));
+                    gutter_lines.push(blank_gutter_line(line_number_width));
                     if let Some(bg_lines) = bg_lines.as_mut() {
                         super::push_wrapped_bg_line(bg_lines, visible_width, debug_wrap, None);
                     }
@@ -1290,7 +1599,7 @@ fn render_old_pane(
                     display_row = display_row.saturating_add(debug_wrap);
                     if app.line_wrap && debug_wrap > 1 {
                         for _ in 1..debug_wrap {
-                            gutter_lines.push(Line::from(Span::raw(" ")));
+                            gutter_lines.push(blank_gutter_line(line_number_width));
                         }
                     }
                 }
@@ -1353,22 +1662,40 @@ fn render_old_pane(
         }
         frame.render_widget(content_paragraph, content_area);
     }
+    let viewport_start = if app.line_wrap { scroll_offset } else { 0 };
+    app.add_fold_context_render_rows(content_area, &fold_context_rows, viewport_start);
 
-    if app.review_mode()
-        && !app.review_editor_active()
-        && app.view_mode == crate::app::ViewMode::Split
-    {
-        add_review_preview_boxes_for_rows(app, content_area, scroll_offset, &review_preview_rows);
+    if app.review_mode() && app.view_mode == crate::app::ViewMode::Split {
+        let note_area = Rect::new(
+            gutter_area.x,
+            content_area.y,
+            gutter_area.width.saturating_add(content_area.width),
+            content_area.height,
+        );
+        add_review_preview_boxes_for_rows(app, note_area, scroll_offset, &review_preview_rows);
+        let viewport_start = if app.line_wrap { scroll_offset } else { 0 };
+        let viewport_end = viewport_start.saturating_add(note_area.height as usize);
+        for (row_idx, avatar) in &review_avatar_rows {
+            if *row_idx < viewport_start || *row_idx >= viewport_end {
+                continue;
+            }
+            let avatar_area = Rect::new(
+                note_area.x.saturating_add(1),
+                note_area.y,
+                note_area.width.saturating_sub(1),
+                note_area.height,
+            );
+            render_review_note_avatar(
+                frame,
+                app,
+                avatar_area,
+                row_idx.saturating_sub(viewport_start),
+                avatar,
+            );
+        }
     }
 
-    // Render border
-    let mut border = Block::default()
-        .borders(Borders::RIGHT)
-        .border_style(Style::default().fg(app.theme.border_subtle));
-    if let Some(style) = bg_style {
-        border = border.style(style);
-    }
-    frame.render_widget(border, border_area);
+    render_split_divider(frame, app, border_area);
 
     app.update_current_max_line_width(max_line_width);
 }
@@ -1380,10 +1707,12 @@ fn render_new_pane(
     hunk_overflow: Option<(bool, bool)>,
     show_virtual_pane: bool,
     scroll_offset: usize,
+    line_number_width: u16,
 ) {
     // Clone markers to avoid borrow conflicts
     let primary_marker_right = app.primary_marker_right.clone();
     let extent_marker_right = app.extent_marker_right.clone();
+    let extent_marker_deleted = app.extent_marker_deleted.clone();
 
     let animation_frame = app.animation_frame();
     let view_lines = app.current_view_with_frame(animation_frame);
@@ -1398,11 +1727,12 @@ fn render_new_pane(
     };
     let warmup_window = super::syntax_highlight_window(scroll_offset, visible_height);
     let debug_target = app.syntax_scope_target(&view_lines);
-    let mut bg_lines: Option<Vec<Line<'static>>> = if app.line_wrap && app.diff_bg {
-        Some(Vec::new())
-    } else {
-        None
-    };
+    let mut bg_lines: Option<Vec<Line<'static>>> =
+        if app.line_wrap && (app.diff_bg || app.fold_context.is_enabled()) {
+            Some(Vec::new())
+        } else {
+            None
+        };
     let (preview_mode, preview_hunk) = {
         let state = app.multi_diff.current_navigator().state();
         (state.hunk_preview_mode, state.current_hunk)
@@ -1530,7 +1860,7 @@ fn render_new_pane(
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Length(5), // "1234 "
+            Constraint::Length(split_gutter_width(line_number_width)),
             Constraint::Min(0),
             Constraint::Length(1), // For active marker
         ])
@@ -1544,36 +1874,54 @@ fn render_new_pane(
     let mut gutter_lines: Vec<Line> = Vec::new();
     let mut content_lines: Vec<Line> = Vec::new();
     let mut marker_lines: Vec<Line> = Vec::new();
-    let mut review_preview_rows: Vec<(usize, usize, String)> = Vec::new();
+    let mut review_preview_rows: Vec<super::ReviewPreviewRow> = Vec::new();
+    let mut review_avatar_rows = Vec::new();
+    let mut fold_context_rows = Vec::new();
+    let mut visible_fold_index = 0;
     let mut line_idx = 0;
     let mut display_row = 0usize;
     let query = app.search_query().trim().to_ascii_lowercase();
     let has_query = !query.is_empty();
     let mut max_line_width: usize = 0;
 
-    let mut review_preview_before_idx: std::collections::HashMap<usize, Vec<(String, String)>> =
-        std::collections::HashMap::new();
-    let mut review_preview_after_idx: std::collections::HashMap<usize, Vec<(String, String)>> =
-        std::collections::HashMap::new();
-    if app.review_mode()
-        && !app.review_editor_active()
-        && app.view_mode == crate::app::ViewMode::Split
-    {
+    let mut review_preview_before_idx: std::collections::HashMap<
+        usize,
+        Vec<(
+            String,
+            super::ReviewNoteBlock,
+            crate::app::review::ReviewCommentOverlay,
+        )>,
+    > = std::collections::HashMap::new();
+    let mut review_preview_after_idx: std::collections::HashMap<
+        usize,
+        Vec<(
+            String,
+            super::ReviewNoteBlock,
+            crate::app::review::ReviewCommentOverlay,
+        )>,
+    > = std::collections::HashMap::new();
+    if app.review_mode() && app.view_mode == crate::app::ViewMode::Split {
         for overlay in app.review_comment_overlays_for_current_file() {
             if !overlay.prefer_right {
                 continue;
             }
-            let text = app.review_preview_hint_text(&overlay);
+            let block = review_note_block(
+                app,
+                &overlay,
+                visible_width
+                    .saturating_add(split_gutter_width(line_number_width) as usize)
+                    .saturating_sub(1),
+            );
             if overlay.is_hunk {
                 review_preview_before_idx
                     .entry(overlay.display_idx)
                     .or_default()
-                    .push((overlay.anchor_key, text));
+                    .push((overlay.anchor_key.clone(), block, overlay));
             } else {
                 review_preview_after_idx
                     .entry(overlay.display_idx)
                     .or_default()
-                    .push((overlay.anchor_key, text));
+                    .push((overlay.anchor_key.clone(), block, overlay));
             }
         }
     }
@@ -1611,6 +1959,7 @@ fn render_new_pane(
                 let virtual_rows = push_virtual_line_new(
                     text,
                     app,
+                    line_number_width,
                     visible_width,
                     &mut max_line_width,
                     &mut content_lines,
@@ -1624,42 +1973,31 @@ fn render_new_pane(
         }
 
         if let Some(previews) = review_preview_before_idx.get(&idx) {
-            for (anchor_key, preview_text) in previews {
-                let virtual_style = Style::default()
-                    .fg(app.theme.text_muted)
-                    .add_modifier(Modifier::ITALIC);
-                let mut virtual_spans = vec![Span::styled(preview_text.clone(), virtual_style)];
-                virtual_spans = expand_tabs_in_spans(&virtual_spans, TAB_WIDTH);
-
-                let virtual_width = spans_width(&virtual_spans);
-                max_line_width = max_line_width.max(virtual_width);
-
-                let virtual_wrap = if app.line_wrap {
-                    wrap_count_for_spans(&virtual_spans, visible_width)
-                } else {
-                    1
-                };
+            for (anchor_key, block, overlay) in previews {
                 let row_idx = display_row;
-
-                let mut display_virtual = virtual_spans;
-                if !app.line_wrap {
-                    display_virtual =
-                        slice_spans(&display_virtual, app.horizontal_scroll, visible_width);
+                let row_span = push_review_note_lines_new(
+                    &block.lines,
+                    anchor_key,
+                    app,
+                    line_number_width,
+                    visible_width,
+                    &mut max_line_width,
+                    &mut content_lines,
+                    &mut gutter_lines,
+                    &mut marker_lines,
+                    bg_lines.as_mut(),
+                );
+                if let Some(avatar) = &block.avatar {
+                    review_avatar_rows
+                        .push((row_idx.saturating_add(avatar.row_offset), avatar.clone()));
                 }
-                if let Some(bg_lines) = bg_lines.as_mut() {
-                    super::push_wrapped_bg_line(bg_lines, visible_width, virtual_wrap, None);
-                }
-                content_lines.push(Line::from(display_virtual));
-                gutter_lines.push(Line::from(vec![Span::raw("    "), Span::raw(" ")]));
-                marker_lines.push(Line::from(Span::raw(" ")));
-                if app.line_wrap && virtual_wrap > 1 {
-                    for _ in 1..virtual_wrap {
-                        gutter_lines.push(Line::from(Span::raw(" ")));
-                        marker_lines.push(Line::from(Span::raw(" ")));
-                    }
-                }
-                review_preview_rows.push((row_idx, virtual_wrap, anchor_key.clone()));
-                display_row = display_row.saturating_add(virtual_wrap);
+                review_preview_rows.push(super::review_preview_row(
+                    row_idx,
+                    row_span,
+                    anchor_key.clone(),
+                    overlay,
+                ));
+                display_row = display_row.saturating_add(row_span);
             }
         }
 
@@ -1670,9 +2008,9 @@ fn render_new_pane(
                 1
             };
             let fill_span = align_fill_span(app, visible_width);
-            let gutter_fill = align_fill_gutter_span(app, 4);
+            let gutter_fill = align_fill_gutter_span(app, line_number_width as usize);
             let sign_fill = align_fill_gutter_span(app, 1);
-            gutter_lines.push(Line::from(vec![gutter_fill, sign_fill]));
+            gutter_lines.push(Line::from(vec![Span::raw(" "), gutter_fill, sign_fill]));
             if let Some(bg_lines) = bg_lines.as_mut() {
                 super::push_wrapped_bg_line(bg_lines, visible_width, 1, None);
             }
@@ -1681,9 +2019,9 @@ fn render_new_pane(
             marker_lines.push(Line::from(Span::raw(" ")));
             if app.line_wrap && wrap_count > 1 {
                 for _ in 1..wrap_count {
-                    let gutter_fill = align_fill_gutter_span(app, 4);
+                    let gutter_fill = align_fill_gutter_span(app, line_number_width as usize);
                     let sign_fill = align_fill_gutter_span(app, 1);
-                    gutter_lines.push(Line::from(vec![gutter_fill, sign_fill]));
+                    gutter_lines.push(Line::from(vec![Span::raw(" "), gutter_fill, sign_fill]));
                     if let Some(bg_lines) = bg_lines.as_mut() {
                         super::push_wrapped_bg_line(bg_lines, visible_width, 1, None);
                     }
@@ -1693,42 +2031,31 @@ fn render_new_pane(
                 }
             }
             if let Some(previews) = review_preview_after_idx.get(&idx) {
-                for (anchor_key, preview_text) in previews {
-                    let virtual_style = Style::default()
-                        .fg(app.theme.text_muted)
-                        .add_modifier(Modifier::ITALIC);
-                    let mut virtual_spans = vec![Span::styled(preview_text.clone(), virtual_style)];
-                    virtual_spans = expand_tabs_in_spans(&virtual_spans, TAB_WIDTH);
-
-                    let virtual_width = spans_width(&virtual_spans);
-                    max_line_width = max_line_width.max(virtual_width);
-
-                    let virtual_wrap = if app.line_wrap {
-                        wrap_count_for_spans(&virtual_spans, visible_width)
-                    } else {
-                        1
-                    };
+                for (anchor_key, block, overlay) in previews {
                     let row_idx = display_row;
-
-                    let mut display_virtual = virtual_spans;
-                    if !app.line_wrap {
-                        display_virtual =
-                            slice_spans(&display_virtual, app.horizontal_scroll, visible_width);
+                    let row_span = push_review_note_lines_new(
+                        &block.lines,
+                        anchor_key,
+                        app,
+                        line_number_width,
+                        visible_width,
+                        &mut max_line_width,
+                        &mut content_lines,
+                        &mut gutter_lines,
+                        &mut marker_lines,
+                        bg_lines.as_mut(),
+                    );
+                    if let Some(avatar) = &block.avatar {
+                        review_avatar_rows
+                            .push((row_idx.saturating_add(avatar.row_offset), avatar.clone()));
                     }
-                    if let Some(bg_lines) = bg_lines.as_mut() {
-                        super::push_wrapped_bg_line(bg_lines, visible_width, virtual_wrap, None);
-                    }
-                    content_lines.push(Line::from(display_virtual));
-                    gutter_lines.push(Line::from(vec![Span::raw("    "), Span::raw(" ")]));
-                    marker_lines.push(Line::from(Span::raw(" ")));
-                    if app.line_wrap && virtual_wrap > 1 {
-                        for _ in 1..virtual_wrap {
-                            gutter_lines.push(Line::from(Span::raw(" ")));
-                            marker_lines.push(Line::from(Span::raw(" ")));
-                        }
-                    }
-                    review_preview_rows.push((row_idx, virtual_wrap, anchor_key.clone()));
-                    display_row = display_row.saturating_add(virtual_wrap);
+                    review_preview_rows.push(super::review_preview_row(
+                        row_idx,
+                        row_span,
+                        anchor_key.clone(),
+                        overlay,
+                    ));
+                    display_row = display_row.saturating_add(row_span);
                 }
             }
 
@@ -1741,6 +2068,7 @@ fn render_new_pane(
                     let virtual_rows = push_virtual_line_new(
                         text,
                         app,
+                        line_number_width,
                         visible_width,
                         &mut max_line_width,
                         &mut content_lines,
@@ -1758,22 +2086,25 @@ fn render_new_pane(
         }
 
         let fold_line = is_fold_line(view_line);
+        let fold_bg = fold_line.then(|| super::fold_context_background(app));
         let new_line_num = view_line
             .new_line
             .or(if fold_line { Some(0) } else { None });
         if let Some(new_line_num) = new_line_num {
             let line_num_str = if new_line_num == 0 {
-                "    ".to_string()
+                blank_line_number(line_number_width)
             } else {
-                format!("{:4}", new_line_num)
+                format_line_number(new_line_num, line_number_width)
             };
             let bg_kind = split_new_bg_kind(view_line.kind);
             let line_num_style = line_num_style_for_kind(bg_kind, app);
-            let line_bg_gutter = if app.diff_bg {
-                diff_line_bg(bg_kind, &app.theme)
-            } else {
-                None
-            };
+            let line_bg_gutter = fold_bg.or_else(|| {
+                if app.diff_bg {
+                    diff_line_bg(bg_kind, &app.theme)
+                } else {
+                    None
+                }
+            });
 
             let show_extent = super::show_extent_marker(app, view_line);
             // Gutter marker: right-pane primary marker for focus, extent marker for hunk nav, blank otherwise
@@ -1786,7 +2117,11 @@ fn render_new_pane(
                 )
             } else if show_extent {
                 (
-                    extent_marker_right.as_str(),
+                    super::extent_marker_text(
+                        extent_marker_right.as_str(),
+                        extent_marker_deleted.as_str(),
+                        view_line,
+                    ),
                     super::extent_marker_style(
                         app,
                         view_line.kind,
@@ -1801,6 +2136,7 @@ fn render_new_pane(
 
             // Build gutter line
             let mut gutter_spans = vec![
+                Span::styled(" ", Style::default()),
                 Span::styled(line_num_str, line_num_style),
                 Span::styled(" ", Style::default()),
             ];
@@ -1813,6 +2149,33 @@ fn render_new_pane(
             gutter_lines.push(Line::from(gutter_spans));
 
             let display_idx = line_idx;
+            let fold_row = if app.line_wrap {
+                display_row
+            } else {
+                content_lines.len()
+            };
+            let viewport_start = if app.line_wrap { scroll_offset } else { 0 };
+            let fold_action_idx = (app.fold_context.is_enabled()
+                && fold_line
+                && fold_row >= viewport_start
+                && fold_row < viewport_start.saturating_add(visible_height))
+            .then(|| {
+                let idx = visible_fold_index;
+                visible_fold_index += 1;
+                idx
+            });
+            let fold_band =
+                super::fold_context_band(app, view_line, visible_width, fold_action_idx);
+            if let Some(band) = fold_band.as_ref() {
+                fold_context_rows.push(crate::app::FoldContextRenderRow {
+                    row: fold_row,
+                    key: band.key,
+                    top_x: band.top_x,
+                    top_width: band.top_width,
+                    bottom_x: band.bottom_x,
+                    bottom_width: band.bottom_width,
+                });
+            }
             let syntax_line_num = if new_line_num == 0 {
                 None
             } else {
@@ -1840,8 +2203,14 @@ fn render_new_pane(
             // Build content line
             let mut content_spans: Vec<Span<'static>> = Vec::new();
             let mut used_syntax = false;
-            if fold_line {
-                content_spans.push(Span::styled("…", Style::default().fg(app.theme.text_muted)));
+            if let Some(band) = fold_band.as_ref() {
+                content_spans = band.spans.clone();
+                used_syntax = true;
+            } else if fold_line {
+                content_spans.push(Span::styled(
+                    view_line.content.clone(),
+                    Style::default().fg(app.theme.text_muted),
+                ));
                 used_syntax = true;
             } else {
                 let pure_context = matches!(view_line.kind, LineKind::Context)
@@ -1966,11 +2335,13 @@ fn render_new_pane(
                     }
                 }
             }
-            let line_bg_line = if app.diff_bg {
-                diff_line_bg(bg_kind, &app.theme)
-            } else {
-                None
-            };
+            let line_bg_line = fold_bg.or_else(|| {
+                if app.diff_bg {
+                    diff_line_bg(bg_kind, &app.theme)
+                } else {
+                    None
+                }
+            });
             if let Some(bg) = line_bg_line {
                 content_spans = apply_line_bg(content_spans, bg, visible_width, app.line_wrap);
             }
@@ -2075,15 +2446,38 @@ fn render_new_pane(
             if let Some(bg_lines) = bg_lines.as_mut() {
                 super::push_wrapped_bg_line(bg_lines, visible_width, wrap_count, line_bg_line);
             }
+            let line_display_row = display_row;
+            let line_content_row = content_lines.len();
             content_lines.push(Line::from(display_spans));
             display_row = display_row.saturating_add(wrap_count);
+            for wrapped_row in 0..wrap_count {
+                let local_row = if app.line_wrap {
+                    line_display_row
+                        .saturating_add(wrapped_row)
+                        .checked_sub(scroll_offset)
+                } else {
+                    Some(line_content_row.saturating_add(wrapped_row))
+                };
+                if let Some(local_row) = local_row.filter(|row| *row < area.height as usize) {
+                    app.add_review_split_line_row(
+                        area.y.saturating_add(local_row as u16),
+                        crate::app::review::ReviewSide::New,
+                        idx,
+                    );
+                }
+            }
 
             // Build marker line
-            marker_lines.push(Line::from(Span::styled(active_marker, active_style)));
+            let marker_style = fold_bg.map_or(active_style, |bg| active_style.bg(bg));
+            marker_lines.push(Line::from(Span::styled(active_marker, marker_style)));
             if app.line_wrap && wrap_count > 1 {
                 let (wrap_marker, wrap_style) = if show_extent {
                     (
-                        extent_marker_right.as_str(),
+                        super::extent_marker_text(
+                            extent_marker_right.as_str(),
+                            extent_marker_deleted.as_str(),
+                            view_line,
+                        ),
                         super::extent_marker_style(
                             app,
                             view_line.kind,
@@ -2098,53 +2492,42 @@ fn render_new_pane(
                 for _ in 1..wrap_count {
                     if let Some(bg) = line_bg_gutter {
                         gutter_lines.push(Line::from(Span::styled(
-                            " ".repeat(NEW_GUTTER_WIDTH as usize),
+                            " ".repeat(split_gutter_width(line_number_width) as usize),
                             Style::default().bg(bg),
                         )));
                     } else {
-                        gutter_lines.push(Line::from(Span::raw(" ")));
+                        gutter_lines.push(blank_gutter_line(line_number_width));
                     }
                     marker_lines.push(Line::from(Span::styled(wrap_marker, wrap_style)));
                 }
             }
 
             if let Some(previews) = review_preview_after_idx.get(&idx) {
-                for (anchor_key, preview_text) in previews {
-                    let virtual_style = Style::default()
-                        .fg(app.theme.text_muted)
-                        .add_modifier(Modifier::ITALIC);
-                    let mut virtual_spans = vec![Span::styled(preview_text.clone(), virtual_style)];
-                    virtual_spans = expand_tabs_in_spans(&virtual_spans, TAB_WIDTH);
-
-                    let virtual_width = spans_width(&virtual_spans);
-                    max_line_width = max_line_width.max(virtual_width);
-
-                    let virtual_wrap = if app.line_wrap {
-                        wrap_count_for_spans(&virtual_spans, visible_width)
-                    } else {
-                        1
-                    };
+                for (anchor_key, block, overlay) in previews {
                     let row_idx = display_row;
-
-                    let mut display_virtual = virtual_spans;
-                    if !app.line_wrap {
-                        display_virtual =
-                            slice_spans(&display_virtual, app.horizontal_scroll, visible_width);
+                    let row_span = push_review_note_lines_new(
+                        &block.lines,
+                        anchor_key,
+                        app,
+                        line_number_width,
+                        visible_width,
+                        &mut max_line_width,
+                        &mut content_lines,
+                        &mut gutter_lines,
+                        &mut marker_lines,
+                        bg_lines.as_mut(),
+                    );
+                    if let Some(avatar) = &block.avatar {
+                        review_avatar_rows
+                            .push((row_idx.saturating_add(avatar.row_offset), avatar.clone()));
                     }
-                    if let Some(bg_lines) = bg_lines.as_mut() {
-                        super::push_wrapped_bg_line(bg_lines, visible_width, virtual_wrap, None);
-                    }
-                    content_lines.push(Line::from(display_virtual));
-                    gutter_lines.push(Line::from(vec![Span::raw("    "), Span::raw(" ")]));
-                    marker_lines.push(Line::from(Span::raw(" ")));
-                    if app.line_wrap && virtual_wrap > 1 {
-                        for _ in 1..virtual_wrap {
-                            gutter_lines.push(Line::from(Span::raw(" ")));
-                            marker_lines.push(Line::from(Span::raw(" ")));
-                        }
-                    }
-                    review_preview_rows.push((row_idx, virtual_wrap, anchor_key.clone()));
-                    display_row = display_row.saturating_add(virtual_wrap);
+                    review_preview_rows.push(super::review_preview_row(
+                        row_idx,
+                        row_span,
+                        anchor_key.clone(),
+                        overlay,
+                    ));
+                    display_row = display_row.saturating_add(row_span);
                 }
             }
 
@@ -2157,6 +2540,7 @@ fn render_new_pane(
                     let virtual_rows = push_virtual_line_new(
                         text,
                         app,
+                        line_number_width,
                         visible_width,
                         &mut max_line_width,
                         &mut content_lines,
@@ -2178,6 +2562,7 @@ fn render_new_pane(
                     let virtual_rows = push_virtual_line_new(
                         text,
                         app,
+                        line_number_width,
                         visible_width,
                         &mut max_line_width,
                         &mut content_lines,
@@ -2216,11 +2601,11 @@ fn render_new_pane(
                 }
                 content_lines.push(Line::from(display_virtual));
                 display_row = display_row.saturating_add(virtual_wrap);
-                gutter_lines.push(Line::from(vec![Span::raw("    "), Span::raw(" ")]));
+                gutter_lines.push(blank_gutter_line(line_number_width));
                 marker_lines.push(Line::from(Span::raw(" ")));
                 if app.line_wrap && virtual_wrap > 1 {
                     for _ in 1..virtual_wrap {
-                        gutter_lines.push(Line::from(Span::raw(" ")));
+                        gutter_lines.push(blank_gutter_line(line_number_width));
                         marker_lines.push(Line::from(Span::raw(" ")));
                     }
                 }
@@ -2252,11 +2637,11 @@ fn render_new_pane(
                 }
                 content_lines.push(Line::from(display_virtual));
                 display_row = display_row.saturating_add(virtual_wrap);
-                gutter_lines.push(Line::from(vec![Span::raw("    "), Span::raw(" ")]));
+                gutter_lines.push(blank_gutter_line(line_number_width));
                 marker_lines.push(Line::from(Span::raw(" ")));
                 if app.line_wrap && virtual_wrap > 1 {
                     for _ in 1..virtual_wrap {
-                        gutter_lines.push(Line::from(Span::raw(" ")));
+                        gutter_lines.push(blank_gutter_line(line_number_width));
                         marker_lines.push(Line::from(Span::raw(" ")));
                     }
                 }
@@ -2274,7 +2659,7 @@ fn render_new_pane(
                     } else {
                         1
                     };
-                    gutter_lines.push(Line::from(Span::raw(" ")));
+                    gutter_lines.push(blank_gutter_line(line_number_width));
                     if let Some(bg_lines) = bg_lines.as_mut() {
                         super::push_wrapped_bg_line(bg_lines, visible_width, debug_wrap, None);
                     }
@@ -2283,7 +2668,7 @@ fn render_new_pane(
                     marker_lines.push(Line::from(Span::raw(" ")));
                     if app.line_wrap && debug_wrap > 1 {
                         for _ in 1..debug_wrap {
-                            gutter_lines.push(Line::from(Span::raw(" ")));
+                            gutter_lines.push(blank_gutter_line(line_number_width));
                             marker_lines.push(Line::from(Span::raw(" ")));
                         }
                     }
@@ -2344,12 +2729,37 @@ fn render_new_pane(
         }
         frame.render_widget(content_paragraph, content_area);
     }
+    let viewport_start = if app.line_wrap { scroll_offset } else { 0 };
+    app.add_fold_context_render_rows(content_area, &fold_context_rows, viewport_start);
 
-    if app.review_mode()
-        && !app.review_editor_active()
-        && app.view_mode == crate::app::ViewMode::Split
-    {
-        add_review_preview_boxes_for_rows(app, content_area, scroll_offset, &review_preview_rows);
+    if app.review_mode() && app.view_mode == crate::app::ViewMode::Split {
+        let note_area = Rect::new(
+            gutter_area.x,
+            content_area.y,
+            gutter_area.width.saturating_add(content_area.width),
+            content_area.height,
+        );
+        add_review_preview_boxes_for_rows(app, note_area, scroll_offset, &review_preview_rows);
+        let viewport_start = if app.line_wrap { scroll_offset } else { 0 };
+        let viewport_end = viewport_start.saturating_add(note_area.height as usize);
+        for (row_idx, avatar) in &review_avatar_rows {
+            if *row_idx < viewport_start || *row_idx >= viewport_end {
+                continue;
+            }
+            let avatar_area = Rect::new(
+                note_area.x.saturating_add(1),
+                note_area.y,
+                note_area.width.saturating_sub(1),
+                note_area.height,
+            );
+            render_review_note_avatar(
+                frame,
+                app,
+                avatar_area,
+                row_idx.saturating_sub(viewport_start),
+                avatar,
+            );
+        }
     }
 
     // Render marker (no horizontal scroll)
@@ -2744,5 +3154,37 @@ fn get_new_span_style(
             }
             style
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{format_line_number, split_gutter_width, split_line_number_width};
+    use oyo_core::{LineKind, ViewLine};
+
+    fn view_line(old_line: Option<usize>, new_line: Option<usize>) -> ViewLine {
+        ViewLine {
+            content: String::new(),
+            spans: Vec::new(),
+            kind: LineKind::Context,
+            old_line,
+            new_line,
+            is_active: false,
+            is_active_change: false,
+            is_primary_active: false,
+            show_hunk_extent: false,
+            change_id: 0,
+            hunk_index: None,
+            has_changes: false,
+        }
+    }
+
+    #[test]
+    fn split_line_number_width_grows_for_large_files() {
+        let lines = [view_line(Some(9), Some(103474))];
+        assert_eq!(split_line_number_width(&lines), 6);
+        assert_eq!(split_gutter_width(6), 8);
+        assert_eq!(format_line_number(2039, 6), "  2039");
+        assert_eq!(format_line_number(103474, 6), "103474");
     }
 }

@@ -12,6 +12,8 @@ If you do not set an action, Oyo uses the default keys. Set an action to an empt
 [keybindings.global]
 open_command_palette = ["ctrl-p"]
 open_file_search = ["ctrl-shift-p"]
+open_comment_picker = ["ctrl-shift-c"]
+open_theme_picker = ["ctrl-t"]
 
 [keybindings.normal]
 step_down = ["j", "down"]
@@ -22,11 +24,12 @@ start_line_selection = ["V"]
 start_block_selection = ["ctrl-v"]
 
 [keybindings.review_editor]
-save = ["ctrl-o"]
+save = ["ctrl-s"]
 
 [keybindings.selection]
 copy = ["y"]
 cancel = ["esc"]
+show_actions = ["enter"]
 left = ["h", "left"]
 right = ["l", "right"]
 up = ["k", "up"]
@@ -51,13 +54,63 @@ Use these rules when you write keys:
 - modifiers use hyphens, for example `ctrl-p`, `ctrl-shift-p`, `alt-x`, `cmd-p`
 - named keys include `esc`, `enter`, `tab`, `backtab`, `space`, `up`, `down`, `left`, `right`, `home`, `end`, `pagedown`, `pageup`, `backspace` and `delete`
 
+Oyo requests enhanced keyboard reporting so supported terminals can distinguish `ctrl-shift-p` from `ctrl-p`. Other terminals may report them as the same key. Use `g f` for files or `g c` for comments when this happens.
+
 Duplicate bindings or prefix conflicts make that whole mode fall back to defaults. Oyo prints a warning.
 
 In `normal` mode, plain `1` to `9` are reserved for counts. Plain `0` means `line_start` unless a count is already pending. Modified digits such as `ctrl-1` are allowed.
 
 `global` runs before most input modes. It does not run before `help` or `review_editor`.
 
-`normal.open_command_palette` and `normal.open_file_search` still work in normal mode. Use `global` if you want shortcuts to work while a picker, search box or filter is active.
+`normal.open_command_palette`, `normal.open_file_search`, `normal.open_comment_picker` and `normal.open_theme_picker` still work in normal mode. Use `global` if you want shortcuts to work while a picker, search box or filter is active.
+
+In review mode, `r`, `v`, `x` and `o` are contextual when the current file shows inline comments. Use indexed actions such as `ra reply`, `va resolve` on a thread root, `xa delete` and `oa overflow`. Reply cards omit the resolve action because resolved state belongs to the thread. These prefixes take priority over their normal-mode actions while review cards are visible.
+
+## Mouse interactions
+
+Mouse actions use built-in behaviour and cannot be changed with keybindings.
+
+| Action | What it does |
+| --- | --- |
+| Drag in the diff | Select text |
+| Click a selection action | Copy, comment, cancel or run a configured command |
+| Scroll a selection action row | Move through hidden selection actions |
+| Click ` + ` on a diff line | Add or update a line comment |
+| Click a comment card or `ia edit` | Edit that comment |
+| Click `ra reply` on an inline review comment | Reply in that local or provider thread |
+| Click `xa delete` on a comment card | Delete that comment |
+| Click `ra reply` on a pull request conversation comment | Quote it in a new comment |
+| Click a comment editor action | Save, cancel, mention or run a configured command |
+| Scroll a comment editor action row | Move through hidden comment actions |
+| Click the sidebar toggle | Show or hide the sidebar |
+| Drag the sidebar edge | Resize the sidebar |
+| Scroll the sidebar | Scroll files or comments |
+| Click the sidebar filter | Filter files or comments |
+| Click the filter clear button | Clear the filter |
+| Click a file in the sidebar | Open it in the active tab |
+| Control-click a file in the sidebar | Open it in a new tab |
+| Right-click a file in the sidebar | Open the file context menu |
+| Click a sidebar file context menu action | Open, open in a new tab or copy the path |
+| Click a comment in the sidebar | Open it for editing |
+| Click the comments sidebar overflow menu | Pull or push review comments |
+| Click a comment picker item | Jump to that review comment |
+| Click an item in History | Open it |
+| Control-click an item in History | Mark the range start |
+| Right-click an item in History | Open the range context menu |
+| Click a History context menu action | Open, mark start or mark end |
+| Click an action in the History footer | Open, mark the range, clear the range or quit |
+| Click the sidebar header mode label | Switch between files and comments |
+| Click the footer mode label | Cycle view modes |
+| Control-click the footer mode label | Cycle view modes backwards |
+| Right-click the footer mode label | Pick a view mode from a context menu |
+| Click the empty-state `ctrl-r history` action | Open History |
+| Click the footer file count | Open the sidebar in files mode |
+| Click the footer comment count | Open the sidebar in comments mode |
+| Scroll over the tab bar | Move through tabs |
+| Drag a tab | Reorder tabs |
+| Click a tab overflow control | Move through hidden tabs |
+| Shift and scroll over the diff | Scroll horizontally |
+| Drag a scrollbar | Scroll that panel |
 
 ## Modes
 
@@ -71,12 +124,14 @@ Use each mode as `[keybindings.<mode>]`.
 | `review_editor` | `[keybindings.review_editor]` | Inline comment editor |
 | `command_palette` | `[keybindings.command_palette]` | Command palette picker |
 | `file_search` | `[keybindings.file_search]` | Quick file search picker |
+| `comment_picker` | `[keybindings.comment_picker]` | Comment picker |
+| `theme_picker` | `[keybindings.theme_picker]` | Theme picker |
 | `file_filter` | `[keybindings.file_filter]` | File panel filter |
 | `goto` | `[keybindings.goto]` | Go to prompt |
 | `search` | `[keybindings.search]` | Diff search prompt |
 | `selection` | `[keybindings.selection]` | Diff text selection |
-| `dashboard` | `[keybindings.dashboard]` | Commit picker dashboard |
-| `dashboard_filter` | `[keybindings.dashboard_filter]` | Dashboard filter prompt |
+| `dashboard` | `[keybindings.dashboard]` | History view |
+| `dashboard_filter` | `[keybindings.dashboard_filter]` | History filter prompt |
 
 ## Global mode
 
@@ -84,12 +139,16 @@ Use each mode as `[keybindings.<mode>]`.
 | --- | --- | --- |
 | `open_command_palette` | `ctrl-p` | Open the command palette |
 | `open_file_search` | `ctrl-shift-p` | Open quick file search |
+| `open_comment_picker` | `ctrl-shift-c` | Open comment picker |
+| `open_theme_picker` | `ctrl-t` | Open theme picker |
 
 ## Normal mode
 
+`esc` closes the active picker, overlay, sub-view or find bar.
+
 | Action | Default keys | What it does |
 | --- | --- | --- |
-| `quit` | `q`, `esc` | Quit and print comments if any |
+| `quit` | `q` | Quit |
 | `step_down` | `j`, `down` | Step forward |
 | `step_up` | `k`, `up` | Step backward |
 | `next_hunk` | `l`, `right` | Go to the next hunk |
@@ -116,8 +175,9 @@ Use each mode as `[keybindings.<mode>]`.
 | `next_file` | `]` | Go to the next file |
 | `toggle_autoplay` | `space` | Start or stop forward autoplay |
 | `toggle_autoplay_reverse` | `B` | Start or stop reverse autoplay |
-| `toggle_view_mode` | `tab` | Cycle view mode |
-| `toggle_view_mode_reverse` | `backtab` | Cycle view mode in reverse |
+| `toggle_view_mode` | `tab` | Cycle view modes |
+| `toggle_view_mode_reverse` | `backtab` | Cycle view modes in reverse |
+| `open_dashboard` | `ctrl-r` | Open History |
 | `scroll_up` | `K` | Scroll up |
 | `scroll_down` | `J` | Scroll down |
 | `half_page_up` | `ctrl-u` | Scroll up half a page |
@@ -129,7 +189,7 @@ Use each mode as `[keybindings.<mode>]`.
 | `toggle_line_wrap` | `w` | Turn line wrap on or off |
 | `toggle_syntax` | `t` | Turn syntax highlighting on or off |
 | `toggle_evo_syntax` | `E` | Toggle evolution syntax mode |
-| `toggle_stepping` | `s` | Turn stepping on or off |
+| `toggle_stepping` | `s` | Turn step mode on or off |
 | `toggle_strikethrough` | `S` | Turn deletion strikethrough on or off |
 | `scroll_left` | `H` | Scroll left |
 | `scroll_right` | `L` | Scroll right |
@@ -140,21 +200,31 @@ Use each mode as `[keybindings.<mode>]`.
 | `replay_step` | `r` | Replay the last step |
 | `refresh` | `R` | Refresh files |
 | `toggle_file_panel` | `ctrl-f` | Show or hide the file panel |
-| `toggle_fold_context` | `f` | Fold or unfold context |
+| `toggle_fold_context` | `f` | Toggle full and expandable context |
+| `expand_all_folds` | `F` | Expand every context fold |
 | `open_search_or_file_filter` | `/` | Search the diff, or filter files when the file list is focused |
 | `open_goto` | `:` | Go to a line, hunk or step |
 | `search_next` | `n` | Go to the next match |
 | `search_prev` | `N` | Go to the previous match |
+| `focus_next_comment` | `}` | Focus the next review comment |
+| `focus_prev_comment` | `{` | Focus the previous review comment |
 | `next_conflict` | `c` | Go to the next conflict |
 | `prev_conflict` | `C` | Go to the previous conflict |
-| `line_comment` | `m` | Add or update a line comment |
+| `line_comment` | `m` | Comment on the hovered diff line, or the cursor line when no line is hovered |
 | `hunk_comment` | `M` | Add or update a hunk comment |
 | `clear_comments` | `ctrl-x` | Clear all comments |
 | `remove_line_comment` | `x` | Remove a line comment |
 | `remove_hunk_comment` | `X` | Remove a hunk comment |
 | `toggle_help` | `?` | Show or hide help |
 | `open_command_palette` | `ctrl-p` | Open the command palette in normal mode |
-| `open_file_search` | `ctrl-shift-p` | Open quick file search in normal mode |
+| `open_file_search` | `ctrl-shift-p`, `g f` | Open quick file search in normal mode |
+| `open_comment_picker` | `g c` | Open comment picker in normal mode |
+| `open_outdated_comments` | `g o` | Open outdated comments in normal mode |
+| `open_theme_picker` | `ctrl-t` | Open theme picker in normal mode |
+
+Visible expandable folds show contextual shortcuts such as `ua` and `da`. Use the
+shortcut beside an arrow to reveal 20 lines from that side. Use `F` to expand all
+folds.
 
 ## Help mode
 
@@ -169,7 +239,7 @@ Use each mode as `[keybindings.<mode>]`.
 | Action | Default keys | What it does |
 | --- | --- | --- |
 | `cancel` | `esc` | Cancel the editor |
-| `save` | `ctrl-o` | Save the comment |
+| `save` | `ctrl-s` | Save the comment |
 | `insert_newline` | `enter` | Insert a new line |
 | `accept_mention` | `tab` | Accept the mention |
 | `backspace` | `backspace` | Delete the character before the cursor |
@@ -206,6 +276,28 @@ Use each mode as `[keybindings.<mode>]`.
 | `select_next` | `down` | Select the next item |
 | `select_prev` | `up` | Select the previous item |
 
+## Comment picker mode
+
+| Action | Default keys | What it does |
+| --- | --- | --- |
+| `cancel` | `esc` | Cancel |
+| `accept` | `enter` | Open the comment |
+| `backspace` | `backspace` | Delete the previous character |
+| `clear` | `ctrl-u` | Clear the query |
+| `select_next` | `down` | Select the next comment |
+| `select_prev` | `up` | Select the previous comment |
+
+## Theme picker mode
+
+| Action | Default keys | What it does |
+| --- | --- | --- |
+| `cancel` | `esc` | Cancel |
+| `accept` | `enter` | Apply the theme |
+| `backspace` | `backspace` | Delete the previous character |
+| `clear` | `ctrl-u` | Clear the query |
+| `select_next` | `down` | Preview the next theme |
+| `select_prev` | `up` | Preview the previous theme |
+
 ## File filter mode
 
 | Action | Default keys | What it does |
@@ -238,10 +330,13 @@ Use `v`, `V` or `ctrl-v` in normal mode to start selection. Oyo then uses select
 
 Selection works on visible diff cells. It does not include line numbers, gutters, align-fill characters or UI padding.
 
+The selection toolbar appears above the selection after you finish a mouse selection. Press `enter` to show it for a keyboard selection. Select `y copy`, `esc cancel`, `m comment` in review mode, or any configured `selection.actions` command.
+
 | Action | Default keys | What it does |
 | --- | --- | --- |
 | `cancel` | `esc` | Cancel selection |
 | `copy` | `y` | Copy selection |
+| `show_actions` | `enter` | Show selection actions |
 | `left` | `h`, `left` | Extend left |
 | `right` | `l`, `right` | Extend right |
 | `up` | `k`, `up` | Extend up |
@@ -257,14 +352,15 @@ Selection works on visible diff cells. It does not include line numbers, gutters
 | `goto_end` | `G` | Extend to the last visible cell |
 | `goto_half_page_down` | `d` | Extend down half a page |
 
-## Dashboard mode
+## History mode
 
 | Action | Default keys | What it does |
 | --- | --- | --- |
-| `quit` | `esc`, `q` | Quit the dashboard |
+| `quit` | `esc`, `q` | Quit History |
 | `start_filter` | `/` | Filter commits |
-| `clear_pin` | `r` | Clear the pinned range start |
+| `clear_pin` | `r` | Clear the range |
 | `toggle_pin` | `space` | Mark the range start |
+| `select_hovered` | `e` | Mark the range end |
 | `accept` | `enter` | Open the selection |
 | `select_next` | `j`, `down` | Select the next commit |
 | `select_prev` | `k`, `up` | Select the previous commit |
@@ -273,7 +369,7 @@ Selection works on visible diff cells. It does not include line numbers, gutters
 | `select_first` | `g`, `home` | Select the first commit |
 | `select_last` | `G`, `end` | Select the last commit |
 
-## Dashboard filter mode
+## History filter mode
 
 | Action | Default keys | What it does |
 | --- | --- | --- |

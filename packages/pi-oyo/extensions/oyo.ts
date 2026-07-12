@@ -1,141 +1,70 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { spawnSync } from "node:child_process";
-import { randomBytes } from "node:crypto";
-import { readFileSync, unlinkSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 
-function parseArgs(args?: string): string[] {
-  if (!args) return [];
-  return args.split(/\s+/).filter(Boolean);
+type OyoMode = "on" | "off";
+
+const ENTRY_TYPE = "oyo-mode";
+
+const OYO_PROMPT = [
+  "OYO CODE REVIEW.",
+  "To review code changes, read Oyo comments, or work on comments in Git or jj, use the oyo-code-review skill.",
+  "Run `oy skill path`, read the file it prints, then use `oy` and `oy review` for the task.",
+].join("\n");
+
+let mode: OyoMode = "on";
+
+type UiContext = {
+  ui: {
+    notify: (message: string, type?: "info" | "warning" | "error") => void;
+  };
+};
+
+function parseMode(input: string): OyoMode | "status" | undefined {
+  const token = input.trim().toLowerCase();
+  if (!token || token === "on") return "on";
+  if (token === "off" || token === "stop" || token === "disable") return "off";
+  if (token === "status") return "status";
+  return undefined;
 }
 
-function stripManagedReviewFlags(args: string[]): string[] {
-  const out: string[] = [];
-
-  for (let i = 0; i < args.length; i++) {
-    const token = args[i]!;
-
-    if (token === "--no-print-review") continue;
-
-    if (token === "--review-output-file") {
-      i += 1;
-      continue;
-    }
-
-    if (token.startsWith("--review-output-file=")) continue;
-
-    out.push(token);
-  }
-
-  return out;
-}
-
-function runOyAndReadReview(cwd: string, args: string[] = []): { comments: string; error?: Error } {
-  const outputFile = join(
-    tmpdir(),
-    `oy-review-${Date.now()}-${randomBytes(6).toString("hex")}.txt`,
-  );
-
-  const userArgs = stripManagedReviewFlags(args);
-  const oyArgs = [
-    ...userArgs,
-    "--review-output-file",
-    outputFile,
-    "--no-print-review",
-  ];
-
-  const result = spawnSync("oy", oyArgs, { cwd, stdio: "inherit" });
-  if (result.error) {
-    return { comments: "", error: result.error };
-  }
-
-  let comments = "";
-  try {
-    comments = readFileSync(outputFile, "utf8");
-  } catch {
-    comments = "";
-  }
-
-  try {
-    unlinkSync(outputFile);
-  } catch {
-    // ignore
-  }
-
-  return { comments: comments.trimEnd() };
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
-}
-
-function buildReviewOyArgs(args?: string): string[] {
-  const inputArgs = parseArgs(args);
-
-  let tempSession = false;
-  let clearSession = false;
-  let i = 0;
-  while (i < inputArgs.length) {
-    const token = inputArgs[i]!;
-    if (token === "temp") {
-      tempSession = true;
-      i += 1;
-      continue;
-    }
-    if (token === "new") {
-      clearSession = true;
-      i += 1;
-      continue;
-    }
-    break;
-  }
-
-  const oyArgs = inputArgs.slice(i);
-  if (tempSession && !oyArgs.includes("--no-review-persist")) {
-    oyArgs.push("--no-review-persist");
-  }
-  if (clearSession && !oyArgs.includes("--clear-review-session")) {
-    oyArgs.push("--clear-review-session");
-  }
-
-  return oyArgs;
+function setMode(next: OyoMode, ctx: UiContext, pi: ExtensionAPI): void {
+  mode = next;
+  pi.appendEntry(ENTRY_TYPE, { mode: next });
+  ctx.ui.notify(`Oyo review: ${next}`, "info");
 }
 
 export default function oyoExtension(pi: ExtensionAPI): void {
-  const cwd = process.cwd();
+  pi.on("session_start", async (_event, ctx) => {
+    mode = "on";
 
-  pi.registerCommand("diff", {
-    description: "Diff changes",
-    handler: async (args, ctx) => {
-      const { error } = runOyAndReadReview(cwd, parseArgs(args));
-
-      if (error) {
-        ctx.ui.notify(`Failed to run oy: ${error.message}`, "error");
+    for (const entry of ctx.sessionManager.getBranch()) {
+      if (entry.type === "custom" && entry.customType === ENTRY_TYPE) {
+        const candidate = (entry as { data?: { mode?: OyoMode } }).data?.mode;
+        if (candidate === "on" || candidate === "off") mode = candidate;
       }
-    },
+    }
   });
 
-  pi.registerCommand("review", {
-    description: "Review changes",
+  pi.on("before_agent_start", async (event) => {
+    if (mode === "off") return;
+    return { systemPrompt: `${event.systemPrompt}\n\n${OYO_PROMPT}` };
+  });
+
+  pi.registerCommand("oyo", {
+    description: "Set Oyo review instruction: on|off|status",
     handler: async (args, ctx) => {
-      const oyArgs = buildReviewOyArgs(args);
-      const { comments, error } = runOyAndReadReview(cwd, oyArgs);
+      const next = parseMode(args);
 
-      if (error) {
-        ctx.ui.notify(`Failed to run oy: ${error.message}`, "error");
+      if (next === "status") {
+        ctx.ui.notify(`Oyo review: ${mode}`, "info");
         return;
       }
 
-      if (!comments.trim()) {
-        ctx.ui.notify("No review comments", "info");
+      if (!next) {
+        ctx.ui.notify("Usage: /oyo [on|off|status]", "warning");
         return;
       }
 
-      await delay(50);
-      ctx.ui.pasteToEditor(`${comments}\n`);
+      setMode(next, ctx, pi);
     },
   });
 }

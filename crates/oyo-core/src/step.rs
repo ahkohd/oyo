@@ -26,6 +26,7 @@ pub enum AnimationFrame {
 
 /// The current state of stepping through a diff
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct StepState {
     /// Current step index (0 = initial state, 1 = after first change applied, etc.)
     pub current_step: usize,

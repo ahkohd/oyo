@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/oyo-core", "crates/oyo"]
 
 [workspace.package]
-version = "0.1.37"
+version = "0.1.45"
 edition = "2021"
 authors = ["Victor Aremu <me@victorare.mu>"]
 license = "MIT"
@@ -24,6 +24,7 @@ ignore = "0.4"
 
 # TUI
 ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
+ratatui-image = { version = "11.0.6", default-features = false, features = ["crossterm"] }
 crossterm = "0.29"
 keymap = { version = "1.0.0-rc.6", features = ["crossterm"] }
 tui-textarea = "0.7"
@@ -34,13 +35,18 @@ tokio = { version = "1.0", features = ["full"] }
 # CLI
 clap = { version = "4.0", features = ["derive"] }
 flate2 = "1.0"
+csv = "1.3"
 
 # Config
 toml = "1.0"
 dirs = "5.0"
 regex = "1.10"
+lazy_static = "1.4"
+logos = "0.12"
+yaml-rust = "0.4"
 unicode-width = "0.2"
 unicode-segmentation = "1.11"
 pulldown-cmark = "0.13"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
 time = { version = "0.3", features = ["std", "formatting", "parsing"] }
+rusqlite = { version = "0.32", features = ["bundled"] }

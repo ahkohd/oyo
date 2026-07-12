@@ -1,4 +1,4 @@
-use crate::app::{App, ViewMode};
+use crate::app::{App, FilePanelMode, FoldContextDirection, TopbarTabContent, ViewMode};
 use crate::config;
 use crate::keybindings::{
     Dispatch, FileFilterAction, GlobalAction, HelpAction, LineInputAction, NormalAction,
@@ -12,6 +12,14 @@ use crossterm::{
 
 use super::{coalesce_key_repeats, open_current_file_in_editor, TuiTerminal};
 
+fn is_force_quit_key(key: KeyEvent) -> bool {
+    key.modifiers == KeyModifiers::CONTROL && matches!(key.code, KeyCode::Char('c' | 'C'))
+}
+
+fn should_force_quit(app: &App, key: KeyEvent) -> bool {
+    !app.review_editor_active() && is_force_quit_key(key)
+}
+
 pub(crate) fn handle_app_key(
     app: &mut App,
     key: KeyEvent,
@@ -19,14 +27,72 @@ pub(crate) fn handle_app_key(
     terminal: &mut TuiTerminal,
     editor_config: &config::EditorConfig,
 ) -> Result<()> {
+    if should_force_quit(app, key) {
+        app.force_quit();
+        return Ok(());
+    }
+
+    if app.quit_confirmation_active() {
+        app.handle_quit_confirmation_key(key);
+        return Ok(());
+    }
+
     if app.show_help {
         handle_help_key(app, key);
+        return Ok(());
+    }
+
+    if app.review_remote_picker_active() {
+        app.handle_review_remote_picker_key(key);
+        return Ok(());
+    }
+
+    if app.review_delete_confirmation_active() {
+        app.handle_review_delete_confirmation_key(key);
         return Ok(());
     }
 
     if app.review_editor_active() {
         handle_review_editor_key(app, key);
         return Ok(());
+    }
+
+    if app.status_mode_menu_open() {
+        if key.code == KeyCode::Esc {
+            app.close_status_mode_menu();
+            return Ok(());
+        }
+        app.close_status_mode_menu();
+    }
+
+    if app.review_comment_context_menu.is_some() {
+        if key.code == KeyCode::Esc {
+            app.close_review_comment_context_menu();
+            return Ok(());
+        }
+        app.close_review_comment_context_menu();
+    }
+
+    if app.file_context_menu.is_some() {
+        if key.code == KeyCode::Esc {
+            app.close_file_context_menu();
+            return Ok(());
+        }
+        app.close_file_context_menu();
+    }
+
+    if key.code == KeyCode::Esc && app.show_path_popup {
+        app.show_path_popup = false;
+        return Ok(());
+    }
+
+    if app.session_rename_active() {
+        handle_session_rename_key(app, key);
+        return Ok(());
+    }
+
+    if app.keybindings.normal_sequence_pending() {
+        return handle_normal_key(app, key, pending_event, terminal, editor_config);
     }
 
     if handle_global_key(app, key) {
@@ -43,6 +109,16 @@ pub(crate) fn handle_app_key(
         return Ok(());
     }
 
+    if app.comment_picker_active() {
+        handle_comment_picker_key(app, key);
+        return Ok(());
+    }
+
+    if app.theme_picker_active() {
+        handle_theme_picker_key(app, key);
+        return Ok(());
+    }
+
     if app.file_filter_active {
         handle_file_filter_key(app, key);
         return Ok(());
@@ -50,6 +126,11 @@ pub(crate) fn handle_app_key(
 
     if app.goto_active() {
         handle_goto_key(app, key);
+        return Ok(());
+    }
+
+    if key.code == KeyCode::Esc && app.search_bar_visible() {
+        app.clear_search();
         return Ok(());
     }
 
@@ -62,10 +143,20 @@ pub(crate) fn handle_app_key(
         return Ok(());
     }
 
+    if app.file_panel_mode == FilePanelMode::Comments
+        && app.file_list_focused
+        && app.handle_comments_sidebar_action_key(key)
+    {
+        return Ok(());
+    }
+
     handle_normal_key(app, key, pending_event, terminal, editor_config)
 }
 
 fn handle_selection_key(app: &mut App, key: KeyEvent) -> bool {
+    if app.selection_toolbar_visible() && app.handle_selection_action_key(key) {
+        return true;
+    }
     match app.keybindings.selection(key) {
         Dispatch::Matched(SelectionAction::Cancel) => {
             app.clear_diff_selection();
@@ -76,6 +167,7 @@ fn handle_selection_key(app: &mut App, key: KeyEvent) -> bool {
             app.clear_diff_selection();
             true
         }
+        Dispatch::Matched(SelectionAction::ShowActions) => app.show_selection_toolbar(),
         Dispatch::Matched(SelectionAction::Left) => app.move_diff_selection(-1, 0),
         Dispatch::Matched(SelectionAction::Right) => app.move_diff_selection(1, 0),
         Dispatch::Matched(SelectionAction::Up) => app.move_diff_selection(0, -1),
@@ -104,11 +196,11 @@ fn handle_selection_key(app: &mut App, key: KeyEvent) -> bool {
 }
 
 fn handle_global_key(app: &mut App, key: KeyEvent) -> bool {
-    if app.multi_diff.file_count() == 0 {
-        return false;
-    }
     match app.keybindings.global(key) {
         Dispatch::Matched(GlobalAction::OpenCommandPalette) => {
+            if app.multi_diff.file_count() == 0 {
+                return false;
+            }
             app.reset_count();
             if app.command_palette_active() {
                 app.stop_command_palette();
@@ -118,11 +210,35 @@ fn handle_global_key(app: &mut App, key: KeyEvent) -> bool {
             true
         }
         Dispatch::Matched(GlobalAction::OpenFileSearch) => {
+            if app.multi_diff.file_count() == 0 {
+                return false;
+            }
             app.reset_count();
             if app.file_search_active() {
                 app.stop_file_search();
             } else {
                 app.start_file_search();
+            }
+            true
+        }
+        Dispatch::Matched(GlobalAction::OpenCommentPicker) => {
+            if !app.review_mode() {
+                return false;
+            }
+            app.reset_count();
+            if app.comment_picker_active() {
+                app.stop_comment_picker();
+            } else {
+                app.start_comment_picker();
+            }
+            true
+        }
+        Dispatch::Matched(GlobalAction::OpenThemePicker) => {
+            app.reset_count();
+            if app.theme_picker_active() {
+                app.stop_theme_picker();
+            } else {
+                app.start_theme_picker();
             }
             true
         }
@@ -234,6 +350,29 @@ fn handle_command_palette_key(app: &mut App, key: KeyEvent) {
     }
 }
 
+fn handle_theme_picker_key(app: &mut App, key: KeyEvent) {
+    match app.keybindings.theme_picker(key) {
+        Dispatch::Matched(PickerAction::Cancel) => app.stop_theme_picker(),
+        Dispatch::Matched(PickerAction::Accept) => app.apply_theme_picker_selection(),
+        Dispatch::Matched(PickerAction::Backspace) => {
+            if app.theme_picker_query().is_empty() {
+                app.stop_theme_picker();
+            } else {
+                app.pop_theme_picker_char();
+            }
+        }
+        Dispatch::Matched(PickerAction::Clear) => app.clear_theme_picker_text(),
+        Dispatch::Matched(PickerAction::SelectNext) => app.move_theme_picker_selection(1),
+        Dispatch::Matched(PickerAction::SelectPrev) => app.move_theme_picker_selection(-1),
+        Dispatch::Pending => {}
+        Dispatch::Unmatched => {
+            if let Some(c) = printable_char(key) {
+                app.push_theme_picker_char(c);
+            }
+        }
+    }
+}
+
 fn handle_file_search_key(app: &mut App, key: KeyEvent) {
     match app.keybindings.file_search(key) {
         Dispatch::Matched(PickerAction::Cancel) => app.stop_file_search(),
@@ -257,6 +396,29 @@ fn handle_file_search_key(app: &mut App, key: KeyEvent) {
     }
 }
 
+fn handle_comment_picker_key(app: &mut App, key: KeyEvent) {
+    match app.keybindings.comment_picker(key) {
+        Dispatch::Matched(PickerAction::Cancel) => app.stop_comment_picker(),
+        Dispatch::Matched(PickerAction::Accept) => app.apply_comment_picker_selection(),
+        Dispatch::Matched(PickerAction::Backspace) => {
+            if app.comment_picker_query().is_empty() {
+                app.stop_comment_picker();
+            } else {
+                app.pop_comment_picker_char();
+            }
+        }
+        Dispatch::Matched(PickerAction::Clear) => app.clear_comment_picker_text(),
+        Dispatch::Matched(PickerAction::SelectNext) => app.move_comment_picker_selection(1),
+        Dispatch::Matched(PickerAction::SelectPrev) => app.move_comment_picker_selection(-1),
+        Dispatch::Pending => {}
+        Dispatch::Unmatched => {
+            if let Some(c) = printable_char(key) {
+                app.push_comment_picker_char(c);
+            }
+        }
+    }
+}
+
 fn handle_file_filter_key(app: &mut App, key: KeyEvent) {
     match app.keybindings.file_filter(key) {
         Dispatch::Matched(FileFilterAction::Close) => app.stop_file_filter(),
@@ -266,6 +428,25 @@ fn handle_file_filter_key(app: &mut App, key: KeyEvent) {
         Dispatch::Unmatched => {
             if let Some(c) = printable_char(key) {
                 app.push_file_filter_char(c);
+            }
+        }
+    }
+}
+
+fn handle_session_rename_key(app: &mut App, key: KeyEvent) {
+    match app.keybindings.goto(key) {
+        Dispatch::Matched(LineInputAction::Cancel) => app.cancel_session_rename(),
+        Dispatch::Matched(LineInputAction::Accept) => app.submit_session_rename(),
+        Dispatch::Matched(LineInputAction::Backspace) => {
+            if !app.session_rename_query().is_empty() {
+                app.pop_session_rename_char();
+            }
+        }
+        Dispatch::Matched(LineInputAction::Clear) => app.clear_session_rename_text(),
+        Dispatch::Pending => {}
+        Dispatch::Unmatched => {
+            if let Some(c) = printable_char(key) {
+                app.push_session_rename_char(c);
             }
         }
     }
@@ -303,9 +484,7 @@ fn handle_search_key(app: &mut App, key: KeyEvent) {
             app.search_next();
         }
         Dispatch::Matched(LineInputAction::Backspace) => {
-            if app.search_query().is_empty() {
-                app.clear_search();
-            } else {
+            if !app.search_query().is_empty() {
                 app.pop_search_char();
             }
         }
@@ -348,6 +527,37 @@ fn repeat_count(
     }
 }
 
+fn handle_fold_context_action_key(app: &mut App, key: KeyEvent) -> bool {
+    if !key.modifiers.is_empty() {
+        return false;
+    }
+    if let Some(direction) = app.fold_context_prefix.take() {
+        match key.code {
+            KeyCode::Char(c @ 'a'..='z') => {
+                app.expand_visible_context_fold_letter(c, direction);
+                return true;
+            }
+            KeyCode::Char(c @ '1'..='9') => {
+                app.expand_visible_context_fold_number((c as u8 - b'0') as usize, direction);
+                return true;
+            }
+            _ => {}
+        }
+    }
+    let direction = match key.code {
+        KeyCode::Char('u') => Some(FoldContextDirection::Top),
+        KeyCode::Char('d') => Some(FoldContextDirection::Bottom),
+        _ => None,
+    };
+    if let Some(direction) = direction.filter(|_| app.has_visible_context_folds()) {
+        app.fold_context_prefix = Some(direction);
+        app.keybindings.clear_sequence();
+        app.reset_count();
+        return true;
+    }
+    false
+}
+
 fn handle_normal_key(
     app: &mut App,
     key: KeyEvent,
@@ -355,6 +565,184 @@ fn handle_normal_key(
     terminal: &mut TuiTerminal,
     editor_config: &config::EditorConfig,
 ) -> Result<()> {
+    if handle_fold_context_action_key(app, key) {
+        return Ok(());
+    }
+    if app.review_mode() && key.modifiers.is_empty() {
+        let sequence_pending = app.keybindings.normal_sequence_pending();
+        if app.active_pr_comments_view() && app.pr_reply_prefix {
+            app.pr_reply_prefix = false;
+            match key.code {
+                KeyCode::Char(c @ 'a'..='z') => {
+                    app.reply_to_pull_request_comment_letter(c);
+                    return Ok(());
+                }
+                KeyCode::Char(c @ '1'..='9') => {
+                    app.reply_to_pull_request_comment_number((c as u8 - b'0') as usize);
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
+        if app.review_edit_prefix {
+            app.review_edit_prefix = false;
+            match key.code {
+                KeyCode::Char(c @ 'a'..='z') => {
+                    app.edit_review_comment_letter(c);
+                    return Ok(());
+                }
+                KeyCode::Char(c @ '1'..='9') => {
+                    app.edit_review_comment_number((c as u8 - b'0') as usize);
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
+        if app.review_reply_prefix {
+            app.review_reply_prefix = false;
+            match key.code {
+                KeyCode::Char(c @ 'a'..='z') => {
+                    app.reply_to_review_comment_letter(c);
+                    return Ok(());
+                }
+                KeyCode::Char(c @ '1'..='9') => {
+                    app.reply_to_review_comment_number((c as u8 - b'0') as usize);
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
+        if app.review_resolve_prefix {
+            app.review_resolve_prefix = false;
+            match key.code {
+                KeyCode::Char(c @ 'a'..='z') => {
+                    app.resolve_review_comment_letter(c);
+                    return Ok(());
+                }
+                KeyCode::Char(c @ '1'..='9') => {
+                    app.resolve_review_comment_number((c as u8 - b'0') as usize);
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
+        if app.review_delete_prefix {
+            app.review_delete_prefix = false;
+            match key.code {
+                KeyCode::Char(c @ 'a'..='z') => {
+                    app.delete_review_comment_letter(c);
+                    return Ok(());
+                }
+                KeyCode::Char(c @ '1'..='9') => {
+                    app.delete_review_comment_number((c as u8 - b'0') as usize);
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
+        if app.review_overflow_prefix {
+            app.review_overflow_prefix = false;
+            match key.code {
+                KeyCode::Char(c @ 'a'..='z') => {
+                    app.open_review_comment_context_menu_letter(c);
+                    return Ok(());
+                }
+                KeyCode::Char(c @ '1'..='9') => {
+                    app.open_review_comment_context_menu_number((c as u8 - b'0') as usize);
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
+        if app.active_pr_comments_view() && !sequence_pending {
+            match key.code {
+                KeyCode::Char('c') => {
+                    app.start_pull_request_comment();
+                    return Ok(());
+                }
+                KeyCode::Char('r') => {
+                    app.pr_reply_prefix = true;
+                    app.review_edit_prefix = false;
+                    app.review_reply_prefix = false;
+                    app.review_resolve_prefix = false;
+                    app.review_delete_prefix = false;
+                    app.review_overflow_prefix = false;
+                    app.keybindings.clear_sequence();
+                    app.reset_count();
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
+        if !sequence_pending && matches!(key.code, KeyCode::Char('i')) {
+            app.review_edit_prefix = true;
+            app.review_reply_prefix = false;
+            app.review_resolve_prefix = false;
+            app.review_delete_prefix = false;
+            app.review_overflow_prefix = false;
+            app.pr_reply_prefix = false;
+            app.keybindings.clear_sequence();
+            app.reset_count();
+            return Ok(());
+        }
+        if !sequence_pending
+            && matches!(key.code, KeyCode::Char('r'))
+            && app.inline_review_reply_available()
+        {
+            app.review_reply_prefix = true;
+            app.review_edit_prefix = false;
+            app.review_resolve_prefix = false;
+            app.review_delete_prefix = false;
+            app.review_overflow_prefix = false;
+            app.pr_reply_prefix = false;
+            app.keybindings.clear_sequence();
+            app.reset_count();
+            return Ok(());
+        }
+        if !sequence_pending
+            && matches!(key.code, KeyCode::Char('v'))
+            && app.inline_review_actions_available()
+        {
+            app.review_resolve_prefix = true;
+            app.review_edit_prefix = false;
+            app.review_reply_prefix = false;
+            app.review_delete_prefix = false;
+            app.review_overflow_prefix = false;
+            app.pr_reply_prefix = false;
+            app.keybindings.clear_sequence();
+            app.reset_count();
+            return Ok(());
+        }
+        if !sequence_pending
+            && matches!(key.code, KeyCode::Char('x'))
+            && app.inline_review_actions_available()
+        {
+            app.review_delete_prefix = true;
+            app.review_edit_prefix = false;
+            app.review_reply_prefix = false;
+            app.review_resolve_prefix = false;
+            app.review_overflow_prefix = false;
+            app.pr_reply_prefix = false;
+            app.keybindings.clear_sequence();
+            app.reset_count();
+            return Ok(());
+        }
+        if !sequence_pending
+            && matches!(key.code, KeyCode::Char('o'))
+            && app.inline_review_actions_available()
+        {
+            app.review_overflow_prefix = true;
+            app.review_edit_prefix = false;
+            app.review_reply_prefix = false;
+            app.review_resolve_prefix = false;
+            app.review_delete_prefix = false;
+            app.pr_reply_prefix = false;
+            app.keybindings.clear_sequence();
+            app.reset_count();
+            return Ok(());
+        }
+    }
+
     if let Some(digit) = count_digit(key, app.pending_count.is_some()) {
         app.clear_diff_selection();
         app.keybindings.clear_sequence();
@@ -381,9 +769,15 @@ fn dispatch_normal_action(
     editor_config: &config::EditorConfig,
 ) -> Result<()> {
     if app.multi_diff.file_count() == 0
+        && app.active_topbar_content() != Some(TopbarTabContent::Help)
         && !matches!(
             action,
-            NormalAction::Quit | NormalAction::Refresh | NormalAction::ToggleHelp
+            NormalAction::Quit
+                | NormalAction::Refresh
+                | NormalAction::ToggleHelp
+                | NormalAction::OpenCommentPicker
+                | NormalAction::OpenOutdatedComments
+                | NormalAction::OpenThemePicker
         )
     {
         app.reset_count();
@@ -406,11 +800,16 @@ fn dispatch_normal_action(
             if app.show_path_popup {
                 app.show_path_popup = false;
             } else {
-                app.submit_review_and_quit();
+                app.request_quit();
             }
         }
         NormalAction::StepDown => {
             let count = repeat_count(app, key, pending_event, true)?;
+            if !app.file_list_focused
+                && (app.csv_preview_move_down(count) || app.structured_preview_move_down(count))
+            {
+                return Ok(());
+            }
             for _ in 0..count {
                 if app.file_list_focused {
                     app.next_file();
@@ -423,6 +822,11 @@ fn dispatch_normal_action(
         }
         NormalAction::StepUp => {
             let count = repeat_count(app, key, pending_event, true)?;
+            if !app.file_list_focused
+                && (app.csv_preview_move_up(count) || app.structured_preview_move_up(count))
+            {
+                return Ok(());
+            }
             for _ in 0..count {
                 if app.file_list_focused {
                     app.prev_file();
@@ -435,6 +839,16 @@ fn dispatch_normal_action(
         }
         NormalAction::NextHunk => {
             let count = repeat_count(app, key, pending_event, true)?;
+            if !app.file_list_focused {
+                let mut handled = false;
+                handled |= app.csv_preview_move_right(count);
+                for _ in 0..count {
+                    handled |= app.structured_preview_move_right();
+                }
+                if handled {
+                    return Ok(());
+                }
+            }
             app.defer_view_build_for_jump();
             for _ in 0..count {
                 if app.stepping {
@@ -446,6 +860,16 @@ fn dispatch_normal_action(
         }
         NormalAction::PrevHunk => {
             let count = repeat_count(app, key, pending_event, true)?;
+            if !app.file_list_focused {
+                let mut handled = false;
+                handled |= app.csv_preview_move_left(count);
+                for _ in 0..count {
+                    handled |= app.structured_preview_move_left();
+                }
+                if handled {
+                    return Ok(());
+                }
+            }
             app.defer_view_build_for_jump();
             for _ in 0..count {
                 if app.stepping {
@@ -466,6 +890,9 @@ fn dispatch_normal_action(
         }
         NormalAction::HunkEnd => {
             app.reset_count();
+            if app.structured_preview_expand_node_and_siblings(false) {
+                return Ok(());
+            }
             app.defer_view_build_for_jump();
             if app.stepping {
                 app.goto_hunk_end();
@@ -534,11 +961,17 @@ fn dispatch_normal_action(
         }
         NormalAction::GotoStart => {
             app.reset_count();
+            if app.csv_preview_focus_top() || app.structured_preview_focus_top() {
+                return Ok(());
+            }
             app.defer_view_build_for_jump();
             app.goto_start();
         }
         NormalAction::GotoEnd => {
             app.reset_count();
+            if app.csv_preview_focus_bottom() || app.structured_preview_focus_bottom() {
+                return Ok(());
+            }
             app.defer_view_build_for_jump();
             app.goto_end();
         }
@@ -574,6 +1007,9 @@ fn dispatch_normal_action(
         }
         NormalAction::ToggleAutoplay => {
             app.reset_count();
+            if app.structured_preview_toggle_collapsed() {
+                return Ok(());
+            }
             if app.stepping {
                 app.toggle_autoplay();
             }
@@ -592,6 +1028,10 @@ fn dispatch_normal_action(
             app.reset_count();
             app.toggle_view_mode_reverse();
         }
+        NormalAction::OpenDashboard => {
+            app.reset_count();
+            app.open_dashboard = true;
+        }
         NormalAction::ScrollUp => {
             let count = repeat_count(app, key, pending_event, false)?;
             for _ in 0..count {
@@ -606,19 +1046,25 @@ fn dispatch_normal_action(
         }
         NormalAction::HalfPageUp => {
             app.reset_count();
+            if app.structured_preview_jump_up(None) {
+                return Ok(());
+            }
             if let Ok((_, rows)) = terminal::size() {
                 app.scroll_half_page_up(rows.saturating_sub(6) as usize);
             }
         }
         NormalAction::HalfPageDown => {
             app.reset_count();
+            if app.structured_preview_jump_down(None) {
+                return Ok(());
+            }
             if let Ok((_, rows)) = terminal::size() {
                 app.scroll_half_page_down(rows.saturating_sub(6) as usize);
             }
         }
         NormalAction::ToggleFileListFocus => {
             app.reset_count();
-            if app.is_multi_file() {
+            if app.can_show_file_panel() {
                 app.file_list_focused = !app.file_list_focused;
                 if !app.file_list_focused {
                     app.stop_file_filter();
@@ -627,7 +1073,7 @@ fn dispatch_normal_action(
         }
         NormalAction::IncreaseSpeed => {
             app.reset_count();
-            if app.is_multi_file() && app.file_list_focused {
+            if app.can_show_file_panel() && app.file_list_focused {
                 if let Ok((cols, _)) = terminal::size() {
                     app.resize_file_panel(2, cols);
                 }
@@ -637,7 +1083,7 @@ fn dispatch_normal_action(
         }
         NormalAction::DecreaseSpeed => {
             app.reset_count();
-            if app.is_multi_file() && app.file_list_focused {
+            if app.can_show_file_panel() && app.file_list_focused {
                 if let Ok((cols, _)) = terminal::size() {
                     app.resize_file_panel(-2, cols);
                 }
@@ -659,6 +1105,9 @@ fn dispatch_normal_action(
         }
         NormalAction::ToggleEvoSyntax => {
             app.reset_count();
+            if app.structured_preview_expand_node_and_siblings(true) {
+                return Ok(());
+            }
             if app.view_mode == ViewMode::Evolution {
                 app.toggle_evo_syntax();
             }
@@ -712,13 +1161,17 @@ fn dispatch_normal_action(
         }
         NormalAction::ToggleFilePanel => {
             app.reset_count();
-            if app.is_multi_file() {
+            if app.can_show_file_panel() {
                 app.toggle_file_panel();
             }
         }
         NormalAction::ToggleFoldContext => {
             app.reset_count();
             app.toggle_fold_context();
+        }
+        NormalAction::ExpandAllFolds => {
+            app.reset_count();
+            app.expand_all_context_folds();
         }
         NormalAction::OpenSearchOrFileFilter => {
             app.reset_count();
@@ -742,16 +1195,37 @@ fn dispatch_normal_action(
             app.reset_count();
             app.search_prev();
         }
+        NormalAction::FocusNextComment => {
+            let count = repeat_count(app, key, pending_event, false)?;
+            for _ in 0..count {
+                app.focus_next_review_comment();
+            }
+        }
+        NormalAction::FocusPrevComment => {
+            let count = repeat_count(app, key, pending_event, false)?;
+            for _ in 0..count {
+                app.focus_prev_review_comment();
+            }
+        }
         NormalAction::NextConflict => {
             app.reset_count();
+            if app.structured_preview_collapse_node_and_siblings(false) {
+                return Ok(());
+            }
             app.next_conflict();
         }
         NormalAction::PrevConflict => {
             app.reset_count();
+            if app.structured_preview_collapse_node_and_siblings(true) {
+                return Ok(());
+            }
             app.prev_conflict();
         }
         NormalAction::LineComment => {
             app.reset_count();
+            if app.structured_preview_toggle_mode() {
+                return Ok(());
+            }
             app.start_line_comment();
         }
         NormalAction::HunkComment => {
@@ -764,7 +1238,9 @@ fn dispatch_normal_action(
         }
         NormalAction::RemoveLineComment => {
             app.reset_count();
-            app.remove_line_comment_at_cursor();
+            if !app.remove_hovered_review_comment() {
+                app.remove_line_comment_at_cursor();
+            }
         }
         NormalAction::RemoveHunkComment => {
             app.reset_count();
@@ -790,6 +1266,26 @@ fn dispatch_normal_action(
                 app.start_file_search();
             }
         }
+        NormalAction::OpenCommentPicker => {
+            app.reset_count();
+            if app.comment_picker_active() {
+                app.stop_comment_picker();
+            } else {
+                app.start_comment_picker();
+            }
+        }
+        NormalAction::OpenOutdatedComments => {
+            app.reset_count();
+            app.open_outdated_comments_in_current_tab(None);
+        }
+        NormalAction::OpenThemePicker => {
+            app.reset_count();
+            if app.theme_picker_active() {
+                app.stop_theme_picker();
+            } else {
+                app.start_theme_picker();
+            }
+        }
     }
     Ok(())
 }
@@ -805,6 +1301,45 @@ mod tests {
 
     fn ctrl(ch: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(ch), KeyModifiers::CONTROL)
+    }
+
+    fn test_terminal() -> TuiTerminal {
+        let backend = ratatui::backend::CrosstermBackend::new(
+            Box::new(Vec::<u8>::new()) as Box<dyn std::io::Write>
+        );
+        ratatui::Terminal::with_options(
+            backend,
+            ratatui::TerminalOptions {
+                viewport: ratatui::Viewport::Fixed(ratatui::layout::Rect::new(0, 0, 80, 24)),
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn control_c_is_the_force_quit_key_outside_the_review_editor() {
+        let diff = MultiFileDiff::from_file_pair(
+            "old.txt".into(),
+            "new.txt".into(),
+            "old\n".to_string(),
+            "new\n".to_string(),
+        );
+        let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+        assert!(should_force_quit(&app, ctrl('c')));
+        assert!(!should_force_quit(&app, key('c')));
+        assert!(!should_force_quit(
+            &app,
+            KeyEvent::new(
+                KeyCode::Char('c'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            )
+        ));
+
+        app.set_review_persist_enabled(false);
+        app.enable_review_mode();
+        app.start_line_comment();
+        assert!(app.review_editor_active());
+        assert!(!should_force_quit(&app, ctrl('c')));
     }
 
     #[test]
@@ -824,10 +1359,263 @@ mod tests {
     }
 
     #[test]
+    fn review_prefixes_do_not_swallow_pending_normal_sequences() {
+        let diff = MultiFileDiff::from_file_pair(
+            "old.txt".into(),
+            "new.txt".into(),
+            "old\n".to_string(),
+            "new\n".to_string(),
+        );
+        let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+        app.set_review_persist_enabled(false);
+        app.enable_review_mode();
+        app.start_line_comment();
+        app.review_insert_char('x');
+        app.review_save_editor();
+        assert_eq!(app.review_comment_count(), 1);
+        let mut terminal = test_terminal();
+        let mut pending_event = None;
+        let editor_config = config::EditorConfig::default();
+
+        handle_app_key(
+            &mut app,
+            key('g'),
+            &mut pending_event,
+            &mut terminal,
+            &editor_config,
+        )
+        .unwrap();
+        assert!(app.keybindings.normal_sequence_pending());
+        handle_app_key(
+            &mut app,
+            key('o'),
+            &mut pending_event,
+            &mut terminal,
+            &editor_config,
+        )
+        .unwrap();
+
+        assert!(app.active_outdated_comments_view());
+        assert!(!app.review_overflow_prefix);
+
+        handle_app_key(
+            &mut app,
+            key('g'),
+            &mut pending_event,
+            &mut terminal,
+            &editor_config,
+        )
+        .unwrap();
+        handle_app_key(
+            &mut app,
+            key('f'),
+            &mut pending_event,
+            &mut terminal,
+            &editor_config,
+        )
+        .unwrap();
+        assert!(app.file_search_active());
+    }
+
+    #[test]
+    fn inline_review_uses_r_for_reply_and_v_for_resolve() {
+        let diff = MultiFileDiff::from_file_pair(
+            "old.txt".into(),
+            "new.txt".into(),
+            "old\n".to_string(),
+            "new\n".to_string(),
+        );
+        let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+        app.set_review_persist_enabled(false);
+        app.enable_review_mode();
+        app.goto_last_step();
+        app.start_line_comment();
+        app.review_insert_char('x');
+        app.review_save_editor();
+        let mut terminal = test_terminal();
+        let mut pending_event = None;
+        let editor_config = config::EditorConfig::default();
+
+        handle_app_key(
+            &mut app,
+            key('r'),
+            &mut pending_event,
+            &mut terminal,
+            &editor_config,
+        )
+        .unwrap();
+        assert!(app.review_reply_prefix);
+        handle_app_key(
+            &mut app,
+            key('a'),
+            &mut pending_event,
+            &mut terminal,
+            &editor_config,
+        )
+        .unwrap();
+        assert!(app.review_editor_active());
+        app.review_cancel_editor();
+
+        handle_app_key(
+            &mut app,
+            key('v'),
+            &mut pending_event,
+            &mut terminal,
+            &editor_config,
+        )
+        .unwrap();
+        assert!(app.review_resolve_prefix);
+    }
+
+    #[test]
+    fn escape_closes_path_popup_without_quitting() {
+        let diff = MultiFileDiff::from_file_pair(
+            "old.txt".into(),
+            "new.txt".into(),
+            "old\n".to_string(),
+            "new\n".to_string(),
+        );
+        let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+        app.show_path_popup = true;
+        let mut terminal = test_terminal();
+        let mut pending_event = None;
+
+        handle_app_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()),
+            &mut pending_event,
+            &mut terminal,
+            &config::EditorConfig::default(),
+        )
+        .unwrap();
+
+        assert!(!app.show_path_popup);
+        assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn escape_closes_search_after_accept_without_quitting() {
+        let diff = MultiFileDiff::from_file_pair(
+            "old.txt".into(),
+            "new.txt".into(),
+            "needle\n".to_string(),
+            "needle\n".to_string(),
+        );
+        let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+        app.start_search();
+        for ch in "needle".chars() {
+            app.push_search_char(ch);
+        }
+        handle_search_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+        );
+        assert!(!app.search_active());
+        assert!(app.search_bar_visible());
+        assert!(app.search_target().is_some());
+        let mut terminal = test_terminal();
+        let mut pending_event = None;
+
+        handle_app_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()),
+            &mut pending_event,
+            &mut terminal,
+            &config::EditorConfig::default(),
+        )
+        .unwrap();
+
+        assert!(!app.search_bar_visible());
+        assert_eq!(app.search_target(), None);
+        assert!(!app.quit_confirmation_active());
+        assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn backspace_keeps_empty_search_open() {
+        let diff = MultiFileDiff::from_file_pair(
+            "old.txt".into(),
+            "new.txt".into(),
+            "old\n".to_string(),
+            "new\n".to_string(),
+        );
+        let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+        app.start_search();
+
+        handle_search_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::empty()),
+        );
+
+        assert!(app.search_active());
+        assert!(app.search_query().is_empty());
+    }
+
+    #[test]
     fn count_digits_require_plain_digit_keys() {
         assert_eq!(count_digit(key('1'), false), Some(1));
         assert_eq!(count_digit(key('0'), false), None);
         assert_eq!(count_digit(key('0'), true), Some(0));
         assert_eq!(count_digit(ctrl('1'), false), None);
+    }
+
+    #[test]
+    fn visible_fold_shortcuts_reveal_from_each_side() {
+        let content = (1..=40)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let diff = MultiFileDiff::from_file_pair(
+            "fold.txt".into(),
+            "fold.txt".into(),
+            content.clone(),
+            content,
+        );
+        let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+        app.set_fold_context_mode(crate::config::FoldContextMode::Expandable);
+
+        let register_fold = |app: &mut App| {
+            let view = app.current_view_with_frame(oyo_core::AnimationFrame::Idle);
+            let region = view
+                .iter()
+                .find_map(|line| app.fold_context_region_for_line(line))
+                .unwrap();
+            app.fold_context_hits = vec![
+                crate::app::FoldContextHit {
+                    x: 0,
+                    y: 0,
+                    width: 1,
+                    height: 1,
+                    key: region.key,
+                    direction: FoldContextDirection::Top,
+                },
+                crate::app::FoldContextHit {
+                    x: 1,
+                    y: 0,
+                    width: 1,
+                    height: 1,
+                    key: region.key,
+                    direction: FoldContextDirection::Bottom,
+                },
+            ];
+        };
+
+        register_fold(&mut app);
+        assert!(handle_fold_context_action_key(&mut app, key('u')));
+        assert_eq!(app.fold_context_prefix, Some(FoldContextDirection::Top));
+        assert!(handle_fold_context_action_key(&mut app, key('a')));
+        assert!(app
+            .current_view_with_frame(oyo_core::AnimationFrame::Idle)
+            .iter()
+            .any(|line| line.content == "↑ 14 unchanged lines ↓"));
+
+        register_fold(&mut app);
+        assert!(handle_fold_context_action_key(&mut app, key('d')));
+        assert_eq!(app.fold_context_prefix, Some(FoldContextDirection::Bottom));
+        assert!(handle_fold_context_action_key(&mut app, key('a')));
+        assert!(app
+            .current_view_with_frame(oyo_core::AnimationFrame::Idle)
+            .iter()
+            .all(|line| !crate::app::is_fold_line(line)));
     }
 }

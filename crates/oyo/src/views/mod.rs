@@ -22,16 +22,872 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::app::{diff_scrollbar_thumb, App, DiffScrollbarState};
+use crate::app::{
+    diff_scrollbar_thumb, review::ReviewCommentOverlay, App, DiffScrollbarState,
+    FoldContextDirection, FoldContextKey,
+};
+use crate::avatars::avatar_image;
+use crate::keybindings::{GlobalAction, NormalAction};
+use crate::markdown::markdown_preview_lines;
 use oyo_core::{LineKind, ViewLine, ViewSpan};
 use ratatui::{
-    layout::{Margin, Rect},
-    style::Style,
-    text::Span,
+    layout::{Margin, Rect, Size},
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
     Frame,
 };
+use ratatui_image::{Image as TerminalImage, Resize};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
+
+pub(crate) struct FoldContextBand {
+    pub(crate) key: FoldContextKey,
+    pub(crate) spans: Vec<Span<'static>>,
+    pub(crate) top_x: u16,
+    pub(crate) top_width: u16,
+    pub(crate) bottom_x: u16,
+    pub(crate) bottom_width: u16,
+}
+
+pub(crate) fn fold_context_background(app: &App) -> Color {
+    let surface = app.theme.background_panel.or(app.theme.background_element);
+    match (surface, app.theme.background) {
+        (Some(surface), Some(background)) if surface == background => {
+            color::blend_colors(background, app.theme.text_muted, 0.05).unwrap_or(surface)
+        }
+        (Some(surface), Some(background)) => {
+            color::blend_colors(background, surface, 0.25).unwrap_or(surface)
+        }
+        (Some(surface), None) => surface,
+        (None, Some(background)) => {
+            color::blend_colors(background, app.theme.text_muted, 0.05).unwrap_or(background)
+        }
+        (None, None) => {
+            if app.theme_is_light {
+                Color::Gray
+            } else {
+                Color::Black
+            }
+        }
+    }
+}
+
+fn fold_scope_hint(text: &str, available_width: usize) -> Option<String> {
+    const GAP: &str = "   ";
+    let gap_width = GAP.width();
+    if available_width <= gap_width.saturating_add("…".width()) {
+        return None;
+    }
+    let text_width = available_width - gap_width;
+    if text.width() <= text_width {
+        return Some(format!("{GAP}{text}"));
+    }
+
+    let prefix_width = text_width.saturating_sub("…".width());
+    let mut prefix = String::new();
+    let mut used = 0usize;
+    for grapheme in text.graphemes(true) {
+        let width = grapheme.width();
+        if used.saturating_add(width) > prefix_width {
+            break;
+        }
+        prefix.push_str(grapheme);
+        used += width;
+    }
+    Some(format!("{GAP}{prefix}…"))
+}
+
+pub(crate) fn fold_context_band(
+    app: &App,
+    line: &ViewLine,
+    visible_width: usize,
+    action_idx: Option<usize>,
+) -> Option<FoldContextBand> {
+    let region = app.fold_context_region_for_line(line)?;
+    let full_label = crate::app::fold_context_label(region.hidden_lines);
+    let compact_label = format!(" {} ", region.hidden_lines);
+    let (up_key, label, down_key) = if let Some(idx) = action_idx {
+        let up = crate::app::review::review_index_action_label("u", idx);
+        let down = crate::app::review::review_index_action_label("d", idx);
+        let full_width = up
+            .width()
+            .saturating_add(full_label.as_str().width())
+            .saturating_add(down.width())
+            .saturating_add(4);
+        let compact_width = up
+            .width()
+            .saturating_add(compact_label.as_str().width())
+            .saturating_add(down.width())
+            .saturating_add(4);
+        if visible_width >= full_width {
+            (format!("{up} "), full_label, format!("{down} "))
+        } else if visible_width >= compact_width {
+            (format!("{up} "), compact_label, format!("{down} "))
+        } else {
+            (up, String::new(), down)
+        }
+    } else if visible_width >= full_label.as_str().width().saturating_add(2) {
+        (String::new(), full_label, String::new())
+    } else if visible_width >= compact_label.as_str().width().saturating_add(2) {
+        (String::new(), compact_label, String::new())
+    } else {
+        (String::new(), String::new(), String::new())
+    };
+    let muted = if app.theme.background.is_none()
+        && app.theme.background_panel.is_none()
+        && app.theme.background_element.is_none()
+        && app.theme_is_light
+    {
+        app.theme.text
+    } else {
+        app.theme.text_muted
+    };
+    let up_key_width = up_key.as_str().width() as u16;
+    let down_key_width = down_key.as_str().width() as u16;
+    let top_x = 0;
+    let top_width = up_key_width.saturating_add("↑".width() as u16);
+    let bottom_x = up_key
+        .as_str()
+        .width()
+        .saturating_add("↑".width())
+        .saturating_add(label.as_str().width()) as u16;
+    let bottom_width = down_key_width.saturating_add("↓".width() as u16);
+    let button_style = |direction| {
+        if app.fold_context_hover == Some((region.key, direction)) {
+            Style::default()
+                .fg(app.theme.accent)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(muted)
+        }
+    };
+    let controls_width = bottom_x as usize + bottom_width as usize;
+    let scope_hint = region
+        .scope_hint
+        .as_deref()
+        .and_then(|hint| fold_scope_hint(hint, visible_width.saturating_sub(controls_width)));
+    let mut spans = vec![
+        Span::styled(up_key, button_style(FoldContextDirection::Top)),
+        Span::styled("↑", button_style(FoldContextDirection::Top)),
+        Span::styled(label, Style::default().fg(muted)),
+        Span::styled(down_key, button_style(FoldContextDirection::Bottom)),
+        Span::styled("↓", button_style(FoldContextDirection::Bottom)),
+    ];
+    if let Some(scope_hint) = scope_hint {
+        spans.push(Span::styled(
+            scope_hint,
+            Style::default().fg(muted).add_modifier(Modifier::DIM),
+        ));
+    }
+    Some(FoldContextBand {
+        key: region.key,
+        spans,
+        top_x,
+        top_width,
+        bottom_x,
+        bottom_width,
+    })
+}
+
+pub(crate) fn review_note_line_spans(
+    app: &App,
+    overlay: &ReviewCommentOverlay,
+    line: &str,
+) -> Vec<Span<'static>> {
+    let anchor_key = &overlay.anchor_key;
+    let highlighted = app.review_preview_hover.as_deref() == Some(anchor_key)
+        || app.review_preview_flash_active(anchor_key);
+    let reply_hovered = app.review_preview_reply_hover.as_deref() == Some(anchor_key);
+    let resolve_hovered = app.review_preview_resolve_hover.as_deref() == Some(anchor_key);
+    let delete_hovered = app.review_preview_delete_hover.as_deref() == Some(anchor_key);
+    let overflow_hovered = app.review_preview_overflow_hover.as_deref() == Some(anchor_key);
+    let resolved = overlay.resolved;
+    let border = Style::default().fg(if highlighted {
+        app.theme.accent
+    } else if resolved || overlay.outdated {
+        app.theme.text_muted
+    } else {
+        app.theme.warning
+    });
+    let title = Style::default()
+        .fg(if resolved {
+            app.theme.text_muted
+        } else {
+            app.theme.warning
+        })
+        .add_modifier(Modifier::BOLD);
+    let text = Style::default().fg(if resolved {
+        app.theme.text_muted
+    } else {
+        app.theme.text
+    });
+    let key = Style::default()
+        .fg(app.theme.accent)
+        .add_modifier(Modifier::BOLD);
+    let delete = if delete_hovered {
+        Style::default()
+            .fg(app.theme.error)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        text
+    };
+
+    if let Some(rest) = line
+        .strip_prefix("╭ ")
+        .and_then(|line| line.strip_suffix('╮'))
+    {
+        let (label, rule) = rest.rsplit_once(' ').unwrap_or((rest, ""));
+        return vec![
+            Span::styled("╭ ".to_string(), border),
+            Span::styled(label.to_string(), title),
+            Span::styled(format!(" {rule}╮"), border),
+        ];
+    }
+    if let Some(rule) = line
+        .strip_prefix('╰')
+        .and_then(|line| line.strip_suffix('╯'))
+        .filter(|line| line.chars().all(|ch| ch == '─'))
+    {
+        return vec![
+            Span::styled("╰".to_string(), border),
+            Span::styled(rule.to_string(), border),
+            Span::styled("╯".to_string(), border),
+        ];
+    }
+    if let Some(rest) = line
+        .strip_prefix("╰ ")
+        .and_then(|line| line.strip_suffix('╯'))
+    {
+        let (label, rule) = rest
+            .rsplit_once(' ')
+            .filter(|(_, rule)| rule.chars().all(|ch| ch == '─'))
+            .unwrap_or((rest, ""));
+        let mut spans = vec![Span::styled("╰ ".to_string(), border)];
+        for (idx, action) in label.split("   ").enumerate() {
+            if idx > 0 {
+                spans.push(Span::styled("   ".to_string(), text));
+            }
+            if let Some((action_key, action_label)) = action.split_once(' ') {
+                let is_delete = action_key.starts_with('x');
+                let is_reply = action_key.starts_with('r');
+                let is_resolve = action_key.starts_with('v');
+                let is_overflow = action_key.starts_with('o');
+                let edit_hovered = action_key.starts_with('i')
+                    && app.review_preview_edit_hover.as_deref() == Some(anchor_key);
+                let hovered = app.pr_comment_action_hover_key.as_deref() == Some(action_key)
+                    || edit_hovered
+                    || (is_reply && reply_hovered)
+                    || (is_resolve && resolve_hovered)
+                    || (is_overflow && overflow_hovered);
+                let delete_active = is_delete && (hovered || delete_hovered);
+                let action_key_style = if delete_active {
+                    Style::default()
+                        .fg(app.theme.error)
+                        .add_modifier(Modifier::BOLD)
+                } else if is_resolve && hovered {
+                    Style::default()
+                        .fg(app.theme.accent)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    key
+                };
+                let action_label_style = if delete_active {
+                    action_key_style
+                } else if hovered {
+                    Style::default()
+                        .fg(app.theme.accent)
+                        .add_modifier(Modifier::BOLD)
+                } else if is_delete {
+                    delete
+                } else {
+                    text
+                };
+                spans.push(Span::styled(action_key.to_string(), action_key_style));
+                spans.push(Span::styled(format!(" {action_label}"), action_label_style));
+            } else {
+                spans.push(Span::styled(action.to_string(), text));
+            }
+        }
+        if !rule.is_empty() {
+            spans.push(Span::styled(format!(" {rule}"), border));
+        }
+        spans.push(Span::styled("╯".to_string(), border));
+        return spans;
+    }
+    vec![Span::styled(line.to_string(), text)]
+}
+
+fn take_width_prefix(text: &str, max_width: usize) -> String {
+    let mut out = String::new();
+    let mut width = 0usize;
+    for ch in text.chars() {
+        let ch_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if width.saturating_add(ch_width) > max_width {
+            break;
+        }
+        width = width.saturating_add(ch_width);
+        out.push(ch);
+    }
+    out
+}
+
+fn take_width_suffix(text: &str, max_width: usize) -> String {
+    let mut out = Vec::new();
+    let mut width = 0usize;
+    for ch in text.chars().rev() {
+        let ch_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if width.saturating_add(ch_width) > max_width {
+            break;
+        }
+        width = width.saturating_add(ch_width);
+        out.push(ch);
+    }
+    out.into_iter().rev().collect()
+}
+
+fn truncate_middle_width(text: &str, max_width: usize) -> String {
+    if UnicodeWidthStr::width(text) <= max_width {
+        return text.to_string();
+    }
+    if max_width == 0 {
+        return String::new();
+    }
+    if max_width == 1 {
+        return "…".to_string();
+    }
+    let keep = max_width.saturating_sub(1);
+    let head_width = keep.div_ceil(2);
+    let tail_width = keep.saturating_sub(head_width);
+    format!(
+        "{}…{}",
+        take_width_prefix(text, head_width),
+        take_width_suffix(text, tail_width)
+    )
+}
+
+#[derive(Clone)]
+pub(crate) struct ReviewNoteAvatar {
+    pub(crate) url: Option<String>,
+    pub(crate) seed: String,
+    pub(crate) row_offset: usize,
+    pub(crate) x_offset: u16,
+    pub(crate) width: u16,
+    pub(crate) height: u16,
+}
+
+#[derive(Clone, Copy)]
+enum ReviewActionKind {
+    Edit,
+    Reply,
+    Resolve,
+    Delete,
+    Overflow,
+}
+
+#[derive(Clone, Default, Debug)]
+pub(crate) struct ReviewNoteActionHits {
+    pub(crate) edit: Option<(usize, u16, u16)>,
+    pub(crate) reply: Option<(usize, u16, u16)>,
+    pub(crate) resolve: Option<(usize, u16, u16)>,
+    pub(crate) delete: Option<(usize, u16, u16)>,
+    pub(crate) overflow: Option<(usize, u16, u16)>,
+}
+
+#[derive(Clone)]
+pub(crate) struct ReviewNoteBlock {
+    pub(crate) lines: Vec<Line<'static>>,
+    pub(crate) avatar: Option<ReviewNoteAvatar>,
+    pub(crate) snapshot_rows: Option<(usize, usize)>,
+}
+
+fn wrap_review_card_spans(spans: Vec<Span<'static>>, width: usize) -> Vec<Vec<Span<'static>>> {
+    if width == 0 {
+        return vec![spans];
+    }
+    let mut lines = vec![Vec::new()];
+    let mut col = 0usize;
+    for span in spans {
+        let style = span.style;
+        let mut buf = String::new();
+        for grapheme in span.content.graphemes(true) {
+            let grapheme_width = UnicodeWidthStr::width(grapheme);
+            if col > 0 && col.saturating_add(grapheme_width) > width {
+                if !buf.is_empty() {
+                    lines.last_mut().unwrap().push(Span::styled(buf, style));
+                    buf = String::new();
+                }
+                lines.push(Vec::new());
+                col = 0;
+            }
+            buf.push_str(grapheme);
+            col = col.saturating_add(grapheme_width);
+        }
+        if !buf.is_empty() {
+            lines.last_mut().unwrap().push(Span::styled(buf, style));
+        }
+    }
+    lines
+}
+
+fn review_card_content_line(
+    border: Style,
+    text: Style,
+    content_width: usize,
+    content: Vec<Span<'static>>,
+    fill_wrapped_background: bool,
+) -> Line<'static> {
+    let used = spans_width(&content);
+    let fill = if fill_wrapped_background {
+        let mut backgrounds = content
+            .iter()
+            .filter(|span| !span.content.is_empty())
+            .map(|span| span.style.bg);
+        match backgrounds.next().flatten() {
+            Some(bg) if backgrounds.all(|candidate| candidate == Some(bg)) => {
+                Style::default().bg(bg)
+            }
+            _ => text,
+        }
+    } else {
+        text
+    };
+    let mut spans = vec![Span::styled("│ ".to_string(), border)];
+    spans.extend(content);
+    if used < content_width {
+        spans.push(Span::styled(" ".repeat(content_width - used), fill));
+    }
+    spans.push(Span::styled(" │".to_string(), border));
+    Line::from(spans)
+}
+
+fn review_snapshot_code_spans(
+    app: &mut App,
+    path: &str,
+    code: &str,
+    code_color: Color,
+    accent: Color,
+) -> Vec<Vec<Span<'static>>> {
+    let snapshot = code.lines().any(|line| line.starts_with("→ "));
+    let marked = code
+        .lines()
+        .map(|line| line.starts_with("→ "))
+        .collect::<Vec<_>>();
+    let source = if snapshot {
+        code.lines()
+            .map(|line| {
+                line.strip_prefix("→ ")
+                    .or_else(|| line.strip_prefix("  "))
+                    .unwrap_or(line)
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    } else {
+        code.to_string()
+    };
+    let mut rows = app.preview_source_spans(path, &source).unwrap_or_else(|| {
+        let mut rows = source
+            .lines()
+            .map(|line| {
+                vec![Span::styled(
+                    line.to_string(),
+                    Style::default().fg(code_color),
+                )]
+            })
+            .collect::<Vec<_>>();
+        if rows.is_empty() {
+            rows.push(vec![Span::styled("", Style::default().fg(code_color))]);
+        }
+        rows
+    });
+    if snapshot {
+        for (idx, row) in rows.iter_mut().enumerate() {
+            if marked.get(idx).copied().unwrap_or(false) {
+                for span in row.iter_mut() {
+                    span.style = span.style.add_modifier(Modifier::BOLD);
+                }
+                row.insert(
+                    0,
+                    Span::styled(
+                        "→ ",
+                        Style::default().fg(accent).add_modifier(Modifier::BOLD),
+                    ),
+                );
+            } else {
+                row.insert(0, Span::styled("  ", Style::default().fg(code_color)));
+            }
+        }
+    }
+    rows
+}
+
+fn review_note_action_rows(overlay: &ReviewCommentOverlay) -> Vec<Vec<(ReviewActionKind, String)>> {
+    let mut actions = Vec::new();
+    if overlay.can_edit {
+        if let Some(label) = overlay.edit_label.as_ref() {
+            actions.push((ReviewActionKind::Edit, format!("{label} edit")));
+        }
+    }
+    if let Some(label) = overlay.reply_label.as_ref() {
+        actions.push((ReviewActionKind::Reply, format!("{label} reply")));
+    }
+    if let Some(label) = overlay.resolve_label.as_ref() {
+        let action = if overlay.resolved {
+            "unresolve"
+        } else {
+            "resolve"
+        };
+        actions.push((ReviewActionKind::Resolve, format!("{label} {action}")));
+    }
+    if overlay.can_edit {
+        if let Some(label) = overlay.delete_label.as_ref() {
+            actions.push((ReviewActionKind::Delete, format!("{label} delete")));
+        }
+    }
+    if let Some(label) = overlay.overflow_label.as_ref() {
+        actions.push((ReviewActionKind::Overflow, format!("{label} …")));
+    }
+    (!actions.is_empty())
+        .then_some(actions)
+        .into_iter()
+        .collect()
+}
+
+fn review_note_block_inner(
+    app: &mut App,
+    overlay: &ReviewCommentOverlay,
+    visible_width: usize,
+    with_avatar: bool,
+    footer_label: Option<&str>,
+) -> ReviewNoteBlock {
+    const AVATAR_WIDTH: u16 = 2;
+    const AVATAR_HEIGHT: u16 = 2;
+
+    let max_width = visible_width.max(12);
+    let content_width = max_width.saturating_sub(4).max(1);
+    let avatar = (with_avatar && app.image_picker.is_some() && content_width > 8).then(|| {
+        ReviewNoteAvatar {
+            url: overlay.avatar_url.clone(),
+            seed: overlay.avatar_seed.clone(),
+            row_offset: 0,
+            x_offset: 2,
+            width: AVATAR_WIDTH,
+            height: AVATAR_HEIGHT,
+        }
+    });
+    let avatar_prefix_width = avatar
+        .as_ref()
+        .map(|_| AVATAR_WIDTH as usize + 1)
+        .unwrap_or(0);
+    let title_text = if overlay.resolved {
+        format!("✓ {}", overlay.title)
+    } else {
+        overlay.title.clone()
+    };
+    let title = truncate_middle_width(
+        &title_text,
+        max_width.saturating_sub(4 + avatar_prefix_width),
+    );
+    let rule = "─".repeat(
+        max_width.saturating_sub(UnicodeWidthStr::width(title.as_str()) + 4 + avatar_prefix_width),
+    );
+    let key = &overlay.anchor_key;
+    let mut lines = vec![Line::from(review_note_line_spans(
+        app,
+        overlay,
+        &format!("╭ {}{title} {rule}╮", " ".repeat(avatar_prefix_width)),
+    ))];
+
+    let body = if overlay.body.is_empty() {
+        "(empty)"
+    } else {
+        overlay.body.as_str()
+    };
+    let theme = app.theme.clone();
+    let syntax_path = overlay.syntax_path.clone();
+    let snapshot_code = overlay.snapshot_code.clone();
+    let mut highlight = |_lang: Option<&str>, code: &str| {
+        let path = syntax_path.as_deref()?;
+        let snapshot = snapshot_code.as_deref()?;
+        (code.trim_end_matches(['\r', '\n']) == snapshot)
+            .then(|| review_snapshot_code_spans(app, path, code, theme.diff_context, theme.accent))
+    };
+    let (mut body_lines, _) =
+        markdown_preview_lines(body, &theme, content_width, None, &mut highlight, None);
+    let snapshot_label = overlay.outdated.then(|| {
+        body_lines.iter().rposition(|line| {
+            line.spans
+                .first()
+                .is_some_and(|span| span.content.trim_start().starts_with("Snapshot "))
+        })
+    });
+    let snapshot_label = snapshot_label.flatten();
+    if let Some(label) = snapshot_label.and_then(|row| body_lines.get_mut(row)) {
+        if let Some(name) = label.spans.first_mut() {
+            name.style = Style::default().fg(theme.text_muted);
+        }
+    }
+    let border = Style::default().fg(
+        if app.review_preview_hover.as_deref() == Some(key) || app.review_preview_flash_active(key)
+        {
+            app.theme.accent
+        } else if overlay.resolved || overlay.outdated {
+            app.theme.text_muted
+        } else {
+            app.theme.warning
+        },
+    );
+    let text = Style::default().fg(if overlay.resolved {
+        app.theme.text_muted
+    } else {
+        app.theme.text
+    });
+    lines.push(review_card_content_line(
+        border,
+        text,
+        content_width,
+        Vec::new(),
+        false,
+    ));
+    let mut snapshot_start = None;
+    for (row, line) in body_lines.into_iter().enumerate() {
+        let wrapped_lines = wrap_review_card_spans(line.spans, content_width);
+        let wrapped = wrapped_lines.len() > 1;
+        for spans in wrapped_lines {
+            lines.push(review_card_content_line(
+                border,
+                text,
+                content_width,
+                spans,
+                wrapped,
+            ));
+        }
+        if Some(row) == snapshot_label && overlay.snapshot_code.is_some() {
+            snapshot_start = Some(lines.len());
+        }
+    }
+    let snapshot_rows = snapshot_start.map(|start| (start, lines.len()));
+    lines.push(review_card_content_line(
+        border,
+        text,
+        content_width,
+        Vec::new(),
+        false,
+    ));
+    if let Some(footer_label) = footer_label {
+        let bottom_rule = if footer_label.is_empty() {
+            "─".repeat(max_width.saturating_sub(2))
+        } else {
+            "─".repeat(max_width.saturating_sub(UnicodeWidthStr::width(footer_label) + 4))
+        };
+        let bottom_line = if footer_label.is_empty() {
+            format!("╰{bottom_rule}╯")
+        } else {
+            format!("╰ {footer_label} {bottom_rule}╯")
+        };
+        lines.push(Line::from(review_note_line_spans(
+            app,
+            overlay,
+            &bottom_line,
+        )));
+    } else {
+        let action_rows = review_note_action_rows(overlay);
+        if action_rows.is_empty() {
+            lines.push(Line::from(review_note_line_spans(
+                app,
+                overlay,
+                &format!("╰{}╯", "─".repeat(max_width.saturating_sub(2))),
+            )));
+        } else {
+            let last_row = action_rows.len().saturating_sub(1);
+            for (row_idx, row) in action_rows.into_iter().enumerate() {
+                let labels = row.into_iter().map(|(_, label)| label).collect::<Vec<_>>();
+                let label = labels.join("   ");
+                let mut spans = review_note_line_spans(app, overlay, &format!("╰ {label} ╯"));
+                if row_idx != last_row {
+                    spans.first_mut().unwrap().content = "├ ".into();
+                    spans.last_mut().unwrap().content = "┤".into();
+                }
+                let rule = "─"
+                    .repeat(max_width.saturating_sub(UnicodeWidthStr::width(label.as_str()) + 4));
+                let last = spans.len().saturating_sub(1);
+                spans.insert(last, Span::styled(format!(" {rule}"), border));
+                lines.push(Line::from(spans));
+            }
+        }
+    }
+    if overlay.thread_continues {
+        lines.push(Line::from(vec![
+            Span::raw(" "),
+            Span::styled("│", Style::default().fg(app.theme.text_muted)),
+        ]));
+    }
+    ReviewNoteBlock {
+        lines,
+        avatar,
+        snapshot_rows,
+    }
+}
+
+pub(crate) fn review_note_block(
+    app: &mut App,
+    overlay: &ReviewCommentOverlay,
+    visible_width: usize,
+) -> ReviewNoteBlock {
+    review_note_block_inner(app, overlay, visible_width, true, None)
+}
+
+pub(crate) fn review_note_block_with_footer(
+    app: &mut App,
+    overlay: &ReviewCommentOverlay,
+    visible_width: usize,
+    footer_label: &str,
+) -> ReviewNoteBlock {
+    review_note_block_inner(app, overlay, visible_width, true, Some(footer_label))
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ReviewPreviewRow {
+    pub(crate) id: u64,
+    pub(crate) row_idx: usize,
+    pub(crate) row_span: usize,
+    pub(crate) anchor_key: String,
+    pub(crate) indent: u16,
+    pub(crate) actions: ReviewNoteActionHits,
+}
+
+fn review_action_width(label: Option<&str>, action: &str) -> u16 {
+    label
+        .map(|label| format!("{label} {action}").width() as u16)
+        .unwrap_or(0)
+}
+
+pub(crate) fn review_note_edit_width(overlay: &ReviewCommentOverlay) -> u16 {
+    if overlay.can_edit {
+        review_action_width(overlay.edit_label.as_deref(), "edit")
+    } else {
+        0
+    }
+}
+
+pub(crate) fn review_note_reply_width(overlay: &ReviewCommentOverlay) -> u16 {
+    review_action_width(overlay.reply_label.as_deref(), "reply")
+}
+
+pub(crate) fn review_note_reply_x_offset(overlay: &ReviewCommentOverlay) -> u16 {
+    let edit_width = review_note_edit_width(overlay);
+    if edit_width == 0 {
+        2
+    } else {
+        2u16.saturating_add(edit_width).saturating_add(3)
+    }
+}
+
+pub(crate) fn review_note_resolve_width(overlay: &ReviewCommentOverlay) -> u16 {
+    review_action_width(
+        overlay.resolve_label.as_deref(),
+        if overlay.resolved {
+            "unresolve"
+        } else {
+            "resolve"
+        },
+    )
+}
+
+pub(crate) fn review_note_resolve_x_offset(overlay: &ReviewCommentOverlay) -> u16 {
+    let reply_width = review_note_reply_width(overlay);
+    let mut offset = review_note_reply_x_offset(overlay);
+    if reply_width > 0 {
+        offset = offset.saturating_add(reply_width).saturating_add(3);
+    }
+    offset
+}
+
+pub(crate) fn review_note_delete_x_offset(overlay: &ReviewCommentOverlay) -> u16 {
+    let resolve_width = review_note_resolve_width(overlay);
+    let mut offset = review_note_resolve_x_offset(overlay);
+    if resolve_width > 0 {
+        offset = offset.saturating_add(resolve_width).saturating_add(3);
+    }
+    offset
+}
+
+pub(crate) fn review_note_delete_width(overlay: &ReviewCommentOverlay) -> u16 {
+    if !overlay.can_edit {
+        return 0;
+    }
+    review_action_width(overlay.delete_label.as_deref(), "delete")
+}
+
+pub(crate) fn review_preview_row(
+    row_idx: usize,
+    row_span: usize,
+    anchor_key: String,
+    overlay: &ReviewCommentOverlay,
+) -> ReviewPreviewRow {
+    let rows = review_note_action_rows(overlay);
+    let trailing_rows = usize::from(overlay.thread_continues);
+    let first_row = row_span.saturating_sub(rows.len().saturating_add(trailing_rows));
+    let mut actions = ReviewNoteActionHits::default();
+    for (row_offset, row) in rows.into_iter().enumerate() {
+        let mut x = 2u16;
+        for (kind, label) in row {
+            let width = UnicodeWidthStr::width(label.as_str()) as u16;
+            let hit = Some((first_row.saturating_add(row_offset), x, width));
+            match kind {
+                ReviewActionKind::Edit => actions.edit = hit,
+                ReviewActionKind::Reply => actions.reply = hit,
+                ReviewActionKind::Resolve => actions.resolve = hit,
+                ReviewActionKind::Delete => actions.delete = hit,
+                ReviewActionKind::Overflow => actions.overflow = hit,
+            }
+            x = x.saturating_add(width).saturating_add(3);
+        }
+    }
+    ReviewPreviewRow {
+        id: overlay.id,
+        row_idx,
+        row_span,
+        anchor_key,
+        indent: 0,
+        actions,
+    }
+}
+
+pub(crate) fn review_note_lines(
+    app: &mut App,
+    overlay: &ReviewCommentOverlay,
+    visible_width: usize,
+) -> Vec<Line<'static>> {
+    review_note_block_inner(app, overlay, visible_width, false, None).lines
+}
+
+pub(crate) fn render_review_note_avatar(
+    frame: &mut Frame,
+    app: &App,
+    content_area: Rect,
+    local_row: usize,
+    avatar: &ReviewNoteAvatar,
+) {
+    let Some(picker) = app.image_picker.as_ref().cloned() else {
+        return;
+    };
+    let area = Rect::new(
+        content_area.x.saturating_add(avatar.x_offset),
+        content_area.y.saturating_add(local_row as u16),
+        avatar.width,
+        avatar.height,
+    );
+    if area.y >= content_area.y.saturating_add(content_area.height) {
+        return;
+    }
+    let image = avatar_image(avatar.url.as_deref(), &avatar.seed);
+    let Ok(protocol) =
+        picker.new_protocol(image, Size::new(area.width, area.height), Resize::Fit(None))
+    else {
+        return;
+    };
+    frame.render_widget(TerminalImage::new(&protocol).allow_clipping(true), area);
+}
 
 pub(crate) fn spans_to_text(spans: &[Span]) -> String {
     let mut out = String::new();
@@ -105,15 +961,29 @@ pub(crate) fn render_diff_scrollbar(
         vertical: 0,
         horizontal: 0,
     });
+    if track.width == 0 {
+        return;
+    }
+    let x = track.x;
+    let mut style = Style::default().fg(app.theme.text_muted);
+    let track_style = app.theme.background.map(|bg| Style::default().bg(bg));
+    if let Some(bg) = app.theme.background {
+        style = style.bg(bg);
+    }
+    let buffer = frame.buffer_mut();
+    for row in track.y..track.y.saturating_add(track.height) {
+        if let Some(cell) = buffer.cell_mut((x, row)) {
+            cell.set_symbol(" ");
+            if let Some(track_style) = track_style {
+                cell.set_style(track_style);
+            }
+        }
+    }
     let Some((thumb_top, thumb_height)) =
         diff_scrollbar_thumb(total_lines, visible_lines, track.height, scroll_offset)
     else {
         return;
     };
-    if track.width == 0 {
-        return;
-    }
-    let x = track.x;
     app.set_diff_scrollbar(DiffScrollbarState {
         x,
         y: track.y,
@@ -128,8 +998,6 @@ pub(crate) fn render_diff_scrollbar(
     } else {
         "▐"
     };
-    let style = Style::default().fg(app.theme.text_muted);
-    let buffer = frame.buffer_mut();
     let start = track.y.saturating_add(thumb_top);
     let end = start
         .saturating_add(thumb_height)
@@ -511,6 +1379,31 @@ pub(crate) fn pad_spans_bg(
     spans
 }
 
+fn review_note_is_footer(spans: &[Span]) -> bool {
+    spans_to_text(spans).trim_start().starts_with('╰')
+}
+
+pub(crate) fn fit_review_note_footer(
+    spans: Vec<Span<'static>>,
+    width: usize,
+) -> Vec<Span<'static>> {
+    if !review_note_is_footer(&spans) || width == 0 || spans_width(&spans) <= width {
+        return spans;
+    }
+    let border_style = spans.last().map(|span| span.style).unwrap_or_default();
+    let mut clipped = slice_spans(&spans, 0, width.saturating_sub(1));
+    clipped.push(Span::styled("╯", border_style));
+    clipped
+}
+
+pub(crate) fn review_note_wrap_count(spans: &[Span], wrap_width: usize) -> usize {
+    if review_note_is_footer(spans) {
+        1
+    } else {
+        wrap_count_for_spans(spans, wrap_width)
+    }
+}
+
 pub(crate) fn wrap_count_for_spans(spans: &[Span], wrap_width: usize) -> usize {
     let graphemes = spans
         .iter()
@@ -653,12 +1546,7 @@ pub(crate) fn truncate_text(text: &str, max_width: usize) -> String {
 use crate::app::{AnimationPhase, ViewMode};
 use crate::color;
 use crate::config::{DiffExtentMarkerMode, DiffExtentMarkerScope, ResolvedTheme};
-use ratatui::{
-    layout::Alignment,
-    style::{Color, Modifier},
-    text::Line,
-    widgets::Paragraph,
-};
+use ratatui::{layout::Alignment, widgets::Paragraph};
 
 pub(crate) fn extent_marker_style(
     app: &App,
@@ -693,7 +1581,8 @@ pub(crate) fn extent_marker_style(
 }
 
 pub(crate) fn show_extent_marker(app: &App, view_line: &ViewLine) -> bool {
-    if !view_line.show_hunk_extent {
+    let no_step_hunk_line = !app.stepping && view_line.hunk_index.is_some();
+    if !view_line.show_hunk_extent && !no_step_hunk_line {
         return false;
     }
     if app.diff_extent_marker_context {
@@ -703,6 +1592,18 @@ pub(crate) fn show_extent_marker(app: &App, view_line: &ViewLine) -> bool {
         return false;
     }
     true
+}
+
+pub(crate) fn extent_marker_text<'a>(
+    marker: &'a str,
+    deleted_marker: &'a str,
+    view_line: &ViewLine,
+) -> &'a str {
+    if matches!(view_line.kind, LineKind::Deleted | LineKind::PendingDelete) {
+        deleted_marker
+    } else {
+        marker
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1406,6 +2307,274 @@ fn should_strikethrough(phase: AnimationPhase, progress: f32, backward: bool) ->
     }
 }
 
+fn review_file_comment_action(app: &App) -> Option<(Vec<Span<'static>>, usize)> {
+    if !app.file_review_comments_supported() || app.review_editor_active() {
+        return None;
+    }
+    let key = app.keybindings.normal_keys(NormalAction::LineComment);
+    let label = "comment";
+    let width = key.width().saturating_add(1).saturating_add(label.width());
+    let key_style = Style::default()
+        .fg(app.theme.accent)
+        .add_modifier(Modifier::BOLD);
+    let label_style = if app.review_file_comment_hover {
+        Style::default()
+            .fg(app.theme.accent)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(app.theme.text_muted)
+    };
+    Some((
+        vec![
+            Span::styled(key, key_style),
+            Span::raw(" "),
+            Span::styled(label.to_string(), label_style),
+        ],
+        width,
+    ))
+}
+
+fn review_file_comment_card(
+    app: &mut App,
+    width: usize,
+) -> Option<(ReviewCommentOverlay, Vec<Line<'static>>)> {
+    let overlay = app.review_file_comment_overlay()?;
+    let lines = review_note_lines(app, &overlay, width);
+    Some((overlay, lines))
+}
+
+fn add_review_file_comment_card_hits(
+    app: &mut App,
+    area: Rect,
+    y: u16,
+    row: usize,
+    visible_height: u16,
+    overlay: &ReviewCommentOverlay,
+) {
+    app.add_review_comment_preview_box(
+        area.x,
+        y.saturating_add(row as u16),
+        area.width,
+        visible_height,
+        overlay.id,
+        overlay.anchor_key.clone(),
+    );
+    let preview = review_preview_row(
+        row,
+        visible_height as usize,
+        overlay.anchor_key.clone(),
+        overlay,
+    );
+    if let Some((offset, x, width)) = preview.actions.edit {
+        app.add_review_preview_edit_box(
+            area.x.saturating_add(x),
+            y.saturating_add(row as u16).saturating_add(offset as u16),
+            width,
+            1,
+            overlay.id,
+            overlay.anchor_key.clone(),
+        );
+    }
+    if let Some((offset, x, width)) = preview.actions.reply {
+        app.add_review_preview_reply_box(
+            area.x.saturating_add(x),
+            y.saturating_add(row as u16).saturating_add(offset as u16),
+            width,
+            1,
+            overlay.id,
+            overlay.anchor_key.clone(),
+        );
+    }
+    if let Some((offset, x, width)) = preview.actions.resolve {
+        app.add_review_preview_resolve_box(
+            area.x.saturating_add(x),
+            y.saturating_add(row as u16).saturating_add(offset as u16),
+            width,
+            1,
+            overlay.id,
+            overlay.anchor_key.clone(),
+        );
+    }
+    if let Some((offset, x, width)) = preview.actions.delete {
+        app.add_review_preview_delete_box(
+            area.x.saturating_add(x),
+            y.saturating_add(row as u16).saturating_add(offset as u16),
+            width,
+            1,
+            overlay.id,
+            overlay.anchor_key.clone(),
+        );
+    }
+    if let Some((offset, x, width)) = preview.actions.overflow {
+        app.add_review_preview_overflow_box(
+            area.x.saturating_add(x),
+            y.saturating_add(row as u16).saturating_add(offset as u16),
+            width,
+            1,
+            overlay.id,
+            overlay.anchor_key.clone(),
+        );
+    }
+}
+
+pub(crate) fn render_binary_empty_state(frame: &mut Frame, app: &mut App, area: Rect) {
+    app.binary_preview_hit = None;
+    app.set_review_file_comment_hit(None);
+
+    if let Some(bg) = app.theme.background {
+        let bg_fill = Paragraph::new("").style(Style::default().bg(bg));
+        frame.render_widget(bg_fill, area);
+    }
+
+    let comment_action = review_file_comment_action(app);
+    let comment_card = review_file_comment_card(app, area.width as usize);
+
+    if !app.current_file_is_image() {
+        if comment_action.is_none() && comment_card.is_none() {
+            render_empty_state_text(
+                frame,
+                area,
+                &app.theme,
+                "Binary file (preview disabled)",
+                false,
+            );
+            return;
+        }
+
+        let mut lines = vec![Line::from(Span::styled(
+            "Binary file (preview disabled)",
+            Style::default().fg(app.theme.text_muted),
+        ))];
+        let action_row = comment_action.as_ref().map(|_| lines.len());
+        if let Some((comment_spans, _)) = comment_action.as_ref() {
+            lines.push(Line::from(comment_spans.clone()));
+        }
+        let card_row = comment_card.as_ref().map(|_| lines.len().saturating_add(1));
+        if let Some((_, card_lines)) = comment_card.as_ref() {
+            lines.push(Line::from(""));
+            lines.extend(card_lines.clone());
+        }
+
+        let height = (lines.len() as u16).min(area.height);
+        let y = area
+            .y
+            .saturating_add(area.height.saturating_sub(height) / 2);
+        if let (Some(row), Some((_, comment_width))) = (action_row, comment_action.as_ref()) {
+            if row < height as usize {
+                let comment_width = *comment_width;
+                let x = area
+                    .x
+                    .saturating_add(area.width.saturating_sub(comment_width as u16) / 2);
+                app.set_review_file_comment_hit(Some((
+                    x,
+                    y.saturating_add(row as u16),
+                    comment_width.min(area.width as usize) as u16,
+                    1,
+                )));
+            }
+        }
+        if let (Some(row), Some((overlay, card_lines))) = (card_row, comment_card.as_ref()) {
+            if row < height as usize {
+                let visible_height = card_lines.len().min(height as usize - row) as u16;
+                if visible_height == card_lines.len() as u16 {
+                    add_review_file_comment_card_hits(app, area, y, row, visible_height, overlay);
+                } else {
+                    app.add_review_preview_box(
+                        area.x,
+                        y.saturating_add(row as u16),
+                        area.width,
+                        visible_height,
+                        overlay.anchor_key.clone(),
+                    );
+                }
+            }
+        }
+
+        frame.render_widget(
+            Paragraph::new(lines).alignment(Alignment::Center),
+            Rect::new(area.x, y, area.width, height),
+        );
+        return;
+    }
+
+    let key = app
+        .keybindings
+        .global_keys(GlobalAction::OpenCommandPalette);
+    let label = "preview";
+    let preview_width = key.width().saturating_add(1).saturating_add(label.width());
+    let gap = usize::from(comment_action.is_some()) * 2;
+    let comment_width = comment_action
+        .as_ref()
+        .map(|(_, width)| *width)
+        .unwrap_or(0);
+    let width = preview_width
+        .saturating_add(gap)
+        .saturating_add(comment_width);
+    let key_style = Style::default()
+        .fg(app.theme.accent)
+        .add_modifier(Modifier::BOLD);
+    let label_style = if app.binary_preview_hover {
+        Style::default()
+            .fg(app.theme.accent)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(app.theme.text_muted)
+    };
+    let mut spans = vec![
+        Span::styled(key, key_style),
+        Span::raw(" "),
+        Span::styled(label.to_string(), label_style),
+    ];
+    if let Some((comment_spans, _)) = comment_action.as_ref() {
+        spans.push(Span::raw("  "));
+        spans.extend(comment_spans.clone());
+    }
+
+    let mut lines = vec![Line::from(spans)];
+    let card_row = comment_card.as_ref().map(|_| lines.len().saturating_add(1));
+    if let Some((_, card_lines)) = comment_card.as_ref() {
+        lines.push(Line::from(""));
+        lines.extend(card_lines.clone());
+    }
+    let height = (lines.len() as u16).min(area.height);
+    let y = area
+        .y
+        .saturating_add(area.height.saturating_sub(height) / 2);
+    let x = area
+        .x
+        .saturating_add(area.width.saturating_sub(width as u16) / 2);
+    app.binary_preview_hit = Some((x, y, preview_width.min(area.width as usize) as u16, 1));
+    if comment_action.is_some() && width <= area.width as usize {
+        app.set_review_file_comment_hit(Some((
+            x.saturating_add((preview_width + gap) as u16),
+            y,
+            comment_width as u16,
+            1,
+        )));
+    }
+    if let (Some(row), Some((overlay, card_lines))) = (card_row, comment_card.as_ref()) {
+        if row < height as usize {
+            let visible_height = card_lines.len().min(height as usize - row) as u16;
+            if visible_height == card_lines.len() as u16 {
+                add_review_file_comment_card_hits(app, area, y, row, visible_height, overlay);
+            } else {
+                app.add_review_preview_box(
+                    area.x,
+                    y.saturating_add(row as u16),
+                    area.width,
+                    visible_height,
+                    overlay.anchor_key.clone(),
+                );
+            }
+        }
+    }
+
+    frame.render_widget(
+        Paragraph::new(lines).alignment(Alignment::Center),
+        Rect::new(area.x, y, area.width, height),
+    );
+}
+
 /// Render empty state message centered in area.
 /// Shows hint line only if viewport has enough height and width.
 fn render_empty_state(
@@ -1415,12 +2584,6 @@ fn render_empty_state(
     has_changes: bool,
     is_binary: bool,
 ) {
-    // Fill entire area with background
-    if let Some(bg) = theme.background {
-        let bg_fill = Paragraph::new("").style(Style::default().bg(bg));
-        frame.render_widget(bg_fill, area);
-    }
-
     let (primary_text, show_hint) = if is_binary {
         ("Binary file (preview disabled)", false)
     } else if has_changes {
@@ -1428,6 +2591,22 @@ fn render_empty_state(
     } else {
         ("No changes in this file", false)
     };
+    render_empty_state_text(frame, area, theme, primary_text, show_hint);
+}
+
+fn render_empty_state_text(
+    frame: &mut Frame,
+    area: Rect,
+    theme: &ResolvedTheme,
+    primary_text: &str,
+    show_hint: bool,
+) {
+    // Fill entire area with background
+    if let Some(bg) = theme.background {
+        let bg_fill = Paragraph::new("").style(Style::default().bg(bg));
+        frame.render_widget(bg_fill, area);
+    }
+
     let primary = Line::from(Span::styled(
         primary_text,
         Style::default().fg(theme.text_muted),

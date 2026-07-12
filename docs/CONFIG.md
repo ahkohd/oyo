@@ -10,7 +10,7 @@ You can also pass extra config files. Oyo loads your user config first, then mer
 oy --config /tmp/oyo-plugin.toml
 ```
 
-Extra config files append `review.hooks` and `review.actions`. They merge tables, such as `keybindings.normal`.
+Extra config files append `review.hooks`, `review.actions` and `selection.actions`. They merge tables, such as `keybindings.normal`.
 
 ## Config file locations
 
@@ -28,12 +28,11 @@ view_mode = "unified"
 stepping = false
 watch = true
 line_wrap = false
-fold_context = "off"
 
 [ui.diff]
-fg = "theme"
-bg = false
-highlight = "text"
+fg = "syntax"
+bg = true
+highlight = "word"
 
 [ui.syntax]
 mode = "on"
@@ -55,17 +54,25 @@ Use `[ui]` for general display and navigation defaults.
 | `auto_center` | `true`, `false` | `true` | Keeps the active change centred while stepping |
 | `watch` | `true`, `false` | `true` | Refreshes changed files on disk |
 | `overscroll` | `true`, `false` | `false` | Allows extra end-of-file scroll while centring |
+| `confirm_quit` | `true`, `false` | `true` | Asks for confirmation before quitting the TUI |
 | `view_mode` | `unified`, `split`, `evolution`, `blame`, `preview` | `unified` | Sets the default view mode |
 | `line_wrap` | `true`, `false` | `false` | Wraps long lines instead of horizontal scrolling |
-| `fold_context` | `off`, `on`, `counts` | `off` | Folds long unchanged blocks |
+| `fold_context` | `off`, `expandable` | `expandable` | Sets whether Oyo folds long unchanged blocks |
+| `fold_context_lines` | non-negative integer | `3` | Keeps this many context lines on each side of a fold |
 | `scrollbar` | `true`, `false` | `true` | Shows the diff and file panel scrollbars |
 | `strikethrough_deletions` | `true`, `false` | `false` | Strikes through deleted text |
 | `gutter_signs` | `true`, `false` | `true` | Shows added and removed signs in unified and evolution views |
-| `stepping` | `true`, `false` | `false` | Starts in step-through mode |
+| `stepping` | `true`, `false` | `false` | Starts in step mode |
 | `primary_marker` | string | built in | Sets the active-line marker for the left pane or unified view |
 | `primary_marker_right` | string | built in | Sets the active-line marker for the right pane |
-| `extent_marker` | string | built in | Sets the hunk extent marker for the left pane or unified view |
+| `extent_marker_left` | string | built in | Sets the hunk extent marker for the left pane or unified view |
 | `extent_marker_right` | string | built in | Sets the hunk extent marker for the right pane |
+| `extent_marker_deleted` | string | built in | Sets the hunk extent marker for deleted lines |
+| `extent_marker` | string | built in | Legacy name for `extent_marker_left` |
+
+Long unchanged blocks are expandable by default. Oyo creates a fold when at least 8 lines remain hidden after preserving edge context. Set `fold_context = "off"` to show full context by default. Set `fold_context_lines = 0` for the most compact expandable view. The older `on` value remains an alias for `expandable`.
+
+Press `f` to toggle full and folded context. Search checks rendered lines. Press `F` to expand all folds before searching hidden context.
 
 ```toml
 [ui]
@@ -74,14 +81,35 @@ topbar = true
 auto_center = true
 watch = true
 overscroll = false
+confirm_quit = true
 view_mode = "unified"
 line_wrap = false
-fold_context = "off"
+fold_context = "expandable"
+fold_context_lines = 3
 scrollbar = true
 strikethrough_deletions = false
 gutter_signs = true
 stepping = false
+extent_marker_left = "┃"
+extent_marker_right = "▐"
+extent_marker_deleted = "╏"
+
+# Use "off" to show full context by default.
+# Use fold_context_lines = 0 for maximum compaction.
+
+[ui.toasts]
+enabled = true
+position = "bottom_right"
 ```
+
+### Toasts
+
+Use `[ui.toasts]` to turn toast notifications on or off and choose where they appear.
+
+| Key | Values | Default | What it does |
+| --- | --- | --- | --- |
+| `enabled` | `true`, `false` | `true` | Shows short notifications for actions such as copy and toggles |
+| `position` | `top_left`, `top_right`, `bottom_left`, `bottom_right`, `center` | `bottom_right` | Sets where toast notifications appear |
 
 ## Diff display
 
@@ -89,32 +117,34 @@ Use `[ui.diff]` to control diff colours, inline highlights and large-file behavi
 
 | Key | Values | Default | What it does |
 | --- | --- | --- | --- |
-| `bg` | `true`, `false` | `false` | Shows full-line diff backgrounds |
-| `fg` | `theme`, `syntax` | `theme` | Chooses diff text colours |
-| `highlight` | `text`, `word`, `none` | `text` | Controls inline changed-span highlights |
+| `bg` | `true`, `false` | `true` | Shows full-line diff backgrounds |
+| `fg` | `theme`, `syntax` | `syntax` | Chooses diff text colours |
+| `highlight` | `text`, `word`, `none` | `word` | Controls inline changed-span highlights |
 | `max_bytes` | integer | `16777216` | Defers diffing above this file size |
 | `full_context_max_bytes` | integer | `2097152` | Uses full-context rendering up to this file size |
 | `defer` | `true`, `false` | `true` | Computes large diffs in the background |
 | `idle_ms` | integer | `250` | Waits this many milliseconds before background diffing starts |
-| `extent_marker` | `neutral`, `diff` | `neutral` | Chooses hunk extent marker colour |
-| `extent_marker_scope` | `progress`, `hunk` | `progress` | Chooses which lines get diff colours while stepping |
+| `extent_marker` | `neutral`, `diff` | `diff` | Chooses hunk extent marker colour |
+| `extent_marker_scope` | `progress`, `hunk` | `hunk` | Chooses which lines get diff colours while stepping |
 | `extent_marker_context` | `true`, `false` | `false` | Shows extent markers on unchanged context lines |
+| `preview_change_bars` | `true`, `false` | `true` | Shows change bars in source, Markdown, CSV and structured previews |
 
 ```toml
 [ui.diff]
-bg = false
-fg = "theme"
-highlight = "text"
+bg = true
+fg = "syntax"
+highlight = "word"
 max_bytes = 16777216
 full_context_max_bytes = 2097152
 defer = true
 idle_ms = 250
-extent_marker = "neutral"
-extent_marker_scope = "progress"
+extent_marker = "diff"
+extent_marker_scope = "hunk"
 extent_marker_context = false
+preview_change_bars = true
 ```
 
-See [diff behaviour](./docs/DIFF_VIEWER.md) and [diff styling previews](./docs/DIFF_PREVIEWS.md).
+See [diff behaviour](./DIFF_VIEWER.md) and [diff styling previews](./DIFF_PREVIEWS.md).
 
 ## Syntax highlighting
 
@@ -146,7 +176,7 @@ idle_lines = 1000
 debounce_ms = 80
 ```
 
-See [theme configuration](./docs/THEME.md).
+See [theme configuration](./THEME.md).
 
 ## View-specific settings
 
@@ -157,7 +187,7 @@ Use these tables to change one view mode.
 modified_step_mode = "mixed" # "mixed" or "modified"
 
 [ui.split]
-align_lines = false
+align_lines = true
 align_fill = "/"
 
 [ui.evo]
@@ -167,7 +197,7 @@ syntax = "context" # "context" or "full"
 | Table | Key | Values | Default | What it does |
 | --- | --- | --- | --- | --- |
 | `[ui.unified]` | `modified_step_mode` | `mixed`, `modified` | `mixed` | Chooses how modified lines render while stepping |
-| `[ui.split]` | `align_lines` | `true`, `false` | `false` | Inserts blank rows to keep panes aligned |
+| `[ui.split]` | `align_lines` | `true`, `false` | `true` | Inserts blank rows to keep panes aligned |
 | `[ui.split]` | `align_fill` | string | built in | Fills aligned blank rows |
 | `[ui.evo]` | `syntax` | `context`, `full` | `context` | Chooses syntax scope in evolution view |
 
@@ -216,7 +246,7 @@ mode = "dark"
 | `defs` | table | empty | Defines reusable colour names |
 | `theme` | table | built in | Overrides theme tokens |
 
-See [theme configuration](./docs/THEME.md) for built-in themes, custom themes and theme tokens.
+See [theme configuration](./THEME.md) for built-in themes, custom themes and theme tokens.
 
 ## Navigation wrapping
 
@@ -288,7 +318,7 @@ ignore_globs = [".git/**", ".jj/**", ".hg/**", ".svn/**"]
 
 ## No-step mode
 
-Use `[no_step]` for scroll-only mode behaviour.
+Use `[no_step]` for scroll mode behaviour.
 
 | Key | Values | Default | What it does |
 | --- | --- | --- | --- |
@@ -331,6 +361,80 @@ file_scope = "repo"
 finder = "auto"
 ```
 
+## Review database and sync
+
+Use `[review]` to set where Oyo saves the review database.
+
+```toml
+[review]
+dir = ".oyo/reviews"
+```
+
+| Key | Values | Default | What it does |
+| --- | --- | --- | --- |
+| `dir` | path | platform app data directory | Sets the base directory for review databases |
+
+Relative paths resolve from the current workspace root. This supports Git worktrees and jj workspaces.
+
+GitHub sync uses the built-in `gh` adapter. Use provider config when you need to define another provider command interface.
+
+Pass a remote name to `oy review pull` or `oy review push` when you do not want the default remote.
+
+### Provider command interface
+
+Add custom providers under `[review.providers.<id>]`.
+
+```toml
+[review.providers.example]
+hosts = ["git.example.com"]
+
+[review.providers.example.commands.whoami]
+command = "example-oyo-provider"
+args = ["whoami"]
+
+[review.providers.example.commands.pr_get]
+command = "example-oyo-provider"
+args = ["pr", "get", "{repo}", "{target}"]
+
+[review.providers.example.commands.comments_list]
+command = "example-oyo-provider"
+args = ["comments", "list", "{repo}", "{number}"]
+
+[review.providers.example.commands.comments_create]
+command = "example-oyo-provider"
+args = ["comments", "create", "{repo}", "{number}"]
+
+[review.providers.example.commands.comments_update]
+command = "example-oyo-provider"
+args = ["comments", "update", "{repo}", "{number}"]
+
+[review.providers.example.commands.comments_delete]
+command = "example-oyo-provider"
+args = ["comments", "delete", "{repo}", "{number}"]
+```
+
+Provider command keys are:
+
+- `whoami`
+- `pr_find`
+- `pr_get`
+- `comments_list`
+- `comments_create`
+- `comments_update`
+- `comments_delete`
+
+Each command supports:
+
+| Key | Values | Default | What it does |
+| --- | --- | --- | --- |
+| `command` | string | none | Sets the executable |
+| `args` | list of strings | `[]` | Sets command arguments |
+| `timeout_ms` | number | `30000` | Sets the command timeout |
+
+Provider commands return Oyo-shaped JSON. Mutation commands read Oyo-shaped JSON from standard input.
+
+See [provider command contract](./REVIEW.md#provider-command-contract).
+
 ## Review hooks and actions
 
 Use `[[review.hooks]]` to run commands after review events.
@@ -372,7 +476,31 @@ Review events are:
 
 `stdin` can be `json` or `none`.
 
-See [review hooks](./docs/REVIEW_HOOKS.md).
+See [review hooks](./REVIEW_HOOKS.md).
+
+## Selection actions
+
+Use `[[selection.actions]]` to run commands from the selection toolbar.
+
+```toml
+[[selection.actions]]
+id = "ask-agent"
+label = "Ask agent"
+key = "a"
+message = "Sent to agent"
+failure_message = "Could not send to agent"
+command = "my-agent"
+args = ["review-selection"]
+stdin = "json"
+blocking = true
+timeout_ms = 30000
+```
+
+Oyo sends JSON on standard input by default. The payload includes the selected text, file, repo root, line ranges, view mode, side, scroll offset and selected screen rows.
+
+`stdin` can be `json` or `none`.
+
+If you omit `message` or `failure_message`, Oyo uses `<label> started` and `<label> failed`.
 
 ## Keybindings
 
@@ -382,21 +510,25 @@ Use `[keybindings.<mode>]` tables to override keys.
 [keybindings.global]
 open_command_palette = ["ctrl-p"]
 open_file_search = ["ctrl-shift-p"]
+open_theme_picker = ["ctrl-t"]
 
 [keybindings.normal]
 step_down = ["j", "down"]
 step_up = ["k", "up"]
+open_dashboard = ["ctrl-r"]
 start_selection = ["v"]
 start_line_selection = ["V"]
 start_block_selection = ["ctrl-v"]
 toggle_help = ["?"]
 
 [keybindings.review_editor]
-save = ["ctrl-o"]
+save = ["ctrl-s"]
+clear = ["ctrl-u"]
 
 [keybindings.selection]
 copy = ["y"]
 cancel = ["esc"]
+show_actions = ["enter"]
 
 [keybindings.search]
 cancel = ["esc"]
@@ -406,4 +538,4 @@ clear = ["ctrl-u"]
 
 If you omit an action, Oyo keeps the default keys. Set an action to an empty array to unbind it.
 
-See [keybinding actions](./docs/KEYBINDINGS.md).
+See [keybinding actions](./KEYBINDINGS.md).

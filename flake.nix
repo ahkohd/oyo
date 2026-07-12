@@ -36,14 +36,44 @@
         in
         rec {
           default = oyo;
-          oyo = rustPlatform.buildRustPackage {
-            pname = "oyo";
-            inherit version;
-            src = ./.;
-            cargoLock.lockFile = ./Cargo.lock;
-            nativeBuildInputs = [ pkgs.pkg-config ];
-            meta.mainProgram = "oy";
-          };
+          oyo =
+            let
+              # Runtime tools `oy` shells out to; --suffix keeps the user's own
+              # git/jj first. Clipboard and xdg-open are Linux-only (darwin: OSC52).
+              runtimeDeps =
+                (with pkgs; [
+                  git
+                  jujutsu
+                  curl
+                  gh
+                  glab
+                  fzf
+                ])
+                ++ pkgs.lib.optionals pkgs.stdenv.isLinux (
+                  with pkgs;
+                  [
+                    wl-clipboard
+                    xclip
+                    xsel
+                    xdg-utils
+                  ]
+                );
+            in
+            rustPlatform.buildRustPackage {
+              pname = "oyo";
+              inherit version;
+              src = ./.;
+              cargoLock.lockFile = ./Cargo.lock;
+              # TUI render/snapshot tests assume a real terminal and git on
+              # PATH, which the hermetic Nix sandbox lacks; they gate in CI.
+              doCheck = false;
+              nativeBuildInputs = [ pkgs.makeWrapper ];
+              postInstall = ''
+                wrapProgram $out/bin/oy \
+                  --suffix PATH : ${pkgs.lib.makeBinPath runtimeDeps}
+              '';
+              meta.mainProgram = "oy";
+            };
         }
       );
 
@@ -68,7 +98,6 @@
             packages = [
               rustToolchain
               pkgs.bacon
-              pkgs.pkg-config
             ];
             shellHook = ''
               echo "=== DEV SHELL (${system}) ==="

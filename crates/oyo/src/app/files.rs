@@ -1,8 +1,18 @@
 use super::{
-    AnimationPhase, App, FileDiskStamp, PreviewLinkBox, TopbarTab, TopbarTabContent, ViewMode,
+    AnimationPhase, App, FileDiskStamp, FilePanelMode, ImagePreviewCache, ImagePreviewSignature,
+    PreviewLinkBox, StatusModeMenu, TopbarTab, TopbarTabContent, ViewMode,
 };
+use crate::csv_preview::{CsvPreviewSignature, CsvPreviewState};
+use crate::structured_preview::{StructuredPreviewSignature, StructuredPreviewState};
+use crate::toasts::ToastEvent;
 use oyo_core::multi::FileSide;
+use ratatui::layout::Size;
+use ratatui_image::{picker::Picker, protocol::Protocol, Resize};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+
+const WATCH_CHANGE_FLASH_DURATION: Duration = Duration::from_secs(3);
 
 /// Whether a URL is safe to hand to the OS opener: only http(s)/mailto, so we
 /// never launch `file://`, `javascript:`, or other schemes from preview clicks.
@@ -10,6 +20,13 @@ fn is_openable_url(url: &str) -> bool {
     ["http://", "https://", "mailto:"]
         .iter()
         .any(|s| url.len() > s.len() && url[..s.len()].eq_ignore_ascii_case(s))
+}
+
+fn is_image_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"]
+        .iter()
+        .any(|ext| lower.ends_with(ext))
 }
 
 /// Open a URL with the operating system's default handler. The URL is passed as
@@ -121,15 +138,13 @@ impl App {
     }
 
     pub fn scroll_file_panel_down(&mut self) {
-        let visible_rows = self
-            .file_list_area
-            .map(|(_, _, _, height)| height.saturating_sub(2) as usize)
-            .unwrap_or(1)
-            .max(1);
-        let max_scroll = self
-            .filtered_file_indices()
-            .len()
-            .saturating_sub(visible_rows);
+        let total_rows = if self.file_panel_mode == FilePanelMode::Comments {
+            self.filtered_review_comment_indices().len()
+        } else {
+            let indices = self.filtered_file_indices();
+            self.file_list_total_rows(&indices)
+        };
+        let max_scroll = total_rows.saturating_sub(self.file_list_visible_rows());
         self.file_list_scroll = self.file_list_scroll.saturating_add(1).min(max_scroll);
     }
 
@@ -203,13 +218,75 @@ impl App {
         if index >= self.multi_diff.file_count() {
             return;
         }
+        self.clear_review_action_prefixes();
+        let was_comment_view = matches!(
+            self.active_topbar_content(),
+            Some(TopbarTabContent::PrComments | TopbarTabContent::OutdatedComments)
+        );
         self.save_active_topbar_tab_state();
+        if was_comment_view {
+            self.clear_virtual_comment_view_state();
+        }
         self.replace_active_topbar_tab_file(index);
         self.select_file_in_active_tab(index);
     }
 
+    fn clear_review_action_prefixes(&mut self) {
+        self.pr_reply_prefix = false;
+        self.review_edit_prefix = false;
+        self.review_reply_prefix = false;
+        self.review_resolve_prefix = false;
+        self.review_delete_prefix = false;
+        self.review_overflow_prefix = false;
+    }
+
+    fn clear_virtual_comment_view_state(&mut self) {
+        self.pr_comment_focus = None;
+        self.outdated_comment_focus = None;
+        self.pr_comment_hits.clear();
+        self.pr_comment_add_hit = None;
+        self.pr_comment_action_hover = None;
+        self.pr_comment_action_hover_key = None;
+        self.pr_comment_add_hover = false;
+        self.clear_review_action_prefixes();
+        self.clear_review_preview_boxes();
+        if self.review_editor_active() {
+            self.review_cancel_editor();
+        }
+    }
+
+    fn file_is_preview_only(&self, index: usize) -> bool {
+        self.multi_diff
+            .files
+            .get(index)
+            .is_some_and(|file| file.binary || is_image_name(&file.display_name))
+    }
+
+    fn apply_content_view_mode(&mut self) {
+        let saved_mode = self
+            .active_topbar_tab
+            .and_then(|id| self.topbar_tabs.iter().find(|tab| tab.id == id))
+            .map(|tab| tab.view_mode)
+            .unwrap_or(self.view_mode);
+        let preview_only = match self.active_topbar_content() {
+            Some(TopbarTabContent::File(index)) => self.file_is_preview_only(index),
+            Some(TopbarTabContent::PrComments | TopbarTabContent::OutdatedComments) => true,
+            Some(TopbarTabContent::Help) | None => false,
+        };
+        if preview_only && saved_mode != ViewMode::Preview {
+            self.view_mode = ViewMode::Preview;
+            self.preview_forced_by_content = true;
+        } else {
+            self.view_mode = saved_mode;
+            self.preview_forced_by_content = false;
+        }
+    }
+
     fn select_file_in_active_tab(&mut self, index: usize) {
         let old_index = self.multi_diff.selected_index;
+        if old_index != index && self.review_editor_active() {
+            self.review_cancel_editor();
+        }
         self.clear_step_edge_hint();
         self.clear_hunk_edge_hint();
         self.clear_blame_step_hint();
@@ -219,6 +296,7 @@ impl App {
         }
         self.save_scroll_position_for(old_index);
         self.multi_diff.select_file(index);
+        self.apply_content_view_mode();
         self.restore_scroll_position_for(self.multi_diff.selected_index);
         self.animation_phase = AnimationPhase::Idle;
         self.animation_progress = 1.0;
@@ -233,15 +311,32 @@ impl App {
     pub(crate) fn ensure_topbar_tabs(&mut self) {
         let count = self.multi_diff.file_count();
         if count == 0 {
-            self.topbar_tabs.clear();
-            self.active_topbar_tab = None;
+            self.topbar_tabs.retain(|tab| {
+                matches!(
+                    tab.content,
+                    TopbarTabContent::Help
+                        | TopbarTabContent::PrComments
+                        | TopbarTabContent::OutdatedComments
+                )
+            });
+            self.active_topbar_tab = self
+                .active_topbar_tab
+                .filter(|id| self.topbar_tabs.iter().any(|tab| tab.id == *id))
+                .or_else(|| self.topbar_tabs.first().map(|tab| tab.id));
             self.topbar_drag_target = None;
             return;
         }
         self.topbar_tabs.retain(|tab| match tab.content {
             TopbarTabContent::File(index) => index < count,
-            TopbarTabContent::Help => true,
+            TopbarTabContent::Help
+            | TopbarTabContent::PrComments
+            | TopbarTabContent::OutdatedComments => true,
         });
+        let live_ids: Vec<usize> = self.topbar_tabs.iter().map(|tab| tab.id).collect();
+        self.structured_previews
+            .retain(|id, _| live_ids.iter().any(|live| live == id));
+        self.csv_previews
+            .retain(|id, _| live_ids.iter().any(|live| live == id));
         if self.topbar_tabs.is_empty() {
             self.add_topbar_tab_for(self.multi_diff.selected_index.min(count.saturating_sub(1)));
         }
@@ -257,6 +352,14 @@ impl App {
         {
             self.topbar_drag_target = None;
         }
+    }
+
+    pub(crate) fn open_file_in_new_topbar_tab(&mut self, file_index: usize) {
+        if file_index >= self.multi_diff.file_count() {
+            return;
+        }
+        let id = self.add_topbar_tab_for(file_index);
+        self.select_topbar_tab(id);
     }
 
     fn add_topbar_tab_for(&mut self, file_index: usize) -> usize {
@@ -285,14 +388,21 @@ impl App {
             self.active_topbar_tab = Some(self.add_topbar_tab_for(index));
             return;
         };
+        let saved_view_mode = if self.preview_forced_by_content {
+            tab.view_mode
+        } else {
+            self.view_mode
+        };
         if tab.content != TopbarTabContent::File(index) {
+            self.structured_previews.remove(&active);
+            self.csv_previews.remove(&active);
             tab.content = TopbarTabContent::File(index);
             tab.navigator_state = None;
             tab.scroll_offset = 0;
             tab.horizontal_scroll = 0;
             tab.preview_rendered = true;
         }
-        tab.view_mode = self.view_mode;
+        tab.view_mode = saved_view_mode;
         tab.step_view_mode = self.step_view_mode;
         tab.stepping = self.stepping;
     }
@@ -313,15 +423,27 @@ impl App {
         let content = match content {
             TopbarTabContent::File(_) => TopbarTabContent::File(self.multi_diff.selected_index),
             TopbarTabContent::Help => TopbarTabContent::Help,
+            TopbarTabContent::PrComments => TopbarTabContent::PrComments,
+            TopbarTabContent::OutdatedComments => TopbarTabContent::OutdatedComments,
         };
-        let view_mode = self.view_mode;
+        let view_mode = if self.preview_forced_by_content {
+            self.topbar_tabs
+                .iter()
+                .find(|tab| tab.id == active)
+                .map(|tab| tab.view_mode)
+                .unwrap_or(self.view_mode)
+        } else {
+            self.view_mode
+        };
         let step_view_mode = self.step_view_mode;
         let stepping = self.stepping;
         let scroll_offset = self.scroll_offset;
         let horizontal_scroll = self.horizontal_scroll;
         let navigator_state = match content {
             TopbarTabContent::File(_) => Some(self.multi_diff.current_navigator().state().clone()),
-            TopbarTabContent::Help => None,
+            TopbarTabContent::Help
+            | TopbarTabContent::PrComments
+            | TopbarTabContent::OutdatedComments => None,
         };
         if let Some(tab) = self.topbar_tabs.iter_mut().find(|tab| tab.id == active) {
             tab.content = content;
@@ -365,13 +487,44 @@ impl App {
         self.active_topbar_tab = Some(id);
     }
 
+    pub(crate) fn topbar_close_allowed(&self, tab_id: usize) -> bool {
+        if self.topbar_tabs.len() > 1 {
+            return true;
+        }
+        self.multi_diff.file_count() == 0
+            && self
+                .topbar_tabs
+                .iter()
+                .any(|tab| tab.id == tab_id && tab.content == TopbarTabContent::Help)
+    }
+
+    pub(crate) fn close_active_topbar_tab(&mut self) {
+        if let Some(tab_id) = self.active_topbar_tab {
+            self.close_topbar_tab(tab_id);
+        }
+    }
+
     fn close_topbar_tab(&mut self, tab_id: usize) {
-        if self.topbar_tabs.len() <= 1 {
+        if !self.topbar_close_allowed(tab_id) {
             return;
         }
         let Some(pos) = self.topbar_tabs.iter().position(|tab| tab.id == tab_id) else {
             return;
         };
+        if self.topbar_tabs.len() == 1 {
+            self.structured_previews.remove(&tab_id);
+            self.csv_previews.remove(&tab_id);
+            self.topbar_tabs.clear();
+            self.active_topbar_tab = None;
+            self.topbar_hover_tab = None;
+            self.topbar_hover_close = None;
+            self.view_mode = ViewMode::UnifiedPane;
+            self.scroll_offset = 0;
+            self.horizontal_scroll = 0;
+            return;
+        }
+        self.structured_previews.remove(&tab_id);
+        self.csv_previews.remove(&tab_id);
         self.topbar_tabs.remove(pos);
         if self.active_topbar_tab == Some(tab_id) {
             let next_pos = pos.min(self.topbar_tabs.len().saturating_sub(1));
@@ -402,7 +555,23 @@ impl App {
             }
         }
         let old_index = self.multi_diff.selected_index;
+        let old_content = self.active_topbar_content();
+        let target_file = match tab.content {
+            TopbarTabContent::File(index) => Some(index),
+            TopbarTabContent::Help
+            | TopbarTabContent::PrComments
+            | TopbarTabContent::OutdatedComments => None,
+        };
+        if target_file != Some(old_index) && self.review_editor_active() {
+            self.review_cancel_editor();
+        }
         self.save_active_topbar_tab_state();
+        if matches!(
+            old_content,
+            Some(TopbarTabContent::PrComments | TopbarTabContent::OutdatedComments)
+        ) {
+            self.clear_virtual_comment_view_state();
+        }
         if !self.stepping {
             self.save_no_step_state_snapshot(old_index);
         }
@@ -413,6 +582,7 @@ impl App {
         self.clear_blame_hunk_hint();
         self.active_topbar_tab = Some(tab_id);
         self.view_mode = tab.view_mode;
+        self.preview_forced_by_content = false;
         self.step_view_mode = tab.step_view_mode;
         self.stepping = tab.stepping;
         self.scroll_offset = tab.scroll_offset;
@@ -426,6 +596,7 @@ impl App {
         match tab.content {
             TopbarTabContent::File(index) => {
                 self.multi_diff.select_file(index);
+                self.apply_content_view_mode();
                 self.update_file_list_scroll();
                 let restored = tab
                     .navigator_state
@@ -439,16 +610,114 @@ impl App {
             }
             TopbarTabContent::Help => {
                 self.view_mode = ViewMode::Preview;
+                self.preview_forced_by_content = false;
+                self.clear_diff_selection();
+            }
+            TopbarTabContent::PrComments | TopbarTabContent::OutdatedComments => {
+                self.view_mode = ViewMode::Preview;
+                self.preview_forced_by_content = tab.view_mode != ViewMode::Preview;
                 self.clear_diff_selection();
             }
         }
     }
 
-    pub(crate) fn open_help_tab(&mut self) {
-        if self.multi_diff.file_count() == 0 {
-            self.toggle_help();
+    fn set_virtual_comment_focus(&mut self, content: TopbarTabContent, focus: Option<u64>) {
+        match content {
+            TopbarTabContent::PrComments => self.pr_comment_focus = focus,
+            TopbarTabContent::OutdatedComments => self.outdated_comment_focus = focus,
+            TopbarTabContent::File(_) | TopbarTabContent::Help => {}
+        }
+    }
+
+    fn open_virtual_comments_in_current_tab(
+        &mut self,
+        content: TopbarTabContent,
+        focus: Option<u64>,
+    ) {
+        self.clear_virtual_comment_view_state();
+        self.set_virtual_comment_focus(content, focus);
+        self.save_active_topbar_tab_state();
+        let mut saved_mode = ViewMode::Preview;
+        if let Some(id) = self.active_topbar_tab {
+            if let Some(tab) = self.topbar_tabs.iter_mut().find(|tab| tab.id == id) {
+                saved_mode = tab.view_mode;
+                tab.content = content;
+                tab.scroll_offset = 0;
+                tab.horizontal_scroll = 0;
+                tab.preview_rendered = true;
+                tab.navigator_state = None;
+            }
+        } else {
+            self.open_virtual_comments_tab(content, focus);
             return;
         }
+        self.view_mode = ViewMode::Preview;
+        self.preview_forced_by_content = saved_mode != ViewMode::Preview;
+        self.scroll_offset = 0;
+        self.horizontal_scroll = 0;
+        self.clear_diff_selection();
+    }
+
+    fn open_virtual_comments_tab(&mut self, content: TopbarTabContent, focus: Option<u64>) {
+        self.clear_virtual_comment_view_state();
+        if let Some(id) = self
+            .topbar_tabs
+            .iter()
+            .find(|tab| tab.content == content)
+            .map(|tab| tab.id)
+        {
+            self.select_topbar_tab(id);
+            self.set_virtual_comment_focus(content, focus);
+            return;
+        }
+        self.set_virtual_comment_focus(content, focus);
+        self.save_active_topbar_tab_state();
+        let saved_mode = if self.preview_forced_by_content {
+            self.active_topbar_tab
+                .and_then(|active| self.topbar_tabs.iter().find(|tab| tab.id == active))
+                .map(|tab| tab.view_mode)
+                .unwrap_or(self.view_mode)
+        } else {
+            self.view_mode
+        };
+        let id = self.next_topbar_tab_id;
+        self.next_topbar_tab_id = self.next_topbar_tab_id.saturating_add(1);
+        self.topbar_tabs.push(TopbarTab {
+            id,
+            content,
+            view_mode: saved_mode,
+            step_view_mode: self.step_view_mode,
+            stepping: self.stepping,
+            scroll_offset: 0,
+            horizontal_scroll: 0,
+            preview_rendered: true,
+            navigator_state: None,
+        });
+        self.active_topbar_tab = Some(id);
+        self.view_mode = ViewMode::Preview;
+        self.preview_forced_by_content = saved_mode != ViewMode::Preview;
+        self.scroll_offset = 0;
+        self.horizontal_scroll = 0;
+        self.clear_diff_selection();
+    }
+
+    pub(crate) fn open_pr_comments_in_current_tab(&mut self, focus: Option<u64>) {
+        self.open_virtual_comments_in_current_tab(TopbarTabContent::PrComments, focus);
+    }
+
+    pub(crate) fn open_pr_comments_tab(&mut self, focus: Option<u64>) {
+        self.open_virtual_comments_tab(TopbarTabContent::PrComments, focus);
+    }
+
+    pub(crate) fn open_outdated_comments_in_current_tab(&mut self, focus: Option<u64>) {
+        self.open_virtual_comments_in_current_tab(TopbarTabContent::OutdatedComments, focus);
+    }
+
+    pub(crate) fn open_outdated_comments_tab(&mut self, focus: Option<u64>) {
+        self.open_virtual_comments_tab(TopbarTabContent::OutdatedComments, focus);
+    }
+
+    pub(crate) fn open_help_tab(&mut self) {
         if let Some(id) = self
             .topbar_tabs
             .iter()
@@ -474,6 +743,7 @@ impl App {
         });
         self.active_topbar_tab = Some(id);
         self.view_mode = ViewMode::Preview;
+        self.preview_forced_by_content = false;
         self.scroll_offset = 0;
         self.horizontal_scroll = 0;
         self.clear_diff_selection();
@@ -497,11 +767,490 @@ impl App {
     }
 
     pub(crate) fn toggle_preview_rendered(&mut self) {
+        let mut rendered = None;
         if let Some(active) = self.active_topbar_tab {
             if let Some(tab) = self.topbar_tabs.iter_mut().find(|tab| tab.id == active) {
                 tab.preview_rendered = !tab.preview_rendered;
+                rendered = Some(tab.preview_rendered);
             }
         }
+        if let Some(rendered) = rendered {
+            self.notify(ToastEvent::PreviewRendered(rendered));
+        }
+    }
+
+    pub(crate) fn set_image_picker(&mut self, picker: Picker) {
+        self.image_picker = Some(picker);
+        self.image_preview_cache = None;
+    }
+
+    pub(crate) fn ensure_terminal_image_preview(
+        &mut self,
+        path: &Path,
+        size: Size,
+    ) -> Option<&Protocol> {
+        if size.width == 0 || size.height == 0 {
+            return None;
+        }
+        let picker = self.image_picker.as_ref()?.clone();
+
+        let metadata = std::fs::metadata(path).ok();
+        let signature = ImagePreviewSignature {
+            path: path.to_path_buf(),
+            size,
+            len: metadata.as_ref().map(std::fs::Metadata::len).unwrap_or(0),
+            modified: metadata.and_then(|metadata| metadata.modified().ok()),
+        };
+        if self
+            .image_preview_cache
+            .as_ref()
+            .is_some_and(|cache| cache.signature == signature)
+        {
+            return self
+                .image_preview_cache
+                .as_ref()
+                .map(|cache| &cache.protocol);
+        }
+
+        let image = image::ImageReader::open(path).ok()?.decode().ok()?;
+        let protocol = picker.new_protocol(image, size, Resize::Fit(None)).ok()?;
+        self.image_preview_cache = Some(ImagePreviewCache {
+            signature,
+            protocol,
+        });
+        self.image_preview_cache
+            .as_ref()
+            .map(|cache| &cache.protocol)
+    }
+
+    pub(crate) fn ensure_csv_preview(
+        &mut self,
+        signature: CsvPreviewSignature,
+        text: &str,
+    ) -> Result<&mut CsvPreviewState, String> {
+        let Some(tab_id) = self.active_topbar_tab else {
+            return Err("No active tab".to_string());
+        };
+        let rebuild = self
+            .csv_previews
+            .get(&tab_id)
+            .is_none_or(|state| state.signature() != &signature);
+        if rebuild {
+            match CsvPreviewState::new(signature, text) {
+                Ok(state) => {
+                    self.csv_previews.insert(tab_id, state);
+                }
+                Err(error) => {
+                    self.csv_previews.remove(&tab_id);
+                    return Err(error);
+                }
+            }
+        }
+        self.csv_previews
+            .get_mut(&tab_id)
+            .ok_or_else(|| "No CSV preview".to_string())
+    }
+
+    pub(crate) fn active_csv_preview_mut(&mut self) -> Option<&mut CsvPreviewState> {
+        if self.view_mode != ViewMode::Preview || !self.active_preview_rendered() {
+            return None;
+        }
+        let tab_id = self.active_topbar_tab?;
+        self.csv_previews.get_mut(&tab_id)
+    }
+
+    pub(crate) fn sync_scroll_from_csv_preview(&mut self) {
+        // Header and separator stay pinned, so the scrollable body is shorter than the viewport.
+        let viewport_height = self.last_viewport_height.saturating_sub(2).max(1);
+        if let Some(state) = self.active_csv_preview_mut() {
+            let line = state.selected_visual_line();
+            if line < self.scroll_offset {
+                self.scroll_offset = line;
+            } else if line >= self.scroll_offset.saturating_add(viewport_height) {
+                self.scroll_offset = line.saturating_sub(viewport_height.saturating_sub(1));
+            }
+        }
+    }
+
+    pub(crate) fn csv_preview_move_down(&mut self, count: usize) -> bool {
+        let Some(state) = self.active_csv_preview_mut().filter(|_| count > 0) else {
+            return false;
+        };
+        state.move_down(count);
+        self.sync_scroll_from_csv_preview();
+        true
+    }
+
+    pub(crate) fn csv_preview_move_up(&mut self, count: usize) -> bool {
+        let Some(state) = self.active_csv_preview_mut().filter(|_| count > 0) else {
+            return false;
+        };
+        state.move_up(count);
+        self.sync_scroll_from_csv_preview();
+        true
+    }
+
+    pub(crate) fn csv_preview_move_left(&mut self, count: usize) -> bool {
+        let Some(state) = self.active_csv_preview_mut().filter(|_| count > 0) else {
+            return false;
+        };
+        state.move_left(count);
+        true
+    }
+
+    pub(crate) fn csv_preview_move_right(&mut self, count: usize) -> bool {
+        let Some(state) = self.active_csv_preview_mut().filter(|_| count > 0) else {
+            return false;
+        };
+        state.move_right(count);
+        true
+    }
+
+    pub(crate) fn csv_preview_focus_top(&mut self) -> bool {
+        let Some(state) = self.active_csv_preview_mut() else {
+            return false;
+        };
+        state.focus_top();
+        self.sync_scroll_from_csv_preview();
+        true
+    }
+
+    pub(crate) fn csv_preview_focus_bottom(&mut self) -> bool {
+        let Some(state) = self.active_csv_preview_mut() else {
+            return false;
+        };
+        state.focus_bottom();
+        self.sync_scroll_from_csv_preview();
+        true
+    }
+
+    pub(crate) fn ensure_structured_preview(
+        &mut self,
+        signature: StructuredPreviewSignature,
+        text: &str,
+    ) -> Result<&mut StructuredPreviewState, String> {
+        let Some(tab_id) = self.active_topbar_tab else {
+            return Err("No active tab".to_string());
+        };
+        let rebuild = self
+            .structured_previews
+            .get(&tab_id)
+            .is_none_or(|state| state.signature() != &signature);
+        if rebuild {
+            match StructuredPreviewState::new(signature, text) {
+                Ok(state) => {
+                    self.structured_previews.insert(tab_id, state);
+                }
+                Err(error) => {
+                    self.structured_previews.remove(&tab_id);
+                    return Err(error);
+                }
+            }
+        }
+        self.structured_previews
+            .get_mut(&tab_id)
+            .ok_or_else(|| "No structured preview".to_string())
+    }
+
+    pub(crate) fn active_structured_preview_mut(&mut self) -> Option<&mut StructuredPreviewState> {
+        if self.view_mode != ViewMode::Preview || !self.active_preview_rendered() {
+            return None;
+        }
+        let tab_id = self.active_topbar_tab?;
+        self.structured_previews.get_mut(&tab_id)
+    }
+
+    pub(crate) fn sync_scroll_from_structured_preview(&mut self) {
+        if let Some(state) = self.active_structured_preview_mut() {
+            self.scroll_offset = state.top_visible_offset();
+        }
+    }
+
+    pub(crate) fn structured_preview_move_down(&mut self, count: usize) -> bool {
+        let Some(state) = self.active_structured_preview_mut().filter(|_| count > 0) else {
+            return false;
+        };
+        state.move_down(count);
+        self.sync_scroll_from_structured_preview();
+        true
+    }
+
+    pub(crate) fn structured_preview_move_up(&mut self, count: usize) -> bool {
+        let Some(state) = self.active_structured_preview_mut().filter(|_| count > 0) else {
+            return false;
+        };
+        state.move_up(count);
+        self.sync_scroll_from_structured_preview();
+        true
+    }
+
+    pub(crate) fn structured_preview_move_left(&mut self) -> bool {
+        let Some(state) = self.active_structured_preview_mut() else {
+            return false;
+        };
+        state.move_left();
+        self.sync_scroll_from_structured_preview();
+        true
+    }
+
+    pub(crate) fn structured_preview_move_right(&mut self) -> bool {
+        let Some(state) = self.active_structured_preview_mut() else {
+            return false;
+        };
+        state.move_right();
+        self.sync_scroll_from_structured_preview();
+        true
+    }
+
+    pub(crate) fn structured_preview_focus_top(&mut self) -> bool {
+        let Some(state) = self.active_structured_preview_mut() else {
+            return false;
+        };
+        state.focus_top();
+        self.sync_scroll_from_structured_preview();
+        true
+    }
+
+    pub(crate) fn structured_preview_focus_bottom(&mut self) -> bool {
+        let Some(state) = self.active_structured_preview_mut() else {
+            return false;
+        };
+        state.focus_bottom();
+        self.sync_scroll_from_structured_preview();
+        true
+    }
+
+    pub(crate) fn structured_preview_jump_up(&mut self, count: Option<usize>) -> bool {
+        let Some(state) = self.active_structured_preview_mut() else {
+            return false;
+        };
+        state.jump_up(count);
+        self.sync_scroll_from_structured_preview();
+        true
+    }
+
+    pub(crate) fn structured_preview_jump_down(&mut self, count: Option<usize>) -> bool {
+        let Some(state) = self.active_structured_preview_mut() else {
+            return false;
+        };
+        state.jump_down(count);
+        self.sync_scroll_from_structured_preview();
+        true
+    }
+
+    pub(crate) fn structured_preview_toggle_collapsed(&mut self) -> bool {
+        let Some(state) = self.active_structured_preview_mut() else {
+            return false;
+        };
+        state.toggle_collapsed();
+        self.sync_scroll_from_structured_preview();
+        true
+    }
+
+    pub(crate) fn structured_preview_collapse_node_and_siblings(&mut self, deep: bool) -> bool {
+        let Some(state) = self.active_structured_preview_mut() else {
+            return false;
+        };
+        if deep {
+            state.deep_collapse_node_and_siblings();
+        } else {
+            state.collapse_node_and_siblings();
+        }
+        self.sync_scroll_from_structured_preview();
+        true
+    }
+
+    pub(crate) fn structured_preview_expand_node_and_siblings(&mut self, deep: bool) -> bool {
+        let Some(state) = self.active_structured_preview_mut() else {
+            return false;
+        };
+        if deep {
+            state.deep_expand_node_and_siblings();
+        } else {
+            state.expand_node_and_siblings();
+        }
+        self.sync_scroll_from_structured_preview();
+        true
+    }
+
+    pub(crate) fn structured_preview_toggle_mode(&mut self) -> bool {
+        let Some(state) = self.active_structured_preview_mut() else {
+            return false;
+        };
+        state.toggle_mode();
+        self.sync_scroll_from_structured_preview();
+        true
+    }
+
+    pub(crate) fn handle_structured_preview_click(&mut self, column: u16, row: u16) -> bool {
+        if self.view_mode != ViewMode::Preview || !self.active_preview_rendered() {
+            return false;
+        }
+        let Some((x, y, width, height)) = self.diff_view_area else {
+            return false;
+        };
+        if column < x
+            || column >= x.saturating_add(width)
+            || row < y
+            || row >= y.saturating_add(height)
+        {
+            return false;
+        }
+        let Some(state) = self.active_structured_preview_mut() else {
+            return false;
+        };
+        state.click(row.saturating_sub(y).saturating_add(1));
+        self.sync_scroll_from_structured_preview();
+        true
+    }
+
+    pub(crate) fn mouse_over_topbar(&self, column: u16, row: u16) -> bool {
+        self.topbar_area.is_some_and(|(x, y, width, height)| {
+            column >= x
+                && column < x.saturating_add(width)
+                && row >= y
+                && row < y.saturating_add(height)
+        })
+    }
+
+    pub(crate) fn scroll_topbar_tabs(&mut self, delta: isize) -> bool {
+        let max_scroll = self.topbar_tabs.len().saturating_sub(1);
+        let old = self.topbar_tab_scroll.min(max_scroll);
+        let next = if delta.is_negative() {
+            old.saturating_sub(delta.unsigned_abs())
+        } else {
+            old.saturating_add(delta as usize).min(max_scroll)
+        };
+        self.topbar_tab_scroll = next;
+        old != next
+    }
+
+    pub(crate) fn handle_no_changes_dashboard_click(&mut self, column: u16, row: u16) -> bool {
+        let hit = self
+            .no_changes_dashboard_hit
+            .is_some_and(|(x, y, width, height)| {
+                column >= x
+                    && column < x.saturating_add(width)
+                    && row >= y
+                    && row < y.saturating_add(height)
+            });
+        if hit {
+            self.open_dashboard = true;
+        }
+        hit
+    }
+
+    pub(crate) fn handle_no_changes_quit_click(&mut self, column: u16, row: u16) -> bool {
+        let hit = self
+            .no_changes_quit_hit
+            .is_some_and(|(x, y, width, height)| {
+                column >= x
+                    && column < x.saturating_add(width)
+                    && row >= y
+                    && row < y.saturating_add(height)
+            });
+        if hit {
+            self.request_quit();
+        }
+        hit
+    }
+
+    pub(crate) fn handle_status_bar_mouse_down(
+        &mut self,
+        column: u16,
+        row: u16,
+        reverse: bool,
+    ) -> bool {
+        let hit = self.status_mode_hit.is_some_and(|(x, y, width, height)| {
+            column >= x
+                && column < x.saturating_add(width)
+                && row >= y
+                && row < y.saturating_add(height)
+        });
+        if !hit {
+            return false;
+        }
+        if reverse {
+            self.toggle_view_mode_reverse();
+        } else {
+            self.toggle_view_mode();
+        }
+        true
+    }
+
+    pub(crate) fn open_status_mode_menu(&mut self, column: u16, row: u16) -> bool {
+        let hit = self.status_mode_hit.is_some_and(|(x, y, width, height)| {
+            column >= x
+                && column < x.saturating_add(width)
+                && row >= y
+                && row < y.saturating_add(height)
+        });
+        if !hit {
+            return false;
+        }
+        self.close_file_context_menu();
+        self.close_review_comment_context_menu();
+        self.status_mode_menu = Some(StatusModeMenu { x: column, y: row });
+        self.status_mode_menu_hover = None;
+        true
+    }
+
+    pub(crate) fn close_status_mode_menu(&mut self) -> bool {
+        let was_open = self.status_mode_menu.take().is_some();
+        self.status_mode_menu_hits.clear();
+        self.status_mode_menu_hover = None;
+        was_open
+    }
+
+    fn status_mode_menu_mode_at(&self, column: u16, row: u16) -> Option<ViewMode> {
+        self.status_mode_menu_hits
+            .iter()
+            .find(|hit| {
+                column >= hit.x
+                    && column < hit.x.saturating_add(hit.width)
+                    && row >= hit.y
+                    && row < hit.y.saturating_add(hit.height)
+            })
+            .map(|hit| hit.mode)
+    }
+
+    pub(crate) fn update_status_mode_menu_hover(&mut self, column: u16, row: u16) -> bool {
+        let hover = self.status_mode_menu_mode_at(column, row);
+        if self.status_mode_menu_hover == hover {
+            return false;
+        }
+        self.status_mode_menu_hover = hover;
+        true
+    }
+
+    pub(crate) fn handle_status_mode_menu_click(&mut self, column: u16, row: u16) -> bool {
+        let Some(mode) = self.status_mode_menu_mode_at(column, row) else {
+            return self.close_status_mode_menu();
+        };
+        self.set_view_mode(mode);
+        self.close_status_mode_menu();
+        true
+    }
+
+    pub(crate) fn status_mode_menu_open(&self) -> bool {
+        self.status_mode_menu.is_some()
+    }
+
+    pub(crate) fn handle_binary_preview_click(&mut self, column: u16, row: u16) -> bool {
+        let hit = self
+            .binary_preview_hit
+            .is_some_and(|(x, y, width, height)| {
+                column >= x
+                    && column < x.saturating_add(width)
+                    && row >= y
+                    && row < y.saturating_add(height)
+            });
+        if !hit {
+            return false;
+        }
+        self.set_view_mode(ViewMode::Preview);
+        self.clear_diff_selection();
+        true
     }
 
     pub(crate) fn handle_topbar_mouse_down(&mut self, column: u16, row: u16) -> bool {
@@ -518,6 +1267,42 @@ impl App {
             self.toggle_preview_rendered();
             return true;
         }
+        if self
+            .topbar_sidebar_toggle_hit
+            .is_some_and(|(x, y, width, height)| {
+                column >= x
+                    && column < x.saturating_add(width)
+                    && row >= y
+                    && row < y.saturating_add(height)
+            })
+        {
+            self.toggle_file_panel();
+            return true;
+        }
+        if self
+            .topbar_scroll_left_hit
+            .is_some_and(|(x, y, width, height)| {
+                column >= x
+                    && column < x.saturating_add(width)
+                    && row >= y
+                    && row < y.saturating_add(height)
+            })
+        {
+            self.scroll_topbar_tabs(-1);
+            return true;
+        }
+        if self
+            .topbar_scroll_right_hit
+            .is_some_and(|(x, y, width, height)| {
+                column >= x
+                    && column < x.saturating_add(width)
+                    && row >= y
+                    && row < y.saturating_add(height)
+            })
+        {
+            self.scroll_topbar_tabs(1);
+            return true;
+        }
         if self.topbar_plus_hit.is_some_and(|(x, y, width, height)| {
             column >= x
                 && column < x.saturating_add(width)
@@ -531,7 +1316,7 @@ impl App {
         let Some(hit) = self.topbar_hit(column, row) else {
             return false;
         };
-        if hit.close_col == Some(column) && self.topbar_tabs.len() > 1 {
+        if hit.close_col == Some(column) && self.topbar_close_allowed(hit.tab_id) {
             self.close_topbar_tab(hit.tab_id);
             return true;
         }
@@ -583,15 +1368,325 @@ impl App {
                 && row >= y
                 && row < y.saturating_add(height)
         });
+        let scroll_left_hover = self
+            .topbar_scroll_left_hit
+            .is_some_and(|(x, y, width, height)| {
+                column >= x
+                    && column < x.saturating_add(width)
+                    && row >= y
+                    && row < y.saturating_add(height)
+            });
+        let scroll_right_hover =
+            self.topbar_scroll_right_hit
+                .is_some_and(|(x, y, width, height)| {
+                    column >= x
+                        && column < x.saturating_add(width)
+                        && row >= y
+                        && row < y.saturating_add(height)
+                });
+        let preview_hover = self
+            .preview_toggle_hit
+            .is_some_and(|(x, y, width, height)| {
+                column >= x
+                    && column < x.saturating_add(width)
+                    && row >= y
+                    && row < y.saturating_add(height)
+            });
+        let sidebar_hover = self
+            .topbar_sidebar_toggle_hit
+            .is_some_and(|(x, y, width, height)| {
+                column >= x
+                    && column < x.saturating_add(width)
+                    && row >= y
+                    && row < y.saturating_add(height)
+            });
+        let status_comments_hover =
+            self.status_comments_hit
+                .is_some_and(|(x, y, width, height)| {
+                    column >= x
+                        && column < x.saturating_add(width)
+                        && row >= y
+                        && row < y.saturating_add(height)
+                });
+        let status_file_hover = self.status_file_hit.is_some_and(|(x, y, width, height)| {
+            column >= x
+                && column < x.saturating_add(width)
+                && row >= y
+                && row < y.saturating_add(height)
+        });
+        let binary_preview_hover = self
+            .binary_preview_hit
+            .is_some_and(|(x, y, width, height)| {
+                column >= x
+                    && column < x.saturating_add(width)
+                    && row >= y
+                    && row < y.saturating_add(height)
+            });
+        let review_file_comment_hover =
+            self.review_file_comment_hit
+                .is_some_and(|(x, y, width, height)| {
+                    column >= x
+                        && column < x.saturating_add(width)
+                        && row >= y
+                        && row < y.saturating_add(height)
+                });
+        let no_changes_dashboard_hover =
+            self.no_changes_dashboard_hit
+                .is_some_and(|(x, y, width, height)| {
+                    column >= x
+                        && column < x.saturating_add(width)
+                        && row >= y
+                        && row < y.saturating_add(height)
+                });
+        let no_changes_quit_hover =
+            self.no_changes_quit_hit
+                .is_some_and(|(x, y, width, height)| {
+                    column >= x
+                        && column < x.saturating_add(width)
+                        && row >= y
+                        && row < y.saturating_add(height)
+                });
+        let file_panel_hover = self.mouse_over_file_panel(column, row);
+        let file_panel_mode_toggle_hover =
+            self.file_panel_mode_toggle_hit
+                .is_some_and(|(x, y, width, height)| {
+                    column >= x
+                        && column < x.saturating_add(width)
+                        && row >= y
+                        && row < y.saturating_add(height)
+                });
+        let file_panel_root_hover =
+            self.file_panel_root_hit
+                .is_some_and(|(x, y, width, height)| {
+                    column >= x
+                        && column < x.saturating_add(width)
+                        && row >= y
+                        && row < y.saturating_add(height)
+                });
+        let file_filter_hover = self.file_filter_area.is_some_and(|(x, y, width, height)| {
+            column >= x
+                && column < x.saturating_add(width)
+                && row >= y
+                && row < y.saturating_add(height)
+        });
+        let file_filter_clear_hover =
+            self.file_filter_clear_hit
+                .is_some_and(|(x, y, width, height)| {
+                    column >= x
+                        && column < x.saturating_add(width)
+                        && row >= y
+                        && row < y.saturating_add(height)
+                });
+        let comments_sidebar_sync_hover =
+            self.comments_sidebar_sync_hit
+                .is_some_and(|(x, y, width, height)| {
+                    column >= x
+                        && column < x.saturating_add(width)
+                        && row >= y
+                        && row < y.saturating_add(height)
+                });
+        let comments_sidebar_discard_hover =
+            self.comments_sidebar_discard_hit
+                .is_some_and(|(x, y, width, height)| {
+                    column >= x
+                        && column < x.saturating_add(width)
+                        && row >= y
+                        && row < y.saturating_add(height)
+                });
+        let comments_sidebar_overflow_hover =
+            self.comments_sidebar_overflow_hit
+                .is_some_and(|(x, y, width, height)| {
+                    column >= x
+                        && column < x.saturating_add(width)
+                        && row >= y
+                        && row < y.saturating_add(height)
+                });
+        let comments_sidebar_overflow_menu_hover = self
+            .comments_sidebar_overflow_hits
+            .iter()
+            .find(|hit| {
+                column >= hit.x
+                    && column < hit.x.saturating_add(hit.width)
+                    && row >= hit.y
+                    && row < hit.y.saturating_add(hit.height)
+            })
+            .map(|hit| hit.action);
+        let file_hover = self.file_list_item_at(column, row);
+        let file_context_menu_hover = self.file_context_menu_action_at(column, row);
+        let selection_hover = self
+            .selection_toolbar_hits
+            .iter()
+            .find(|hit| {
+                column >= hit.x
+                    && column < hit.x.saturating_add(hit.width)
+                    && row >= hit.y
+                    && row < hit.y.saturating_add(hit.height)
+            })
+            .map(|hit| hit.action);
+        let fold_context_hover = self
+            .fold_context_hits
+            .iter()
+            .find(|hit| {
+                column >= hit.x
+                    && column < hit.x.saturating_add(hit.width)
+                    && row >= hit.y
+                    && row < hit.y.saturating_add(hit.height)
+            })
+            .map(|hit| (hit.key, hit.direction));
+        let (review_line_add_row, review_line_add_hover) =
+            self.review_line_add_hover_at(column, row);
+        let review_line_add_side =
+            review_line_add_row.and_then(|_| self.review_side_at_screen_column(column));
+        let review_preview_hit = self.review_preview_boxes.iter().rev().find_map(|hit| {
+            let end_x = hit.x.saturating_add(hit.width);
+            let end_y = hit.y.saturating_add(hit.height);
+            (column >= hit.x && column < end_x && row >= hit.y && row < end_y).then(|| {
+                (
+                    hit.comment_id,
+                    hit.anchor_key.clone(),
+                    hit.edit,
+                    hit.reply,
+                    hit.resolve,
+                    hit.delete,
+                    hit.overflow,
+                )
+            })
+        });
+        let review_preview_hover_id = review_preview_hit.as_ref().and_then(|(id, ..)| *id);
+        let review_preview_hover = review_preview_hit
+            .as_ref()
+            .map(|(_, anchor_key, _, _, _, _, _)| anchor_key.clone());
+        let review_preview_edit_hover = review_preview_hit
+            .as_ref()
+            .and_then(|(_, anchor_key, edit, _, _, _, _)| edit.then(|| anchor_key.clone()));
+        let review_preview_reply_hover = review_preview_hit
+            .as_ref()
+            .and_then(|(_, anchor_key, _, reply, _, _, _)| reply.then(|| anchor_key.clone()));
+        let review_preview_resolve_hover = review_preview_hit
+            .as_ref()
+            .and_then(|(_, anchor_key, _, _, resolve, _, _)| resolve.then(|| anchor_key.clone()));
+        let review_preview_delete_hover = review_preview_hit
+            .as_ref()
+            .and_then(|(_, anchor_key, _, _, _, delete, _)| delete.then(|| anchor_key.clone()));
+        let review_preview_overflow_hover = review_preview_hit
+            .and_then(|(_, anchor_key, _, _, _, _, overflow)| overflow.then_some(anchor_key));
+        let pr_comment_action_hover = self
+            .pr_comment_hits
+            .iter()
+            .find(|hit| {
+                column >= hit.x
+                    && column < hit.x.saturating_add(hit.width)
+                    && row >= hit.y
+                    && row < hit.y.saturating_add(hit.height)
+            })
+            .map(|hit| hit.action);
+        let pr_comment_action_hover_key = pr_comment_action_hover.and_then(|action| match action {
+            super::review::PrCommentHitAction::Delete(_) => None,
+            super::review::PrCommentHitAction::Edit(id) => self.pull_request_edit_label(id),
+            super::review::PrCommentHitAction::Reply(id) => self.pull_request_reply_label(id),
+            super::review::PrCommentHitAction::Open(_) => None,
+        });
+        let pr_comment_add_hover = self
+            .pr_comment_add_hit
+            .is_some_and(|(x, y, width, height)| {
+                column >= x
+                    && column < x.saturating_add(width)
+                    && row >= y
+                    && row < y.saturating_add(height)
+            });
+        let review_editor_hover = self
+            .review_editor_toolbar_hits
+            .iter()
+            .find(|hit| {
+                column >= hit.x
+                    && column < hit.x.saturating_add(hit.width)
+                    && row >= hit.y
+                    && row < hit.y.saturating_add(hit.height)
+            })
+            .map(|hit| hit.action);
         if self.topbar_hover_tab == hover
             && self.topbar_hover_close == close_hover
             && self.topbar_plus_hover == plus_hover
+            && self.topbar_scroll_left_hover == scroll_left_hover
+            && self.topbar_scroll_right_hover == scroll_right_hover
+            && self.preview_toggle_hover == preview_hover
+            && self.topbar_sidebar_toggle_hover == sidebar_hover
+            && self.status_comments_hover == status_comments_hover
+            && self.status_file_hover == status_file_hover
+            && self.binary_preview_hover == binary_preview_hover
+            && self.review_file_comment_hover == review_file_comment_hover
+            && self.no_changes_dashboard_hover == no_changes_dashboard_hover
+            && self.no_changes_quit_hover == no_changes_quit_hover
+            && self.file_list_hover == file_hover
+            && self.file_context_menu_hover == file_context_menu_hover
+            && self.file_panel_hover == file_panel_hover
+            && self.file_panel_mode_toggle_hover == file_panel_mode_toggle_hover
+            && self.file_panel_root_hover == file_panel_root_hover
+            && self.file_filter_hover == file_filter_hover
+            && self.file_filter_clear_hover == file_filter_clear_hover
+            && self.comments_sidebar_sync_hover == comments_sidebar_sync_hover
+            && self.comments_sidebar_discard_hover == comments_sidebar_discard_hover
+            && self.comments_sidebar_overflow_hover == comments_sidebar_overflow_hover
+            && self.comments_sidebar_overflow_menu_hover == comments_sidebar_overflow_menu_hover
+            && self.selection_toolbar_hover == selection_hover
+            && self.fold_context_hover == fold_context_hover
+            && self.review_line_add_row == review_line_add_row
+            && self.review_line_add_side == review_line_add_side
+            && self.review_line_add_hover == review_line_add_hover
+            && self.review_preview_hover == review_preview_hover
+            && self.review_preview_hover_id == review_preview_hover_id
+            && self.review_preview_edit_hover == review_preview_edit_hover
+            && self.review_preview_reply_hover == review_preview_reply_hover
+            && self.review_preview_resolve_hover == review_preview_resolve_hover
+            && self.review_preview_delete_hover == review_preview_delete_hover
+            && self.review_preview_overflow_hover == review_preview_overflow_hover
+            && self.pr_comment_action_hover == pr_comment_action_hover
+            && self.pr_comment_action_hover_key == pr_comment_action_hover_key
+            && self.pr_comment_add_hover == pr_comment_add_hover
+            && self.review_editor_toolbar_hover == review_editor_hover
         {
             return false;
         }
+        self.selection_toolbar_hover = selection_hover;
+        self.fold_context_hover = fold_context_hover;
+        self.review_line_add_row = review_line_add_row;
+        self.review_line_add_side = review_line_add_side;
+        self.review_line_add_hover = review_line_add_hover;
+        self.review_preview_hover = review_preview_hover;
+        self.review_preview_hover_id = review_preview_hover_id;
+        self.review_preview_edit_hover = review_preview_edit_hover;
+        self.review_preview_reply_hover = review_preview_reply_hover;
+        self.review_preview_resolve_hover = review_preview_resolve_hover;
+        self.review_preview_delete_hover = review_preview_delete_hover;
+        self.review_preview_overflow_hover = review_preview_overflow_hover;
+        self.pr_comment_action_hover = pr_comment_action_hover;
+        self.pr_comment_action_hover_key = pr_comment_action_hover_key;
+        self.pr_comment_add_hover = pr_comment_add_hover;
+        self.review_editor_toolbar_hover = review_editor_hover;
         self.topbar_hover_tab = hover;
         self.topbar_hover_close = close_hover;
         self.topbar_plus_hover = plus_hover;
+        self.topbar_scroll_left_hover = scroll_left_hover;
+        self.topbar_scroll_right_hover = scroll_right_hover;
+        self.preview_toggle_hover = preview_hover;
+        self.topbar_sidebar_toggle_hover = sidebar_hover;
+        self.status_comments_hover = status_comments_hover;
+        self.status_file_hover = status_file_hover;
+        self.binary_preview_hover = binary_preview_hover;
+        self.review_file_comment_hover = review_file_comment_hover;
+        self.no_changes_dashboard_hover = no_changes_dashboard_hover;
+        self.no_changes_quit_hover = no_changes_quit_hover;
+        self.file_list_hover = file_hover;
+        self.file_context_menu_hover = file_context_menu_hover;
+        self.file_panel_hover = file_panel_hover;
+        self.file_panel_mode_toggle_hover = file_panel_mode_toggle_hover;
+        self.file_panel_root_hover = file_panel_root_hover;
+        self.file_filter_hover = file_filter_hover;
+        self.file_filter_clear_hover = file_filter_clear_hover;
+        self.comments_sidebar_sync_hover = comments_sidebar_sync_hover;
+        self.comments_sidebar_discard_hover = comments_sidebar_discard_hover;
+        self.comments_sidebar_overflow_hover = comments_sidebar_overflow_hover;
+        self.comments_sidebar_overflow_menu_hover = comments_sidebar_overflow_menu_hover;
         true
     }
 
@@ -643,8 +1738,14 @@ impl App {
     }
 
     pub fn start_file_filter(&mut self) {
-        self.file_filter_active = true;
         self.file_filter.clear();
+        self.focus_file_filter();
+    }
+
+    pub(crate) fn focus_file_filter(&mut self) {
+        self.file_filter_active = true;
+        self.file_filter_cursor_visible = true;
+        self.file_filter_cursor_last_blink = std::time::Instant::now();
         self.file_list_scroll = 0;
         self.ensure_selection_matches_filter();
         self.update_file_list_scroll();
@@ -652,21 +1753,30 @@ impl App {
 
     pub fn stop_file_filter(&mut self) {
         self.file_filter_active = false;
+        self.file_filter_cursor_visible = true;
     }
 
     pub fn push_file_filter_char(&mut self, ch: char) {
         self.file_filter.push(ch);
+        self.reset_file_filter_cursor();
         self.on_filter_changed();
     }
 
     pub fn pop_file_filter_char(&mut self) {
         self.file_filter.pop();
+        self.reset_file_filter_cursor();
         self.on_filter_changed();
     }
 
     pub fn clear_file_filter(&mut self) {
         self.file_filter.clear();
+        self.reset_file_filter_cursor();
         self.on_filter_changed();
+    }
+
+    fn reset_file_filter_cursor(&mut self) {
+        self.file_filter_cursor_visible = true;
+        self.file_filter_cursor_last_blink = std::time::Instant::now();
     }
 
     /// Check if current file would be blank at step 0 (new file: empty old, non-empty new)
@@ -749,8 +1859,8 @@ impl App {
         }
     }
 
-    pub fn is_multi_file(&self) -> bool {
-        self.multi_diff.is_multi_file()
+    pub fn can_show_file_panel(&self) -> bool {
+        self.multi_diff.file_count() > 0
     }
 
     fn update_file_list_scroll(&mut self) {
@@ -760,17 +1870,76 @@ impl App {
             return;
         }
 
-        // Keep selected file visible in the file list
+        // Keep selected file visible in the file list.
         let selected = self.multi_diff.selected_index;
-        let selected_pos = indices.iter().position(|&i| i == selected).unwrap_or(0);
-        if selected_pos < self.file_list_scroll {
-            self.file_list_scroll = selected_pos;
+        let selected_row = self.file_list_row_for_file(&indices, selected).unwrap_or(0);
+        if selected_row < self.file_list_scroll {
+            self.file_list_scroll = selected_row;
         }
-        // Assume roughly 20 visible files
-        let visible_files = 20;
-        if selected_pos >= self.file_list_scroll + visible_files {
-            self.file_list_scroll = selected_pos.saturating_sub(visible_files - 1);
+        let visible_rows = self.file_list_visible_rows();
+        if selected_row >= self.file_list_scroll.saturating_add(visible_rows) {
+            self.file_list_scroll = selected_row.saturating_sub(visible_rows - 1);
         }
+        let max_scroll = self
+            .file_list_total_rows(&indices)
+            .saturating_sub(visible_rows);
+        self.file_list_scroll = self.file_list_scroll.min(max_scroll);
+    }
+
+    pub(crate) fn file_list_total_rows(&self, indices: &[usize]) -> usize {
+        let mut rows = 0usize;
+        let mut current_group: Option<String> = None;
+        for &index in indices {
+            let group = self.file_list_group(index);
+            if current_group.as_deref() != Some(group.as_str()) {
+                if current_group.is_some() {
+                    rows += 1;
+                }
+                rows += 1;
+                current_group = Some(group);
+            }
+            rows += 1;
+        }
+        rows
+    }
+
+    fn file_list_row_for_file(&self, indices: &[usize], target: usize) -> Option<usize> {
+        let mut row = 0usize;
+        let mut current_group: Option<String> = None;
+        for &index in indices {
+            let group = self.file_list_group(index);
+            if current_group.as_deref() != Some(group.as_str()) {
+                if current_group.is_some() {
+                    row += 1;
+                }
+                row += 1;
+                current_group = Some(group);
+            }
+            if index == target {
+                return Some(row);
+            }
+            row += 1;
+        }
+        None
+    }
+
+    pub(crate) fn file_list_group(&self, index: usize) -> String {
+        self.multi_diff
+            .files
+            .get(index)
+            .and_then(|file| {
+                file.display_name
+                    .rsplit_once('/')
+                    .map(|(dir, _)| dir.to_string())
+            })
+            .unwrap_or_else(|| "Root Path".to_string())
+    }
+
+    fn file_list_visible_rows(&self) -> usize {
+        self.file_list_area
+            .map(|(_, _, _, height)| height.saturating_sub(2) as usize)
+            .unwrap_or(20)
+            .max(1)
     }
 
     fn on_filter_changed(&mut self) {
@@ -814,6 +1983,15 @@ impl App {
     pub fn current_file_path(&self) -> String {
         if self.active_topbar_content() == Some(TopbarTabContent::Help) {
             return "Help".to_string();
+        }
+        if self.active_topbar_content() == Some(TopbarTabContent::PrComments) {
+            return format!(
+                "{} comments",
+                self.review_provider_kind().long_review_noun()
+            );
+        }
+        if self.active_topbar_content() == Some(TopbarTabContent::OutdatedComments) {
+            return "Outdated comments".to_string();
         }
         self.multi_diff
             .current_file()
@@ -873,6 +2051,7 @@ impl App {
             .map(|idx| self.disk_stamp_for_index(idx))
             .collect();
         self.file_disk_changed = vec![false; file_count];
+        self.file_recently_changed_until = vec![None; file_count];
     }
 
     fn refresh_file_disk_baseline_for(&mut self, idx: usize) {
@@ -911,6 +2090,31 @@ impl App {
 
     pub(crate) fn file_changed_on_disk(&self, idx: usize) -> bool {
         self.file_disk_changed.get(idx).copied().unwrap_or(false)
+            || self
+                .file_recently_changed_until
+                .get(idx)
+                .and_then(|until| *until)
+                .is_some_and(|until| Instant::now() < until)
+    }
+
+    pub(crate) fn files_changed_indicator_active(&self) -> bool {
+        self.files_changed_on_disk
+            || self
+                .file_recently_changed_until
+                .iter()
+                .flatten()
+                .any(|until| Instant::now() < *until)
+    }
+
+    pub(crate) fn expire_recent_file_changes(&mut self, now: Instant) -> bool {
+        let mut expired = false;
+        for until in &mut self.file_recently_changed_until {
+            if until.is_some_and(|until| now >= until) {
+                *until = None;
+                expired = true;
+            }
+        }
+        expired
     }
 
     /// Check if tracked files changed on disk since the last refresh baseline.
@@ -924,14 +2128,14 @@ impl App {
     }
 
     pub(crate) fn maybe_watch_refresh_git_files(&mut self) -> bool {
-        if !self.watch || !self.multi_diff.is_git_mode() {
+        if !self.watch || self.jj_watch_target.is_some() || !self.multi_diff.is_git_mode() {
             return false;
         }
         let now = Instant::now();
-        if now.duration_since(self.last_git_watch_check) < Duration::from_secs(1) {
+        if now.duration_since(self.last_change_list_watch_check) < Duration::from_secs(1) {
             return false;
         }
-        self.last_git_watch_check = now;
+        self.last_change_list_watch_check = now;
 
         let index_stamp = self.git_index_stamp();
         let changed =
@@ -942,6 +2146,81 @@ impl App {
 
         self.refresh_all_files();
         true
+    }
+
+    pub fn set_jj_watch_target(&mut self, repo_root: PathBuf, revision: String) {
+        let working_copy_stamp = crate::jj_working_copy_stamp(&repo_root);
+        self.jj_watch_target = Some(super::JjWatchTarget {
+            repo_root,
+            revision,
+            working_copy_stamp,
+        });
+    }
+
+    pub(crate) fn maybe_watch_refresh_jj_files(&mut self) -> bool {
+        if !self.watch || self.jj_watch_target.is_none() {
+            return false;
+        }
+        let now = Instant::now();
+        if now.duration_since(self.last_change_list_watch_check) < Duration::from_secs(1) {
+            return false;
+        }
+        self.last_change_list_watch_check = now;
+
+        let target = self.jj_watch_target.clone().unwrap();
+        let working_copy_stamp = crate::jj_working_copy_stamp(&target.repo_root);
+        if working_copy_stamp == target.working_copy_stamp {
+            return false;
+        }
+        let Ok(signature) = crate::jj_diff_file_signature(&target.repo_root, &target.revision)
+        else {
+            return false;
+        };
+        if self.same_file_signature(&signature) {
+            if let Some(target) = self.jj_watch_target.as_mut() {
+                target.working_copy_stamp = working_copy_stamp;
+            }
+            return false;
+        }
+        let changed_indices: Vec<usize> = signature
+            .iter()
+            .enumerate()
+            .filter_map(|(index, (status, old_path, path))| {
+                (!self.multi_diff.files.iter().any(|file| {
+                    file.path == *path && file.old_path == *old_path && file.status == *status
+                }))
+                .then_some(index)
+            })
+            .collect();
+        let Ok(refreshed) = crate::build_jj_diff(&target.repo_root, &target.revision, None) else {
+            return false;
+        };
+        if let Some(target) = self.jj_watch_target.as_mut() {
+            target.working_copy_stamp = working_copy_stamp;
+        }
+        self.replace_multi_diff(refreshed);
+        let flash_until = Instant::now() + WATCH_CHANGE_FLASH_DURATION;
+        for index in changed_indices {
+            if let Some(until) = self.file_recently_changed_until.get_mut(index) {
+                *until = Some(flash_until);
+            }
+        }
+        true
+    }
+
+    fn same_file_signature(
+        &self,
+        other: &[(oyo_core::git::FileStatus, Option<PathBuf>, PathBuf)],
+    ) -> bool {
+        self.multi_diff.files.len() == other.len()
+            && self
+                .multi_diff
+                .files
+                .iter()
+                .zip(other)
+                .all(|(left, (status, old_path, path))| {
+                    left.path == *path && left.old_path == *old_path && left.status == *status
+                })
     }
 
     pub(crate) fn maybe_watch_refresh_changed_files(&mut self) -> bool {
@@ -960,18 +2239,27 @@ impl App {
         }
 
         let current = self.multi_diff.selected_index;
+        let flash_until = Instant::now() + WATCH_CHANGE_FLASH_DURATION;
         for idx in changed {
             if idx == current {
                 self.refresh_current_file();
-                continue;
+            } else {
+                self.multi_diff.refresh_file(idx);
+                self.mark_diff_changed();
+                if idx < self.syntax_caches.len() {
+                    self.syntax_caches[idx] = None;
+                }
+                if idx < self.fold_scope_caches.len() {
+                    self.fold_scope_caches[idx] = None;
+                }
+                self.refresh_file_disk_baseline_for(idx);
             }
-            self.multi_diff.refresh_file(idx);
-            if idx < self.syntax_caches.len() {
-                self.syntax_caches[idx] = None;
+            if let Some(until) = self.file_recently_changed_until.get_mut(idx) {
+                *until = Some(flash_until);
             }
-            self.refresh_file_disk_baseline_for(idx);
         }
         self.recompute_file_change_state();
+        self.repair_review_comments_after_diff_refresh();
         true
     }
 
@@ -1004,6 +2292,13 @@ impl App {
         };
 
         self.multi_diff.refresh_current_file();
+        self.mark_diff_changed();
+        let idx = self.multi_diff.selected_index;
+        if self.queue_refreshed_current_file_diff() {
+            self.diff_refresh_restore_end = Some(idx);
+        } else if self.diff_refresh_restore_end == Some(idx) {
+            self.diff_refresh_restore_end = None;
+        }
 
         // The navigator is rebuilt at step 0 after refresh; jump to the end
         // so all changes remain visible.
@@ -1048,43 +2343,113 @@ impl App {
             }
         }
 
-        let idx = self.multi_diff.selected_index;
-        if idx < self.syntax_caches.len() {
-            self.syntax_caches[idx] = None;
-        }
-        self.ensure_syntax_cache();
+        self.invalidate_fold_context_view();
+        self.rebuild_current_syntax_cache_after_reload();
 
         self.refresh_file_disk_baseline_for(idx);
         self.recompute_file_change_state();
+        self.repair_review_comments_after_diff_refresh();
     }
 
-    /// Refresh all files from git (re-scan for uncommitted changes)
+    /// Refresh all files from the active VCS.
     pub fn refresh_all_files(&mut self) {
-        if self.multi_diff.refresh_all_from_git() {
-            // Reset scroll states for all files
-            let file_count = self.multi_diff.file_count();
-            self.scroll_offsets_step = vec![0; file_count];
-            self.scroll_offsets_no_step = vec![0; file_count];
-            self.horizontal_scrolls_step = vec![0; file_count];
-            self.horizontal_scrolls_no_step = vec![0; file_count];
-            self.max_line_widths_step = vec![0; file_count];
-            self.max_line_widths_no_step = vec![0; file_count];
-            self.no_step_visited = vec![false; file_count];
-            self.files_visited = vec![false; file_count];
-            self.syntax_caches = vec![None; file_count];
-            self.step_state_snapshots = vec![None; file_count];
-            self.no_step_state_snapshots = vec![None; file_count];
-            self.scroll_offset = 0;
-            self.horizontal_scroll = 0;
-            self.needs_scroll_to_active = true;
-            self.centered_once = false;
-            self.handle_file_enter();
-
-            self.rebuild_file_disk_baseline();
-            self.git_index_baseline = self.git_index_stamp();
-            self.files_changed_on_disk = false;
-            self.invalidate_review_repo_file_cache();
+        if let Some(target) = self.jj_watch_target.clone() {
+            let working_copy_stamp = crate::jj_working_copy_stamp(&target.repo_root);
+            if let Ok(refreshed) = crate::build_jj_diff(&target.repo_root, &target.revision, None) {
+                if let Some(target) = self.jj_watch_target.as_mut() {
+                    target.working_copy_stamp = working_copy_stamp;
+                }
+                self.replace_multi_diff(refreshed);
+            }
+        } else if self.multi_diff.refresh_all_from_git() {
+            self.reset_after_file_list_refresh();
         }
+    }
+
+    pub(crate) fn replace_multi_diff(&mut self, mut refreshed: oyo_core::MultiFileDiff) {
+        let recent_changes: HashMap<PathBuf, Option<Instant>> = self
+            .multi_diff
+            .files
+            .iter()
+            .zip(&self.file_recently_changed_until)
+            .map(|(file, until)| (file.path.clone(), *until))
+            .collect();
+        let selected_path = self.multi_diff.current_file().map(|file| file.path.clone());
+        let selected_index = selected_path
+            .and_then(|path| refreshed.files.iter().position(|file| file.path == path));
+        if let Some(index) = selected_index {
+            refreshed.select_file(index);
+        }
+        let scroll_offset = self.scroll_offset;
+        let horizontal_scroll = self.horizontal_scroll;
+        self.multi_diff = refreshed;
+        if let Some(request) = self
+            .multi_diff
+            .take_pending_content_for(self.multi_diff.selected_index)
+        {
+            let content = super::load_content_request_sync(request);
+            self.multi_diff
+                .apply_prepared_content(self.multi_diff.selected_index, content);
+            self.multi_diff
+                .ensure_full_navigator(self.multi_diff.selected_index);
+        }
+        self.reset_after_file_list_refresh();
+        self.start_content_loading();
+        for (index, file) in self.multi_diff.files.iter().enumerate() {
+            if let Some(until) = recent_changes.get(&file.path) {
+                self.file_recently_changed_until[index] = *until;
+            }
+        }
+        if let Some(index) = selected_index {
+            self.scroll_offset = scroll_offset;
+            self.horizontal_scroll = horizontal_scroll;
+            self.needs_scroll_to_active = false;
+            if self.stepping {
+                self.scroll_offsets_step[index] = scroll_offset;
+                self.horizontal_scrolls_step[index] = horizontal_scroll;
+            } else {
+                self.scroll_offsets_no_step[index] = scroll_offset;
+                self.horizontal_scrolls_no_step[index] = horizontal_scroll;
+            }
+        }
+    }
+
+    fn reset_after_file_list_refresh(&mut self) {
+        self.mark_diff_changed();
+        self.diff_worker_tx = None;
+        self.diff_worker_rx = None;
+        self.content_generation = self.content_generation.wrapping_add(1);
+        self.content_worker_rx = None;
+        self.content_loading.clear();
+        self.diff_inflight = None;
+        self.diff_queue.clear();
+        self.diff_refresh_restore_end = None;
+        let file_count = self.multi_diff.file_count();
+        self.scroll_offsets_step = vec![0; file_count];
+        self.scroll_offsets_no_step = vec![0; file_count];
+        self.horizontal_scrolls_step = vec![0; file_count];
+        self.horizontal_scrolls_no_step = vec![0; file_count];
+        self.max_line_widths_step = vec![0; file_count];
+        self.max_line_widths_no_step = vec![0; file_count];
+        self.no_step_visited = vec![false; file_count];
+        self.files_visited = vec![false; file_count];
+        self.syntax_caches = vec![None; file_count];
+        self.fold_scope_caches = vec![None; file_count];
+        self.step_state_snapshots = vec![None; file_count];
+        self.no_step_state_snapshots = vec![None; file_count];
+        self.scroll_offset = 0;
+        self.horizontal_scroll = 0;
+        self.needs_scroll_to_active = true;
+        self.centered_once = false;
+        self.handle_file_enter();
+        self.invalidate_fold_context_view();
+        self.rebuild_current_syntax_cache_after_reload();
+
+        self.rebuild_file_disk_baseline();
+        self.git_index_baseline = self.git_index_stamp();
+        self.files_changed_on_disk = false;
+        self.invalidate_review_repo_file_cache();
+        self.repair_review_comments_after_diff_refresh();
     }
 
     /// Get the total number of lines in the current view
@@ -1099,12 +2464,25 @@ impl App {
         if self.multi_diff.file_count() == 0 || self.current_file_is_binary() {
             return (0, 0);
         }
+        if self.multi_diff.current_file_diff_status() != oyo_core::multi::DiffStatus::Ready {
+            return self
+                .multi_diff
+                .current_file()
+                .map(|file| (file.insertions, file.deletions))
+                .unwrap_or((0, 0));
+        }
         let diff = self.multi_diff.current_navigator().diff();
         (diff.insertions, diff.deletions)
     }
 
     pub fn current_file_is_binary(&self) -> bool {
         self.multi_diff.current_file_is_binary()
+    }
+
+    pub(crate) fn current_file_is_image(&self) -> bool {
+        self.multi_diff
+            .current_file()
+            .is_some_and(|file| is_image_name(&file.display_name))
     }
 }
 

@@ -17,6 +17,7 @@ pub enum ChangeKind {
 
 /// A span of text that represents a change
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ChangeSpan {
     /// The kind of change
     pub kind: ChangeKind,
@@ -77,6 +78,7 @@ impl ChangeSpan {
 
 /// A complete change unit (may contain multiple spans for word-level diffs)
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Change {
     /// Unique ID for this change
     pub id: usize,

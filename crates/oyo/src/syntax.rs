@@ -12,7 +12,7 @@ use std::sync::OnceLock;
 use syntect::{
     easy::HighlightLines,
     highlighting::{Color, FontStyle, Style as SynStyle, Theme, ThemeSet},
-    parsing::{ParseState, ScopeStack, SyntaxReference, SyntaxSet},
+    parsing::{ParseState, Scope, ScopeStack, SyntaxReference, SyntaxSet},
     util::LinesWithEndings,
 };
 
@@ -26,6 +26,25 @@ pub enum SyntaxSide {
 pub struct SyntaxSpan {
     pub text: String,
     pub style: Style,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct EnclosingScopeRange {
+    pub(crate) start_line: usize,
+    pub(crate) end_line: usize,
+    pub(crate) definition_line: usize,
+    pub(crate) definition: String,
+}
+
+pub(crate) fn enclosing_scope_definition(
+    ranges: &[EnclosingScopeRange],
+    line_index: usize,
+) -> Option<&str> {
+    let idx = ranges.partition_point(|range| range.start_line <= line_index);
+    ranges
+        .get(idx.saturating_sub(1))
+        .filter(|range| range.start_line <= line_index && line_index < range.end_line)
+        .map(|range| range.definition.as_str())
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -72,6 +91,7 @@ struct LazySyntaxCache {
 }
 
 const MAX_LAZY_SYNTAX_BYTES: usize = 512 * 1024;
+const MAX_SCOPE_HINT_BYTES: usize = MAX_LAZY_SYNTAX_BYTES;
 const SYNTAX_CHECKPOINT_STRIDE: usize = 200;
 #[cfg(test)]
 const MAX_SYNC_SYNTAX_LINES: usize = 200;
@@ -502,6 +522,145 @@ impl SyntaxEngine {
         scopes.into_iter().collect()
     }
 
+    pub(crate) fn enclosing_scope_ranges(
+        &self,
+        content: &str,
+        file_name: &str,
+    ) -> Vec<EnclosingScopeRange> {
+        let syntax = self.syntax_for_file(file_name);
+        // ponytail: skip huge files; use an incremental parser if large-file hints matter.
+        if syntax.name == "Plain Text" || content.len() > MAX_SCOPE_HINT_BYTES {
+            return Vec::new();
+        }
+        if syntax.name.to_ascii_lowercase().contains("markdown") {
+            return markdown_heading_ranges(content, syntax, &self.syntax_set);
+        }
+
+        let mut state = ParseState::new(syntax);
+        let mut stack = ScopeStack::new();
+        let mut persistent = Vec::<ActiveNamedScope>::new();
+        let mut indented = Vec::<IndentedNamedScope>::new();
+        let mut ranges = Vec::<EnclosingScopeRange>::new();
+        let mut order = 0usize;
+
+        for (line_index, line) in LinesWithEndings::from(content).enumerate() {
+            let trimmed = line.trim();
+            let indent = indentation_width(line);
+            if !trimmed.is_empty() {
+                while indented.last().is_some_and(|scope| indent <= scope.indent) {
+                    indented.pop();
+                }
+            }
+
+            let before = stack.scopes.clone();
+            let Ok(ops) = state.parse_line(line, &self.syntax_set) else {
+                return Vec::new();
+            };
+            let mut has_definition = false;
+            for (idx, (position, op)) in ops.iter().enumerate() {
+                if stack.apply(op).is_err() {
+                    return Vec::new();
+                }
+                let end = ops
+                    .get(idx + 1)
+                    .map(|(next, _)| *next)
+                    .unwrap_or(line.len());
+                if end <= *position || !stack_has_named_definition(&stack) {
+                    continue;
+                }
+                let text = line[*position..end].trim();
+                if !text.is_empty() {
+                    has_definition = true;
+                }
+            }
+
+            persistent.retain(|scope| {
+                stack.scopes.len() >= scope.prefix.len()
+                    && stack.scopes[..scope.prefix.len()] == scope.prefix
+            });
+
+            if has_definition {
+                order = order.wrapping_add(1);
+                let definition = line.trim_end_matches(['\r', '\n']).trim_start().to_string();
+                let common = before
+                    .iter()
+                    .zip(&stack.scopes)
+                    .take_while(|(left, right)| left == right)
+                    .count();
+                let definition_depth = stack
+                    .scopes
+                    .iter()
+                    .enumerate()
+                    .skip(common)
+                    .filter(|(_, scope)| scope_is_definition_scope(&scope.to_string()))
+                    .map(|(idx, _)| idx + 1)
+                    .next_back();
+                let depth = definition_depth.or_else(|| {
+                    stack
+                        .scopes
+                        .iter()
+                        .enumerate()
+                        .skip(common)
+                        .filter(|(_, scope)| scope_is_definition_body(&scope.to_string()))
+                        .map(|(idx, _)| idx + 1)
+                        .next_back()
+                });
+                if let Some(depth) = depth {
+                    persistent.retain(|scope| scope.prefix.len() < depth);
+                    persistent.push(ActiveNamedScope {
+                        prefix: stack.scopes[..depth].to_vec(),
+                        definition,
+                        definition_line: line_index,
+                        order,
+                    });
+                } else {
+                    indented.push(IndentedNamedScope {
+                        indent,
+                        definition,
+                        definition_line: line_index,
+                        order,
+                    });
+                }
+            }
+
+            let definition = persistent
+                .iter()
+                .map(|scope| {
+                    (
+                        scope.order,
+                        scope.definition_line,
+                        scope.definition.as_str(),
+                    )
+                })
+                .chain(indented.iter().map(|scope| {
+                    (
+                        scope.order,
+                        scope.definition_line,
+                        scope.definition.as_str(),
+                    )
+                }))
+                .max_by_key(|(scope_order, _, _)| *scope_order)
+                .map(|(_, definition_line, definition)| (definition_line, definition));
+            if let Some((definition_line, definition)) = definition {
+                let extends_last = ranges.last().is_some_and(|last| {
+                    last.end_line == line_index && last.definition_line == definition_line
+                });
+                if extends_last {
+                    ranges.last_mut().expect("scope range exists").end_line += 1;
+                } else {
+                    ranges.push(EnclosingScopeRange {
+                        start_line: line_index,
+                        end_line: line_index + 1,
+                        definition_line,
+                        definition: definition.to_string(),
+                    });
+                }
+            }
+        }
+
+        ranges
+    }
+
     fn syntax_for_file(&self, file_name: &str) -> &SyntaxReference {
         self.syntax_set
             .find_syntax_for_file(file_name)
@@ -509,6 +668,214 @@ impl SyntaxEngine {
             .flatten()
             .unwrap_or_else(|| self.syntax_set.find_syntax_plain_text())
     }
+}
+
+#[derive(Clone, Debug)]
+struct MarkdownHeading {
+    level: usize,
+    definition_line: usize,
+    definition: String,
+}
+
+fn markdown_heading_ranges(
+    content: &str,
+    syntax: &SyntaxReference,
+    syntax_set: &SyntaxSet,
+) -> Vec<EnclosingScopeRange> {
+    let mut state = ParseState::new(syntax);
+    let mut stack = ScopeStack::new();
+    let mut headings = Vec::<MarkdownHeading>::new();
+    let mut ranges = Vec::<EnclosingScopeRange>::new();
+
+    for (line_index, line) in LinesWithEndings::from(content).enumerate() {
+        let Ok(ops) = state.parse_line(line, syntax_set) else {
+            return Vec::new();
+        };
+        let mut is_heading = false;
+        for (_, op) in ops {
+            if stack.apply(&op).is_err() {
+                return Vec::new();
+            }
+            is_heading |= stack_has_markdown_heading(&stack);
+        }
+        if is_heading {
+            let definition = line.trim_end_matches(['\r', '\n']).trim_start().to_string();
+            let level = definition.chars().take_while(|ch| *ch == '#').count();
+            if level > 0 {
+                while headings
+                    .last()
+                    .is_some_and(|heading| heading.level >= level)
+                {
+                    headings.pop();
+                }
+                headings.push(MarkdownHeading {
+                    level,
+                    definition_line: line_index,
+                    definition,
+                });
+            }
+        }
+
+        if let Some(heading) = headings.last() {
+            let extends_last = ranges.last().is_some_and(|last| {
+                last.end_line == line_index && last.definition_line == heading.definition_line
+            });
+            if extends_last {
+                ranges.last_mut().expect("heading range exists").end_line += 1;
+            } else {
+                ranges.push(EnclosingScopeRange {
+                    start_line: line_index,
+                    end_line: line_index + 1,
+                    definition_line: heading.definition_line,
+                    definition: heading.definition.clone(),
+                });
+            }
+        }
+    }
+
+    ranges
+}
+
+fn stack_has_markdown_heading(stack: &ScopeStack) -> bool {
+    let mut heading = false;
+    let mut section = false;
+    for scope in &stack.scopes {
+        let scope = scope.to_string();
+        heading |= scope.starts_with("markup.heading");
+        section |= scope.starts_with("entity.name.section");
+    }
+    heading && section
+}
+
+#[derive(Clone, Debug)]
+struct ActiveNamedScope {
+    prefix: Vec<Scope>,
+    definition: String,
+    definition_line: usize,
+    order: usize,
+}
+
+#[derive(Clone, Debug)]
+struct IndentedNamedScope {
+    indent: usize,
+    definition: String,
+    definition_line: usize,
+    order: usize,
+}
+
+#[derive(Clone, Copy)]
+enum DefinitionKind {
+    Function,
+    Class,
+    Type,
+    Section,
+    Namespace,
+}
+
+fn stack_has_named_definition(stack: &ScopeStack) -> bool {
+    let Some((entity_idx, kind)) =
+        stack
+            .scopes
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(idx, scope)| {
+                definition_kind_for_entity(&scope.to_string()).map(|kind| (idx, kind))
+            })
+    else {
+        return false;
+    };
+    stack.scopes[..entity_idx]
+        .iter()
+        .rev()
+        .map(ToString::to_string)
+        .find(|scope| scope.starts_with("meta."))
+        .is_some_and(|scope| meta_matches_definition(&scope, kind))
+}
+
+fn definition_kind_for_entity(scope: &str) -> Option<DefinitionKind> {
+    if !scope.starts_with("entity.name.") {
+        return None;
+    }
+    if scope.contains(".function") || scope.contains(".method") {
+        Some(DefinitionKind::Function)
+    } else if scope.contains(".class") {
+        Some(DefinitionKind::Class)
+    } else if scope.contains(".type")
+        || scope.contains(".struct")
+        || scope.contains(".enum")
+        || scope.contains(".trait")
+        || scope.contains(".interface")
+        || scope.contains(".impl")
+    {
+        Some(DefinitionKind::Type)
+    } else if scope.contains(".section") || scope.contains(".heading") {
+        Some(DefinitionKind::Section)
+    } else if scope.contains(".namespace") || scope.contains(".module") {
+        Some(DefinitionKind::Namespace)
+    } else {
+        None
+    }
+}
+
+fn meta_matches_definition(scope: &str, kind: DefinitionKind) -> bool {
+    match kind {
+        DefinitionKind::Function => {
+            (scope.starts_with("meta.function") || scope.contains("method"))
+                && !scope.contains("call")
+        }
+        DefinitionKind::Class => scope.starts_with("meta.class") || scope.starts_with("meta.type"),
+        DefinitionKind::Type => {
+            scope.starts_with("meta.type")
+                || scope.starts_with("meta.struct")
+                || scope.starts_with("meta.enum")
+                || scope.starts_with("meta.trait")
+                || scope.starts_with("meta.interface")
+                || scope.starts_with("meta.impl")
+                || scope.starts_with("meta.class")
+        }
+        DefinitionKind::Section => {
+            scope.starts_with("meta.section") || scope.starts_with("meta.heading")
+        }
+        DefinitionKind::Namespace => {
+            scope.starts_with("meta.namespace") || scope.starts_with("meta.module")
+        }
+    }
+}
+
+fn scope_is_definition_scope(scope: &str) -> bool {
+    ((scope.starts_with("meta.function") || scope.contains("method"))
+        && !scope.contains("call")
+        && !scope.contains("parameters"))
+        || scope.starts_with("meta.class")
+        || scope.starts_with("meta.type")
+        || scope.starts_with("meta.struct")
+        || scope.starts_with("meta.enum")
+        || scope.starts_with("meta.trait")
+        || scope.starts_with("meta.interface")
+        || scope.starts_with("meta.impl")
+        || scope.starts_with("meta.section")
+        || scope.starts_with("meta.heading")
+        || scope.starts_with("meta.namespace")
+        || scope.starts_with("meta.module")
+}
+
+fn indentation_width(line: &str) -> usize {
+    line.chars()
+        .take_while(|ch| ch.is_whitespace() && *ch != '\n' && *ch != '\r')
+        .fold(0, |column, ch| {
+            if ch == '\t' {
+                (column / 8 + 1) * 8
+            } else {
+                column + 1
+            }
+        })
+}
+
+fn scope_is_definition_body(scope: &str) -> bool {
+    scope.starts_with("meta.block")
+        || scope.starts_with("meta.group.braces")
+        || scope.starts_with("meta.brace.curly")
 }
 
 fn resolve_syntax_theme(theme_name: &str, light_mode: bool) -> (Theme, TuiColor) {
@@ -1445,6 +1812,112 @@ fn to_tui(color: Color) -> TuiColor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn enclosing_scope_ranges_choose_innermost_definition() {
+        let engine = SyntaxEngine::new("aura", false);
+        let source = "const TOP: i32 = 1;\nfn outer() {\n    let x = 1;\n    fn inner() {\n        let y = 2;\n    }\n    let z = x;\n}\n";
+        let ranges = engine.enclosing_scope_ranges(source, "sample.rs");
+
+        assert_eq!(enclosing_scope_definition(&ranges, 0), None);
+        assert_eq!(enclosing_scope_definition(&ranges, 2), Some("fn outer() {"));
+        assert_eq!(enclosing_scope_definition(&ranges, 4), Some("fn inner() {"));
+        assert_eq!(enclosing_scope_definition(&ranges, 6), Some("fn outer() {"));
+        assert_eq!(enclosing_scope_definition(&ranges, 7), None);
+    }
+
+    #[test]
+    fn enclosing_scope_ranges_name_rust_impl_blocks() {
+        let engine = SyntaxEngine::new("aura", false);
+        let source = "struct Outer;\nimpl Outer {\n    const VALUE: i32 = 1;\n}\n";
+        let ranges = engine.enclosing_scope_ranges(source, "sample.rs");
+
+        assert_eq!(enclosing_scope_definition(&ranges, 2), Some("impl Outer {"));
+        assert_eq!(enclosing_scope_definition(&ranges, 3), None);
+    }
+
+    #[test]
+    fn enclosing_scope_ranges_follow_nested_javascript_blocks() {
+        let engine = SyntaxEngine::new("aura", false);
+        let source = "class Outer {\n  method() {\n    function inner() {\n      return 1;\n    }\n    return inner();\n  }\n}\n";
+        let ranges = engine.enclosing_scope_ranges(source, "sample.js");
+
+        assert_eq!(
+            enclosing_scope_definition(&ranges, 0),
+            Some("class Outer {")
+        );
+        assert_eq!(enclosing_scope_definition(&ranges, 1), Some("method() {"));
+        assert_eq!(
+            enclosing_scope_definition(&ranges, 3),
+            Some("function inner() {")
+        );
+        assert_eq!(enclosing_scope_definition(&ranges, 5), Some("method() {"));
+        assert_eq!(enclosing_scope_definition(&ranges, 7), None);
+    }
+
+    #[test]
+    fn indentation_width_uses_eight_column_tab_stops() {
+        assert_eq!(indentation_width("\tvalue"), 8);
+        assert_eq!(indentation_width("        value"), 8);
+        assert_eq!(indentation_width("\t    value"), 12);
+    }
+
+    #[test]
+    fn enclosing_scope_ranges_use_syntect_names_for_indented_code() {
+        let engine = SyntaxEngine::new("aura", false);
+        let source = "class Outer:\n    def method(self):\n        def inner():\n            return 1\n        return inner()\nvalue = 1\n";
+        let ranges = engine.enclosing_scope_ranges(source, "sample.py");
+
+        assert_eq!(enclosing_scope_definition(&ranges, 0), Some("class Outer:"));
+        assert_eq!(
+            enclosing_scope_definition(&ranges, 1),
+            Some("def method(self):")
+        );
+        assert_eq!(enclosing_scope_definition(&ranges, 3), Some("def inner():"));
+        assert_eq!(
+            enclosing_scope_definition(&ranges, 4),
+            Some("def method(self):")
+        );
+        assert_eq!(enclosing_scope_definition(&ranges, 5), None);
+    }
+
+    #[test]
+    fn enclosing_scope_ranges_follow_nested_markdown_headings() {
+        let engine = SyntaxEngine::new("aura", false);
+        let source = "preamble\n## Foo\nbody\n### Bar\nnested\n## Next\nnext body\n";
+        let ranges = engine.enclosing_scope_ranges(source, "README.md");
+
+        assert_eq!(enclosing_scope_definition(&ranges, 0), None);
+        assert_eq!(enclosing_scope_definition(&ranges, 2), Some("## Foo"));
+        assert_eq!(enclosing_scope_definition(&ranges, 4), Some("### Bar"));
+        assert_eq!(enclosing_scope_definition(&ranges, 6), Some("## Next"));
+    }
+
+    #[test]
+    fn enclosing_scope_ranges_do_not_treat_calls_as_definitions() {
+        let engine = SyntaxEngine::new("aura", false);
+        let source = "outer();\nconst value = factory();\n";
+        assert!(engine
+            .enclosing_scope_ranges(source, "sample.js")
+            .is_empty());
+    }
+
+    #[test]
+    fn enclosing_scope_ranges_are_empty_for_plain_text() {
+        let engine = SyntaxEngine::new("aura", false);
+        assert!(engine
+            .enclosing_scope_ranges("fn not_really_code() {\n}\n", "notes.txt")
+            .is_empty());
+    }
+
+    #[test]
+    fn enclosing_scope_ranges_skip_huge_files() {
+        let engine = SyntaxEngine::new("aura", false);
+        let source = "x".repeat(MAX_SCOPE_HINT_BYTES + 1);
+        assert!(engine
+            .enclosing_scope_ranges(&source, "sample.rs")
+            .is_empty());
+    }
 
     #[test]
     fn lazy_cache_only_fills_requested_lines() {

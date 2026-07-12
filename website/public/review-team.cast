@@ -1,0 +1,9 @@
+{"version":2,"width":90,"height":20,"timestamp":1783824930,"idle_time_limit":4.0,"command":"bash /tmp/tmp.CEJcrQf5Qo/team.sh","env":{"SHELL":"/usr/bin/zsh"}}
+[0.002172, "o", "\u001b[H\u001b[2J\u001b[3J"]
+[0.702807, "o", "$ git branch --show-current\r\n"]
+[1.15491, "o", "feature/review-sync\r\n"]
+[2.35567, "o", "$ oy review pull\r\n"]
+[5.305162, "o", "Reviewing: \u001b[36mPR #1 (feature/review-sync)\u001b[0m\r\nPulled 4 comments from https://github.com/ahkohd/oyo-review-dogfood-1783482731/pull/1.\r\n"]
+[7.106403, "o", "$ oy review status\r\n"]
+[7.599117, "o", "Reviewing: \u001b[36mPR #1 (feature/review-sync)\u001b[0m\r\nReview comments:\r\n\u001b[1;38;5;8m#1\u001b[0m \u001b[36mREADME.md\u001b[0m \u001b[2mR3\u001b[0m  Add a short usage example here so new users can get started.\r\n\u001b[1;38;5;8m#4\u001b[0m \u001b[36mpull request\u001b[0m \u001b[2mpr\u001b[0m  Looks solid overall. A couple of inline notes, then good to merge.\r\n\u001b[1;38;5;8m#3\u001b[0m \u001b[36msrc/app.txt\u001b[0m \u001b[2mR2\u001b[0m  Pull this out into a helper \u2014 it's duplicated a few lines down.\r\n\u001b[1;38;5;8m#2\u001b[0m \u001b[36msrc/app.txt\u001b[0m \u001b[2mR4\u001b[0m  Handle the empty-input case before we index into this.\r\n"]
+[11.000384, "o", "\u001b[0m"]

@@ -1,0 +1,145 @@
+---
+// Custom Starlight header that reuses the landing nav's look: the `~/oy` brand,
+// mono nav links, and a bordered ◐ theme toggle. Keeps docs search. The mobile
+// sidebar toggle is rendered by PageFrame, so it's unaffected by this override.
+import Search from "@astrojs/starlight/components/Search.astro";
+import SiteTitle from "./SiteTitle.astro";
+
+const base = import.meta.env.BASE_URL;
+const home = base.endsWith("/") ? base : `${base}/`;
+---
+
+<div class="oy-header">
+  <SiteTitle />
+  <div class="oy-search"><Search /></div>
+  <nav class="oy-nav">
+    <a href={`${home}#features`} class="oy-link">Features</a>
+    <a href={`${home}#install`} class="oy-link">Install</a>
+    <a href={`${home}config/`} class="oy-link oy-link--active">Docs</a>
+    <button
+      class="oy-toggle"
+      id="oy-theme-toggle"
+      type="button"
+      aria-label="Toggle color theme"
+      title="Toggle theme">◐</button
+    >
+  </nav>
+</div>
+
+<style>
+  .oy-header {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 1.4rem;
+    width: 100%;
+    height: 100%;
+    /* Center at the landing's 72rem with matching side padding. */
+    max-width: 72rem;
+    margin-inline: auto;
+    padding-inline: 1.5rem;
+  }
+  /* Center the search in the middle column. */
+  .oy-search {
+    justify-self: center;
+    width: 100%;
+    max-width: 24rem;
+    display: flex;
+  }
+  .oy-search :global(site-search) {
+    display: block;
+    width: 100%;
+  }
+  .oy-search :global(site-search > button) {
+    width: 100%;
+  }
+  .oy-nav {
+    display: flex;
+    align-items: center;
+    gap: 1.5rem;
+  }
+  .oy-link {
+    font-family: var(--sl-font-mono);
+    font-size: 0.82rem;
+    letter-spacing: 0.02em;
+    color: var(--sl-color-gray-3);
+    text-decoration: none;
+    transition: color 0.15s;
+    transform: translateY(0.5px);
+  }
+  .oy-link:hover {
+    color: var(--sl-color-text-accent);
+  }
+  .oy-link--active {
+    color: var(--sl-color-text-accent);
+  }
+  .oy-toggle {
+    display: grid;
+    place-items: center;
+    width: 2rem;
+    height: 2rem;
+    font-family: var(--sl-font-mono);
+    font-size: 0.95rem;
+    line-height: 1;
+    color: var(--sl-color-gray-3);
+    background: transparent;
+    border: 1px solid var(--sl-color-hairline);
+    border-radius: 0;
+    cursor: pointer;
+    transition:
+      color 0.15s,
+      border-color 0.15s;
+  }
+  .oy-toggle:hover {
+    color: var(--sl-color-text-accent);
+    border-color: var(--sl-color-text-accent);
+  }
+  /* On narrow screens Starlight shows a fixed hamburger (top-right) and moves the
+     theme control into the mobile menu, so hide the links and the toggle, leave
+     room on the right for the hamburger, and let search sit compact at the end. */
+  @media (max-width: 50rem) {
+    /* Hide the whole nav group (links + toggle live in the mobile menu), so the
+       grid is just brand + search in one row — otherwise the empty nav wraps to
+       a second row and shoves the content to the top, off the hamburger's line. */
+    .oy-nav {
+      display: none;
+    }
+    .oy-header {
+      grid-template-columns: auto 1fr;
+      padding-inline-end: calc(
+        var(--sl-nav-pad-x) + var(--sl-menu-button-size, 2rem) + 0.75rem
+      );
+    }
+    .oy-search {
+      justify-self: end;
+      width: auto;
+    }
+    .oy-search :global(site-search),
+    .oy-search :global(site-search > button) {
+      width: auto;
+    }
+  }
+</style>
+
+<script>
+  // Toggle the theme using Starlight's own localStorage key, so the choice is
+  // shared with the landing page and restored on load by Starlight.
+  const btn = document.getElementById("oy-theme-toggle");
+  if (btn) {
+    const root = document.documentElement;
+    const current = () => {
+      const stored = localStorage.getItem("starlight-theme");
+      if (stored === "dark" || stored === "light") return stored;
+      return window.matchMedia("(prefers-color-scheme: dark)").matches
+        ? "dark"
+        : "light";
+    };
+    btn.addEventListener("click", () => {
+      const next = current() === "dark" ? "light" : "dark";
+      root.dataset.theme = next;
+      try {
+        localStorage.setItem("starlight-theme", next);
+      } catch (e) {}
+    });
+  }
+</script>

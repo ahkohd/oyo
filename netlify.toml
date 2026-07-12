@@ -1,0 +1,6 @@
+# The Astro site lives in website/, not the repo root, so point Netlify at it.
+# `publish` is relative to `base`, i.e. website/dist.
+[build]
+  base = "website"
+  command = "npm run build"
+  publish = "dist"
