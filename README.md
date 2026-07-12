@@ -118,6 +118,18 @@ paru -S oyo
 cargo install oyo --locked --force
 ```
 
+### Nix
+
+```sh
+nix profile add github:ahkohd/oyo
+```
+
+Or run it without installing:
+
+```sh
+nix run github:ahkohd/oyo
+```
+
 ## Use Oyo
 
 ### Show uncommitted changes
