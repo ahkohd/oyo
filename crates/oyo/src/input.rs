@@ -998,13 +998,13 @@ fn dispatch_normal_action(
         NormalAction::PrevFile => {
             let count = repeat_count(app, key, pending_event, false)?;
             for _ in 0..count {
-                app.prev_file();
+                app.prev_file_wrapped();
             }
         }
         NormalAction::NextFile => {
             let count = repeat_count(app, key, pending_event, false)?;
             for _ in 0..count {
-                app.next_file();
+                app.next_file_wrapped();
             }
         }
         NormalAction::ToggleAutoplay => {
@@ -1366,6 +1366,65 @@ mod tests {
         assert!(handle_global_key(&mut app, ctrl('p')));
         assert!(app.command_palette_active());
         assert!(!app.search_active());
+    }
+
+    #[test]
+    fn bracket_file_navigation_wraps_but_focused_list_navigation_clamps() {
+        let diff = MultiFileDiff::from_file_pairs(
+            ["a.txt", "b.txt", "c.txt"]
+                .into_iter()
+                .map(|path| (path.into(), "old\n".to_string(), "new\n".to_string()))
+                .collect(),
+        );
+        let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+        let mut terminal = test_terminal();
+        let mut pending_event = None;
+        let editor_config = config::EditorConfig::default();
+
+        app.select_file(2);
+        handle_app_key(
+            &mut app,
+            key(']'),
+            &mut pending_event,
+            &mut terminal,
+            &editor_config,
+        )
+        .unwrap();
+        assert_eq!(app.current_file_path(), "a.txt");
+        handle_app_key(
+            &mut app,
+            key('['),
+            &mut pending_event,
+            &mut terminal,
+            &editor_config,
+        )
+        .unwrap();
+        assert_eq!(app.current_file_path(), "c.txt");
+
+        app.select_file(0);
+        handle_app_key(
+            &mut app,
+            key('2'),
+            &mut pending_event,
+            &mut terminal,
+            &editor_config,
+        )
+        .unwrap();
+        handle_app_key(
+            &mut app,
+            key(']'),
+            &mut pending_event,
+            &mut terminal,
+            &editor_config,
+        )
+        .unwrap();
+        assert_eq!(app.current_file_path(), "c.txt");
+
+        app.next_file();
+        assert_eq!(app.current_file_path(), "c.txt");
+        app.select_file(0);
+        app.prev_file();
+        assert_eq!(app.current_file_path(), "a.txt");
     }
 
     #[test]

@@ -150,7 +150,7 @@ impl App {
         self.file_list_scroll = self.file_list_scroll.saturating_add(1).min(max_scroll);
     }
 
-    pub(super) fn next_file_wrapped(&mut self) -> bool {
+    pub(crate) fn next_file_wrapped(&mut self) -> bool {
         self.restore_live_diff_after_outdated_view();
         if !self.file_filter.is_empty() {
             let indices = self.filtered_file_indices();
@@ -184,7 +184,7 @@ impl App {
         true
     }
 
-    pub(super) fn prev_file_wrapped(&mut self) -> bool {
+    pub(crate) fn prev_file_wrapped(&mut self) -> bool {
         self.restore_live_diff_after_outdated_view();
         if !self.file_filter.is_empty() {
             let indices = self.filtered_file_indices();
