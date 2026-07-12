@@ -2566,9 +2566,19 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
         Style::default().fg(app.theme.text_muted)
     };
     let files_active = app.file_panel_mode == FilePanelMode::Files;
-    let files_segment = if files_active { "• files" } else { "  files" };
+    let files_segment = if files_active {
+        "• files"
+    } else if app.files_tab_unseen {
+        "* files"
+    } else {
+        "  files"
+    };
     let comments_segment = if files_active {
-        "  comments"
+        if app.comments_tab_unseen {
+            "* comments"
+        } else {
+            "  comments"
+        }
     } else {
         "• comments"
     };
@@ -2613,6 +2623,21 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
     } else {
         active_segment_style
     };
+    let mut tabs = vec![Span::raw(" ")];
+    if !files_active && app.files_tab_unseen {
+        tabs.push(Span::styled("*", Style::default().fg(app.theme.warning)));
+        tabs.push(Span::styled(" files", files_style));
+    } else {
+        tabs.push(Span::styled(files_segment, files_style));
+    }
+    tabs.push(Span::raw("   "));
+    if files_active && app.comments_tab_unseen {
+        tabs.push(Span::styled("*", Style::default().fg(app.theme.warning)));
+        tabs.push(Span::styled(" comments", comments_style));
+    } else {
+        tabs.push(Span::styled(comments_segment, comments_style));
+    }
+    let tabs_line = Line::from(tabs);
     let header_lines = if app.file_panel_mode == FilePanelMode::Comments {
         let comment_count = app.review_comment_count();
         let comments_label = match comment_count {
@@ -2623,12 +2648,7 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
             Line::raw(""),
             Line::from(vec![Span::raw(" "), Span::styled(header_text, root_style)]),
             Line::raw(""),
-            Line::from(vec![
-                Span::raw(" "),
-                Span::styled(files_segment, files_style),
-                Span::raw("   "),
-                Span::styled(comments_segment, comments_style),
-            ]),
+            tabs_line,
             Line::from(vec![
                 Span::raw(" "),
                 Span::styled(comments_label, Style::default().fg(app.theme.text_muted)),
@@ -2639,12 +2659,7 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
             Line::raw(""),
             Line::from(vec![Span::raw(" "), Span::styled(header_text, root_style)]),
             Line::raw(""),
-            Line::from(vec![
-                Span::raw(" "),
-                Span::styled(files_segment, files_style),
-                Span::raw("   "),
-                Span::styled(comments_segment, comments_style),
-            ]),
+            tabs_line,
             Line::from(vec![
                 Span::raw(" "),
                 Span::styled(
@@ -8819,6 +8834,60 @@ mod tests {
                     .collect::<String>()
             })
             .collect()
+    }
+
+    #[test]
+    fn inactive_sidebar_tab_renders_unseen_marker_without_moving_hit_area() {
+        let multi = MultiFileDiff::from_file_pairs(vec![
+            (
+                std::path::PathBuf::from("a.txt"),
+                "old\n".to_string(),
+                "new\n".to_string(),
+            ),
+            (
+                std::path::PathBuf::from("b.txt"),
+                "old\n".to_string(),
+                "new\n".to_string(),
+            ),
+        ]);
+        let mut app = App::new(multi, ViewMode::UnifiedPane, 0, false, None);
+        app.theme.warning = Color::Yellow;
+        app.theme.text_muted = Color::Blue;
+        app.comments_tab_unseen = true;
+        let backend = TestBackend::new(100, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| super::draw(frame, &mut app)).unwrap();
+        let unseen_hit = app.file_panel_mode_toggle_hit;
+        let lines = ascii_buffer_lines(&terminal);
+        assert!(lines.join("\n").contains("* comments"));
+        let (star_x, star_y) = text_pos(&lines, "* comments").unwrap();
+        assert_eq!(
+            terminal.backend().buffer()[(star_x, star_y)].fg,
+            app.theme.warning
+        );
+        assert_eq!(
+            terminal.backend().buffer()[(star_x + 2, star_y)].fg,
+            app.theme.text_muted
+        );
+
+        app.comments_tab_unseen = false;
+        terminal.draw(|frame| super::draw(frame, &mut app)).unwrap();
+        assert_eq!(app.file_panel_mode_toggle_hit, unseen_hit);
+
+        app.show_comments_sidebar();
+        app.files_tab_unseen = true;
+        terminal.draw(|frame| super::draw(frame, &mut app)).unwrap();
+        let lines = ascii_buffer_lines(&terminal);
+        assert!(lines.join("\n").contains("* files"));
+        let (star_x, star_y) = text_pos(&lines, "* files").unwrap();
+        assert_eq!(
+            terminal.backend().buffer()[(star_x, star_y)].fg,
+            app.theme.warning
+        );
+        assert_eq!(
+            terminal.backend().buffer()[(star_x + 2, star_y)].fg,
+            app.theme.text_muted
+        );
     }
 
     #[test]

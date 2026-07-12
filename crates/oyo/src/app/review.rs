@@ -4025,6 +4025,14 @@ impl App {
         self.review_unified_line_rows.push((row, display_idx));
     }
 
+    pub(crate) fn crop_review_unified_line_rows(&mut self, skipped: usize) {
+        self.review_unified_line_rows = self
+            .review_unified_line_rows
+            .drain(..)
+            .filter_map(|(row, display_idx)| row.checked_sub(skipped).map(|row| (row, display_idx)))
+            .collect();
+    }
+
     pub(crate) fn clear_review_split_line_rows(&mut self) {
         self.review_split_line_rows.clear();
     }
@@ -7201,6 +7209,11 @@ impl App {
         if stamp == self.review_db_stamp {
             return false;
         }
+        let previous_comment_ids = self
+            .review_comments
+            .iter()
+            .map(|comment| comment.id)
+            .collect::<FxHashSet<_>>();
         if !self.load_review_state(&path) {
             self.review_db_stamp = stamp;
             return false;
@@ -7216,6 +7229,16 @@ impl App {
             .unwrap_or(0)
             .saturating_add(1);
         self.review_session_baseline = self.review_comments.clone();
+        if self.file_panel_mode != super::FilePanelMode::Comments
+            && previous_comment_ids
+                != self
+                    .review_comments
+                    .iter()
+                    .map(|comment| comment.id)
+                    .collect::<FxHashSet<_>>()
+        {
+            self.comments_tab_unseen = true;
+        }
         self.touch_review_state();
         true
     }
@@ -10984,6 +11007,7 @@ mod tests {
                 "external note".to_string(),
             )
             .unwrap();
+        assert!(!external.comments_tab_unseen);
         assert!(external.set_review_comment_resolved_from_cli(id, true));
 
         loaded.multi_diff.files.clear();
@@ -10998,6 +11022,26 @@ mod tests {
             .unwrap();
         assert!(resolved.resolved);
         assert!(!resolved.outdated);
+        assert!(loaded.comments_tab_unseen);
+        loaded.show_comments_sidebar();
+        assert!(!loaded.comments_tab_unseen);
+
+        external
+            .add_review_comment_from_cli(
+                "new.txt",
+                ReviewTargetKind::Line,
+                Some(ReviewSide::New),
+                None,
+                Some(ReviewRange { start: 1, end: 1 }),
+                "another external note".to_string(),
+            )
+            .unwrap();
+        loaded.last_review_db_check = Instant::now() - Duration::from_secs(2);
+        assert!(loaded.maybe_watch_reload_review_state());
+        assert!(!loaded.comments_tab_unseen);
+        loaded.last_review_db_check = Instant::now() - Duration::from_secs(2);
+        assert!(!loaded.maybe_watch_reload_review_state());
+        assert!(!loaded.comments_tab_unseen);
 
         assert!(loaded.abandon_review_from_cli());
         assert_eq!(loaded.review_comment_count(), 0);

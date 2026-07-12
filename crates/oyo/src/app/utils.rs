@@ -305,6 +305,7 @@ fn folded_context_line(text: String, change_id: usize) -> ViewLine {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn fold_context_view(
     view: Vec<ViewLine>,
     mode: FoldContextMode,
@@ -312,6 +313,26 @@ pub(crate) fn fold_context_view(
     context_lines: usize,
     expansions: &FxHashMap<FoldContextKey, FoldContextExpansion>,
     comment_anchors: &FxHashSet<usize>,
+) -> (Vec<ViewLine>, Vec<FoldContextRegion>) {
+    fold_context_view_with_expand_all(
+        view,
+        mode,
+        file_index,
+        context_lines,
+        expansions,
+        comment_anchors,
+        false,
+    )
+}
+
+pub(crate) fn fold_context_view_with_expand_all(
+    view: Vec<ViewLine>,
+    mode: FoldContextMode,
+    file_index: usize,
+    context_lines: usize,
+    expansions: &FxHashMap<FoldContextKey, FoldContextExpansion>,
+    comment_anchors: &FxHashSet<usize>,
+    expand_all: bool,
 ) -> (Vec<ViewLine>, Vec<FoldContextRegion>) {
     if !mode.is_enabled() || view.is_empty() {
         return (view, Vec::new());
@@ -355,7 +376,14 @@ pub(crate) fn fold_context_view(
                     idx = end;
                     continue;
                 }
-                let expansion = expansions.get(&key).copied().unwrap_or_default();
+                let expansion = if expand_all {
+                    FoldContextExpansion {
+                        top: usize::MAX,
+                        bottom: 0,
+                    }
+                } else {
+                    expansions.get(&key).copied().unwrap_or_default()
+                };
                 let top = base_top.saturating_add(expansion.top).min(count);
                 let bottom = base_bottom
                     .saturating_add(expansion.bottom)

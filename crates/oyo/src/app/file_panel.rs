@@ -17,6 +17,7 @@ impl App {
     pub fn show_comments_sidebar(&mut self) {
         self.close_file_context_menu();
         self.file_panel_mode = FilePanelMode::Comments;
+        self.comments_tab_unseen = false;
         self.file_panel_visible = true;
         self.file_panel_manually_set = true;
         self.file_panel_auto_hidden = false;
@@ -32,6 +33,7 @@ impl App {
             return false;
         }
         self.file_panel_mode = FilePanelMode::Files;
+        self.files_tab_unseen = false;
         self.file_panel_visible = true;
         self.file_panel_manually_set = true;
         self.file_panel_auto_hidden = false;
@@ -47,8 +49,13 @@ impl App {
             FilePanelMode::Files => FilePanelMode::Comments,
             FilePanelMode::Comments => FilePanelMode::Files,
         };
+        match self.file_panel_mode {
+            FilePanelMode::Files => self.files_tab_unseen = false,
+            FilePanelMode::Comments => self.comments_tab_unseen = false,
+        }
         self.file_list_scroll = 0;
         self.file_list_focused = true;
+        self.file_panel_mode_toggle_hover = false;
         if self.file_panel_mode == FilePanelMode::Comments {
             self.preload_all_outdated_reconstructions();
         }

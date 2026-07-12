@@ -289,6 +289,84 @@ fn expandable_folds_preserve_step_targets_and_work_without_stepping() {
 }
 
 #[test]
+fn full_context_watch_refresh_keeps_new_eof_change_and_comment_visible() {
+    let _guard = DiffSettingsGuard::default();
+    let repo = tracked_watch_repo("full_context_eof");
+    let base = (1..=40)
+        .map(|line| format!("line {line}"))
+        .collect::<Vec<_>>();
+    std::fs::write(repo.join("README.md"), format!("{}\n", base.join("\n")))
+        .expect("write long base");
+    run_git(&repo, &["add", "README.md"]);
+    run_git(
+        &repo,
+        &[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "--amend",
+            "--no-edit",
+            "-q",
+        ],
+    );
+
+    let mut changed = base.clone();
+    changed[14] = "changed line 15".to_string();
+    changed.push("append one".to_string());
+    std::fs::write(repo.join("README.md"), format!("{}\n", changed.join("\n")))
+        .expect("write first change");
+    let changes = oyo_core::git::get_uncommitted_changes(&repo).expect("changes");
+    let diff = MultiFileDiff::from_git_changes(repo.clone(), changes).expect("diff");
+    let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+    app.set_review_persist_enabled(false);
+    app.enable_review_mode();
+    app.toggle_stepping();
+    app.last_viewport_height = 10;
+    let _ = app.current_view_with_frame(AnimationFrame::Idle);
+    assert!(app.expand_all_context_folds());
+    let expanded = app.current_view_with_frame(AnimationFrame::Idle);
+    assert!(expanded.iter().all(|line| !is_fold_line(line)));
+    app.scroll_offset = max_scroll(expanded.len(), app.last_viewport_height, false);
+
+    changed.push("append two".to_string());
+    std::fs::write(repo.join("README.md"), format!("{}\n", changed.join("\n")))
+        .expect("append at eof");
+    app.last_fs_check = Instant::now() - Duration::from_secs(2);
+    assert!(app.maybe_check_file_changes());
+    assert!(app.maybe_watch_refresh_changed_files());
+
+    let refreshed = app.current_view_with_frame(AnimationFrame::Idle);
+    assert!(refreshed.iter().all(|line| !is_fold_line(line)));
+    let appended = refreshed
+        .iter()
+        .find(|line| line.content == "append two")
+        .expect("newest eof line");
+    assert_eq!(appended.kind, LineKind::Inserted);
+    assert!(appended.has_changes);
+    app.clamp_scroll(refreshed.len(), app.last_viewport_height, false);
+    assert!(refreshed[app.scroll_offset..]
+        .iter()
+        .any(|line| line.content == "append two"));
+
+    app.add_review_comment_from_cli(
+        "README.md",
+        review::ReviewTargetKind::Line,
+        Some(review::ReviewSide::New),
+        None,
+        Some(review::ReviewRange { start: 42, end: 42 }),
+        "last line".to_string(),
+    )
+    .unwrap();
+    assert_eq!(app.review_comment_overlays_for_current_file().len(), 1);
+
+    let _ = std::fs::remove_dir_all(repo);
+}
+
+#[test]
 fn fold_context_scope_hints_are_cached_and_use_innermost_definition() {
     let mut lines = vec!["fn outer() {".to_string()];
     lines.extend((0..12).map(|idx| format!("    let outer_{idx} = {idx};")));
@@ -1572,6 +1650,35 @@ fn file_panel_root_hover_and_click_open_oy_view() {
     assert!(app.handle_file_list_click(2, 0, false));
     assert!(app.open_dashboard);
     assert_eq!(app.file_panel_mode, FilePanelMode::Comments);
+}
+
+#[test]
+fn sidebar_tab_unseen_markers_clear_on_switch() {
+    let diff = MultiFileDiff::from_file_pair(
+        "a.txt".into(),
+        "a.txt".into(),
+        "old\n".to_string(),
+        "new\n".to_string(),
+    );
+    let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+    app.comments_tab_unseen = true;
+    app.show_comments_sidebar();
+    assert!(!app.comments_tab_unseen);
+
+    app.files_tab_unseen = true;
+    assert!(app.show_files_sidebar());
+    assert!(!app.files_tab_unseen);
+
+    app.comments_tab_unseen = true;
+    app.file_panel_mode_toggle_hover = true;
+    app.toggle_file_panel_mode();
+    assert!(!app.comments_tab_unseen);
+    assert!(!app.file_panel_mode_toggle_hover);
+    app.files_tab_unseen = true;
+    app.file_panel_mode_toggle_hover = true;
+    app.toggle_file_panel_mode();
+    assert!(!app.files_tab_unseen);
+    assert!(!app.file_panel_mode_toggle_hover);
 }
 
 #[test]
@@ -3005,6 +3112,7 @@ fn test_watch_adds_newly_modified_tracked_file() {
     let diff = MultiFileDiff::from_git_changes(repo.clone(), changes).expect("diff");
     let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
     assert_eq!(app.multi_diff.file_count(), 1);
+    app.show_comments_sidebar();
 
     std::fs::write(repo.join("README.md"), "readme changed\n").expect("modify readme");
     app.last_change_list_watch_check = Instant::now() - Duration::from_secs(2);
@@ -3016,6 +3124,18 @@ fn test_watch_adds_newly_modified_tracked_file() {
         .files
         .iter()
         .any(|file| file.path == std::path::Path::new("README.md")));
+    assert!(app.files_tab_unseen);
+    assert!(app.show_files_sidebar());
+    assert!(!app.files_tab_unseen);
+
+    app.last_change_list_watch_check = Instant::now() - Duration::from_secs(2);
+    assert!(!app.maybe_watch_refresh_git_files());
+    assert!(!app.files_tab_unseen);
+
+    std::fs::write(repo.join("third.txt"), "third\n").expect("modify third");
+    app.last_change_list_watch_check = Instant::now() - Duration::from_secs(2);
+    assert!(app.maybe_watch_refresh_git_files());
+    assert!(!app.files_tab_unseen);
 
     let _ = std::fs::remove_dir_all(repo);
 }

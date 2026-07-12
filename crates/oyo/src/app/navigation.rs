@@ -2154,6 +2154,7 @@ impl App {
     }
 
     pub fn goto_start(&mut self) {
+        self.scroll_to_render_end = false;
         if self.stepping && !self.current_file_diff_ready() {
             return;
         }
@@ -2202,6 +2203,7 @@ impl App {
         self.clear_blame_hunk_hint();
         if !self.stepping {
             self.scroll_offset = usize::MAX;
+            self.scroll_to_render_end = true;
             self.centered_once = false;
             self.needs_scroll_to_active = false;
             let preserve_scope = self
@@ -2218,10 +2220,11 @@ impl App {
         }
         self.multi_diff.current_navigator().goto_end();
         self.scroll_offset = usize::MAX; // Will be clamped to bottom
+        self.scroll_to_render_end = true;
         self.animation_phase = AnimationPhase::Idle;
         self.animation_progress = 1.0;
         self.centered_once = false;
-        // Don't set needs_scroll_to_active - we want to stay at bottom
+        self.needs_scroll_to_active = false;
         self.refresh_blame_toggle_hint();
     }
 

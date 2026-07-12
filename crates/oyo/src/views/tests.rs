@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use crate::app::{
+    is_fold_line,
     review::{ReviewRange, ReviewSide, ReviewTargetKind},
     AnimationPhase, App, ViewMode,
 };
@@ -11,6 +12,7 @@ use crate::test_utils::TestApp;
 use crate::views::{
     extent_marker_text, fold_context_band, render_blame, render_diff_scrollbar, render_evolution,
     render_split, render_unified_pane, review_note_block, show_extent_marker,
+    unified_pane::TRAILING_REVIEW_SPACER_ROWS,
 };
 use oyo_core::{AnimationFrame, LineKind, MultiFileDiff, ViewLine};
 use ratatui::{
@@ -57,6 +59,15 @@ fn make_fold_scope_app(view_mode: ViewMode) -> App {
     app.syntax_mode = SyntaxMode::Off;
     app.next_step();
     app
+}
+
+fn render_full_buffer(app: &mut App, width: u16, height: u16) -> Buffer {
+    let backend = TestBackend::new(width, height);
+    let mut terminal = Terminal::new(backend).expect("terminal");
+    terminal
+        .draw(|frame| crate::ui::draw(frame, app))
+        .expect("draw");
+    terminal.backend().buffer().clone()
 }
 
 fn render_buffer(app: &mut App, width: u16, height: u16) -> Buffer {
@@ -291,6 +302,216 @@ fn resolved_review_app() -> TestApp {
         .unwrap();
     assert!(app.set_review_comment_resolved_from_cli(id, true));
     app
+}
+
+#[test]
+fn goto_end_reaches_last_line_card_in_every_fold_state() {
+    let old = (1..=30)
+        .map(|line| format!("line {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let new = format!("{old}\nLASTADDED\n");
+    let mut app = make_app(&format!("{old}\n"), &new, ViewMode::UnifiedPane);
+    app.set_review_persist_enabled(false);
+    app.enable_review_mode();
+    let root_id = app
+        .add_review_comment_from_cli(
+            "new.txt",
+            ReviewTargetKind::Line,
+            Some(ReviewSide::New),
+            None,
+            Some(ReviewRange { start: 31, end: 31 }),
+            "CARDBODY".to_string(),
+        )
+        .unwrap();
+
+    app.goto_end();
+    let folded_lines = buffer_text(&render_unified_buffer(&mut app, 80, 24));
+    let folded = folded_lines.join("\n");
+    assert!(folded.contains("LASTADDED"), "{folded}");
+    assert!(folded.contains("CARDBODY"), "{folded}");
+    assert!(
+        folded_lines[folded_lines.len() - 1 - TRAILING_REVIEW_SPACER_ROWS].contains("╰ ia edit")
+    );
+
+    app.toggle_fold_context();
+    app.goto_end();
+    let unfolded = buffer_text(&render_unified_buffer(&mut app, 80, 24)).join("\n");
+    assert!(unfolded.contains("LASTADDED"), "{unfolded}");
+    assert!(unfolded.contains("CARDBODY"), "{unfolded}");
+
+    app.toggle_fold_context();
+    let _ = app.current_view_with_frame(AnimationFrame::Idle);
+    assert!(app.expand_all_context_folds());
+    app.goto_end();
+    let expanded = buffer_text(&render_unified_buffer(&mut app, 80, 24)).join("\n");
+    assert!(expanded.contains("LASTADDED"), "{expanded}");
+    assert!(expanded.contains("CARDBODY"), "{expanded}");
+
+    for index in 1..=10 {
+        app.add_review_reply_from_cli(root_id, format!("REPLY_{index}"))
+            .unwrap();
+    }
+    app.animation_enabled = true;
+    assert!(app.stepping);
+    app.set_fold_context_mode(crate::config::FoldContextMode::Expandable);
+    assert!(app
+        .current_view_with_frame(AnimationFrame::Idle)
+        .iter()
+        .any(is_fold_line));
+    app.goto_start();
+    let _ = render_full_buffer(&mut app, 80, 24);
+    app.goto_end();
+    let mut folded_lines = Vec::new();
+    for _ in 0..4 {
+        app.tick();
+        folded_lines = buffer_text(&render_full_buffer(&mut app, 80, 24));
+    }
+    let folded = folded_lines.join("\n");
+    assert!(app.scroll_to_render_end_pending());
+    assert!(folded.contains("REPLY_10"), "{folded}");
+    let (_, diff_y, _, diff_height) = app.diff_view_area.unwrap();
+    assert!(
+        folded_lines[(diff_y + diff_height - 1 - TRAILING_REVIEW_SPACER_ROWS as u16) as usize]
+            .contains("╰ ik edit"),
+        "{folded}"
+    );
+    assert!(
+        !folded_lines[(diff_y + diff_height - 1) as usize].contains("ik edit"),
+        "{folded}"
+    );
+
+    app.toggle_fold_context();
+    app.goto_end();
+    let unfolded_lines = buffer_text(&render_unified_buffer(&mut app, 80, 24));
+    let unfolded = unfolded_lines.join("\n");
+    assert!(unfolded.contains("REPLY_10"), "{unfolded}");
+    assert!(
+        unfolded_lines[unfolded_lines.len() - 1 - TRAILING_REVIEW_SPACER_ROWS]
+            .contains("╰ ik edit"),
+        "{unfolded}"
+    );
+
+    app.toggle_fold_context();
+    let _ = app.current_view_with_frame(AnimationFrame::Idle);
+    assert!(app.expand_all_context_folds());
+    app.goto_end();
+    let expanded_lines = buffer_text(&render_unified_buffer(&mut app, 80, 24));
+    let expanded = expanded_lines.join("\n");
+    assert!(expanded.contains("REPLY_10"), "{expanded}");
+    assert!(
+        expanded_lines[expanded_lines.len() - 1 - TRAILING_REVIEW_SPACER_ROWS]
+            .contains("╰ ik edit"),
+        "{expanded}"
+    );
+
+    drop(app);
+    let mut mid_file = make_app(&format!("{old}\n"), &new, ViewMode::UnifiedPane);
+    mid_file.set_review_persist_enabled(false);
+    mid_file.enable_review_mode();
+    mid_file
+        .add_review_comment_from_cli(
+            "new.txt",
+            ReviewTargetKind::Line,
+            Some(ReviewSide::New),
+            None,
+            Some(ReviewRange { start: 15, end: 15 }),
+            "middle".to_string(),
+        )
+        .unwrap();
+    mid_file.goto_end();
+    let mid_lines = buffer_text(&render_unified_buffer(&mut mid_file, 80, 16));
+    let action_row = mid_lines
+        .iter()
+        .position(|line| line.contains("╰ ia edit"))
+        .unwrap();
+    assert!(mid_lines[action_row + 1].contains("line 16"));
+}
+
+#[test]
+fn full_context_scroll_reaches_near_eof_card_and_trailing_pad() {
+    let old = (1..=387)
+        .map(|line| format!("line {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let new = format!("{old}\nhi\nthis\n");
+    let mut app = make_app(&format!("{old}\n"), &new, ViewMode::UnifiedPane);
+    app.set_review_persist_enabled(false);
+    app.enable_review_mode();
+    app.add_review_comment_from_cli(
+        "new.txt",
+        ReviewTargetKind::Line,
+        Some(ReviewSide::New),
+        None,
+        Some(ReviewRange {
+            start: 388,
+            end: 388,
+        }),
+        "hello".to_string(),
+    )
+    .unwrap();
+    app.goto_end();
+    app.toggle_fold_context();
+
+    for _ in 0..40 {
+        app.mark_user_input();
+        app.scroll_up();
+    }
+    for _ in 0..40 {
+        app.mark_user_input();
+        app.scroll_down();
+        app.tick();
+        let _ = render_full_buffer(&mut app, 80, 24);
+    }
+    let mut lines = Vec::new();
+    for _ in 0..4 {
+        app.tick();
+        lines = buffer_text(&render_full_buffer(&mut app, 80, 24));
+    }
+    let text = lines.join("\n");
+    assert!(text.contains("hello"), "{text}");
+    assert!(text.contains("va resolve"), "{text}");
+    assert!(text.contains("this"), "{text}");
+
+    for _ in 0..40 {
+        app.mark_user_input();
+        app.scroll_up();
+    }
+    for _ in 0..8 {
+        app.mark_user_input();
+        app.scroll_half_page_down(18);
+        app.tick();
+        let _ = render_full_buffer(&mut app, 80, 24);
+    }
+    let text = (0..4)
+        .map(|_| {
+            app.tick();
+            buffer_text(&render_full_buffer(&mut app, 80, 24)).join("\n")
+        })
+        .last()
+        .unwrap();
+    assert!(text.contains("hello"), "{text}");
+    assert!(text.contains("va resolve"), "{text}");
+    assert!(text.contains("this"), "{text}");
+
+    app.goto_end();
+    for _ in 0..4 {
+        app.tick();
+        lines = buffer_text(&render_full_buffer(&mut app, 80, 24));
+    }
+    let text = lines.join("\n");
+    assert!(text.contains("hello"), "{text}");
+    assert!(text.contains("va resolve"), "{text}");
+    assert!(text.contains("this"), "{text}");
+    let (_, diff_y, _, diff_height) = app.diff_view_area.unwrap();
+    let footer = lines
+        .iter()
+        .position(|line| line.contains("╰ ia edit"))
+        .unwrap();
+    assert_eq!(
+        (diff_y + diff_height) as usize - footer - 1,
+        TRAILING_REVIEW_SPACER_ROWS + 1
+    );
 }
 
 #[test]

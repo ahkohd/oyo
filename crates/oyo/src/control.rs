@@ -701,6 +701,19 @@ fn apply_request(
     last_applied_seq: u64,
     request: ControlRequest,
 ) -> Result<ControlResponse> {
+    if matches!(
+        &request,
+        ControlRequest::Next { .. }
+            | ControlRequest::Prev { .. }
+            | ControlRequest::Hunk { .. }
+            | ControlRequest::File { .. }
+            | ControlRequest::Goto { .. }
+            | ControlRequest::View { .. }
+            | ControlRequest::Step { .. }
+            | ControlRequest::Action { .. }
+    ) {
+        app.mark_user_input();
+    }
     match request {
         ControlRequest::Get => Ok(ControlResponse::ok(
             &info.name,

@@ -385,3 +385,5 @@ The selection toolbar appears above the selection after you finish a mouse selec
 | `page_up` | `pageup` | Page up |
 | `select_first` | `g`, `home` | Select the first commit |
 | `select_last` | `G`, `end` | Select the last commit |
+hi
+this

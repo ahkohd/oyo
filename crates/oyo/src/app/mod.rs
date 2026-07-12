@@ -22,7 +22,7 @@ use ratatui_comfy_toaster::{
 };
 use ratatui_image::{picker::Picker, protocol::Protocol};
 use regex::Regex;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -396,6 +396,8 @@ pub struct App {
     /// File panel position
     pub file_panel_position: FilePanelPosition,
     pub(crate) file_panel_mode: FilePanelMode,
+    pub(crate) files_tab_unseen: bool,
+    pub(crate) comments_tab_unseen: bool,
     pub(crate) file_panel_mode_toggle_hit: Option<(u16, u16, u16, u16)>,
     pub(crate) file_panel_mode_toggle_hover: bool,
     pub(crate) file_panel_root_hit: Option<(u16, u16, u16, u16)>,
@@ -518,6 +520,8 @@ pub struct App {
     view_build_pending: bool,
     /// Horizontal scroll offset (for long lines)
     pub horizontal_scroll: usize,
+    /// Keep unified rendering pinned to its true end bound.
+    scroll_to_render_end: bool,
     /// Per-file horizontal scroll offsets when stepping
     horizontal_scrolls_step: Vec<usize>,
     /// Per-file horizontal scroll offsets when not stepping
@@ -534,6 +538,8 @@ pub struct App {
     pub(crate) fold_context_lines: usize,
     /// Per-gap expansion state
     fold_context_expansions: FxHashMap<FoldContextKey, FoldContextExpansion>,
+    /// Files whose context was fully expanded with `F`.
+    fold_context_fully_expanded_files: FxHashSet<PathBuf>,
     /// Expandable gaps in the current rendered view
     fold_context_regions: Vec<FoldContextRegion>,
     /// Mouse targets for expandable fold controls
@@ -1172,6 +1178,8 @@ impl App {
             file_panel_width: 30,
             file_panel_position: FilePanelPosition::Left,
             file_panel_mode: FilePanelMode::Files,
+            files_tab_unseen: false,
+            comments_tab_unseen: false,
             file_panel_mode_toggle_hit: None,
             file_panel_mode_toggle_hover: false,
             file_panel_root_hit: None,
@@ -1238,6 +1246,7 @@ impl App {
             view_build_defer: false,
             view_build_pending: false,
             horizontal_scroll: 0,
+            scroll_to_render_end: false,
             horizontal_scrolls_step: vec![0; file_count],
             horizontal_scrolls_no_step: vec![0; file_count],
             max_line_widths_step: vec![0; file_count],
@@ -1246,6 +1255,7 @@ impl App {
             fold_context: FoldContextMode::default(),
             fold_context_lines: 3,
             fold_context_expansions: FxHashMap::default(),
+            fold_context_fully_expanded_files: FxHashSet::default(),
             fold_context_regions: Vec::new(),
             fold_context_hits: Vec::new(),
             fold_context_screen_rows: Vec::new(),
@@ -2081,6 +2091,7 @@ impl App {
     pub fn toggle_fold_context(&mut self) {
         self.fold_context = self.fold_context.next();
         self.fold_context_expansions.clear();
+        self.fold_context_fully_expanded_files.clear();
         self.invalidate_fold_context_view();
         self.notify(ToastEvent::FoldContext(self.fold_context));
     }
@@ -2088,6 +2099,7 @@ impl App {
     pub fn set_fold_context_mode(&mut self, mode: FoldContextMode) {
         self.fold_context = mode;
         self.fold_context_expansions.clear();
+        self.fold_context_fully_expanded_files.clear();
         self.invalidate_fold_context_view();
     }
 
@@ -2259,6 +2271,9 @@ impl App {
                     bottom: 0,
                 },
             );
+        }
+        if let Some(path) = self.multi_diff.current_file().map(|file| file.path.clone()) {
+            self.fold_context_fully_expanded_files.insert(path);
         }
         self.invalidate_fold_context_view();
         true
@@ -2484,6 +2499,10 @@ impl App {
 
     pub(crate) fn render_scroll_offset(&self) -> usize {
         self.scroll_offset.saturating_sub(self.view_window_start)
+    }
+
+    pub(crate) fn scroll_to_render_end_pending(&self) -> bool {
+        self.scroll_to_render_end
     }
 
     pub(crate) fn peek_state(&self) -> Option<PeekState> {
@@ -2736,13 +2755,18 @@ impl App {
             }
         }
         let fold_comment_anchors = self.review_fold_anchor_change_ids(&view);
-        let (view, mut fold_context_regions) = utils::fold_context_view(
+        let expand_all_context = self
+            .multi_diff
+            .current_file()
+            .is_some_and(|file| self.fold_context_fully_expanded_files.contains(&file.path));
+        let (view, mut fold_context_regions) = utils::fold_context_view_with_expand_all(
             view,
             self.fold_context,
             self.multi_diff.selected_index,
             self.fold_context_lines,
             &self.fold_context_expansions,
             &fold_comment_anchors,
+            expand_all_context,
         );
         if !fold_context_regions.is_empty() {
             self.ensure_current_fold_scope_cache();

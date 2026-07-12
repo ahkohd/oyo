@@ -23,6 +23,7 @@ use ratatui::{
 
 /// Width of the fixed line number gutter (marker + line num + prefix + space)
 const GUTTER_WIDTH: u16 = 8; // "▶1234 + "
+pub(crate) const TRAILING_REVIEW_SPACER_ROWS: usize = 12;
 
 fn hunk_overflow_wrapped_unified(
     view_lines: &[ViewLine],
@@ -341,6 +342,68 @@ fn build_unified_render_model(
     blame_extra_rows: Option<&[usize]>,
 ) -> UnifiedRenderModel {
     app.clear_review_unified_line_rows();
+    let mut review_preview_before_idx: std::collections::HashMap<
+        usize,
+        Vec<(
+            String,
+            super::ReviewNoteBlock,
+            crate::app::review::ReviewCommentOverlay,
+        )>,
+    > = std::collections::HashMap::new();
+    let mut review_preview_after_idx: std::collections::HashMap<
+        usize,
+        Vec<(
+            String,
+            super::ReviewNoteBlock,
+            crate::app::review::ReviewCommentOverlay,
+        )>,
+    > = std::collections::HashMap::new();
+    if app.review_mode()
+        && matches!(
+            app.view_mode,
+            crate::app::ViewMode::UnifiedPane | crate::app::ViewMode::Blame
+        )
+    {
+        for overlay in app.review_comment_overlays_for_current_file() {
+            let block = review_note_block(app, &overlay, visible_width);
+            if overlay.is_hunk {
+                review_preview_before_idx
+                    .entry(overlay.display_idx)
+                    .or_default()
+                    .push((overlay.anchor_key.clone(), block, overlay));
+            } else {
+                review_preview_after_idx
+                    .entry(overlay.display_idx)
+                    .or_default()
+                    .push((overlay.anchor_key.clone(), block, overlay));
+            }
+        }
+    }
+    let trailing_review = review_preview_before_idx
+        .keys()
+        .chain(review_preview_after_idx.keys())
+        .copied()
+        .max()
+        .and_then(|idx| {
+            let rows = review_preview_before_idx
+                .get(&idx)
+                .into_iter()
+                .chain(review_preview_after_idx.get(&idx))
+                .flatten()
+                .map(|(_, block, _)| block.lines.len())
+                .sum::<usize>();
+            let remaining = view_lines.len().saturating_sub(idx.saturating_add(1));
+            (rows > 0 && remaining <= rows).then_some((idx, rows))
+        });
+    let trailing_review_idx = trailing_review.map(|(idx, _)| idx);
+    let trailing_review_rows = trailing_review.map(|(_, rows)| rows).unwrap_or(0);
+    let source_scroll_offset = if app.line_wrap {
+        scroll_offset
+    } else {
+        scroll_offset.min(trailing_review_idx.unwrap_or_else(|| view_lines.len().saturating_sub(1)))
+    };
+    let leading_rows_to_skip = scroll_offset.saturating_sub(source_scroll_offset);
+    let scroll_offset = source_scroll_offset;
     let primary_marker = app.primary_marker.clone();
     let extent_marker = app.extent_marker.clone();
     let extent_marker_deleted = app.extent_marker_deleted.clone();
@@ -378,42 +441,23 @@ fn build_unified_render_model(
     let mut fold_context_rows = Vec::new();
     let mut visible_fold_index = 0;
 
-    let mut review_preview_before_idx: std::collections::HashMap<
-        usize,
-        Vec<(
-            String,
-            super::ReviewNoteBlock,
-            crate::app::review::ReviewCommentOverlay,
-        )>,
-    > = std::collections::HashMap::new();
-    let mut review_preview_after_idx: std::collections::HashMap<
-        usize,
-        Vec<(
-            String,
-            super::ReviewNoteBlock,
-            crate::app::review::ReviewCommentOverlay,
-        )>,
-    > = std::collections::HashMap::new();
-    if app.review_mode()
-        && matches!(
-            app.view_mode,
-            crate::app::ViewMode::UnifiedPane | crate::app::ViewMode::Blame
-        )
-    {
-        for overlay in app.review_comment_overlays_for_current_file() {
-            let block = review_note_block(app, &overlay, visible_width);
-            if overlay.is_hunk {
-                review_preview_before_idx
-                    .entry(overlay.display_idx)
-                    .or_default()
-                    .push((overlay.anchor_key.clone(), block, overlay));
-            } else {
-                review_preview_after_idx
-                    .entry(overlay.display_idx)
-                    .or_default()
-                    .push((overlay.anchor_key.clone(), block, overlay));
-            }
-        }
+    let trailing_spacer_rows = if trailing_review_rows > 0 {
+        TRAILING_REVIEW_SPACER_ROWS
+    } else {
+        0
+    };
+    if !app.line_wrap {
+        let trailing_rows = trailing_review_rows
+            .saturating_add(trailing_spacer_rows)
+            .saturating_add(
+                view_lines
+                    .len()
+                    .checked_sub(1)
+                    .and_then(|last| blame_extra_rows.and_then(|rows| rows.get(last)))
+                    .copied()
+                    .unwrap_or(0),
+            );
+        display_len = display_len.saturating_add(trailing_rows);
     }
 
     let query = app.search_query().trim().to_ascii_lowercase();
@@ -534,12 +578,16 @@ fn build_unified_render_model(
     }
     let mut prev_visible_hunk: Option<usize> = None;
     let mut virtual_inserted = false;
+    let mut rendered_last_view_line = false;
     for (idx, view_line) in view_lines.iter().enumerate() {
         if !app.line_wrap && idx < scroll_offset {
             continue;
         }
         if !app.line_wrap && gutter_lines.len() >= visible_height {
             break;
+        }
+        if idx + 1 == view_lines.len() {
+            rendered_last_view_line = true;
         }
 
         let extra_rows = blame_extra_rows
@@ -1539,6 +1587,68 @@ fn build_unified_render_model(
         }
     }
 
+    if rendered_last_view_line {
+        for _ in 0..trailing_spacer_rows {
+            content_lines.push(Line::raw(""));
+            gutter_lines.push(Line::raw(""));
+            if let Some(lines) = bg_lines.as_mut() {
+                super::push_wrapped_bg_line(lines, wrap_width, 1, None);
+            }
+        }
+        if app.line_wrap {
+            display_len = display_len.saturating_add(trailing_spacer_rows);
+        }
+    }
+
+    if leading_rows_to_skip > 0 {
+        let skipped = leading_rows_to_skip.min(content_lines.len());
+        app.crop_review_unified_line_rows(skipped);
+        content_lines.drain(..skipped);
+        gutter_lines.drain(..skipped.min(gutter_lines.len()));
+        if let Some(lines) = bg_lines.as_mut() {
+            lines.drain(..skipped.min(lines.len()));
+        }
+        review_preview_rows.retain_mut(|row| {
+            let end = row.row_idx.saturating_add(row.row_span);
+            if end <= skipped {
+                return false;
+            }
+            if row.row_idx < skipped {
+                let removed = skipped - row.row_idx;
+                row.row_idx = 0;
+                row.row_span = row.row_span.saturating_sub(removed);
+                for hit in [
+                    &mut row.actions.edit,
+                    &mut row.actions.reply,
+                    &mut row.actions.resolve,
+                    &mut row.actions.delete,
+                    &mut row.actions.overflow,
+                ] {
+                    *hit = hit.and_then(|(offset, x, width)| {
+                        offset.checked_sub(removed).map(|offset| (offset, x, width))
+                    });
+                }
+            } else {
+                row.row_idx -= skipped;
+            }
+            true
+        });
+        review_avatar_rows.retain_mut(|(row, _)| {
+            let Some(shifted) = row.checked_sub(skipped) else {
+                return false;
+            };
+            *row = shifted;
+            true
+        });
+        fold_context_rows.retain_mut(|row| {
+            let Some(shifted) = row.row.checked_sub(skipped) else {
+                return false;
+            };
+            row.row = shifted;
+            true
+        });
+    }
+
     app.commit_syntax_warmup_frame();
 
     UnifiedRenderModel {
@@ -1582,11 +1692,6 @@ fn render_unified_pane_cached(frame: &mut Frame, app: &mut App, area: Rect) {
     if debug_enabled {
         crate::syntax::syntax_debug_reset();
     }
-    if !app.line_wrap {
-        let total_lines = app.render_total_lines(view_lines.len());
-        app.clamp_scroll(total_lines, visible_height, app.allow_overscroll());
-    }
-
     let mut scroll_offset = app.render_scroll_offset();
 
     let key = unified_render_key(
@@ -1618,35 +1723,39 @@ fn render_unified_pane_cached(frame: &mut Frame, app: &mut App, area: Rect) {
         Some(model) => model,
         None => return,
     };
+    let scroll_to_render_end = app.scroll_to_render_end_pending();
+    if scroll_to_render_end {
+        app.scroll_offset = usize::MAX;
+    }
     if app.line_wrap {
         app.ensure_active_visible_if_needed_wrapped(
             visible_height,
             model.display_len,
             model.primary_display_idx.or(model.active_display_idx),
         );
-        let scroll_before = app.scroll_offset;
-        app.clamp_scroll(model.display_len, visible_height, app.allow_overscroll());
-        if app.scroll_offset != scroll_before {
-            let new_scroll_offset = app.render_scroll_offset();
-            if new_scroll_offset != scroll_offset {
-                scroll_offset = new_scroll_offset;
-                let key = unified_render_key(
-                    app,
-                    animation_frame,
-                    visible_height,
-                    visible_width,
-                    scroll_offset,
-                );
-                model = build_unified_render_model(
-                    app,
-                    key,
-                    &view_lines,
-                    visible_height,
-                    visible_width,
-                    scroll_offset,
-                    None,
-                );
-            }
+    }
+    let scroll_before = app.scroll_offset;
+    app.clamp_scroll(model.display_len, visible_height, app.allow_overscroll());
+    if app.scroll_offset != scroll_before {
+        let new_scroll_offset = app.render_scroll_offset();
+        if new_scroll_offset != scroll_offset {
+            scroll_offset = new_scroll_offset;
+            let key = unified_render_key(
+                app,
+                animation_frame,
+                visible_height,
+                visible_width,
+                scroll_offset,
+            );
+            model = build_unified_render_model(
+                app,
+                key,
+                &view_lines,
+                visible_height,
+                visible_width,
+                scroll_offset,
+                None,
+            );
         }
     }
     let max_line_width = model.max_line_width;
@@ -1897,10 +2006,6 @@ fn render_unified_pane_uncached(frame: &mut Frame, app: &mut App, area: Rect) {
     if debug_enabled {
         crate::syntax::syntax_debug_reset();
     }
-    if !app.line_wrap {
-        let total_lines = app.render_total_lines(view_lines.len());
-        app.clamp_scroll(total_lines, visible_height, app.allow_overscroll());
-    }
     let mut scroll_offset = app.render_scroll_offset();
     let blame_extra_rows = if matches!(app.view_mode, crate::app::ViewMode::Blame) {
         app.blame_extra_rows.clone()
@@ -1923,35 +2028,39 @@ fn render_unified_pane_uncached(frame: &mut Frame, app: &mut App, area: Rect) {
         scroll_offset,
         blame_extra_rows.as_deref(),
     );
+    let scroll_to_render_end = app.scroll_to_render_end_pending();
+    if scroll_to_render_end {
+        app.scroll_offset = usize::MAX;
+    }
     if app.line_wrap {
         app.ensure_active_visible_if_needed_wrapped(
             visible_height,
             model.display_len,
             model.primary_display_idx.or(model.active_display_idx),
         );
-        let scroll_before = app.scroll_offset;
-        app.clamp_scroll(model.display_len, visible_height, app.allow_overscroll());
-        if app.scroll_offset != scroll_before {
-            let new_scroll_offset = app.render_scroll_offset();
-            if new_scroll_offset != scroll_offset {
-                scroll_offset = new_scroll_offset;
-                let key = unified_render_key(
-                    app,
-                    animation_frame,
-                    visible_height,
-                    visible_width,
-                    scroll_offset,
-                );
-                model = build_unified_render_model(
-                    app,
-                    key,
-                    &view_lines,
-                    visible_height,
-                    visible_width,
-                    scroll_offset,
-                    blame_extra_rows.as_deref(),
-                );
-            }
+    }
+    let scroll_before = app.scroll_offset;
+    app.clamp_scroll(model.display_len, visible_height, app.allow_overscroll());
+    if app.scroll_offset != scroll_before {
+        let new_scroll_offset = app.render_scroll_offset();
+        if new_scroll_offset != scroll_offset {
+            scroll_offset = new_scroll_offset;
+            let key = unified_render_key(
+                app,
+                animation_frame,
+                visible_height,
+                visible_width,
+                scroll_offset,
+            );
+            model = build_unified_render_model(
+                app,
+                key,
+                &view_lines,
+                visible_height,
+                visible_width,
+                scroll_offset,
+                blame_extra_rows.as_deref(),
+            );
         }
     }
     app.clamp_horizontal_scroll(model.max_line_width, visible_width);

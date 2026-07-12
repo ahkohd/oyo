@@ -9,6 +9,7 @@ impl App {
     pub(crate) fn mark_user_input(&mut self) {
         self.diff_last_input = Instant::now();
         self.diff_refresh_restore_end = None;
+        self.scroll_to_render_end = false;
     }
 
     fn ensure_diff_worker(&mut self) {

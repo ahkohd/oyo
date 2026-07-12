@@ -1,6 +1,6 @@
 use super::{
-    AnimationPhase, App, FileDiskStamp, FilePanelMode, ImagePreviewCache, ImagePreviewSignature,
-    PreviewLinkBox, StatusModeMenu, TopbarTab, TopbarTabContent, ViewMode,
+    AnimationFrame, AnimationPhase, App, FileDiskStamp, FilePanelMode, ImagePreviewCache,
+    ImagePreviewSignature, PreviewLinkBox, StatusModeMenu, TopbarTab, TopbarTabContent, ViewMode,
 };
 use crate::csv_preview::{CsvPreviewSignature, CsvPreviewState};
 use crate::structured_preview::{StructuredPreviewSignature, StructuredPreviewState};
@@ -2244,7 +2244,18 @@ impl App {
             return false;
         }
 
+        let previous_signature = self
+            .multi_diff
+            .files
+            .iter()
+            .map(|file| (file.status, file.old_path.clone(), file.path.clone()))
+            .collect::<Vec<_>>();
         self.refresh_all_files();
+        if !self.same_file_signature(&previous_signature)
+            && self.file_panel_mode != super::FilePanelMode::Files
+        {
+            self.files_tab_unseen = true;
+        }
         true
     }
 
@@ -2304,6 +2315,9 @@ impl App {
             target.working_copy_stamp = working_copy_stamp;
         }
         self.replace_multi_diff(refreshed);
+        if self.file_panel_mode != super::FilePanelMode::Files {
+            self.files_tab_unseen = true;
+        }
         let flash_until = Instant::now() + WATCH_CHANGE_FLASH_DURATION;
         for index in changed_indices {
             if let Some(until) = self.file_recently_changed_until.get_mut(index) {
@@ -2373,6 +2387,20 @@ impl App {
         if self.multi_diff.file_count() == 0 {
             return;
         }
+        let keep_full_context_tail = !self.stepping
+            && self
+                .multi_diff
+                .current_file()
+                .is_some_and(|file| self.fold_context_fully_expanded_files.contains(&file.path))
+            && {
+                let total = self.current_view_with_frame(AnimationFrame::Idle).len();
+                self.scroll_offset
+                    >= super::utils::max_scroll(
+                        total,
+                        self.last_viewport_height.max(1),
+                        self.allow_overscroll(),
+                    )
+            };
         // Preserve no-step hunk scope/cursor context when possible.
         let preserve_no_step_hunk = if !self.stepping {
             let nav = self.multi_diff.current_navigator();
@@ -2449,6 +2477,11 @@ impl App {
         }
 
         self.invalidate_fold_context_view();
+        if keep_full_context_tail {
+            self.scroll_offset = usize::MAX;
+            self.needs_scroll_to_active = false;
+            self.centered_once = false;
+        }
         self.rebuild_current_syntax_cache_after_reload();
 
         self.refresh_file_disk_baseline_for(idx);

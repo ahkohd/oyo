@@ -1,4 +1,9 @@
 # Config for the small "two modes" clips: hide the sidebar so the diff fills
 # the tiny terminal.
+[ui]
+# No "Quit? y/n" dialog — the clip ends by quitting oy, and the confirm prompt
+# would otherwise be the last frame the loop lands on.
+confirm_quit = false
+
 [files]
 panel_visible = false
