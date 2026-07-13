@@ -576,6 +576,26 @@ Oyo adds `author` from Git or jj config when a new comment does not include one.
 
 Oyo stores `createdAt` and `updatedAt` as Unix timestamps in seconds. Pulled provider comments also include provider sync data.
 
+## Reclaim space
+
+Use `gc` to remove expired deleted-comment records and reclaim database space:
+
+```sh
+oy review gc
+```
+
+Oyo keeps deleted comments for 14 days by default. It never removes a deletion that still needs to sync with a provider. Live comments are not affected.
+
+Preview the change without editing the database:
+
+```sh
+oy review gc --dry-run
+```
+
+Use `--prune-now` to ignore the grace period. Use `--grace DAYS` to change it. Use `--all` to process every review in the resolved database file.
+
+The command is safe to run more than once. Use `--json` for script output.
+
 ## Abandon a review
 
 Use `abandon` to delete the saved review for the current target:

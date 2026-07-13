@@ -3833,6 +3833,7 @@ fn render_outdated_comments_view(frame: &mut Frame, app: &mut App, area: Rect) {
         if let Some(label) = comment.overlay.delete_label.as_ref() {
             footer_actions.push(format!("{label} delete"));
         }
+        let thread_continues = comment.overlay.thread_continues;
         let block = review_note_block_with_footer(
             app,
             &comment.overlay,
@@ -3852,7 +3853,9 @@ fn render_outdated_comments_view(frame: &mut Frame, app: &mut App, area: Rect) {
             avatars.push((start.saturating_add(avatar.row_offset), avatar));
         }
         lines.extend(block.lines);
-        lines.push(Line::from(""));
+        if !thread_continues {
+            lines.push(Line::from(""));
+        }
         cards.push((
             comment.id,
             start,
@@ -3920,6 +3923,7 @@ fn render_outdated_comments_view(frame: &mut Frame, app: &mut App, area: Rect) {
                         .saturating_add(snapshot_start.saturating_sub(scroll) as u16),
                     content_area.width.saturating_sub(4),
                     snapshot_end.saturating_sub(snapshot_start) as u16,
+                    comment_id,
                     anchor_key.clone(),
                 );
             }

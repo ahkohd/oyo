@@ -919,15 +919,15 @@ pub struct App {
     pub(crate) review_preview_hover: Option<String>,
     pub(crate) review_preview_hover_id: Option<u64>,
     /// Hovered edit action on a rendered review comment preview.
-    pub(crate) review_preview_edit_hover: Option<String>,
+    pub(crate) review_preview_edit_hover: Option<u64>,
     /// Hovered reply action on a rendered review comment preview.
-    pub(crate) review_preview_reply_hover: Option<String>,
+    pub(crate) review_preview_reply_hover: Option<u64>,
     /// Hovered resolve action on a rendered review comment preview.
-    pub(crate) review_preview_resolve_hover: Option<String>,
+    pub(crate) review_preview_resolve_hover: Option<u64>,
     /// Hovered delete action on a rendered review comment preview.
-    pub(crate) review_preview_delete_hover: Option<String>,
+    pub(crate) review_preview_delete_hover: Option<u64>,
     /// Hovered overflow action on a rendered review comment preview.
-    pub(crate) review_preview_overflow_hover: Option<String>,
+    pub(crate) review_preview_overflow_hover: Option<u64>,
     /// Review comment overflow menu.
     pub(crate) review_comment_context_menu: Option<ReviewCommentContextMenu>,
     /// Review comment overflow menu hits.
@@ -935,7 +935,7 @@ pub struct App {
     /// Hovered review comment overflow action.
     pub(crate) review_comment_context_menu_hover: Option<ReviewCommentContextMenuAction>,
     /// Review card to flash after sidebar navigation.
-    review_preview_flash: Option<(String, Instant)>,
+    review_preview_flash: Option<(u64, String, Instant)>,
     /// Pending quit confirmation.
     quit_confirmation: bool,
     /// Pending review deletion confirmation.
@@ -3082,7 +3082,7 @@ impl App {
         if self
             .review_preview_flash
             .as_ref()
-            .is_some_and(|(_, until)| now >= *until)
+            .is_some_and(|(_, _, until)| now >= *until)
         {
             self.review_preview_flash = None;
             dirty = true;

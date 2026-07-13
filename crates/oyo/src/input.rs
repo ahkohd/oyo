@@ -66,19 +66,39 @@ pub(crate) fn handle_app_key(
     }
 
     if app.review_comment_context_menu.is_some() {
-        if key.code == KeyCode::Esc {
-            app.close_review_comment_context_menu();
-            return Ok(());
+        match key.code {
+            KeyCode::Down | KeyCode::Char('j') => {
+                app.move_review_comment_context_menu_active(true);
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                app.move_review_comment_context_menu_active(false);
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                app.activate_review_comment_context_menu();
+            }
+            _ => {
+                app.close_review_comment_context_menu();
+            }
         }
-        app.close_review_comment_context_menu();
+        return Ok(());
     }
 
     if app.file_context_menu.is_some() {
-        if key.code == KeyCode::Esc {
-            app.close_file_context_menu();
-            return Ok(());
+        match key.code {
+            KeyCode::Down | KeyCode::Char('j') => {
+                app.move_file_context_menu_active(true);
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                app.move_file_context_menu_active(false);
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                app.activate_file_context_menu();
+            }
+            _ => {
+                app.close_file_context_menu();
+            }
         }
-        app.close_file_context_menu();
+        return Ok(());
     }
 
     if key.code == KeyCode::Esc && app.show_path_popup {
@@ -1303,6 +1323,8 @@ fn dispatch_normal_action(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::{FileContextMenuAction, ReviewCommentContextMenuAction};
+    use crate::{ReviewRange, ReviewSide, ReviewTargetKind};
     use oyo_core::MultiFileDiff;
 
     fn key(ch: char) -> KeyEvent {
@@ -1424,6 +1446,95 @@ mod tests {
         assert_eq!(app.current_file_path(), "c.txt");
         app.select_file(0);
         app.prev_file();
+        assert_eq!(app.current_file_path(), "a.txt");
+    }
+
+    #[test]
+    fn context_menus_support_wrapped_keyboard_navigation_and_activation() {
+        let diff = MultiFileDiff::from_file_pairs(vec![
+            ("a.txt".into(), "old\n".to_string(), "new\n".to_string()),
+            ("b.txt".into(), "old\n".to_string(), "new\n".to_string()),
+        ]);
+        let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+        app.set_review_persist_enabled(false);
+        app.enable_review_mode();
+        app.goto_last_step();
+        app.add_review_comment_from_cli(
+            "a.txt",
+            ReviewTargetKind::Line,
+            Some(ReviewSide::New),
+            None,
+            Some(ReviewRange { start: 1, end: 1 }),
+            "copy me".to_string(),
+        )
+        .unwrap();
+        assert!(app.open_review_comment_context_menu_letter('a'));
+        assert_eq!(
+            app.review_comment_context_menu_hover,
+            Some(ReviewCommentContextMenuAction::Body)
+        );
+
+        let mut terminal = test_terminal();
+        let mut pending_event = None;
+        let editor_config = config::EditorConfig::default();
+        let mut press = |app: &mut App, code| {
+            handle_app_key(
+                app,
+                KeyEvent::new(code, KeyModifiers::empty()),
+                &mut pending_event,
+                &mut terminal,
+                &editor_config,
+            )
+            .unwrap();
+        };
+
+        press(&mut app, KeyCode::Up);
+        assert_eq!(
+            app.review_comment_context_menu_hover,
+            Some(ReviewCommentContextMenuAction::MarkdownQuote)
+        );
+        press(&mut app, KeyCode::Down);
+        assert_eq!(
+            app.review_comment_context_menu_hover,
+            Some(ReviewCommentContextMenuAction::Body)
+        );
+        press(&mut app, KeyCode::Char('j'));
+        assert_eq!(
+            app.review_comment_context_menu_hover,
+            Some(ReviewCommentContextMenuAction::Id)
+        );
+        press(&mut app, KeyCode::Enter);
+        assert!(app.review_comment_context_menu.is_none());
+
+        assert!(app.open_review_comment_context_menu_letter('a'));
+        press(&mut app, KeyCode::Esc);
+        assert!(app.review_comment_context_menu.is_none());
+
+        app.file_list_area = Some((0, 0, 20, 4));
+        app.file_list_rows = vec![Some(1)];
+        assert!(app.open_file_context_menu(1, 1));
+        assert_eq!(
+            app.file_context_menu_hover,
+            Some(FileContextMenuAction::Open)
+        );
+        press(&mut app, KeyCode::Up);
+        assert_eq!(
+            app.file_context_menu_hover,
+            Some(FileContextMenuAction::CopyPath)
+        );
+        press(&mut app, KeyCode::Down);
+        assert_eq!(
+            app.file_context_menu_hover,
+            Some(FileContextMenuAction::Open)
+        );
+        press(&mut app, KeyCode::Enter);
+        assert!(app.file_context_menu.is_none());
+        assert_eq!(app.current_file_path(), "b.txt");
+
+        app.select_file(0);
+        assert!(app.open_file_context_menu(1, 1));
+        press(&mut app, KeyCode::Esc);
+        assert!(app.file_context_menu.is_none());
         assert_eq!(app.current_file_path(), "a.txt");
     }
 

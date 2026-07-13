@@ -1655,18 +1655,18 @@ impl App {
             .map(|(_, anchor_key, _, _, _, _, _)| anchor_key.clone());
         let review_preview_edit_hover = review_preview_hit
             .as_ref()
-            .and_then(|(_, anchor_key, edit, _, _, _, _)| edit.then(|| anchor_key.clone()));
+            .and_then(|(id, _, edit, _, _, _, _)| edit.then_some(*id).flatten());
         let review_preview_reply_hover = review_preview_hit
             .as_ref()
-            .and_then(|(_, anchor_key, _, reply, _, _, _)| reply.then(|| anchor_key.clone()));
+            .and_then(|(id, _, _, reply, _, _, _)| reply.then_some(*id).flatten());
         let review_preview_resolve_hover = review_preview_hit
             .as_ref()
-            .and_then(|(_, anchor_key, _, _, resolve, _, _)| resolve.then(|| anchor_key.clone()));
+            .and_then(|(id, _, _, _, resolve, _, _)| resolve.then_some(*id).flatten());
         let review_preview_delete_hover = review_preview_hit
             .as_ref()
-            .and_then(|(_, anchor_key, _, _, _, delete, _)| delete.then(|| anchor_key.clone()));
+            .and_then(|(id, _, _, _, _, delete, _)| delete.then_some(*id).flatten());
         let review_preview_overflow_hover = review_preview_hit
-            .and_then(|(_, anchor_key, _, _, _, _, overflow)| overflow.then_some(anchor_key));
+            .and_then(|(id, _, _, _, _, _, overflow)| overflow.then_some(id).flatten());
         let pr_comment_action_hover = self
             .pr_comment_hits
             .iter()

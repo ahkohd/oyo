@@ -115,7 +115,7 @@ impl App {
             x: column,
             y: row,
         });
-        self.file_context_menu_hover = None;
+        self.file_context_menu_hover = FileContextMenuAction::ALL.first().copied();
         self.file_list_hover = Some(file_index);
         self.file_list_focused = true;
         self.stop_file_filter();
@@ -146,6 +146,34 @@ impl App {
             return false;
         }
         self.file_context_menu_hover = hover;
+        true
+    }
+
+    pub(crate) fn move_file_context_menu_active(&mut self, forward: bool) -> bool {
+        let actions = FileContextMenuAction::ALL;
+        let position = self
+            .file_context_menu_hover
+            .and_then(|active| actions.iter().position(|action| *action == active));
+        let next = if forward {
+            position.map_or(0, |index| (index + 1) % actions.len())
+        } else {
+            position.map_or(actions.len() - 1, |index| {
+                index.checked_sub(1).unwrap_or(actions.len() - 1)
+            })
+        };
+        self.file_context_menu_hover = Some(actions[next]);
+        true
+    }
+
+    pub(crate) fn activate_file_context_menu(&mut self) -> bool {
+        let Some(action) = self
+            .file_context_menu_hover
+            .or_else(|| FileContextMenuAction::ALL.first().copied())
+        else {
+            return false;
+        };
+        self.run_file_context_menu_action(action);
+        self.close_file_context_menu();
         true
     }
 

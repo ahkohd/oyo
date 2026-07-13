@@ -562,6 +562,34 @@ enum ReviewCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Reclaim space from safely expired deleted comments
+    Gc {
+        /// Commit, branch, bookmark, change ID, revset or range
+        revision: Option<String>,
+        /// Review target
+        #[arg(
+            short = 't',
+            long = "target",
+            value_name = "REV",
+            conflicts_with = "revision"
+        )]
+        target: Option<String>,
+        /// Report what would be reaped without changing the database
+        #[arg(long)]
+        dry_run: bool,
+        /// Keep tombstones newer than this many days
+        #[arg(long, default_value_t = 14)]
+        grace: u64,
+        /// Ignore the grace window
+        #[arg(long)]
+        prune_now: bool,
+        /// Reap safe tombstones for every review in this database
+        #[arg(long)]
+        all: bool,
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Delete the saved review for the current target or revision
     Abandon {
         /// Commit, branch, bookmark, change ID, revset or range
@@ -2832,6 +2860,61 @@ fn print_review_target_header(app: &App) {
     let color = review_cli_color_enabled();
     let label = review_target_summary(app).label;
     println!("Reviewing: {}", review_cli_paint(color, "36", &label));
+}
+
+fn review_gc_kib(bytes: u64) -> String {
+    format!("{:.1} KiB", bytes as f64 / 1024.0)
+}
+
+fn print_review_gc(app: &App, result: &app::review::ReviewGcResult, json: bool) -> Result<()> {
+    if json {
+        let mut value = serde_json::to_value(result)?;
+        if let Some(object) = value.as_object_mut() {
+            object.insert("count".to_string(), result.reaped.len().into());
+            object.insert(
+                "reapedIds".to_string(),
+                result
+                    .reaped
+                    .iter()
+                    .map(|entry| entry.id)
+                    .collect::<Vec<_>>()
+                    .into(),
+            );
+        }
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&review_json_with_target(app, value))?
+        );
+        return Ok(());
+    }
+
+    print_review_target_header(app);
+    if result.reaped.is_empty() {
+        println!("Nothing to reap.");
+    } else if result.dry_run {
+        println!(
+            "Would reap {} tombstone(s), estimated ~{}.",
+            result.reaped.len(),
+            review_gc_kib(result.estimated_bytes)
+        );
+    } else {
+        println!(
+            "Reaped {} tombstone(s), reclaimed ~{} (DB {} -> {}).",
+            result.reaped.len(),
+            review_gc_kib(result.bytes_before.saturating_sub(result.bytes_after)),
+            review_gc_kib(result.bytes_before),
+            review_gc_kib(result.bytes_after)
+        );
+    }
+    if result.held_pending_sync > 0 || result.held_within_grace > 0 {
+        println!(
+            "{} tombstone(s) held: pending sync ({}) / within grace ({}).",
+            result.held_pending_sync + result.held_within_grace,
+            result.held_pending_sync,
+            result.held_within_grace
+        );
+    }
+    Ok(())
 }
 
 fn review_status_json_value(app: &App, filter: &ReviewCommentFilter) -> serde_json::Value {
@@ -6212,6 +6295,23 @@ fn handle_review_command(command: &Command, config: &config::Config, args: &Args
             target,
             json,
         }) => handle_review_push_command(items, target.as_deref(), *json, config, args),
+        Some(ReviewCommand::Gc {
+            revision,
+            target,
+            dry_run,
+            grace,
+            prune_now,
+            all,
+            json,
+        }) => {
+            let explicit = combine_review_targets(&[revision.as_deref(), target.as_deref()])?;
+            let target = resolve_review_target(config, args, explicit.as_deref())?;
+            let app = review_app_for_target(config, args, target.as_deref(), false)?;
+            let result = app
+                .gc_review_tombstones(*all, *grace, *prune_now, *dry_run)
+                .map_err(anyhow::Error::msg)?;
+            print_review_gc(&app, &result, *json)
+        }
         Some(ReviewCommand::Abandon {
             revision,
             target,

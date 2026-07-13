@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use crate::app::{
     is_fold_line,
     review::{ReviewRange, ReviewSide, ReviewTargetKind},
-    AnimationPhase, App, ViewMode,
+    AnimationPhase, App, ReviewCommentContextMenuAction, ViewMode,
 };
 use crate::config::{
     DiffForegroundMode, DiffHighlightMode, EvoSyntaxMode, ModifiedStepMode, SyntaxMode,
@@ -576,7 +576,7 @@ fn resolved_review_unresolve_action_only_highlights_on_hover() {
         .unwrap();
     assert_eq!(label.style.fg, Some(app.theme.text_muted));
 
-    app.review_preview_resolve_hover = Some(overlay.anchor_key.clone());
+    app.review_preview_resolve_hover = Some(overlay.id);
     let block = review_note_block(&mut app, &overlay, 40);
     let label = block
         .lines
@@ -585,6 +585,83 @@ fn resolved_review_unresolve_action_only_highlights_on_hover() {
         .find(|span| span.content.contains("unresolve"))
         .unwrap();
     assert_eq!(label.style.fg, Some(app.theme.accent));
+}
+
+#[test]
+fn shared_anchor_thread_hover_and_flash_are_isolated_by_comment_id() {
+    let mut app = resolved_review_app();
+    let overlay = app.review_comment_overlays_for_current_file().remove(0);
+    let mut sibling = overlay.clone();
+    sibling.id = overlay.id + 1;
+    assert_eq!(sibling.anchor_key, overlay.anchor_key);
+
+    app.review_preview_hover = Some(overlay.anchor_key.clone());
+    app.review_preview_hover_id = Some(overlay.id);
+    let selected = review_note_block(&mut app, &overlay, 60);
+    let sibling_block = review_note_block(&mut app, &sibling, 60);
+    assert_eq!(selected.lines[0].spans[0].style.fg, Some(app.theme.accent));
+    assert_ne!(
+        sibling_block.lines[0].spans[0].style.fg,
+        Some(app.theme.accent)
+    );
+
+    let checks = [
+        ("edit", ReviewCommentContextMenuAction::Body),
+        ("reply", ReviewCommentContextMenuAction::Id),
+        ("unresolve", ReviewCommentContextMenuAction::FileLine),
+        ("delete", ReviewCommentContextMenuAction::Url),
+        ("…", ReviewCommentContextMenuAction::MarkdownQuote),
+    ];
+    for (label, action) in checks {
+        app.review_preview_edit_hover = None;
+        app.review_preview_reply_hover = None;
+        app.review_preview_resolve_hover = None;
+        app.review_preview_delete_hover = None;
+        app.review_preview_overflow_hover = None;
+        match action {
+            ReviewCommentContextMenuAction::Body => {
+                app.review_preview_edit_hover = Some(overlay.id)
+            }
+            ReviewCommentContextMenuAction::Id => app.review_preview_reply_hover = Some(overlay.id),
+            ReviewCommentContextMenuAction::FileLine => {
+                app.review_preview_resolve_hover = Some(overlay.id)
+            }
+            ReviewCommentContextMenuAction::Url => {
+                app.review_preview_delete_hover = Some(overlay.id)
+            }
+            ReviewCommentContextMenuAction::MarkdownQuote => {
+                app.review_preview_overflow_hover = Some(overlay.id)
+            }
+        }
+        let selected = review_note_block(&mut app, &overlay, 60);
+        let sibling_block = review_note_block(&mut app, &sibling, 60);
+        let selected_style = selected
+            .lines
+            .iter()
+            .flat_map(|line| &line.spans)
+            .find(|span| span.content.contains(label))
+            .unwrap()
+            .style;
+        let sibling_style = sibling_block
+            .lines
+            .iter()
+            .flat_map(|line| &line.spans)
+            .find(|span| span.content.contains(label))
+            .unwrap()
+            .style;
+        assert_ne!(selected_style, sibling_style, "{label}");
+    }
+
+    app.review_preview_hover = None;
+    app.review_preview_hover_id = None;
+    assert!(app.open_review_comment(0));
+    let selected = review_note_block(&mut app, &overlay, 60);
+    let sibling_block = review_note_block(&mut app, &sibling, 60);
+    assert_eq!(selected.lines[0].spans[0].style.fg, Some(app.theme.accent));
+    assert_ne!(
+        sibling_block.lines[0].spans[0].style.fg,
+        Some(app.theme.accent)
+    );
 }
 
 #[test]

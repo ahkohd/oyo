@@ -195,12 +195,14 @@ pub(crate) fn review_note_line_spans(
     line: &str,
 ) -> Vec<Span<'static>> {
     let anchor_key = &overlay.anchor_key;
-    let highlighted = app.review_preview_hover.as_deref() == Some(anchor_key)
-        || app.review_preview_flash_active(anchor_key);
-    let reply_hovered = app.review_preview_reply_hover.as_deref() == Some(anchor_key);
-    let resolve_hovered = app.review_preview_resolve_hover.as_deref() == Some(anchor_key);
-    let delete_hovered = app.review_preview_delete_hover.as_deref() == Some(anchor_key);
-    let overflow_hovered = app.review_preview_overflow_hover.as_deref() == Some(anchor_key);
+    let highlighted = app.review_preview_hover_id == Some(overlay.id)
+        || (app.review_preview_hover_id.is_none()
+            && app.review_preview_hover.as_deref() == Some(anchor_key))
+        || app.review_preview_flash_active(overlay.id, anchor_key);
+    let reply_hovered = app.review_preview_reply_hover == Some(overlay.id);
+    let resolve_hovered = app.review_preview_resolve_hover == Some(overlay.id);
+    let delete_hovered = app.review_preview_delete_hover == Some(overlay.id);
+    let overflow_hovered = app.review_preview_overflow_hover == Some(overlay.id);
     let resolved = overlay.resolved;
     let border = Style::default().fg(if highlighted {
         app.theme.accent
@@ -273,7 +275,7 @@ pub(crate) fn review_note_line_spans(
                 let is_resolve = action_key.starts_with('v');
                 let is_overflow = action_key.starts_with('o');
                 let edit_hovered = action_key.starts_with('i')
-                    && app.review_preview_edit_hover.as_deref() == Some(anchor_key);
+                    && app.review_preview_edit_hover == Some(overlay.id);
                 let hovered = app.pr_comment_action_hover_key.as_deref() == Some(action_key)
                     || edit_hovered
                     || (is_reply && reply_hovered)
@@ -627,7 +629,10 @@ fn review_note_block_inner(
         }
     }
     let border = Style::default().fg(
-        if app.review_preview_hover.as_deref() == Some(key) || app.review_preview_flash_active(key)
+        if app.review_preview_hover_id == Some(overlay.id)
+            || (app.review_preview_hover_id.is_none()
+                && app.review_preview_hover.as_deref() == Some(key))
+            || app.review_preview_flash_active(overlay.id, key)
         {
             app.theme.accent
         } else if overlay.resolved || overlay.outdated {
