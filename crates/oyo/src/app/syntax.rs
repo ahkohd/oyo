@@ -16,6 +16,18 @@ impl App {
         }
     }
 
+    pub(crate) fn set_syntax_theme(&mut self, theme: String) {
+        if self.syntax_theme == theme {
+            return;
+        }
+        self.syntax_theme = theme;
+        self.syntax_engine = None;
+        self.syntax_engine_rx = None;
+        self.syntax_caches = vec![None; self.multi_diff.file_count()];
+        self.unified_render_cache = None;
+        self.start_syntax_engine_load();
+    }
+
     pub(crate) fn start_syntax_engine_load(&mut self) {
         if !self.syntax_enabled() || self.syntax_engine.is_some() || self.syntax_engine_rx.is_some()
         {

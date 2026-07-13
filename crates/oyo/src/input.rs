@@ -32,6 +32,16 @@ pub(crate) fn handle_app_key(
         return Ok(());
     }
 
+    if app.settings_leave_confirmation_active() {
+        app.handle_settings_leave_key(key);
+        return Ok(());
+    }
+
+    if app.settings_reset_confirmation_active() {
+        app.handle_settings_reset_key(key);
+        return Ok(());
+    }
+
     if app.quit_confirmation_active() {
         app.handle_quit_confirmation_key(key);
         return Ok(());
@@ -157,6 +167,32 @@ pub(crate) fn handle_app_key(
     if app.search_active() {
         handle_search_key(app, key);
         return Ok(());
+    }
+
+    if app.active_settings_view() {
+        match key.code {
+            KeyCode::Down | KeyCode::Char('j') => {
+                app.move_settings_selection(true);
+                return Ok(());
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                app.move_settings_selection(false);
+                return Ok(());
+            }
+            KeyCode::Left | KeyCode::Char('h') => {
+                app.adjust_selected_setting(false);
+                return Ok(());
+            }
+            KeyCode::Right | KeyCode::Char('l') => {
+                app.adjust_selected_setting(true);
+                return Ok(());
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                app.activate_selected_setting();
+                return Ok(());
+            }
+            _ => {}
+        }
     }
 
     if app.diff_selection_mode_active() && handle_selection_key(app, key) {
@@ -797,6 +833,7 @@ fn dispatch_normal_action(
                 | NormalAction::ToggleHelp
                 | NormalAction::OpenCommentPicker
                 | NormalAction::OpenOutdatedComments
+                | NormalAction::OpenSettings
                 | NormalAction::OpenThemePicker
                 | NormalAction::NavigateBack
                 | NormalAction::NavigateForward
@@ -1308,6 +1345,10 @@ fn dispatch_normal_action(
             app.reset_count();
             app.open_outdated_comments_in_current_tab(None);
         }
+        NormalAction::OpenSettings => {
+            app.reset_count();
+            app.open_settings_tab();
+        }
         NormalAction::OpenThemePicker => {
             app.reset_count();
             if app.theme_picker_active() {
@@ -1323,7 +1364,9 @@ fn dispatch_normal_action(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::{FileContextMenuAction, ReviewCommentContextMenuAction};
+    use crate::app::{
+        FileContextMenuAction, ReviewCommentContextMenuAction, SettingItem, SettingsTarget,
+    };
     use crate::{ReviewRange, ReviewSide, ReviewTargetKind};
     use oyo_core::MultiFileDiff;
 
@@ -1536,6 +1579,83 @@ mod tests {
         press(&mut app, KeyCode::Esc);
         assert!(app.file_context_menu.is_none());
         assert_eq!(app.current_file_path(), "a.txt");
+    }
+
+    #[test]
+    fn settings_key_sequence_opens_and_reuses_settings_tab() {
+        let diff = MultiFileDiff::from_file_pair(
+            "old.txt".into(),
+            "new.txt".into(),
+            "old\n".to_string(),
+            "new\n".to_string(),
+        );
+        let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+        let mut terminal = test_terminal();
+        let mut pending_event = None;
+        let editor_config = config::EditorConfig::default();
+        for ch in ['g', 's', 'g', 's'] {
+            handle_app_key(
+                &mut app,
+                key(ch),
+                &mut pending_event,
+                &mut terminal,
+                &editor_config,
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            app.active_topbar_content(),
+            Some(TopbarTabContent::Settings)
+        );
+        assert_eq!(
+            app.topbar_tabs
+                .iter()
+                .filter(|tab| tab.content == TopbarTabContent::Settings)
+                .count(),
+            1
+        );
+        handle_app_key(
+            &mut app,
+            key('k'),
+            &mut pending_event,
+            &mut terminal,
+            &editor_config,
+        )
+        .unwrap();
+        assert_eq!(
+            app.settings_selected_target(),
+            SettingsTarget::ResetDefaults
+        );
+        handle_app_key(
+            &mut app,
+            key('j'),
+            &mut pending_event,
+            &mut terminal,
+            &editor_config,
+        )
+        .unwrap();
+        assert_eq!(
+            app.settings_selected_target(),
+            SettingsTarget::Item(SettingItem::ViewMode)
+        );
+        handle_app_key(
+            &mut app,
+            key('h'),
+            &mut pending_event,
+            &mut terminal,
+            &editor_config,
+        )
+        .unwrap();
+        assert_eq!(app.view_mode, ViewMode::Evolution);
+        handle_app_key(
+            &mut app,
+            key('l'),
+            &mut pending_event,
+            &mut terminal,
+            &editor_config,
+        )
+        .unwrap();
+        assert_eq!(app.view_mode, ViewMode::UnifiedPane);
     }
 
     #[test]

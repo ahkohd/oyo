@@ -409,7 +409,7 @@ enum CtlCommand {
     },
     /// Open a topbar tab
     Tab {
-        /// help, pr-comments, close or file
+        /// help, settings, pr-comments, close or file
         kind: String,
         /// File path for `file`
         file: Option<String>,
@@ -1488,6 +1488,13 @@ fn apply_config_to_app(app: &mut App, config: &config::Config, args: &Args, ligh
     app.file_panel_width = config.files.panel_width;
     app.file_panel_position = config.files.panel_position;
     app.file_count_mode = config.files.counts;
+    app.file_git_ignore_mode = if args.git_ignore {
+        config::GitIgnoreMode::On
+    } else if args.no_git_ignore {
+        config::GitIgnoreMode::Off
+    } else {
+        config.files.scan.git_ignore
+    };
     app.auto_center = config.ui.auto_center;
     app.watch = config.ui.watch;
     app.overscroll = config.ui.overscroll;
@@ -7305,6 +7312,34 @@ fn run_app(
                         }
                         continue;
                     }
+                    if app.settings_leave_confirmation_active() {
+                        match me.kind {
+                            MouseEventKind::Down(MouseButton::Left) => {
+                                app.handle_settings_leave_click(me.column, me.row);
+                            }
+                            MouseEventKind::Moved
+                                if !app.update_settings_leave_hover(me.column, me.row) =>
+                            {
+                                needs_draw = false;
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
+                    if app.settings_reset_confirmation_active() {
+                        match me.kind {
+                            MouseEventKind::Down(MouseButton::Left) => {
+                                app.handle_settings_reset_click(me.column, me.row);
+                            }
+                            MouseEventKind::Moved
+                                if !app.update_settings_reset_hover(me.column, me.row) =>
+                            {
+                                needs_draw = false;
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
                     if app.quit_confirmation_active() {
                         match me.kind {
                             MouseEventKind::Down(MouseButton::Left) => {
@@ -7369,6 +7404,9 @@ fn run_app(
                                 continue;
                             }
                             if app.handle_topbar_mouse_down(me.column, me.row) {
+                                continue;
+                            }
+                            if app.handle_settings_click(me.column, me.row) {
                                 continue;
                             }
                             if app.start_file_panel_resize(me.column, me.row) {
@@ -7462,7 +7500,8 @@ fn run_app(
                         MouseEventKind::Moved => {
                             let search_changed = app.update_search_bar_hover(me.column, me.row);
                             let topbar_changed = app.update_topbar_hover(me.column, me.row);
-                            if !search_changed && !topbar_changed {
+                            let settings_changed = app.update_settings_hover(me.column, me.row);
+                            if !search_changed && !topbar_changed && !settings_changed {
                                 needs_draw = false;
                             }
                         }
@@ -7525,6 +7564,15 @@ fn run_app(
                                 1
                             };
                             needs_draw = app.scroll_topbar_tabs(delta);
+                        }
+                        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                            if app.active_settings_view()
+                                && app.mouse_over_diff_view(me.column, me.row) =>
+                        {
+                            app.move_settings_selection(matches!(
+                                me.kind,
+                                MouseEventKind::ScrollDown
+                            ));
                         }
                         kind if app.mouse_over_diff_view(me.column, me.row)
                             && mouse_horizontal_scroll_delta(kind, me.modifiers).is_some() =>

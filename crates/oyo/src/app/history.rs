@@ -40,7 +40,8 @@ impl ViewHistoryRecipe {
                     focus_comment_id: right_focus,
                 },
             ) => left_tab == right_tab && left_focus == right_focus,
-            (Self::Help { tab_id: left }, Self::Help { tab_id: right }) => left == right,
+            (Self::Help { tab_id: left }, Self::Help { tab_id: right })
+            | (Self::Settings { tab_id: left }, Self::Settings { tab_id: right }) => left == right,
             (Self::Tab { tab_id: left }, Self::Tab { tab_id: right }) => left == right,
             _ => false,
         }
@@ -77,6 +78,9 @@ impl App {
             Some(TopbarTabContent::Help) => self
                 .active_topbar_tab
                 .map(|tab_id| ViewHistoryRecipe::Help { tab_id }),
+            Some(TopbarTabContent::Settings) => self
+                .active_topbar_tab
+                .map(|tab_id| ViewHistoryRecipe::Settings { tab_id }),
             None => None,
         }
     }
@@ -184,6 +188,14 @@ impl App {
                 self.open_help_in_current_tab();
                 true
             }
+            ViewHistoryRecipe::Settings { tab_id } => {
+                if !self.topbar_tabs.iter().any(|tab| tab.id == tab_id) {
+                    return false;
+                }
+                self.select_topbar_tab(tab_id);
+                self.open_settings_in_current_tab();
+                true
+            }
             ViewHistoryRecipe::Tab { tab_id } => {
                 if !self.topbar_tabs.iter().any(|tab| tab.id == tab_id) {
                     return false;
@@ -194,7 +206,10 @@ impl App {
         }
     }
 
-    fn navigate_view_history(&mut self, backward: bool) -> bool {
+    pub(super) fn navigate_view_history(&mut self, backward: bool) -> bool {
+        if self.request_settings_leave(super::settings::SettingsLeaveTarget::History(backward)) {
+            return true;
+        }
         if self.view_history.is_empty() {
             return false;
         }

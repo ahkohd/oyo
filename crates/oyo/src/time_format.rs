@@ -33,6 +33,14 @@ impl TimeFormatter {
         }
     }
 
+    pub fn mode(&self) -> TimeMode {
+        self.mode
+    }
+
+    pub fn set_mode(&mut self, mode: TimeMode) {
+        self.mode = mode;
+    }
+
     pub fn format(&self, epoch: Option<i64>, now: i64) -> String {
         let Some(epoch) = epoch else {
             return "Unknown".to_string();

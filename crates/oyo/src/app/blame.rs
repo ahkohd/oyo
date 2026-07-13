@@ -644,6 +644,28 @@ impl App {
         }
     }
 
+    pub(crate) fn set_blame_enabled(&mut self, enabled: bool) {
+        self.blame_enabled = enabled;
+        if !enabled {
+            self.blame_toggle = false;
+            self.clear_blame_step_hint();
+            self.clear_blame_hunk_hint();
+        }
+    }
+
+    pub(crate) fn set_blame_mode(&mut self, mode: BlameMode) {
+        self.blame_mode = mode;
+        self.blame_toggle = false;
+        self.clear_blame_step_hint();
+    }
+
+    pub(crate) fn set_blame_hunk_hint_enabled(&mut self, enabled: bool) {
+        self.blame_hunk_hint_enabled = enabled;
+        if !enabled {
+            self.clear_blame_hunk_hint();
+        }
+    }
+
     pub fn trigger_blame_hint(&mut self) {
         if !self.blame_enabled {
             return;

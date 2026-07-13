@@ -1,6 +1,7 @@
 use super::{App, ViewMode};
 use crate::app::utils::copy_to_clipboard;
 use crate::config::{list_ui_themes, ThemeConfig};
+use crate::syntax::list_syntax_themes;
 use crate::toasts::ToastEvent;
 
 #[derive(Clone, Copy, Debug)]
@@ -12,6 +13,7 @@ pub(crate) enum PaletteAction {
     ToggleFoldContext,
     ToggleSyntax,
     ToggleHelp,
+    OpenSettings,
     ToggleZen,
     ToggleFilePanel,
     ToggleAutoplay,
@@ -371,6 +373,10 @@ impl App {
                 action: PaletteAction::ToggleHelp,
             },
             PaletteEntry {
+                label: "Open settings".to_string(),
+                action: PaletteAction::OpenSettings,
+            },
+            PaletteEntry {
                 label: "Toggle zen mode".to_string(),
                 action: PaletteAction::ToggleZen,
             },
@@ -518,6 +524,7 @@ impl App {
             && !matches!(
                 action,
                 PaletteAction::ToggleHelp
+                    | PaletteAction::OpenSettings
                     | PaletteAction::OpenDashboard
                     | PaletteAction::NavigateBack
                     | PaletteAction::NavigateForward
@@ -541,6 +548,7 @@ impl App {
             PaletteAction::ToggleFoldContext => self.toggle_fold_context(),
             PaletteAction::ToggleSyntax => self.toggle_syntax(),
             PaletteAction::ToggleHelp => self.open_help_tab(),
+            PaletteAction::OpenSettings => self.open_settings_tab(),
             PaletteAction::ToggleZen => self.toggle_zen(),
             PaletteAction::ToggleFilePanel => self.toggle_file_panel(),
             PaletteAction::ToggleAutoplay => self.toggle_autoplay(),
@@ -816,6 +824,7 @@ impl App {
         if !self.theme_picker_active {
             self.theme_picker_restore = Some((self.theme.clone(), self.ui_theme_name.clone()));
         }
+        self.theme_picker_syntax = false;
         self.theme_picker_active = true;
         self.theme_picker_query.clear();
         self.reset_picker_cursor();
@@ -824,6 +833,25 @@ impl App {
             .as_ref()
             .and_then(|current| list_ui_themes().iter().position(|name| name == current))
             .unwrap_or(0);
+        self.stop_for_theme_picker();
+    }
+
+    pub(crate) fn start_syntax_theme_picker(&mut self) {
+        if !self.theme_picker_active {
+            self.syntax_theme_picker_restore = Some(self.syntax_theme.clone());
+        }
+        self.theme_picker_syntax = true;
+        self.theme_picker_active = true;
+        self.theme_picker_query.clear();
+        self.reset_picker_cursor();
+        self.theme_picker_selection = list_syntax_themes()
+            .iter()
+            .position(|name| name == &self.syntax_theme)
+            .unwrap_or(0);
+        self.stop_for_theme_picker();
+    }
+
+    fn stop_for_theme_picker(&mut self) {
         self.file_filter_active = false;
         self.clear_search();
         self.clear_goto();
@@ -833,11 +861,16 @@ impl App {
     }
 
     pub fn stop_theme_picker(&mut self) {
-        if let Some((theme, name)) = self.theme_picker_restore.take() {
+        if self.theme_picker_syntax {
+            if let Some(theme) = self.syntax_theme_picker_restore.take() {
+                self.set_syntax_theme(theme);
+            }
+        } else if let Some((theme, name)) = self.theme_picker_restore.take() {
             self.theme = theme;
             self.ui_theme_name = name;
         }
         self.theme_picker_active = false;
+        self.theme_picker_syntax = false;
     }
 
     pub fn theme_picker_active(&self) -> bool {
@@ -894,8 +927,13 @@ impl App {
         let idx = self
             .theme_picker_selection
             .min(names.len().saturating_sub(1));
-        self.apply_ui_theme(&names[idx]);
-        self.theme_picker_restore = None;
+        if self.theme_picker_syntax {
+            self.set_syntax_theme(names[idx].clone());
+            self.syntax_theme_picker_restore = None;
+        } else {
+            self.apply_ui_theme(&names[idx]);
+            self.theme_picker_restore = None;
+        }
         self.stop_theme_picker();
     }
 
@@ -935,10 +973,14 @@ impl App {
 
     pub(crate) fn theme_picker_filtered_names(&mut self) -> Vec<String> {
         let query = self.theme_picker_query.trim().to_ascii_lowercase();
-        let names = list_ui_themes()
-            .into_iter()
-            .filter(|name| query.is_empty() || name.to_ascii_lowercase().contains(&query))
-            .collect::<Vec<_>>();
+        let names = if self.theme_picker_syntax {
+            list_syntax_themes()
+        } else {
+            list_ui_themes()
+        }
+        .into_iter()
+        .filter(|name| query.is_empty() || name.to_ascii_lowercase().contains(&query))
+        .collect::<Vec<_>>();
         if names.is_empty() {
             self.theme_picker_selection = 0;
         } else if self.theme_picker_selection >= names.len() {
@@ -952,16 +994,40 @@ impl App {
         let Some(name) = names.get(self.theme_picker_selection) else {
             return;
         };
-        self.apply_ui_theme(&name.clone());
+        if self.theme_picker_syntax {
+            self.set_syntax_theme(name.clone());
+        } else {
+            self.apply_ui_theme(name);
+        }
+    }
+
+    pub(crate) fn theme_picker_current_name(&self) -> Option<&str> {
+        if self.theme_picker_syntax {
+            Some(&self.syntax_theme)
+        } else {
+            self.ui_theme_name.as_deref()
+        }
+    }
+
+    pub(crate) fn theme_picker_placeholder(&self) -> &'static str {
+        if self.theme_picker_syntax {
+            "Search for syntax themes..."
+        } else {
+            "Search for themes..."
+        }
     }
 
     pub(crate) fn apply_ui_theme(&mut self, name: &str) {
+        self.set_ui_theme_name(Some(name.to_string()));
+    }
+
+    pub(crate) fn set_ui_theme_name(&mut self, name: Option<String>) {
         self.theme = ThemeConfig {
-            name: Some(name.to_string()),
+            name: name.clone(),
             ..ThemeConfig::default()
         }
         .resolve(self.theme_is_light);
-        self.ui_theme_name = Some(name.to_string());
+        self.ui_theme_name = name;
         self.unified_render_cache = None;
         self.blame_render_cache = None;
         self.blame_bar_cache.clear();

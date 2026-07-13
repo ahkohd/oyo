@@ -222,6 +222,7 @@ Use each mode as `[keybindings.<mode>]`.
 | `open_file_search` | `ctrl-shift-p`, `g f` | Open quick file search in normal mode |
 | `open_comment_picker` | `g c` | Open comment picker in normal mode |
 | `open_outdated_comments` | `g o` | Open outdated comments in normal mode |
+| `open_settings` | `g s` | Open Settings in normal mode |
 | `open_theme_picker` | `ctrl-t` | Open theme picker in normal mode |
 
 Visible expandable folds show contextual shortcuts such as `ua` and `da`. Use the

@@ -351,21 +351,18 @@ impl App {
     }
 
     pub fn toggle_file_panel(&mut self) {
-        if self.file_panel_manually_set {
-            // Already manually controlled, just toggle
-            self.file_panel_visible = !self.file_panel_visible;
+        let visible = if self.file_panel_manually_set {
+            !self.file_panel_visible
         } else {
-            // First manual toggle
-            self.file_panel_manually_set = true;
-            if self.file_panel_auto_hidden {
-                // Panel was auto-hidden, show it
-                self.file_panel_visible = true;
-            } else {
-                // Panel was visible, hide it
-                self.file_panel_visible = false;
-            }
-        }
-        if !self.file_panel_visible {
+            self.file_panel_auto_hidden
+        };
+        self.set_file_panel_visible(visible);
+    }
+
+    pub(crate) fn set_file_panel_visible(&mut self, visible: bool) {
+        self.file_panel_manually_set = true;
+        self.file_panel_visible = visible;
+        if !visible {
             self.close_file_context_menu();
             self.file_list_focused = false;
             self.file_panel_hover = false;

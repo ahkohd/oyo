@@ -3,9 +3,9 @@
 use crate::blame::BlameInfo;
 use crate::config::{
     BlameMode, DiffExtentMarkerMode, DiffExtentMarkerScope, DiffForegroundMode, DiffHighlightMode,
-    FileCountMode, FilePanelPosition, FoldContextMode, HunkWrapMode, MentionFileScope,
-    MentionFinder, ModifiedStepMode, ResolvedTheme, ReviewActionConfig, ReviewHookConfig,
-    SelectionActionConfig, StepWrapMode, SyntaxMode,
+    FileCountMode, FilePanelPosition, FoldContextMode, GitIgnoreMode, HunkWrapMode,
+    MentionFileScope, MentionFinder, ModifiedStepMode, ResolvedTheme, ReviewActionConfig,
+    ReviewHookConfig, SelectionActionConfig, StepWrapMode, SyntaxMode,
 };
 use crate::csv_preview::CsvPreviewState;
 use crate::keybindings::Keybindings;
@@ -40,6 +40,13 @@ mod playback;
 pub(crate) mod review;
 mod search;
 mod selection;
+mod settings;
+#[cfg(test)]
+pub(crate) use settings::SettingItem;
+pub(crate) use settings::{
+    SettingHit, SettingsLeaveAction, SettingsLeaveHit, SettingsResetAction, SettingsResetHit,
+    SettingsRow, SettingsTarget,
+};
 mod syntax;
 mod types;
 mod utils;
@@ -171,6 +178,7 @@ pub(crate) struct StatusModeMenuHit {
 pub(crate) enum TopbarTabContent {
     File(usize),
     Help,
+    Settings,
     PrComments,
     OutdatedComments,
 }
@@ -207,6 +215,9 @@ pub(crate) enum ViewHistoryRecipe {
         focus_comment_id: Option<u64>,
     },
     Help {
+        tab_id: usize,
+    },
+    Settings {
         tab_id: usize,
     },
     Tab {
@@ -453,6 +464,8 @@ pub struct App {
     file_filter_cursor_last_blink: Instant,
     /// When to show per-file +/- counts in the file panel
     pub file_count_mode: FileCountMode,
+    /// Git ignore mode used by directory scans.
+    pub file_git_ignore_mode: GitIgnoreMode,
     /// File list filter text
     pub file_filter: String,
     /// True when filter input is active
@@ -856,6 +869,10 @@ pub struct App {
     theme_picker_item_height: u16,
     /// Theme to restore if the theme picker is cancelled.
     theme_picker_restore: Option<(ResolvedTheme, Option<String>)>,
+    /// True when the shared theme picker is choosing a syntax theme.
+    theme_picker_syntax: bool,
+    /// Syntax theme restored when its picker is cancelled.
+    syntax_theme_picker_restore: Option<String>,
     /// Name of the local control session, if one is running.
     control_session_name: Option<String>,
     /// Session rename prompt text.
@@ -936,6 +953,34 @@ pub struct App {
     pub(crate) review_comment_context_menu_hover: Option<ReviewCommentContextMenuAction>,
     /// Review card to flash after sidebar navigation.
     review_preview_flash: Option<(u64, String, Instant)>,
+    /// Selected interactive setting.
+    pub(crate) settings_selection: usize,
+    /// Clickable interactive setting rows.
+    pub(crate) settings_hits: Vec<settings::SettingHit>,
+    /// Hovered interactive setting.
+    pub(crate) settings_hover: Option<settings::SettingsTarget>,
+    /// First rendered row in the scrollable Settings list.
+    pub(crate) settings_scroll: usize,
+    /// Config path override used by settings tests.
+    pub(crate) settings_config_path_override: Option<std::path::PathBuf>,
+    /// Live values captured when Settings opened.
+    settings_open_state: Option<settings::SettingsSnapshot>,
+    /// Values currently represented by the config file.
+    settings_saved_state: Option<settings::SettingsSnapshot>,
+    /// Deferred navigation while unsaved Settings changes are confirmed.
+    settings_leave_confirmation: Option<settings::SettingsLeaveConfirmation>,
+    /// Reset-to-defaults confirmation.
+    settings_reset_confirmation: Option<settings::SettingsResetConfirmation>,
+    /// Reset-to-defaults confirmation hitboxes.
+    pub(crate) settings_reset_hits: Vec<settings::SettingsResetHit>,
+    /// Hovered reset-to-defaults confirmation action.
+    pub(crate) settings_reset_hover: Option<settings::SettingsResetAction>,
+    /// Settings leave confirmation hitboxes.
+    pub(crate) settings_leave_hits: Vec<settings::SettingsLeaveHit>,
+    /// Hovered Settings leave action.
+    pub(crate) settings_leave_hover: Option<settings::SettingsLeaveAction>,
+    /// Bypass the leave guard while replaying a confirmed action.
+    settings_leave_replaying: bool,
     /// Pending quit confirmation.
     quit_confirmation: bool,
     /// Pending review deletion confirmation.
@@ -1211,6 +1256,7 @@ impl App {
             file_filter_cursor_visible: true,
             file_filter_cursor_last_blink: Instant::now(),
             file_count_mode: FileCountMode::Active,
+            file_git_ignore_mode: GitIgnoreMode::Auto,
             file_filter: String::new(),
             file_filter_active: false,
             animation_enabled: false,
@@ -1452,6 +1498,8 @@ impl App {
             theme_picker_list_count: 0,
             theme_picker_item_height: 1,
             theme_picker_restore: None,
+            theme_picker_syntax: false,
+            syntax_theme_picker_restore: None,
             control_session_name: None,
             session_rename_query: String::new(),
             session_rename_active: false,
@@ -1495,6 +1543,20 @@ impl App {
             review_comment_context_menu_hits: Vec::new(),
             review_comment_context_menu_hover: None,
             review_preview_flash: None,
+            settings_selection: 0,
+            settings_hits: Vec::new(),
+            settings_hover: None,
+            settings_scroll: 0,
+            settings_config_path_override: None,
+            settings_open_state: None,
+            settings_saved_state: None,
+            settings_leave_confirmation: None,
+            settings_reset_confirmation: None,
+            settings_reset_hits: Vec::new(),
+            settings_reset_hover: None,
+            settings_leave_hits: Vec::new(),
+            settings_leave_hover: None,
+            settings_leave_replaying: false,
             quit_confirmation: false,
             review_delete_confirmation: None,
             review_delete_confirmation_hits: Vec::new(),

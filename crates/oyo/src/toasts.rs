@@ -27,6 +27,8 @@ pub(crate) enum ToastEvent {
     CommentsCleared,
     ReviewSubmitted,
     SessionRenamed,
+    SettingsSaved,
+    SettingsReverted,
     SelectionActionStarted(String),
     SelectionActionFailed(String),
 }
@@ -67,6 +69,8 @@ impl ToastEvent {
             Self::CommentsCleared => "Comments cleared".to_string(),
             Self::ReviewSubmitted => "Review ready".to_string(),
             Self::SessionRenamed => "Session renamed".to_string(),
+            Self::SettingsSaved => "Settings saved".to_string(),
+            Self::SettingsReverted => "Settings reverted".to_string(),
             Self::SelectionActionStarted(message) if message.trim().is_empty() => {
                 "Selection action started".to_string()
             }
@@ -92,6 +96,8 @@ impl ToastEvent {
             | Self::CommentSaved
             | Self::ReviewSubmitted
             | Self::SessionRenamed
+            | Self::SettingsSaved
+            | Self::SettingsReverted
             | Self::SelectionActionStarted(_) => ToastType::Success,
             _ => ToastType::Info,
         }

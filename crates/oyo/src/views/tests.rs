@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use crate::app::{
     is_fold_line,
     review::{ReviewRange, ReviewSide, ReviewTargetKind},
-    AnimationPhase, App, ReviewCommentContextMenuAction, ViewMode,
+    AnimationPhase, App, ReviewCommentContextMenuAction, SettingItem, ViewMode,
 };
 use crate::config::{
     DiffForegroundMode, DiffHighlightMode, EvoSyntaxMode, ModifiedStepMode, SyntaxMode,
@@ -512,6 +512,309 @@ fn full_context_scroll_reaches_near_eof_card_and_trailing_pad() {
         (diff_y + diff_height) as usize - footer - 1,
         TRAILING_REVIEW_SPACER_ROWS + 1
     );
+}
+
+#[test]
+fn review_line_add_button_only_renders_on_file_tabs() {
+    let mut app = make_app("old\n", "new\n", ViewMode::UnifiedPane);
+    app.enable_review_mode();
+    render_full_buffer(&mut app, 80, 24);
+    let (_, y, _, _) = app.diff_view_area.unwrap();
+    app.review_line_add_row = Some(y + 1);
+
+    render_full_buffer(&mut app, 80, 24);
+    assert!(app.review_line_add_hit.is_some());
+
+    app.open_settings_tab();
+    app.review_line_add_row = Some(y + 1);
+    render_full_buffer(&mut app, 80, 24);
+    assert!(app.review_line_add_hit.is_none());
+}
+
+#[test]
+fn settings_view_renders_live_values_and_mouse_activates_rows() {
+    let mut app = make_app("old\n", "new\n", ViewMode::UnifiedPane);
+    let dir = std::env::temp_dir().join(format!("oyo-settings-view-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    app.settings_config_path_override = Some(dir.join("config.toml"));
+    app.open_settings_tab();
+
+    let lines = buffer_text(&render_full_buffer(&mut app, 90, 32));
+    let text = lines.join("\n");
+    assert!(text.contains("Settings"), "{text}");
+    assert!(text.contains("unsaved changes"), "{text}");
+    assert!(text.contains("View mode"), "{text}");
+    assert!(text.contains("Line wrap"), "{text}");
+    assert!(text.contains("General"), "{text}");
+    let view_line = lines
+        .iter()
+        .find(|line| line.contains("View mode"))
+        .unwrap();
+    let fold_line = lines
+        .iter()
+        .find(|line| line.contains("Fold context"))
+        .unwrap();
+    assert!(view_line.contains("‹ unified ›"), "{view_line}");
+    assert!(!view_line.trim_start().starts_with("> "), "{view_line}");
+    assert!(!fold_line.contains('‹'), "{fold_line}");
+    let value_start = |line: &str, value: &str| {
+        let start = line.find(value).unwrap();
+        UnicodeWidthStr::width(&line[..start])
+    };
+    assert_eq!(
+        value_start(view_line, "unified"),
+        value_start(fold_line, "expandable")
+    );
+    let view_hint = value_start(view_line, "cycle");
+    let fold_hint = value_start(fold_line, "collapse");
+    assert_eq!(view_hint, fold_hint);
+    assert_eq!(
+        fold_hint - value_start(fold_line, "expandable"),
+        UnicodeWidthStr::width("change syntax theme…") + 2
+    );
+    let selected_start = value_start(view_line, "unified");
+    app.settings_selection = SettingItem::FoldContext as usize;
+    let lines = buffer_text(&render_full_buffer(&mut app, 90, 32));
+    let view_line = lines
+        .iter()
+        .find(|line| line.contains("View mode"))
+        .unwrap();
+    assert_eq!(value_start(view_line, "unified"), selected_start);
+    let first_hit = app.settings_hits[0];
+    assert!(!app.handle_settings_click(first_hit.x, first_hit.y - 1));
+
+    app.settings_selection = SettingItem::Syntax as usize;
+    let lines = buffer_text(&render_full_buffer(&mut app, 90, 32));
+    let text = lines.join("\n");
+    let diff_row = lines
+        .iter()
+        .position(|line| line.rsplit('▕').next().unwrap_or(line).trim() == "Diff")
+        .unwrap_or_else(|| panic!("{text}"));
+    assert!(
+        lines[diff_row - 1]
+            .rsplit('▕')
+            .next()
+            .unwrap_or(&lines[diff_row - 1])
+            .trim()
+            .is_empty(),
+        "{text}"
+    );
+
+    app.settings_selection = SettingItem::FilePanelPosition as usize;
+    let lines = buffer_text(&render_full_buffer(&mut app, 90, 32));
+    let panel_side_line = lines
+        .iter()
+        .find(|line| line.contains("File panel side"))
+        .unwrap();
+    assert!(panel_side_line.contains("‹ left ›"), "{panel_side_line}");
+    assert!(app.file_panel_rect.unwrap().0 < app.diff_view_area.unwrap().0);
+    assert!(app.settings_hits.iter().any(|hit| {
+        hit.target == crate::app::SettingsTarget::Item(SettingItem::FilePanelPosition)
+    }));
+    app.adjust_selected_setting(true);
+    let text = buffer_text(&render_full_buffer(&mut app, 90, 32)).join("\n");
+    assert!(text.contains("‹ right ›"), "{text}");
+    assert!(app.file_panel_rect.unwrap().0 > app.diff_view_area.unwrap().0);
+
+    app.settings_selection = SettingItem::Theme as usize;
+    let lines = buffer_text(&render_full_buffer(&mut app, 90, 32));
+    let theme_line = lines
+        .iter()
+        .find(|line| line.contains("Colour theme"))
+        .unwrap();
+    assert!(theme_line.contains("change theme…"), "{theme_line}");
+    assert!(!theme_line.contains('‹'), "{theme_line}");
+
+    app.settings_selection = SettingItem::ALL.len();
+    let lines = buffer_text(&render_full_buffer(&mut app, 90, 32));
+    let theme_line = lines
+        .iter()
+        .find(|line| line.contains("Colour theme"))
+        .unwrap();
+    assert!(theme_line.contains("default"), "{theme_line}");
+    assert!(!theme_line.contains("change theme…"), "{theme_line}");
+    let theme_hit = app
+        .settings_hits
+        .iter()
+        .find(|hit| hit.target == crate::app::SettingsTarget::Item(SettingItem::Theme))
+        .copied()
+        .unwrap();
+    assert!(app.update_settings_hover(theme_hit.x, theme_hit.y));
+    assert_eq!(
+        app.settings_selected_target(),
+        crate::app::SettingsTarget::Item(SettingItem::Theme)
+    );
+    let text = buffer_text(&render_full_buffer(&mut app, 90, 32)).join("\n");
+    assert!(text.contains("change theme…"), "{text}");
+    assert!(app.update_settings_hover(0, 0));
+    let text = buffer_text(&render_full_buffer(&mut app, 90, 32)).join("\n");
+    assert!(text.contains("change theme…"), "{text}");
+    assert!(app.handle_settings_click(theme_hit.x, theme_hit.y));
+    assert!(app.theme_picker_active());
+    app.stop_theme_picker();
+    app.settings_hover = None;
+
+    app.settings_selection = SettingItem::ALL.len();
+    let text = buffer_text(&render_full_buffer(&mut app, 90, 32)).join("\n");
+    assert!(text.contains("default"), "{text}");
+    assert!(!text.contains("change theme…"), "{text}");
+
+    app.settings_selection = SettingItem::SyntaxTheme as usize;
+    let text = buffer_text(&render_full_buffer(&mut app, 90, 32)).join("\n");
+    assert!(text.contains("change syntax theme…"), "{text}");
+    let syntax_hit = app
+        .settings_hits
+        .iter()
+        .find(|hit| hit.target == crate::app::SettingsTarget::Item(SettingItem::SyntaxTheme))
+        .copied()
+        .unwrap();
+    assert_eq!(
+        syntax_hit.target,
+        crate::app::SettingsTarget::Item(SettingItem::SyntaxTheme)
+    );
+    app.activate_selected_setting();
+    assert!(app.theme_picker_active());
+    app.stop_theme_picker();
+    app.settings_hover = None;
+
+    app.settings_selection = SettingItem::ALL.len() + 2;
+    let buffer = render_full_buffer(&mut app, 140, 32);
+    let lines = buffer_text(&buffer);
+    let text = lines.join("\n");
+    assert!(text.contains("Appearance"), "{text}");
+    assert!(text.contains("  Save  "), "{text}");
+    assert!(text.contains("  Revert  "), "{text}");
+    assert!(text.contains("  Reset to defaults  "), "{text}");
+    assert!(!text.contains("[ Save ]"), "{text}");
+    assert!(app.settings_scroll > 0);
+    let button_hit = |target| {
+        app.settings_hits
+            .iter()
+            .find(|hit| hit.target == target)
+            .copied()
+            .unwrap()
+    };
+    let save = button_hit(crate::app::SettingsTarget::Save);
+    let revert = button_hit(crate::app::SettingsTarget::Revert);
+    let reset = button_hit(crate::app::SettingsTarget::ResetDefaults);
+    let theme = button_hit(crate::app::SettingsTarget::Item(SettingItem::Theme));
+    let theme_line = &lines[theme.y as usize];
+    let hint_x =
+        UnicodeWidthStr::width(&theme_line[..theme_line.find("open colour theme picker").unwrap()]);
+    let reset_line = &lines[reset.y as usize];
+    let reset_text_x =
+        UnicodeWidthStr::width(&reset_line[..reset_line.find("Reset to defaults").unwrap()]);
+    assert_eq!(reset_text_x, hint_x);
+    assert_eq!(save.y.saturating_sub(theme.y), 3);
+    assert_eq!(revert.x.saturating_sub(save.x + save.width), 3);
+    assert_eq!(reset.x.saturating_sub(revert.x + revert.width), 3);
+    assert_eq!(buffer[(reset.x, reset.y)].bg, app.theme.error);
+    for target in [
+        crate::app::SettingsTarget::Save,
+        crate::app::SettingsTarget::Revert,
+        crate::app::SettingsTarget::ResetDefaults,
+    ] {
+        assert!(app.settings_hits.iter().any(|hit| hit.target == target));
+    }
+    app.settings_selection = SettingItem::ALL.len();
+    let buffer = render_full_buffer(&mut app, 140, 32);
+    assert_eq!(buffer[(reset.x, reset.y)].fg, app.theme.error);
+    assert!(app.update_settings_hover(reset.x, reset.y));
+    let buffer = render_full_buffer(&mut app, 140, 32);
+    assert_eq!(buffer[(reset.x, reset.y)].bg, app.theme.error);
+    assert!(app.handle_settings_click(reset.x, reset.y));
+    assert!(app.settings_reset_confirmation_active());
+    app.cancel_settings_reset_confirmation();
+
+    app.settings_selection = SettingItem::ALL.len() + 2;
+    render_full_buffer(&mut app, 80, 24);
+    let reset = app
+        .settings_hits
+        .iter()
+        .find(|hit| hit.target == crate::app::SettingsTarget::ResetDefaults)
+        .copied()
+        .unwrap();
+    let (diff_x, _, diff_width, _) = app.diff_view_area.unwrap();
+    assert!(reset.x + reset.width <= diff_x + diff_width - 2);
+
+    app.settings_selection = 2;
+    render_full_buffer(&mut app, 80, 24);
+    let hit = app
+        .settings_hits
+        .iter()
+        .find(|hit| hit.target == crate::app::SettingsTarget::Item(SettingItem::LineWrap))
+        .copied()
+        .unwrap();
+    assert!(app.handle_settings_click(hit.x, hit.y));
+    assert!(app.line_wrap);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn settings_dirty_value_uses_warning_without_moving_the_column() {
+    let mut app = make_app("old\n", "new\n", ViewMode::UnifiedPane);
+    let dir = std::env::temp_dir().join(format!("oyo-settings-dirty-row-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    app.settings_config_path_override = Some(dir.join("config.toml"));
+    app.open_settings_tab();
+    assert!(app.save_settings());
+    app.settings_selection = SettingItem::ViewMode as usize;
+    render_full_buffer(&mut app, 90, 32);
+    let scrollbar_hit = app
+        .settings_hits
+        .iter()
+        .find(|hit| hit.target == crate::app::SettingsTarget::Item(SettingItem::Scrollbar))
+        .copied()
+        .unwrap();
+    assert!(app.update_settings_hover(scrollbar_hit.x, scrollbar_hit.y));
+    assert_eq!(
+        app.settings_selected_target(),
+        crate::app::SettingsTarget::Item(SettingItem::Scrollbar)
+    );
+
+    let value_cell = |buffer: &Buffer, row_label: &str, value: &str| {
+        let lines = buffer_text(buffer);
+        let (y, line) = lines
+            .iter()
+            .enumerate()
+            .find(|(_, line)| line.contains(row_label))
+            .unwrap();
+        let byte = line.find(value).unwrap();
+        let x = UnicodeWidthStr::width(&line[..byte]);
+        (x as u16, y as u16)
+    };
+
+    let clean = render_full_buffer(&mut app, 90, 32);
+    let clean_value = if app.scrollbar_visible { "on" } else { "off" };
+    let clean_chevrons = format!("‹ {clean_value} ›");
+    let clean_cell = value_cell(&clean, "Scrollbar", &clean_chevrons);
+    assert_eq!(clean[clean_cell].fg, app.theme.accent);
+    let lines = buffer_text(&clean);
+    let view_line = lines
+        .iter()
+        .find(|line| line.contains("View mode"))
+        .unwrap();
+    assert!(!view_line.contains('‹'), "{view_line}");
+
+    app.scrollbar_visible = !app.scrollbar_visible;
+    let dirty = render_full_buffer(&mut app, 90, 32);
+    let dirty_value = if app.scrollbar_visible { "on" } else { "off" };
+    let dirty_chevrons = format!("‹ {dirty_value} ›");
+    let dirty_cell = value_cell(&dirty, "Scrollbar", &dirty_chevrons);
+    assert_eq!(dirty[dirty_cell].fg, app.theme.warning);
+    assert_eq!(dirty_cell.0, clean_cell.0);
+
+    let line_wrap = if app.line_wrap { "on" } else { "off" };
+    let line_wrap_cell = value_cell(&dirty, "Line wrap", line_wrap);
+    assert_eq!(dirty[line_wrap_cell].fg, app.theme.text);
+    let line_wrap_hint = value_cell(&dirty, "Line wrap", "wrap long");
+    assert_eq!(dirty[line_wrap_hint].fg, app.theme.text_muted);
+
+    assert!(app.save_settings());
+    let saved = render_full_buffer(&mut app, 90, 32);
+    let saved_cell = value_cell(&saved, "Scrollbar", &dirty_chevrons);
+    assert_ne!(saved[saved_cell].fg, app.theme.warning);
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]

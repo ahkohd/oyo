@@ -912,6 +912,7 @@ fn context_json(app: &mut App, info: &ControlSessionInfo, last_applied_seq: u64)
     let tab = match app.active_topbar_content() {
         Some(TopbarTabContent::File(_)) => "file",
         Some(TopbarTabContent::Help) => "help",
+        Some(TopbarTabContent::Settings) => "settings",
         Some(TopbarTabContent::PrComments) => "pr-comments",
         Some(TopbarTabContent::OutdatedComments) => "outdated-comments",
         None => "none",
@@ -984,6 +985,7 @@ fn topbar_tab_json(app: &App, tab: &TopbarTab, active: bool) -> Value {
                 .map(|file| file.display_name.clone()),
         ),
         TopbarTabContent::Help => ("help", None, None),
+        TopbarTabContent::Settings => ("settings", None, None),
         TopbarTabContent::PrComments => ("pr-comments", None, None),
         TopbarTabContent::OutdatedComments => ("outdated-comments", None, None),
     };
@@ -1266,6 +1268,7 @@ fn apply_sidebar(app: &mut App, mode: &str) -> Result<()> {
 fn apply_tab(app: &mut App, kind: &str, file: Option<&str>) -> Result<()> {
     match kind {
         "help" => app.open_help_tab(),
+        "settings" => app.open_settings_tab(),
         "pr-comments" | "pr" => app.open_pr_comments_tab(None),
         "outdated-comments" | "outdated" => app.open_outdated_comments_tab(None),
         "close" => app.close_active_topbar_tab(),

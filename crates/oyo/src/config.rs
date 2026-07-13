@@ -1497,7 +1497,7 @@ impl Default for EditorConfig {
 }
 
 /// File list counts display behavior
-#[derive(Debug, Deserialize, Clone, Copy, Default)]
+#[derive(Debug, Deserialize, Clone, Copy, Default, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum FileCountMode {
     #[default]
@@ -1857,6 +1857,40 @@ fn merge_config_value(base: &mut toml::Value, overlay: toml::Value) {
     merge_config_value_at(base, overlay, &mut Vec::new());
 }
 
+fn set_document_value(
+    document: &mut toml_edit::DocumentMut,
+    keys: &[&str],
+    value: Option<toml_edit::Value>,
+) -> Result<(), String> {
+    let Some((key, parents)) = keys.split_last() else {
+        return Err("Config key path is empty".to_string());
+    };
+    let mut table = document.as_table_mut();
+    for parent in parents {
+        let item = table
+            .entry(parent)
+            .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()));
+        table = item
+            .as_table_mut()
+            .ok_or_else(|| format!("Config key {} is not a table", parents.join(".")))?;
+    }
+    let Some(value) = value else {
+        table.remove(key);
+        return Ok(());
+    };
+    if let Some(existing) = table.get_mut(key) {
+        let existing = existing
+            .as_value_mut()
+            .ok_or_else(|| format!("Config key {} is not a value", keys.join(".")))?;
+        let decor = existing.decor().clone();
+        *existing = value;
+        *existing.decor_mut() = decor;
+    } else {
+        table.insert(key, toml_edit::Item::Value(value));
+    }
+    Ok(())
+}
+
 impl Config {
     /// Get all possible config file paths in priority order
     fn config_paths() -> Vec<PathBuf> {
@@ -1887,6 +1921,62 @@ impl Config {
     /// Get the first existing config file path
     pub fn config_path() -> Option<PathBuf> {
         Self::config_paths().into_iter().find(|p| p.exists())
+    }
+
+    pub(crate) fn config_path_for_write() -> Option<PathBuf> {
+        Self::config_path().or_else(|| Self::config_paths().into_iter().next())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn write_config_value(
+        path: &Path,
+        keys: &[&str],
+        value: toml_edit::Value,
+    ) -> Result<(), String> {
+        Self::write_config_values(path, &[(keys.to_vec(), Some(value))])
+    }
+
+    pub(crate) fn write_config_values(
+        path: &Path,
+        changes: &[(Vec<&str>, Option<toml_edit::Value>)],
+    ) -> Result<(), String> {
+        let content = if path.exists() {
+            fs::read_to_string(path)
+                .map_err(|error| format!("Failed to read config {}: {error}", path.display()))?
+        } else {
+            String::new()
+        };
+        let mut document = content
+            .parse::<toml_edit::DocumentMut>()
+            .map_err(|error| format!("Failed to parse config {}: {error}", path.display()))?;
+        for (keys, value) in changes {
+            set_document_value(&mut document, keys, value.clone())?;
+        }
+
+        let parent = path
+            .parent()
+            .ok_or_else(|| format!("Config path has no parent: {}", path.display()))?;
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("Failed to create {}: {error}", parent.display()))?;
+        let temporary = parent.join(format!(".config.toml.{}.tmp", std::process::id()));
+        fs::write(&temporary, document.to_string())
+            .map_err(|error| format!("Failed to write config {}: {error}", temporary.display()))?;
+        if let Ok(metadata) = fs::metadata(path) {
+            let _ = fs::set_permissions(&temporary, metadata.permissions());
+        }
+        fs::rename(&temporary, path).map_err(|error| {
+            let _ = fs::remove_file(&temporary);
+            format!("Failed to replace config {}: {error}", path.display())
+        })
+    }
+
+    pub(crate) fn load_from_path(path: &Path) -> Result<Self, String> {
+        if !path.exists() {
+            return Ok(Self::default());
+        }
+        Self::read_config_value(path)?
+            .try_into()
+            .map_err(|error| format!("Failed to load config {}: {error}", path.display()))
     }
 
     fn read_config_value(path: &Path) -> Result<toml::Value, String> {
@@ -1945,6 +2035,67 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn settings_write_changes_one_key_and_preserves_comments() {
+        let dir = std::env::temp_dir().join(format!("oyo-settings-config-{}", std::process::id()));
+        let path = dir.join("config.toml");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            &path,
+            "# header\n[ui]\n# prefer unified\nview_mode = \"unified\"\n# keep line wrap choice\nline_wrap = false # inline note\n# keep this\nwatch = true\n\n[playback]\nanimation = false\n",
+        )
+        .unwrap();
+
+        Config::write_config_value(&path, &["ui", "line_wrap"], toml_edit::Value::from(true))
+            .unwrap();
+        let updated = fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            updated,
+            "# header\n[ui]\n# prefer unified\nview_mode = \"unified\"\n# keep line wrap choice\nline_wrap = true # inline note\n# keep this\nwatch = true\n\n[playback]\nanimation = false\n"
+        );
+
+        Config::write_config_value(&path, &["ui", "view_mode"], toml_edit::Value::from("split"))
+            .unwrap();
+        let updated = fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            updated,
+            "# header\n[ui]\n# prefer unified\nview_mode = \"split\"\n# keep line wrap choice\nline_wrap = true # inline note\n# keep this\nwatch = true\n\n[playback]\nanimation = false\n"
+        );
+
+        Config::write_config_value(
+            &path,
+            &["ui", "theme", "name"],
+            toml_edit::Value::from("nord"),
+        )
+        .unwrap();
+        let updated = fs::read_to_string(&path).unwrap();
+        assert!(updated.contains("[ui.theme]\nname = \"nord\""));
+        assert!(updated.contains("# keep this\nwatch = true"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn settings_write_preserves_nested_bool_and_enum_decor() {
+        let dir = std::env::temp_dir().join(format!("oyo-settings-nested-{}", std::process::id()));
+        let path = dir.join("config.toml");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            &path,
+            "[ui.diff]\n# keep background choice\nbg = true # full line\n\n[files]\n# keep count choice\ncounts = \"active\" # sidebar\n",
+        )
+        .unwrap();
+
+        Config::write_config_value(&path, &["ui", "diff", "bg"], false.into()).unwrap();
+        Config::write_config_value(&path, &["files", "counts"], "focused".into()).unwrap();
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "[ui.diff]\n# keep background choice\nbg = false # full line\n\n[files]\n# keep count choice\ncounts = \"focused\" # sidebar\n"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn light_theme_diff_foregrounds_meet_contrast_floor() {

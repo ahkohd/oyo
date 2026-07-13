@@ -9,8 +9,10 @@ use crate::app::{
     },
     App, FileContextMenuAction, FileContextMenuHit, FilePanelMode, FilePanelScrollbarState,
     ReviewCommentContextMenuHit, ReviewEditorToolbarAction, ReviewEditorToolbarHit,
-    ReviewLineAddHit, SelectionToolbarAction, SelectionToolbarHit, StatusModeMenuHit,
-    TopbarTabContent, TopbarTabHit, ViewMode, DIFF_VIEW_MIN_WIDTH, FILE_PANEL_MIN_WIDTH,
+    ReviewLineAddHit, SelectionToolbarAction, SelectionToolbarHit, SettingHit, SettingsLeaveAction,
+    SettingsLeaveHit, SettingsResetAction, SettingsResetHit, SettingsRow, SettingsTarget,
+    StatusModeMenuHit, TopbarTabContent, TopbarTabHit, ViewMode, DIFF_VIEW_MIN_WIDTH,
+    FILE_PANEL_MIN_WIDTH,
 };
 use crate::color;
 use crate::config::FilePanelPosition;
@@ -593,7 +595,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     app.topbar_area = None;
 
     if app.multi_diff.file_count() == 0
-        && app.active_topbar_content() != Some(TopbarTabContent::Help)
+        && !matches!(
+            app.active_topbar_content(),
+            Some(TopbarTabContent::Help | TopbarTabContent::Settings)
+        )
     {
         app.clear_diff_selection();
         app.set_diff_selection_cells(Vec::new());
@@ -601,9 +606,12 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         if app.theme_picker_active() {
             draw_theme_picker_popover(frame, app);
         }
-        if app.quit_confirmation_active() {
+        if app.settings_leave_confirmation_active() {
+            draw_settings_leave_confirmation(frame, app);
+        } else if app.quit_confirmation_active() {
             draw_confirmation(frame, app, true);
         } else {
+            app.set_settings_leave_hits(Vec::new());
             app.set_review_delete_confirmation_hits(Vec::new());
         }
         draw_toasts(frame, app);
@@ -693,11 +701,17 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if app.session_rename_active() {
         draw_session_rename_modal(frame, app);
     }
-    if app.quit_confirmation_active() {
+    if app.settings_leave_confirmation_active() {
+        draw_settings_leave_confirmation(frame, app);
+    } else if app.settings_reset_confirmation_active() {
+        draw_settings_reset_confirmation(frame, app);
+    } else if app.quit_confirmation_active() {
         draw_confirmation(frame, app, true);
     } else if app.review_delete_confirmation_active() {
         draw_confirmation(frame, app, false);
     } else {
+        app.set_settings_leave_hits(Vec::new());
+        app.set_settings_reset_hits(Vec::new());
         app.set_review_delete_confirmation_hits(Vec::new());
     }
     draw_toasts(frame, app);
@@ -1903,7 +1917,11 @@ fn preview_can_render_csv(app: &App) -> bool {
 fn preview_can_render_markdown(app: &App) -> bool {
     match app.active_topbar_content() {
         Some(TopbarTabContent::Help) => true,
-        Some(TopbarTabContent::PrComments | TopbarTabContent::OutdatedComments) => false,
+        Some(
+            TopbarTabContent::Settings
+            | TopbarTabContent::PrComments
+            | TopbarTabContent::OutdatedComments,
+        ) => false,
         Some(TopbarTabContent::File(index)) => app
             .multi_diff
             .files
@@ -2003,6 +2021,7 @@ fn topbar_tab_spans(app: &mut App, area: Rect, max_width: usize) -> Vec<Span<'st
                     (file_name, changed)
                 }
                 TopbarTabContent::Help => ("Help".to_string(), ""),
+                TopbarTabContent::Settings => ("Settings".to_string(), ""),
                 TopbarTabContent::PrComments => (
                     format!(
                         "{} comments",
@@ -4229,7 +4248,227 @@ fn render_pr_comments_view(frame: &mut Frame, app: &mut App, area: Rect) {
     );
 }
 
+fn render_settings_view(frame: &mut Frame, app: &mut App, area: Rect) {
+    if let Some(bg) = app.theme.background {
+        frame.render_widget(Block::default().style(Style::default().bg(bg)), area);
+    }
+    let inner = area.inner(Margin {
+        horizontal: 2,
+        vertical: 1,
+    });
+    let mut title = vec![Span::styled(
+        "Settings",
+        Style::default()
+            .fg(app.theme.text)
+            .add_modifier(Modifier::BOLD),
+    )];
+    if app.settings_dirty() {
+        title.push(Span::styled(
+            "  unsaved changes",
+            Style::default()
+                .fg(app.theme.warning)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    let mut lines = vec![
+        Line::from(title),
+        Line::from(Span::styled(
+            "Up/Down select  Left/Right adjust  Enter/Space change",
+            Style::default().fg(app.theme.text_muted),
+        )),
+        Line::from(""),
+    ];
+    let rows = app.settings_rows();
+    let selected_target = app.settings_selected_target();
+    let selected_row = rows
+        .iter()
+        .position(|row| match row {
+            SettingsRow::Item { item, .. } => selected_target == SettingsTarget::Item(*item),
+            SettingsRow::Actions { .. } => !matches!(selected_target, SettingsTarget::Item(_)),
+            SettingsRow::Spacer | SettingsRow::Section(_) => false,
+        })
+        .unwrap_or(0);
+    let available = inner.height.saturating_sub(3) as usize;
+    let max_scroll = rows.len().saturating_sub(available);
+    app.settings_scroll = app.settings_scroll.min(max_scroll);
+    if selected_row < app.settings_scroll {
+        app.settings_scroll = selected_row;
+    } else if available > 0 && selected_row >= app.settings_scroll.saturating_add(available) {
+        app.settings_scroll = selected_row.saturating_add(1).saturating_sub(available);
+    }
+
+    let row_width = inner.width as usize;
+    let label_width = rows
+        .iter()
+        .filter_map(|row| match row {
+            SettingsRow::Item { label, .. } => Some(text_width(label)),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0)
+        .min(row_width);
+    let label_gap = 2.min(row_width.saturating_sub(label_width));
+    let value_width = rows
+        .iter()
+        .filter_map(|row| match row {
+            SettingsRow::Item { item, value, .. } => Some(match item.picker_cta() {
+                Some(cta) => (text_width(value) + 6).max(text_width(cta) + 2),
+                None => text_width(value) + 4,
+            }),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0)
+        .min(row_width.saturating_sub(label_width + label_gap));
+    let hint_gap = 2.min(row_width.saturating_sub(label_width + label_gap + value_width));
+    let mut hits = Vec::new();
+    for (screen_row, row) in rows
+        .into_iter()
+        .skip(app.settings_scroll)
+        .take(available)
+        .enumerate()
+    {
+        let y = inner.y.saturating_add((screen_row + 3) as u16);
+        match row {
+            SettingsRow::Spacer => lines.push(Line::from("")),
+            SettingsRow::Section(label) => lines.push(Line::from(Span::styled(
+                label,
+                Style::default()
+                    .fg(app.theme.text_muted)
+                    .add_modifier(Modifier::BOLD),
+            ))),
+            SettingsRow::Item {
+                item,
+                label,
+                value,
+                hint,
+                dirty,
+            } => {
+                let target = SettingsTarget::Item(item);
+                let selected = target == selected_target;
+                let value = if let Some(cta) = item.picker_cta() {
+                    if selected {
+                        format!(
+                            "  {}",
+                            truncate_with_dots(cta, value_width.saturating_sub(2))
+                        )
+                    } else {
+                        let value = truncate_with_dots(&value, value_width.saturating_sub(6));
+                        format!("  {value}    ")
+                    }
+                } else {
+                    let value = truncate_with_dots(&value, value_width.saturating_sub(4));
+                    if selected {
+                        format!("‹ {value} ›")
+                    } else {
+                        format!("  {value}  ")
+                    }
+                };
+                let mut spans = pad_spans_left(
+                    clamp_spans_to_width(
+                        &[Span::styled(label, Style::default().fg(app.theme.text))],
+                        label_width,
+                    ),
+                    label_width,
+                );
+                spans.push(Span::raw(" ".repeat(label_gap)));
+                spans.extend(pad_spans_left(
+                    clamp_spans_to_width(
+                        &[Span::styled(
+                            value,
+                            Style::default()
+                                .fg(if dirty {
+                                    app.theme.warning
+                                } else if selected {
+                                    app.theme.accent
+                                } else {
+                                    app.theme.text
+                                })
+                                .add_modifier(if selected {
+                                    Modifier::BOLD
+                                } else {
+                                    Modifier::empty()
+                                }),
+                        )],
+                        value_width,
+                    ),
+                    value_width,
+                ));
+                spans.push(Span::raw(" ".repeat(hint_gap)));
+                spans.extend(clamp_spans_to_width(
+                    &[Span::styled(
+                        hint,
+                        Style::default().fg(app.theme.text_muted),
+                    )],
+                    row_width.saturating_sub(label_width + label_gap + value_width + hint_gap),
+                ));
+                lines.push(Line::from(spans));
+                hits.push(SettingHit {
+                    target,
+                    x: inner.x,
+                    y,
+                    width: inner.width,
+                });
+            }
+            SettingsRow::Actions { dirty } => {
+                let buttons = [
+                    (SettingsTarget::Save, "Save", app.theme.accent),
+                    (SettingsTarget::Revert, "Revert", app.theme.text),
+                    (
+                        SettingsTarget::ResetDefaults,
+                        "Reset to defaults",
+                        app.theme.error,
+                    ),
+                ];
+                let gap = 3usize;
+                let widths = buttons.map(|(_, label, _)| text_width(label) + 4);
+                let group_width = widths.iter().sum::<usize>() + gap * (buttons.len() - 1);
+                let reset_text_offset = widths[0] + gap + widths[1] + gap + 2;
+                let hint_x = label_width + label_gap + value_width + hint_gap;
+                let mut x = hint_x
+                    .saturating_sub(reset_text_offset)
+                    .min(row_width.saturating_sub(group_width));
+                let mut spans = vec![Span::raw(" ".repeat(x))];
+                for (index, (target, label, tone)) in buttons.into_iter().enumerate() {
+                    if index > 0 {
+                        spans.push(Span::raw(" ".repeat(gap)));
+                        x += gap;
+                    }
+                    let width = text_width(label) + 4;
+                    let active = selected_target == target || app.settings_hover == Some(target);
+                    let mut style = Style::default().fg(tone);
+                    if active {
+                        style = style
+                            .fg(app.theme.background.unwrap_or(Color::Black))
+                            .bg(tone)
+                            .add_modifier(Modifier::BOLD);
+                    } else if target == SettingsTarget::ResetDefaults
+                        || (target == SettingsTarget::Save && dirty)
+                    {
+                        style = style.add_modifier(Modifier::BOLD);
+                    }
+                    spans.push(Span::styled(format!("  {label}  "), style));
+                    hits.push(SettingHit {
+                        target,
+                        x: inner.x.saturating_add(x as u16),
+                        y,
+                        width: width as u16,
+                    });
+                    x += width;
+                }
+                lines.push(Line::from(spans));
+            }
+        }
+    }
+    app.set_settings_hits(hits);
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
 fn render_preview(frame: &mut Frame, app: &mut App, area: Rect) {
+    if app.active_settings_view() {
+        render_settings_view(frame, app, area);
+        return;
+    }
     if app.active_pr_comments_view() {
         render_pr_comments_view(frame, app, area);
         return;
@@ -4492,9 +4731,12 @@ fn preview_document(
                 image_path,
             )
         }
-        Some(TopbarTabContent::PrComments | TopbarTabContent::OutdatedComments) | None => {
-            (String::new(), String::new(), None, false, None, None)
-        }
+        Some(
+            TopbarTabContent::Settings
+            | TopbarTabContent::PrComments
+            | TopbarTabContent::OutdatedComments,
+        )
+        | None => (String::new(), String::new(), None, false, None, None),
     }
 }
 
@@ -4565,6 +4807,7 @@ fn structured_preview_change_bars(
     let index = match app.active_topbar_content()? {
         TopbarTabContent::File(index) => index,
         TopbarTabContent::Help
+        | TopbarTabContent::Settings
         | TopbarTabContent::PrComments
         | TopbarTabContent::OutdatedComments => return None,
     };
@@ -5467,9 +5710,16 @@ fn draw_diff_view(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
     if app.multi_diff.file_count() == 0
-        && app.active_topbar_content() != Some(TopbarTabContent::Help)
+        && !matches!(
+            app.active_topbar_content(),
+            Some(TopbarTabContent::Help | TopbarTabContent::Settings)
+        )
     {
         draw_no_changes(frame, app, area);
+        return;
+    }
+    if app.active_settings_view() {
+        render_settings_view(frame, app, area);
         return;
     }
     match app.view_mode {
@@ -5590,6 +5840,9 @@ fn draw_diff_selection(frame: &mut Frame, app: &App) {
 
 fn draw_review_line_add_button(frame: &mut Frame, app: &mut App) {
     app.clear_review_line_add_hit();
+    if !matches!(app.active_topbar_content(), Some(TopbarTabContent::File(_))) {
+        return;
+    }
     let Some(row) = app.review_line_add_row else {
         return;
     };
@@ -6681,6 +6934,174 @@ fn draw_session_rename_modal(frame: &mut Frame, app: &mut App) {
     frame.render_widget(Paragraph::new(lines), popup_area);
 }
 
+fn draw_settings_reset_confirmation(frame: &mut Frame, app: &mut App) {
+    let area = frame.area();
+    let width = 68u16.min(area.width.saturating_sub(4)).max(40);
+    let height = 9u16.min(area.height.saturating_sub(2)).max(7);
+    let popup = Rect::new(
+        area.x.saturating_add(area.width.saturating_sub(width) / 2),
+        area.y
+            .saturating_add(area.height.saturating_sub(height) / 2),
+        width,
+        height,
+    );
+    frame.render_widget(Clear, popup);
+    let mut block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Reset settings ")
+        .border_style(Style::default().fg(app.theme.error));
+    if let Some(background) = app.theme.background {
+        block = block.style(Style::default().bg(background));
+    }
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from("Replace all settings with their built-in defaults?"),
+            Line::from(Span::styled(
+                "Defaults are staged until you Save.",
+                Style::default().fg(app.theme.text_muted),
+            )),
+        ])
+        .style(Style::default().fg(app.theme.text)),
+        inner,
+    );
+
+    let selected = app.settings_reset_selected_action();
+    let buttons = [
+        (SettingsResetAction::Confirm, "R Reset to defaults"),
+        (SettingsResetAction::Cancel, "Esc Cancel"),
+    ];
+    let gap = 3u16;
+    let total = buttons
+        .iter()
+        .map(|(_, label)| text_width(label) as u16 + 4)
+        .sum::<u16>()
+        .saturating_add(gap);
+    let y = inner.y.saturating_add(inner.height.saturating_sub(2));
+    let mut x = inner
+        .x
+        .saturating_add(inner.width.saturating_sub(total) / 2);
+    let mut hits = Vec::new();
+    for (action, label) in buttons {
+        let width = text_width(label) as u16 + 4;
+        let active = selected == action || app.settings_reset_hover == Some(action);
+        let tone = if action == SettingsResetAction::Confirm {
+            app.theme.error
+        } else {
+            app.theme.accent
+        };
+        let style = if active {
+            Style::default()
+                .fg(app.theme.background.unwrap_or(Color::Black))
+                .bg(tone)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+                .fg(if action == SettingsResetAction::Confirm {
+                    app.theme.error
+                } else {
+                    app.theme.text
+                })
+                .add_modifier(if action == SettingsResetAction::Confirm {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                })
+        };
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(format!("  {label}  "), style))),
+            Rect::new(x, y, width, 1),
+        );
+        hits.push(SettingsResetHit {
+            x,
+            y,
+            width,
+            height: 1,
+            action,
+        });
+        x = x.saturating_add(width).saturating_add(gap);
+    }
+    app.set_settings_reset_hits(hits);
+}
+
+fn draw_settings_leave_confirmation(frame: &mut Frame, app: &mut App) {
+    let area = frame.area();
+    let width = 64u16.min(area.width.saturating_sub(4)).max(36);
+    let height = 9u16.min(area.height.saturating_sub(2)).max(7);
+    let popup = Rect::new(
+        area.x.saturating_add(area.width.saturating_sub(width) / 2),
+        area.y
+            .saturating_add(area.height.saturating_sub(height) / 2),
+        width,
+        height,
+    );
+    frame.render_widget(Clear, popup);
+    let mut block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Unsaved settings ")
+        .border_style(Style::default().fg(app.theme.warning));
+    if let Some(background) = app.theme.background {
+        block = block.style(Style::default().bg(background));
+    }
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from("Save changes before leaving Settings?"),
+            Line::from(Span::styled(
+                "Discard restores the values from when Settings opened.",
+                Style::default().fg(app.theme.text_muted),
+            )),
+        ])
+        .style(Style::default().fg(app.theme.text)),
+        inner,
+    );
+
+    let selected = app.settings_leave_selected_action();
+    let labels = [
+        (SettingsLeaveAction::Save, "S Save"),
+        (SettingsLeaveAction::Discard, "D Discard"),
+        (SettingsLeaveAction::Cancel, "Esc Cancel"),
+    ];
+    let gap = 2u16;
+    let total = labels
+        .iter()
+        .map(|(_, label)| text_width(label) as u16 + 4)
+        .sum::<u16>()
+        .saturating_add(gap.saturating_mul(2));
+    let y = inner.y.saturating_add(inner.height.saturating_sub(2));
+    let mut x = inner
+        .x
+        .saturating_add(inner.width.saturating_sub(total) / 2);
+    let mut hits = Vec::new();
+    for (action, label) in labels {
+        let width = text_width(label) as u16 + 4;
+        let active = selected == action || app.settings_leave_hover == Some(action);
+        let style = if active {
+            Style::default()
+                .fg(app.theme.background.unwrap_or(Color::Black))
+                .bg(app.theme.accent)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(app.theme.text)
+        };
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(format!("  {label}  "), style))),
+            Rect::new(x, y, width, 1),
+        );
+        hits.push(SettingsLeaveHit {
+            x,
+            y,
+            width,
+            height: 1,
+            action,
+        });
+        x = x.saturating_add(width).saturating_add(gap);
+    }
+    app.set_settings_leave_hits(hits);
+}
+
 fn draw_confirmation(frame: &mut Frame, app: &mut App, quit: bool) {
     let (title, body, confirm_label, tone) = if quit {
         (
@@ -7633,7 +8054,7 @@ fn draw_theme_picker_popover(frame: &mut Frame, app: &mut App) {
     let input_line = picker_input_line(
         app,
         app.theme_picker_query(),
-        "Search for themes…",
+        app.theme_picker_placeholder(),
         chunks[0].width,
     );
     frame.render_widget(
@@ -7671,7 +8092,7 @@ fn draw_theme_picker_popover(frame: &mut Frame, app: &mut App) {
     let items: Vec<ListItem> = visible
         .iter()
         .map(|name| {
-            let current = app.ui_theme_name.as_deref() == Some(name.as_str());
+            let current = app.theme_picker_current_name() == Some(name.as_str());
             let suffix = if current { " current" } else { "" };
             let label = truncate_text(&format!("{name}{suffix}"), list_width);
             let style = if current {
@@ -7923,7 +8344,10 @@ fn draw_comment_picker_popover(frame: &mut Frame, app: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::counted_binding_label;
-    use crate::app::{App, FoldContextDirection, SelectionToolbarAction, ViewMode};
+    use crate::app::{
+        App, FoldContextDirection, SelectionToolbarAction, SettingsLeaveAction,
+        SettingsResetAction, ViewMode,
+    };
     use crate::config::{FoldContextMode, ResolvedTheme, SyntaxMode};
     use crate::markdown::{
         markdown_line_is_quote_border, markdown_preview_lines as render_markdown_preview_lines,
@@ -8927,6 +9351,148 @@ mod tests {
         assert!(app.handle_quit_confirmation_click(cancel_x, cancel_y));
         assert!(!app.quit_confirmation_active());
         assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn settings_leave_modal_renders_three_mouse_actions() {
+        let multi = MultiFileDiff::from_file_pair(
+            std::path::PathBuf::from("old.txt"),
+            std::path::PathBuf::from("new.txt"),
+            "old\n".to_string(),
+            "new\n".to_string(),
+        );
+        let mut app = App::new(multi, ViewMode::UnifiedPane, 0, false, None);
+        let dir = std::env::temp_dir().join(format!("oyo-settings-modal-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        app.settings_config_path_override = Some(dir.join("config.toml"));
+        app.ensure_topbar_tabs();
+        let file_tab = app.active_topbar_tab.unwrap();
+        app.open_settings_tab();
+        app.line_wrap = !app.line_wrap;
+        app.select_topbar_tab(file_tab);
+        assert!(app.settings_leave_confirmation_active());
+
+        let backend = TestBackend::new(70, 14);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| super::draw(frame, &mut app)).unwrap();
+        let lines = ascii_buffer_lines(&terminal);
+        let text = lines.join("\n");
+        assert!(text.contains("Unsaved settings"), "screen text: {text:?}");
+        assert!(text.contains("S Save"), "screen text: {text:?}");
+        assert!(text.contains("D Discard"), "screen text: {text:?}");
+        assert!(text.contains("Esc Cancel"), "screen text: {text:?}");
+        assert!(!text.contains("[ S Save ]"), "screen text: {text:?}");
+        assert_eq!(app.settings_leave_hits.len(), 3);
+        let save = app
+            .settings_leave_hits
+            .iter()
+            .find(|hit| hit.action == SettingsLeaveAction::Save)
+            .copied()
+            .unwrap();
+        assert_eq!(
+            terminal.backend().buffer()[(save.x, save.y)].bg,
+            app.theme.accent
+        );
+        let cancel = app
+            .settings_leave_hits
+            .iter()
+            .find(|hit| hit.action == SettingsLeaveAction::Cancel)
+            .copied()
+            .unwrap();
+        assert!(app.handle_settings_leave_click(cancel.x, cancel.y));
+        assert!(!app.settings_leave_confirmation_active());
+        assert!(app.active_settings_view());
+        assert!(app.save_settings());
+        assert!(!app.settings_dirty());
+        terminal.draw(|frame| super::draw(frame, &mut app)).unwrap();
+        app.tick();
+        terminal.draw(|frame| super::draw(frame, &mut app)).unwrap();
+        let text = ascii_buffer_lines(&terminal).join("\n");
+        assert!(!text.contains("unsaved changes"), "screen text: {text:?}");
+        assert!(
+            !app.settings_dirty(),
+            "drifted settings: {:?}",
+            app.settings_dirty_keys()
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn settings_reset_modal_requires_confirmation_and_uses_danger_action() {
+        let multi = MultiFileDiff::from_file_pair(
+            std::path::PathBuf::from("old.txt"),
+            std::path::PathBuf::from("new.txt"),
+            "old\n".to_string(),
+            "new\n".to_string(),
+        );
+        let mut app = App::new(multi, ViewMode::UnifiedPane, 0, false, None);
+        let dir =
+            std::env::temp_dir().join(format!("oyo-settings-reset-modal-{}", std::process::id()));
+        let path = dir.join("config.toml");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&path, "[ui]\nline_wrap = true\n").unwrap();
+        let original = std::fs::read_to_string(&path).unwrap();
+        app.settings_config_path_override = Some(path.clone());
+        app.line_wrap = true;
+        app.ensure_topbar_tabs();
+        app.open_settings_tab();
+        app.settings_selection = crate::app::SettingItem::ALL.len() + 2;
+        app.activate_selected_setting();
+        assert!(app.settings_reset_confirmation_active());
+        assert!(app.line_wrap);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+
+        let backend = TestBackend::new(76, 16);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| super::draw(frame, &mut app)).unwrap();
+        let text = ascii_buffer_lines(&terminal).join("\n");
+        assert!(text.contains("Reset settings"), "screen text: {text:?}");
+        assert!(
+            text.contains("Replace all settings with their built-in defaults?"),
+            "screen text: {text:?}"
+        );
+        assert!(
+            text.contains("R Reset to defaults"),
+            "screen text: {text:?}"
+        );
+        assert!(text.contains("Esc Cancel"), "screen text: {text:?}");
+        assert_eq!(app.settings_reset_hits.len(), 2);
+        let confirm = app
+            .settings_reset_hits
+            .iter()
+            .find(|hit| hit.action == SettingsResetAction::Confirm)
+            .copied()
+            .unwrap();
+        assert_eq!(
+            terminal.backend().buffer()[(confirm.x, confirm.y)].bg,
+            app.theme.error
+        );
+        let cancel = app
+            .settings_reset_hits
+            .iter()
+            .find(|hit| hit.action == SettingsResetAction::Cancel)
+            .copied()
+            .unwrap();
+        assert!(app.handle_settings_reset_click(cancel.x, cancel.y));
+        assert!(!app.settings_reset_confirmation_active());
+        assert!(app.line_wrap);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+
+        app.activate_selected_setting();
+        terminal.draw(|frame| super::draw(frame, &mut app)).unwrap();
+        let confirm = app
+            .settings_reset_hits
+            .iter()
+            .find(|hit| hit.action == SettingsResetAction::Confirm)
+            .copied()
+            .unwrap();
+        assert!(app.handle_settings_reset_click(confirm.x, confirm.y));
+        assert!(!app.settings_reset_confirmation_active());
+        assert!(!app.line_wrap);
+        assert!(app.settings_dirty());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     fn outdated_comments_app_with_snapshot(line_text: &str) -> App {

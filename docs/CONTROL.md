@@ -214,6 +214,7 @@ Open or close topbar tabs:
 ```sh
 oy control tab --session review-a file src/lib.rs
 oy control tab --session review-a help
+oy control tab --session review-a settings
 oy control tab --session review-a pr-comments
 oy control tab --session review-a outdated-comments
 oy control tab --session review-a close

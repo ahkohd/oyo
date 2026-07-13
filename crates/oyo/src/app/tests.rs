@@ -675,6 +675,25 @@ fn review_line_add_rows_skip_reserved_comment_notes() {
 }
 
 #[test]
+fn non_file_tabs_clear_review_line_add_hover_state() {
+    let diff = MultiFileDiff::from_file_pair(
+        std::path::PathBuf::from("a.txt"),
+        std::path::PathBuf::from("a.txt"),
+        "old\n".to_string(),
+        "new\n".to_string(),
+    );
+    let mut app = App::new(diff, ViewMode::UnifiedPane, 100, false, None);
+    app.ensure_topbar_tabs();
+    app.open_settings_tab();
+    app.review_line_add_row = Some(12);
+    app.review_line_add_hover = true;
+
+    assert!(app.update_topbar_hover(0, 0));
+    assert_eq!(app.review_line_add_row, None);
+    assert!(!app.review_line_add_hover);
+}
+
+#[test]
 fn last_diff_hover_persists_after_mouse_leaves_in_normal_mode() {
     let diff = MultiFileDiff::from_file_pair(
         std::path::PathBuf::from("a.txt"),
@@ -1276,6 +1295,7 @@ fn topbar_files(app: &App) -> Vec<usize> {
         .filter_map(|tab| match tab.content {
             TopbarTabContent::File(index) => Some(index),
             TopbarTabContent::Help
+            | TopbarTabContent::Settings
             | TopbarTabContent::PrComments
             | TopbarTabContent::OutdatedComments => None,
         })

@@ -219,6 +219,9 @@ impl App {
     }
 
     pub fn select_file(&mut self, index: usize) {
+        if self.request_settings_leave(super::settings::SettingsLeaveTarget::SelectFile(index)) {
+            return;
+        }
         let history_origin = self.view_history_origin();
         self.restore_live_diff_after_outdated_view();
         if index >= self.multi_diff.file_count() {
@@ -285,7 +288,7 @@ impl App {
         let preview_only = match self.active_topbar_content() {
             Some(TopbarTabContent::File(index)) => self.file_is_preview_only(index),
             Some(TopbarTabContent::PrComments | TopbarTabContent::OutdatedComments) => true,
-            Some(TopbarTabContent::Help) | None => false,
+            Some(TopbarTabContent::Help | TopbarTabContent::Settings) | None => false,
         };
         if preview_only && saved_mode != ViewMode::Preview {
             self.view_mode = ViewMode::Preview;
@@ -329,6 +332,7 @@ impl App {
                 matches!(
                     tab.content,
                     TopbarTabContent::Help
+                        | TopbarTabContent::Settings
                         | TopbarTabContent::PrComments
                         | TopbarTabContent::OutdatedComments
                 )
@@ -343,6 +347,7 @@ impl App {
         self.topbar_tabs.retain(|tab| match tab.content {
             TopbarTabContent::File(index) => index < count,
             TopbarTabContent::Help
+            | TopbarTabContent::Settings
             | TopbarTabContent::PrComments
             | TopbarTabContent::OutdatedComments => true,
         });
@@ -369,6 +374,11 @@ impl App {
     }
 
     pub(crate) fn open_file_in_new_topbar_tab(&mut self, file_index: usize) {
+        if self.request_settings_leave(super::settings::SettingsLeaveTarget::OpenFileNew(
+            file_index,
+        )) {
+            return;
+        }
         self.restore_live_diff_after_outdated_view();
         if file_index >= self.multi_diff.file_count() {
             return;
@@ -438,6 +448,7 @@ impl App {
         let content = match content {
             TopbarTabContent::File(_) => TopbarTabContent::File(self.multi_diff.selected_index),
             TopbarTabContent::Help => TopbarTabContent::Help,
+            TopbarTabContent::Settings => TopbarTabContent::Settings,
             TopbarTabContent::PrComments => TopbarTabContent::PrComments,
             TopbarTabContent::OutdatedComments => TopbarTabContent::OutdatedComments,
         };
@@ -457,6 +468,7 @@ impl App {
         let navigator_state = match content {
             TopbarTabContent::File(_) => Some(self.multi_diff.current_navigator().state().clone()),
             TopbarTabContent::Help
+            | TopbarTabContent::Settings
             | TopbarTabContent::PrComments
             | TopbarTabContent::OutdatedComments => None,
         };
@@ -472,6 +484,9 @@ impl App {
     }
 
     pub(crate) fn new_topbar_tab(&mut self) {
+        if self.request_settings_leave(super::settings::SettingsLeaveTarget::NewTab) {
+            return;
+        }
         self.restore_live_diff_after_outdated_view();
         if self.multi_diff.file_count() == 0 {
             return;
@@ -508,10 +523,13 @@ impl App {
             return true;
         }
         self.multi_diff.file_count() == 0
-            && self
-                .topbar_tabs
-                .iter()
-                .any(|tab| tab.id == tab_id && tab.content == TopbarTabContent::Help)
+            && self.topbar_tabs.iter().any(|tab| {
+                tab.id == tab_id
+                    && matches!(
+                        tab.content,
+                        TopbarTabContent::Help | TopbarTabContent::Settings
+                    )
+            })
     }
 
     pub(crate) fn close_active_topbar_tab(&mut self) {
@@ -521,8 +539,13 @@ impl App {
         }
     }
 
-    fn close_topbar_tab(&mut self, tab_id: usize) {
+    pub(super) fn close_topbar_tab(&mut self, tab_id: usize) {
         if !self.topbar_close_allowed(tab_id) {
+            return;
+        }
+        if self.active_topbar_tab == Some(tab_id)
+            && self.request_settings_leave(super::settings::SettingsLeaveTarget::CloseTab(tab_id))
+        {
             return;
         }
         let Some(pos) = self.topbar_tabs.iter().position(|tab| tab.id == tab_id) else {
@@ -555,6 +578,9 @@ impl App {
         if self.active_topbar_tab == Some(tab_id) {
             return;
         }
+        if self.request_settings_leave(super::settings::SettingsLeaveTarget::SelectTab(tab_id)) {
+            return;
+        }
         let history_origin = self.view_history_origin();
         self.restore_live_diff_after_outdated_view();
         if self.multi_diff.file_count() == 0 {
@@ -578,6 +604,7 @@ impl App {
         let target_file = match tab.content {
             TopbarTabContent::File(index) => Some(index),
             TopbarTabContent::Help
+            | TopbarTabContent::Settings
             | TopbarTabContent::PrComments
             | TopbarTabContent::OutdatedComments => None,
         };
@@ -632,6 +659,13 @@ impl App {
                 self.preview_forced_by_content = false;
                 self.clear_diff_selection();
             }
+            TopbarTabContent::Settings => {
+                self.preview_forced_by_content = false;
+                self.clear_diff_selection();
+                if old_content != Some(TopbarTabContent::Settings) {
+                    self.begin_settings_session();
+                }
+            }
             TopbarTabContent::PrComments | TopbarTabContent::OutdatedComments => {
                 self.view_mode = ViewMode::Preview;
                 self.preview_forced_by_content = tab.view_mode != ViewMode::Preview;
@@ -640,6 +674,7 @@ impl App {
         }
         let destination = match tab.content {
             TopbarTabContent::Help => super::ViewHistoryRecipe::Help { tab_id },
+            TopbarTabContent::Settings => super::ViewHistoryRecipe::Settings { tab_id },
             TopbarTabContent::PrComments => super::ViewHistoryRecipe::PrComments {
                 tab_id,
                 focus_comment_id: self.pr_comment_focus,
@@ -657,7 +692,7 @@ impl App {
         match content {
             TopbarTabContent::PrComments => self.pr_comment_focus = focus,
             TopbarTabContent::OutdatedComments => self.outdated_comment_focus = focus,
-            TopbarTabContent::File(_) | TopbarTabContent::Help => {}
+            TopbarTabContent::File(_) | TopbarTabContent::Help | TopbarTabContent::Settings => {}
         }
     }
 
@@ -666,6 +701,18 @@ impl App {
         content: TopbarTabContent,
         focus: Option<u64>,
     ) {
+        let target = match content {
+            TopbarTabContent::PrComments => {
+                super::settings::SettingsLeaveTarget::PrCommentsCurrent(focus)
+            }
+            TopbarTabContent::OutdatedComments => {
+                super::settings::SettingsLeaveTarget::OutdatedCommentsCurrent(focus)
+            }
+            _ => return,
+        };
+        if self.request_settings_leave(target) {
+            return;
+        }
         self.restore_live_diff_after_outdated_view();
         self.clear_virtual_comment_view_state();
         self.set_virtual_comment_focus(content, focus);
@@ -762,28 +809,51 @@ impl App {
                 tab_id,
                 focus_comment_id: focus,
             },
-            TopbarTabContent::File(_) | TopbarTabContent::Help => return,
+            TopbarTabContent::File(_) | TopbarTabContent::Help | TopbarTabContent::Settings => {
+                return
+            }
         };
         self.record_view_landing(history_origin, destination);
     }
 
     pub(crate) fn open_pr_comments_in_current_tab(&mut self, focus: Option<u64>) {
+        if self.request_settings_leave(super::settings::SettingsLeaveTarget::PrCommentsCurrent(
+            focus,
+        )) {
+            return;
+        }
         self.open_virtual_comments_with_history(TopbarTabContent::PrComments, focus, false);
     }
 
     pub(crate) fn open_pr_comments_tab(&mut self, focus: Option<u64>) {
+        if self.request_settings_leave(super::settings::SettingsLeaveTarget::PrCommentsTab(focus)) {
+            return;
+        }
         self.open_virtual_comments_with_history(TopbarTabContent::PrComments, focus, true);
     }
 
     pub(crate) fn open_outdated_comments_in_current_tab(&mut self, focus: Option<u64>) {
+        if self.request_settings_leave(
+            super::settings::SettingsLeaveTarget::OutdatedCommentsCurrent(focus),
+        ) {
+            return;
+        }
         self.open_virtual_comments_with_history(TopbarTabContent::OutdatedComments, focus, false);
     }
 
     pub(crate) fn open_outdated_comments_tab(&mut self, focus: Option<u64>) {
+        if self.request_settings_leave(super::settings::SettingsLeaveTarget::OutdatedCommentsTab(
+            focus,
+        )) {
+            return;
+        }
         self.open_virtual_comments_with_history(TopbarTabContent::OutdatedComments, focus, true);
     }
 
     pub(crate) fn open_help_in_current_tab(&mut self) {
+        if self.request_settings_leave(super::settings::SettingsLeaveTarget::HelpCurrent) {
+            return;
+        }
         self.restore_live_diff_after_outdated_view();
         self.save_active_topbar_tab_state();
         let Some(tab_id) = self.active_topbar_tab else {
@@ -807,6 +877,9 @@ impl App {
     }
 
     pub(crate) fn open_help_tab(&mut self) {
+        if self.request_settings_leave(super::settings::SettingsLeaveTarget::HelpTab) {
+            return;
+        }
         let history_origin = self.view_history_origin();
         let was_replaying = self.view_history_replaying;
         self.view_history_replaying = true;
@@ -1630,8 +1703,14 @@ impl App {
                     && row < hit.y.saturating_add(hit.height)
             })
             .map(|hit| (hit.key, hit.direction));
-        let (review_line_add_row, review_line_add_hover) =
-            self.review_line_add_hover_at(column, row);
+        let (review_line_add_row, review_line_add_hover) = if matches!(
+            self.active_topbar_content(),
+            Some(TopbarTabContent::File(_))
+        ) {
+            self.review_line_add_hover_at(column, row)
+        } else {
+            (None, false)
+        };
         let review_line_add_side =
             review_line_add_row.and_then(|_| self.review_side_at_screen_column(column));
         let review_preview_hit = self.review_preview_boxes.iter().rev().find_map(|hit| {
@@ -2083,6 +2162,9 @@ impl App {
     pub fn current_file_path(&self) -> String {
         if self.active_topbar_content() == Some(TopbarTabContent::Help) {
             return "Help".to_string();
+        }
+        if self.active_topbar_content() == Some(TopbarTabContent::Settings) {
+            return "Settings".to_string();
         }
         if self.active_topbar_content() == Some(TopbarTabContent::PrComments) {
             return format!(

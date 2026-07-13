@@ -20,6 +20,16 @@ Oyo loads the first config file it finds:
 2. `~/.config/oyo/config.toml`.
 3. The platform config directory, such as `~/Library/Application Support/oyo/config.toml` on macOS.
 
+## Change common settings interactively
+
+Press `g s` in Oyo to open Settings. Settings are grouped into General, Diff, Blame, Time, Files, Playback and Appearance.
+
+Changes apply to the current session immediately but do not update your config until you select Save. Use Left and Right to adjust the selected value. Press Enter or Space to open either theme picker.
+
+Revert restores the values from when you opened Settings. Reset to defaults stages Oyo's built-in defaults without saving them. If you leave with unsaved changes, choose Save, Discard or Cancel. Discard also restores the values from when you opened Settings. Oyo preserves unrelated keys, comments and table order when saving.
+
+The Git ignore setting applies after you restart Oyo because directory scan options are set before the interface opens. Other settings in this tab apply during the current session. Quitting Oyo discards unsaved settings changes.
+
 ## Minimal config
 
 ```toml

@@ -128,6 +128,7 @@ pub(crate) enum NormalAction {
     OpenFileSearch,
     OpenCommentPicker,
     OpenOutdatedComments,
+    OpenSettings,
     OpenThemePicker,
 }
 
@@ -350,6 +351,7 @@ binding_action!(NormalAction, [
     OpenFileSearch => ("open_file_search", "Quick file search", ["ctrl-shift-p", "g f"]),
     OpenCommentPicker => ("open_comment_picker", "Comment picker", ["g c"]),
     OpenOutdatedComments => ("open_outdated_comments", "Outdated comments", ["g o"]),
+    OpenSettings => ("open_settings", "Settings", ["g s"]),
     OpenThemePicker => ("open_theme_picker", "Theme picker", ["ctrl-t"]),
 ]);
 
