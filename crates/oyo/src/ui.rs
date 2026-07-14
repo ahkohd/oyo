@@ -4075,7 +4075,7 @@ fn render_pr_comments_view(frame: &mut Frame, app: &mut App, area: Rect) {
                 .unwrap_or_else(|| format!("i{number}"));
             actions.push((format!("{edit_key} edit"), PrCommentHitAction::Edit(id)));
         }
-        if has_pr_target {
+        if has_pr_target && app.pull_request_comment_can_reply(id) {
             actions.push((reply, PrCommentHitAction::Reply(id)));
         }
         if overlay.can_edit {
@@ -9176,6 +9176,7 @@ mod tests {
             label: "PR".to_string(),
             vcs: "git".to_string(),
             jj_change_id: None,
+            jj_change_ids: None,
             jj_commit_id: None,
             git_base_ref: None,
             git_head_ref: None,
@@ -9826,6 +9827,7 @@ mod tests {
             label: "MR".to_string(),
             vcs: "git".to_string(),
             jj_change_id: None,
+            jj_change_ids: None,
             jj_commit_id: None,
             git_base_ref: None,
             git_head_ref: None,

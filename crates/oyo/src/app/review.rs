@@ -371,6 +371,8 @@ pub(crate) struct ReviewTargetMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) jj_change_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) jj_change_ids: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) jj_commit_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) git_base_ref: Option<String>,
@@ -2002,6 +2004,10 @@ impl App {
             .count()
     }
 
+    pub(crate) fn review_has_stored_comments(&self) -> bool {
+        !self.review_comments.is_empty()
+    }
+
     pub(crate) fn review_comment_count_for_file(&self, file_index: usize) -> usize {
         self.review_comments
             .iter()
@@ -2867,18 +2873,6 @@ impl App {
             .collect()
     }
 
-    pub(crate) fn pull_request_comment_ids(&self) -> Vec<u64> {
-        let mut comments = self
-            .review_comments
-            .iter()
-            .filter(|comment| {
-                !comment.deleted && comment.anchor.kind == ReviewTargetKind::PullRequest
-            })
-            .collect::<Vec<_>>();
-        comments.sort_by_key(|comment| (comment.created_at, comment.id));
-        comments.into_iter().map(|comment| comment.id).collect()
-    }
-
     pub(crate) fn pull_request_comment_overlays(&self) -> Vec<(u64, usize, ReviewCommentOverlay)> {
         let mut comments = self
             .review_comments
@@ -2926,8 +2920,29 @@ impl App {
             .collect()
     }
 
+    fn pull_request_replyable_comment_ids(&self) -> Vec<u64> {
+        let mut comments = self
+            .review_comments
+            .iter()
+            .filter(|comment| {
+                !comment.deleted
+                    && comment.anchor.kind == ReviewTargetKind::PullRequest
+                    && comment
+                        .provider
+                        .as_ref()
+                        .is_none_or(|provider| provider.api_kind != "review_submission")
+            })
+            .collect::<Vec<_>>();
+        comments.sort_by_key(|comment| (comment.created_at, comment.id));
+        comments.into_iter().map(|comment| comment.id).collect()
+    }
+
+    pub(crate) fn pull_request_comment_can_reply(&self, id: u64) -> bool {
+        self.pull_request_replyable_comment_ids().contains(&id)
+    }
+
     pub(crate) fn pull_request_reply_label(&self, id: u64) -> Option<String> {
-        pr_comment_action_label("r", &self.pull_request_comment_ids(), id)
+        pr_comment_action_label("r", &self.pull_request_replyable_comment_ids(), id)
     }
 
     fn pull_request_editable_comment_ids(&self) -> Vec<u64> {
@@ -2958,7 +2973,7 @@ impl App {
             return false;
         }
         let idx = (letter as u8 - b'a') as usize;
-        let Some(id) = self.pull_request_comment_ids().get(idx).copied() else {
+        let Some(id) = self.pull_request_replyable_comment_ids().get(idx).copied() else {
             return false;
         };
         self.start_pull_request_reply(id)
@@ -2966,7 +2981,7 @@ impl App {
 
     pub(crate) fn reply_to_pull_request_comment_number(&mut self, number: usize) -> bool {
         let Some(id) = self
-            .pull_request_comment_ids()
+            .pull_request_replyable_comment_ids()
             .get(number.saturating_sub(1))
             .copied()
         else {
@@ -8096,6 +8111,32 @@ impl App {
         changed
     }
 
+    pub(crate) fn canonicalize_review_provider_repo(
+        &mut self,
+        provider_id: &str,
+        pr_number: u64,
+        repo: &str,
+    ) -> bool {
+        let mut changed = false;
+        for comment in &mut self.review_comments {
+            let Some(provider) = comment.provider.as_mut() else {
+                continue;
+            };
+            if provider.provider == provider_id
+                && provider.pr_number == pr_number
+                && provider.repo != repo
+            {
+                provider.repo = repo.to_string();
+                changed = true;
+            }
+        }
+        if changed {
+            self.touch_review_state();
+            self.persist_review_session();
+        }
+        changed
+    }
+
     pub(crate) fn upsert_provider_review_comment(&mut self, mut comment: ReviewComment) -> u64 {
         let incoming_thread = comment.provider.as_ref().and_then(|provider| {
             Some((
@@ -8133,6 +8174,7 @@ impl App {
                 provider.provider.clone(),
                 provider.repo.clone(),
                 provider.pr_number,
+                provider.api_kind.clone(),
                 provider.comment_id.clone(),
             )
         });
@@ -8143,6 +8185,7 @@ impl App {
                         provider.provider.clone(),
                         provider.repo.clone(),
                         provider.pr_number,
+                        provider.api_kind.clone(),
                         provider.comment_id.clone(),
                     )
                 }) == Some(provider_comment_id.clone())
@@ -8556,8 +8599,15 @@ impl App {
                         return format!("jj:change:{root_key}:{change_id}");
                     }
                 }
-                let spec =
-                    serde_json::to_string(metadata).unwrap_or_else(|_| metadata.label.clone());
+                let mut change_ids = metadata.jj_change_ids.clone().unwrap_or_default();
+                change_ids.retain(|value| !value.trim().is_empty());
+                change_ids.sort();
+                change_ids.dedup();
+                let spec = if change_ids.is_empty() {
+                    metadata.label.clone()
+                } else {
+                    serde_json::to_string(&change_ids).unwrap_or_else(|_| metadata.label.clone())
+                };
                 format!("jj:target:{root_key}:{}", hash_hex(&spec))
             }
             "git" => match metadata.label.as_str() {
@@ -8831,6 +8881,7 @@ mod tests {
             label: label.to_string(),
             vcs: vcs.to_string(),
             jj_change_id: None,
+            jj_change_ids: None,
             jj_commit_id: None,
             git_base_ref: None,
             git_head_ref: None,
@@ -8856,6 +8907,40 @@ mod tests {
         let new = App::review_storage_key_for_metadata("/tmp/repo", "newfp", Some(&metadata));
         assert_eq!(old, new);
         assert!(old.contains("abc123"));
+    }
+
+    #[test]
+    fn review_storage_key_is_stable_for_equivalent_jj_ranges_and_amends() {
+        let mut metadata = test_metadata("main..feature", "jj");
+        metadata.jj_change_id = Some("head1234".to_string());
+        metadata.jj_change_ids = Some(vec!["change-b".to_string(), "change-a".to_string()]);
+        metadata.jj_commit_id = Some("old-commit".to_string());
+        metadata.timestamp = Some("old-time".to_string());
+        metadata.bookmarks = Some("feature".to_string());
+        let old = App::review_storage_key_for_metadata("/tmp/repo", "oldfp", Some(&metadata));
+
+        metadata.label = "trunk()..feature".to_string();
+        metadata.jj_change_ids = Some(vec!["change-a".to_string(), "change-b".to_string()]);
+        metadata.jj_commit_id = Some("new-commit".to_string());
+        metadata.timestamp = Some("new-time".to_string());
+        metadata.bookmarks = Some("feature other".to_string());
+        let amended = App::review_storage_key_for_metadata("/tmp/repo", "newfp", Some(&metadata));
+        assert_eq!(old, amended);
+        assert!(old.starts_with("jj:target:"));
+
+        metadata.jj_change_ids = Some(vec!["change-a".to_string(), "change-c".to_string()]);
+        let different = App::review_storage_key_for_metadata("/tmp/repo", "newfp", Some(&metadata));
+        assert_ne!(old, different);
+    }
+
+    #[test]
+    fn review_storage_key_jj_range_fallback_ignores_moving_metadata() {
+        let mut metadata = test_metadata("main..feature", "jj");
+        metadata.jj_commit_id = Some("old-commit".to_string());
+        let old = App::review_storage_key_for_metadata("/tmp/repo", "oldfp", Some(&metadata));
+        metadata.jj_commit_id = Some("new-commit".to_string());
+        let amended = App::review_storage_key_for_metadata("/tmp/repo", "newfp", Some(&metadata));
+        assert_eq!(old, amended);
     }
 
     #[test]

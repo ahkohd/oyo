@@ -851,12 +851,12 @@ fn detect_input_mode_in(paths: &[PathBuf], cwd: &Path) -> InputMode {
         };
         let path_exists = argument_path.exists();
         if is_jj_repo(cwd) && should_treat_as_jj_revision(path_exists, &value) {
-            let rev =
-                if value.as_ref() != "@" && !value.contains("..") && jj_bookmark_exists(&value) {
-                    jj_bookmark_revset(&value)
-                } else {
-                    value.to_string()
-                };
+            let value = normalize_jj_revision(&value);
+            let rev = if value != "@" && !value.contains("..") && jj_bookmark_exists(&value) {
+                jj_bookmark_revset(&value)
+            } else {
+                value
+            };
             InputMode::JjRevision { rev }
         } else if path_exists && is_jj_repo(cwd) && !oyo_core::git::is_git_repo(cwd) {
             let repo_root = jj_workspace_root(cwd).unwrap_or_else(|| cwd.to_path_buf());
@@ -912,6 +912,10 @@ fn git_merge_base_in(root: &Path, from: &str, to: &str) -> Option<String> {
 fn git_merge_base(from: &str, to: &str) -> Option<String> {
     let cwd = std::env::current_dir().ok()?;
     git_merge_base_in(&cwd, from, to)
+}
+
+fn normalize_jj_revision(revision: &str) -> String {
+    revision.replacen("...", "..", 1)
 }
 
 fn parse_range(range: &str) -> Result<(String, String)> {
@@ -2010,6 +2014,8 @@ fn jj_diff_summary(
     rev: &str,
     path: Option<&Path>,
 ) -> Result<(String, String, String)> {
+    let rev = normalize_jj_revision(rev);
+    let rev = rev.as_str();
     let path = path.map(|path| path.to_string_lossy());
     if rev.contains("..") {
         let (from, to) = parse_range(rev)?;
@@ -2433,11 +2439,15 @@ fn jj_bookmark_exists(bookmark: &str) -> bool {
     let Ok(root) = current_review_workspace() else {
         return false;
     };
-    if !is_jj_repo(&root) {
+    jj_bookmark_exists_in(&root, bookmark)
+}
+
+fn jj_bookmark_exists_in(root: &Path, bookmark: &str) -> bool {
+    if !is_jj_repo(root) {
         return false;
     }
     run_jj(
-        &root,
+        root,
         &[
             "bookmark",
             "list",
@@ -2505,13 +2515,15 @@ fn input_mode_for_control_target(target: control::ControlTarget, args: &Args) ->
 fn review_input_mode(revision: Option<&str>, args: &Args) -> Result<InputMode> {
     let cwd = std::env::current_dir().unwrap_or_default();
     if let Some(revision) = revision {
+        let revision = revision.trim();
         if is_jj_repo(&cwd) {
-            let rev = if revision != "@" && !revision.contains("..") && jj_bookmark_exists(revision)
-            {
-                jj_bookmark_revset(revision)
-            } else {
-                revision.to_string()
-            };
+            let revision = normalize_jj_revision(revision);
+            let rev =
+                if revision != "@" && !revision.contains("..") && jj_bookmark_exists(&revision) {
+                    jj_bookmark_revset(&revision)
+                } else {
+                    revision
+                };
             return Ok(InputMode::JjRevision { rev });
         }
         if oyo_core::git::is_git_repo(&cwd) {
@@ -2531,6 +2543,11 @@ fn review_input_mode(revision: Option<&str>, args: &Args) -> Result<InputMode> {
         return Ok(InputMode::GitStaged);
     }
     if let Some(range) = args.range.as_deref() {
+        if is_jj_repo(&cwd) {
+            return Ok(InputMode::JjRevision {
+                rev: normalize_jj_revision(range),
+            });
+        }
         let (from, to) = parse_range(range)?;
         return Ok(InputMode::GitRange { from, to });
     }
@@ -2550,6 +2567,7 @@ fn basic_review_target_metadata(label: impl Into<String>, vcs: &str) -> ReviewTa
         label: label.into(),
         vcs: vcs.to_string(),
         jj_change_id: None,
+        jj_change_ids: None,
         jj_commit_id: None,
         git_base_ref: None,
         git_head_ref: None,
@@ -2567,9 +2585,14 @@ fn basic_review_target_metadata(label: impl Into<String>, vcs: &str) -> ReviewTa
 
 fn jj_target_metadata(label: &str, rev: &str) -> Option<ReviewTargetMetadata> {
     let root = current_review_workspace().ok()?;
-    if !is_jj_repo(&root) {
+    jj_target_metadata_in(&root, label, rev)
+}
+
+fn jj_target_metadata_in(root: &Path, label: &str, rev: &str) -> Option<ReviewTargetMetadata> {
+    if !is_jj_repo(root) {
         return None;
     }
+    let rev = normalize_jj_revision(rev);
     let output = ProcessCommand::new("jj")
         .arg("-R")
         .arg(root)
@@ -2579,25 +2602,37 @@ fn jj_target_metadata(label: &str, rev: &str) -> Option<ReviewTargetMetadata> {
         .arg("log")
         .arg("--no-graph")
         .arg("-r")
-        .arg(rev)
+        .arg(&rev)
         .arg("-T")
-        .arg("change_id.shortest(8) ++ \"\\t\" ++ commit_id.shortest(8) ++ \"\\t\" ++ author.email() ++ \"\\t\" ++ committer.timestamp().format(\"%Y-%m-%d %H:%M:%S\") ++ \"\\t\" ++ bookmarks ++ \"\\n\"")
+        .arg("change_id.shortest(8) ++ \"\\t\" ++ commit_id.shortest(8) ++ \"\\t\" ++ author.email() ++ \"\\t\" ++ committer.timestamp().format(\"%Y-%m-%d %H:%M:%S\") ++ \"\\t\" ++ bookmarks ++ \"\\t\" ++ change_id ++ \"\\n\"")
         .output()
         .ok()?;
     if !output.status.success() {
         return None;
     }
     let data = String::from_utf8_lossy(&output.stdout);
-    let parts = data.lines().next()?.split('\t').collect::<Vec<_>>();
-    (parts.len() >= 5).then(|| {
-        let mut metadata = basic_review_target_metadata(label, "jj");
-        metadata.jj_change_id = Some(parts[0].to_string());
-        metadata.jj_commit_id = Some(parts[1].to_string());
-        metadata.author = Some(parts[2].to_string());
-        metadata.timestamp = Some(parts[3].to_string());
-        metadata.bookmarks = (!parts[4].trim().is_empty()).then(|| parts[4].to_string());
-        metadata
-    })
+    let rows = data
+        .lines()
+        .map(|line| line.splitn(6, '\t').collect::<Vec<_>>())
+        .filter(|parts| parts.len() == 6)
+        .collect::<Vec<_>>();
+    let parts = rows.first()?;
+    let mut change_ids = rows
+        .iter()
+        .map(|parts| parts[5].trim())
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    change_ids.sort();
+    change_ids.dedup();
+    let mut metadata = basic_review_target_metadata(label, "jj");
+    metadata.jj_change_id = Some(parts[0].to_string());
+    metadata.jj_change_ids = (!change_ids.is_empty()).then_some(change_ids);
+    metadata.jj_commit_id = Some(parts[1].to_string());
+    metadata.author = Some(parts[2].to_string());
+    metadata.timestamp = Some(parts[3].to_string());
+    metadata.bookmarks = (!parts[4].trim().is_empty()).then(|| parts[4].to_string());
+    Some(metadata)
 }
 
 pub(crate) fn git_commit(root: &Path, rev: &str) -> Option<String> {
@@ -2755,7 +2790,7 @@ fn configure_review_state_for_app(
         app.load_review_mode();
     }
     if let InputMode::JjRevision { rev } = input_mode {
-        if rev.contains("..") {
+        if !app.review_has_stored_comments() && rev.contains("..") {
             let fingerprints = saved_review_fingerprints_for_jj_revset(config, args, rev)?;
             if fingerprints.len() > 1 {
                 app.load_review_snapshots_into_current_target(&fingerprints);
@@ -2763,7 +2798,7 @@ fn configure_review_state_for_app(
             }
         }
     }
-    if app.review_comment_count() == 0 && should_load_saved_review_fallback(input_mode) {
+    if !app.review_has_stored_comments() && should_load_saved_review_fallback(input_mode) {
         if let Some(fingerprint) = saved_review_fingerprint_for_app_target(
             config,
             args,
@@ -3117,6 +3152,25 @@ fn saved_review_fingerprint(
     }
 }
 
+fn jj_change_id_sets_match(
+    saved: &ReviewTargetMetadata,
+    target: &ReviewTargetMetadata,
+) -> Option<bool> {
+    let saved = saved
+        .jj_change_ids
+        .as_ref()?
+        .iter()
+        .filter(|value| !value.trim().is_empty())
+        .collect::<BTreeSet<_>>();
+    let target = target
+        .jj_change_ids
+        .as_ref()?
+        .iter()
+        .filter(|value| !value.trim().is_empty())
+        .collect::<BTreeSet<_>>();
+    (!saved.is_empty() && !target.is_empty()).then_some(saved == target)
+}
+
 fn metadata_matches_target(saved: &ReviewTargetMetadata, target: &ReviewTargetMetadata) -> bool {
     if saved.vcs != target.vcs {
         return false;
@@ -3130,7 +3184,7 @@ fn metadata_matches_target(saved: &ReviewTargetMetadata, target: &ReviewTargetMe
             }
             _ => false,
         },
-        "jj" => {
+        "jj" => jj_change_id_sets_match(saved, target).unwrap_or_else(|| {
             saved
                 .jj_change_id
                 .as_ref()
@@ -3141,7 +3195,7 @@ fn metadata_matches_target(saved: &ReviewTargetMetadata, target: &ReviewTargetMe
                     .as_ref()
                     .zip(target.jj_commit_id.as_ref())
                     .is_some_and(|(saved_id, target_id)| saved_id == target_id)
-        }
+        }),
         _ => false,
     }
 }
@@ -3168,7 +3222,7 @@ fn metadata_in_current_scope(saved: &ReviewTargetMetadata, target: &ReviewTarget
                     .zip(target.git_head_commit.as_ref())
                     .is_some_and(|(saved_commit, target_commit)| saved_commit == target_commit)
         }
-        "jj" => {
+        "jj" => jj_change_id_sets_match(saved, target).unwrap_or_else(|| {
             saved
                 .jj_change_id
                 .as_ref()
@@ -3179,7 +3233,7 @@ fn metadata_in_current_scope(saved: &ReviewTargetMetadata, target: &ReviewTarget
                     .as_ref()
                     .zip(target.jj_commit_id.as_ref())
                     .is_some_and(|(saved_id, target_id)| saved_id == target_id)
-        }
+        }),
         _ => false,
     }
 }
@@ -3236,13 +3290,14 @@ fn jj_revset_change_ids(revset: &str) -> Result<Vec<String>> {
     if !is_jj_repo(&root) {
         return Ok(Vec::new());
     }
+    let revset = normalize_jj_revision(revset);
     let output = run_jj(
         &root,
         &[
             "log",
             "--no-graph",
             "-r",
-            revset,
+            &revset,
             "-T",
             "change_id.shortest(8) ++ \"\\n\"",
         ],
@@ -3367,6 +3422,9 @@ fn load_jj_revset_snapshots_for_read(
     args: &Args,
     target: Option<&str>,
 ) -> Result<()> {
+    if app.review_has_stored_comments() {
+        return Ok(());
+    }
     let Some(target) = target.filter(|target| target.contains("..")) else {
         return Ok(());
     };
@@ -3392,13 +3450,27 @@ fn local_pr_review_revision(entries: &[serde_json::Value], branch: &str) -> Opti
     })
 }
 
+fn canonical_review_target(cwd: &Path, target: &str) -> String {
+    let target = target.trim();
+    if !is_jj_repo(cwd) {
+        return target.to_string();
+    }
+    let target = normalize_jj_revision(target);
+    if target != "@" && !target.contains("..") && jj_bookmark_exists_in(cwd, &target) {
+        jj_bookmark_revset(&target)
+    } else {
+        target
+    }
+}
+
 fn resolve_review_target(
     config: &config::Config,
     args: &Args,
     explicit: Option<&str>,
 ) -> Result<Option<String>> {
     if let Some(target) = explicit {
-        return Ok(Some(target.to_string()));
+        let cwd = std::env::current_dir().unwrap_or_default();
+        return Ok(Some(canonical_review_target(&cwd, target)));
     }
     if args.worktree || args.staged || args.range.is_some() {
         return Ok(None);
@@ -3432,7 +3504,14 @@ fn resolve_review_target(
 }
 
 fn combine_review_targets(targets: &[Option<&str>]) -> Result<Option<String>> {
-    let targets = targets.iter().flatten().copied().collect::<Vec<_>>();
+    let targets = targets
+        .iter()
+        .flatten()
+        .map(|target| target.trim())
+        .collect::<Vec<_>>();
+    if targets.iter().any(|target| target.is_empty()) {
+        anyhow::bail!("Review target cannot be empty");
+    }
     match targets.as_slice() {
         [] => Ok(None),
         [target] => Ok(Some((*target).to_string())),
@@ -3645,6 +3724,11 @@ struct GhUser {
 }
 
 #[derive(Debug, Deserialize)]
+struct GhRepo {
+    full_name: String,
+}
+
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GhPr {
     number: u64,
@@ -3758,6 +3842,15 @@ struct GhIssueComment {
     user: GhCommentUser,
     created_at: String,
     updated_at: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct GhReview {
+    id: u64,
+    body: Option<String>,
+    state: String,
+    user: Option<GhCommentUser>,
+    submitted_at: Option<String>,
 }
 
 fn run_output(mut command: ProcessCommand) -> Result<String> {
@@ -3918,6 +4011,23 @@ fn gh_whoami() -> Result<ProviderUser> {
     })
 }
 
+fn github_canonical_repo_with(
+    repo: &str,
+    fetch: impl FnOnce(&str) -> Result<GhRepo>,
+) -> Result<String> {
+    let endpoint = format!("repos/{repo}");
+    let canonical = fetch(&endpoint)?.full_name;
+    if canonical.trim().is_empty() {
+        anyhow::bail!("GitHub returned an empty canonical repository name for {repo}");
+    }
+    Ok(canonical)
+}
+
+fn github_canonical_repo(repo: &str) -> Result<String> {
+    github_canonical_repo_with(repo, |endpoint| gh_json(&["api", endpoint]))
+        .with_context(|| format!("Could not resolve canonical GitHub repository for {repo}"))
+}
+
 fn gh_pr(remote: &ReviewRemote, target: Option<&str>) -> Result<ProviderPr> {
     let mut args = vec![
         "pr",
@@ -3937,11 +4047,12 @@ fn gh_pr(remote: &ReviewRemote, target: Option<&str>) -> Result<ProviderPr> {
             remote.repo
         )
     })?;
+    let canonical_repo = github_canonical_repo(&remote.repo)?;
     Ok(ProviderPr {
         provider: remote.provider,
         remote: remote.name.clone(),
         host: remote.host.clone(),
-        repo: remote.repo.clone(),
+        repo: canonical_repo,
         number: pr.number,
         title: pr.title,
         url: pr.url,
@@ -4046,6 +4157,11 @@ fn gh_issue_comments(pr: &ProviderPr) -> Result<Vec<GhIssueComment>> {
     gh_json(&["api", &endpoint, "--paginate"])
 }
 
+fn gh_reviews(pr: &ProviderPr) -> Result<Vec<GhReview>> {
+    let endpoint = format!("repos/{}/pulls/{}/reviews", pr.repo, pr.number);
+    gh_json(&["api", &endpoint, "--paginate"])
+}
+
 fn add_login(value: &serde_json::Value, users: &mut BTreeSet<String>) {
     if let Some(login) = value.get("login").and_then(serde_json::Value::as_str) {
         users.insert(login.to_string());
@@ -4087,11 +4203,19 @@ fn parse_github_time(value: &str) -> u64 {
         .unwrap_or(0)
 }
 
-fn provider_revision(target: Option<&str>, pr: &ProviderPr) -> String {
-    target
+fn provider_revision(target: Option<&str>, pr: &ProviderPr, jj: bool) -> String {
+    let revision = target
         .filter(|target| target.contains(".."))
         .map(str::to_string)
-        .unwrap_or_else(|| format!("{}...{}", pr.base_branch, pr.head_branch))
+        .unwrap_or_else(|| {
+            let separator = if jj { ".." } else { "..." };
+            format!("{}{separator}{}", pr.base_branch, pr.head_branch)
+        });
+    if jj {
+        normalize_jj_revision(&revision)
+    } else {
+        revision
+    }
 }
 
 fn github_issue_comment_to_review_comment(
@@ -4142,6 +4266,72 @@ fn github_issue_comment_to_review_comment(
         .into_iter()
         .next()
         .ok_or_else(|| anyhow!("Provider comment did not map to this diff."))
+}
+
+fn github_review_state_label(state: &str) -> &'static str {
+    match state {
+        "APPROVED" => "Approved",
+        "CHANGES_REQUESTED" => "Changes requested",
+        "COMMENTED" => "Commented",
+        "DISMISSED" => "Dismissed",
+        "PENDING" => "Pending",
+        _ => "Reviewed",
+    }
+}
+
+fn github_review_to_review_comment(
+    app: &App,
+    pr: &ProviderPr,
+    review: GhReview,
+) -> Result<Option<ReviewComment>> {
+    let body = review.body.as_deref().unwrap_or_default().trim();
+    if body.is_empty() {
+        return Ok(None);
+    }
+    let user = review.user.unwrap_or(GhCommentUser {
+        login: "ghost".to_string(),
+        avatar_url: None,
+    });
+    let avatar_url = user.avatar_url.clone();
+    if let Some(url) = avatar_url.as_deref() {
+        let _ = crate::avatars::cache_avatar_url(url);
+    }
+    let login = user.login;
+    let provider_id = pr.provider.id();
+    let mut usernames = BTreeMap::new();
+    usernames.insert(provider_id.to_string(), login.clone());
+    let state = github_review_state_label(&review.state);
+    let data = serde_json::json!({
+        "version": 1,
+        "comments": [{
+            "file": pr.title.clone(),
+            "kind": "pr",
+            "author": {
+                "name": login.clone(),
+                "usernames": usernames,
+                "avatarUrl": avatar_url
+            },
+            "canEdit": false,
+            "provider": {
+                "provider": provider_id,
+                "remote": pr.remote.clone(),
+                "repo": pr.repo.clone(),
+                "prNumber": pr.number,
+                "commentId": review.id.to_string(),
+                "authorUsername": login,
+                "prTitle": pr.title.clone(),
+                "apiKind": "review_submission",
+                "syncState": "clean"
+            },
+            "createdAt": parse_github_time(review.submitted_at.as_deref().unwrap_or_default()),
+            "updatedAt": parse_github_time(review.submitted_at.as_deref().unwrap_or_default()),
+            "body": format!("Review state: {state}\n\n{body}")
+        }]
+    });
+    let comments = app
+        .parse_review_comments_json_for_sync(&data.to_string())
+        .map_err(|error| anyhow!(error))?;
+    Ok(comments.into_iter().next())
 }
 
 fn github_comment_to_review_comment(
@@ -4317,21 +4507,25 @@ fn github_comment_body(pr: &ProviderPr, comment: &ReviewComment) -> Result<serde
     Ok(body)
 }
 
+fn github_repo_endpoint(pr: &ProviderPr, path: impl std::fmt::Display) -> String {
+    format!("repos/{}/{path}", pr.repo)
+}
+
 fn github_create_comment(pr: &ProviderPr, comment: &ReviewComment) -> Result<GhComment> {
-    let endpoint = format!("repos/{}/pulls/{}/comments", pr.repo, pr.number);
+    let endpoint = github_repo_endpoint(pr, format!("pulls/{}/comments", pr.number));
     gh_api_json("POST", &endpoint, github_comment_body(pr, comment)?)
 }
 
 fn github_create_reply(pr: &ProviderPr, parent_comment_id: &str, body: &str) -> Result<GhComment> {
-    let endpoint = format!(
-        "repos/{}/pulls/{}/comments/{parent_comment_id}/replies",
-        pr.repo, pr.number
+    let endpoint = github_repo_endpoint(
+        pr,
+        format!("pulls/{}/comments/{parent_comment_id}/replies", pr.number),
     );
     gh_api_json("POST", &endpoint, serde_json::json!({ "body": body }))
 }
 
 fn github_update_comment(pr: &ProviderPr, comment_id: &str, body: &str) -> Result<GhComment> {
-    let endpoint = format!("repos/{}/pulls/comments/{comment_id}", pr.repo);
+    let endpoint = github_repo_endpoint(pr, format!("pulls/comments/{comment_id}"));
     gh_api_json("PATCH", &endpoint, serde_json::json!({ "body": body }))
 }
 
@@ -4343,12 +4537,12 @@ fn ignore_github_delete_not_found(result: Result<()>) -> Result<()> {
 }
 
 fn github_delete_comment(pr: &ProviderPr, comment_id: &str) -> Result<()> {
-    let endpoint = format!("repos/{}/pulls/comments/{comment_id}", pr.repo);
+    let endpoint = github_repo_endpoint(pr, format!("pulls/comments/{comment_id}"));
     ignore_github_delete_not_found(gh_api_no_output("DELETE", &endpoint))
 }
 
 fn github_create_issue_comment(pr: &ProviderPr, body: &str) -> Result<GhIssueComment> {
-    let endpoint = format!("repos/{}/issues/{}/comments", pr.repo, pr.number);
+    let endpoint = github_repo_endpoint(pr, format!("issues/{}/comments", pr.number));
     gh_api_json("POST", &endpoint, serde_json::json!({ "body": body }))
 }
 
@@ -4357,12 +4551,12 @@ fn github_update_issue_comment(
     comment_id: &str,
     body: &str,
 ) -> Result<GhIssueComment> {
-    let endpoint = format!("repos/{}/issues/comments/{comment_id}", pr.repo);
+    let endpoint = github_repo_endpoint(pr, format!("issues/comments/{comment_id}"));
     gh_api_json("PATCH", &endpoint, serde_json::json!({ "body": body }))
 }
 
 fn github_delete_issue_comment(pr: &ProviderPr, comment_id: &str) -> Result<()> {
-    let endpoint = format!("repos/{}/issues/comments/{comment_id}", pr.repo);
+    let endpoint = github_repo_endpoint(pr, format!("issues/comments/{comment_id}"));
     ignore_github_delete_not_found(gh_api_no_output("DELETE", &endpoint))
 }
 
@@ -4509,7 +4703,7 @@ fn resolve_sync_target_parts(
         .or_else(|| git_output(&workspace, &["branch", "--show-current"]).ok())
         .filter(|branch| !branch.is_empty());
     let pr = provider_pr(&remote, lookup_target.as_deref())?;
-    let revision = provider_revision(target.as_deref(), &pr);
+    let revision = provider_revision(target.as_deref(), &pr, is_jj_repo(&workspace));
     Ok((target, remote, pr, revision))
 }
 
@@ -4606,6 +4800,7 @@ enum ReviewPullRemoteData {
         user: ProviderUser,
         provider_comments: Vec<GhProviderComment>,
         issue_comments: Vec<GhIssueComment>,
+        reviews: Vec<GhReview>,
         conversation_users: BTreeSet<String>,
     },
     GitLab {
@@ -4665,12 +4860,14 @@ fn fetch_github_comments_for_pull(
         })
         .collect();
     let issue_comments = gh_issue_comments(&pr)?;
+    let reviews = gh_reviews(&pr)?;
     let conversation_users = github_conversation_comment_users(&pr, &user.login)?;
     Ok(ReviewPullRemoteData::GitHub {
         pr,
         user,
         provider_comments,
         issue_comments,
+        reviews,
         conversation_users,
     })
 }
@@ -4687,8 +4884,10 @@ fn apply_provider_comments_to_app(
             user,
             provider_comments,
             issue_comments,
+            reviews,
             conversation_users,
         } => {
+            app.canonicalize_review_provider_repo(pr.provider.id(), pr.number, &pr.repo);
             for comment in provider_comments {
                 match github_comment_to_review_comment(app, &pr, &user.login, comment) {
                     Ok(comment) => changed.push(app.upsert_provider_review_comment(comment)),
@@ -4702,6 +4901,15 @@ fn apply_provider_comments_to_app(
                 }
                 match github_issue_comment_to_review_comment(app, &pr, &user.login, comment) {
                     Ok(comment) => changed.push(app.upsert_provider_review_comment(comment)),
+                    Err(_) => skipped += 1,
+                }
+            }
+            for review in reviews {
+                match github_review_to_review_comment(app, &pr, review) {
+                    Ok(Some(comment)) => {
+                        changed.push(app.upsert_provider_review_comment(comment));
+                    }
+                    Ok(None) => {}
                     Err(_) => skipped += 1,
                 }
             }
@@ -5184,6 +5392,7 @@ fn push_app_comments_to_provider(
     pr: &ProviderPr,
     user: &ProviderUser,
 ) -> Result<ReviewPushStats> {
+    app.canonicalize_review_provider_repo(pr.provider.id(), pr.number, &pr.repo);
     let outcome = push_review_comments_to_provider(app.review_comments_for_sync(), pr, user)?;
     Ok(apply_push_outcome_to_app(app, outcome))
 }
@@ -5195,7 +5404,7 @@ enum ReviewSyncWorkerResult {
     },
     Push {
         action: ReviewSyncAction,
-        provider: ReviewProviderKind,
+        pr: Box<ProviderPr>,
         user: ProviderUser,
         outcome: ReviewPushOutcome,
     },
@@ -5249,7 +5458,7 @@ fn spawn_review_push_worker(
             let outcome = push_review_comments_to_provider(comments, &pr, &user)?;
             Ok(ReviewSyncWorkerResult::Push {
                 action,
-                provider: pr.provider,
+                pr: Box::new(pr),
                 user,
                 outcome,
             })
@@ -5273,7 +5482,7 @@ fn spawn_review_push_request_worker(
             let outcome = push_review_comments_to_provider(comments, &pr, &user)?;
             Ok(ReviewSyncWorkerResult::Push {
                 action,
-                provider: pr.provider,
+                pr: Box::new(pr),
                 user,
                 outcome,
             })
@@ -6866,8 +7075,15 @@ fn run() -> Result<()> {
             anyhow::bail!("--worktree/--staged/--range cannot be used with file paths");
         }
         if let Some(range) = args.range.as_deref() {
-            let (from, to) = parse_range(range)?;
-            InputMode::GitRange { from, to }
+            let cwd = std::env::current_dir().unwrap_or_default();
+            if is_jj_repo(&cwd) {
+                InputMode::JjRevision {
+                    rev: normalize_jj_revision(range),
+                }
+            } else {
+                let (from, to) = parse_range(range)?;
+                InputMode::GitRange { from, to }
+            }
         } else if args.staged {
             InputMode::GitStaged
         } else {
@@ -7735,12 +7951,13 @@ fn run_app(
                 }
                 Ok(ReviewSyncWorkerResult::Push {
                     action,
-                    provider,
+                    pr,
                     user,
                     outcome,
                 }) => {
+                    app.canonicalize_review_provider_repo(pr.provider.id(), pr.number, &pr.repo);
                     app.set_review_author_provider_avatar(
-                        provider.id(),
+                        pr.provider.id(),
                         &user.login,
                         user.avatar_url.clone(),
                     );
@@ -8378,19 +8595,22 @@ fn run_commit_picker<B: Backend>(
 #[cfg(test)]
 mod tests {
     use super::{
-        blocks_mouse_scroll, build_jj_diff, config, dedupe_review_log_entries, detect_input_mode,
-        detect_input_mode_in, git_ref_input_mode, github_comment_to_review_comment, gitlab,
-        ignore_github_delete_not_found, insert_review_thread_states, jj_bookmark_revset,
-        jj_summary_paths, local_pr_review_revision, mouse_horizontal_scroll_delta, parse_range,
-        parse_remote_url, push_pending_mouse_scroll, push_review_comments_to_provider_with,
+        blocks_mouse_scroll, build_jj_diff, canonical_review_target, clean_issue_provider_link,
+        clean_provider_link, combine_review_targets, config, dedupe_review_log_entries,
+        detect_input_mode, detect_input_mode_in, git_ref_input_mode, github_canonical_repo_with,
+        github_comment_to_review_comment, github_repo_endpoint, github_review_to_review_comment,
+        gitlab, ignore_github_delete_not_found, insert_review_thread_states, jj_bookmark_revset,
+        jj_summary_paths, jj_target_metadata_in, local_pr_review_revision,
+        mouse_horizontal_scroll_delta, normalize_jj_revision, parse_range, parse_remote_url,
+        provider_revision, push_pending_mouse_scroll, push_review_comments_to_provider_with,
         push_review_comments_to_provider_with_ops, render_editor_args, review_author_from_cli,
         review_comments_json_value, review_pr_target_metadata, review_provider_for_configured_host,
         review_status_json_value, review_target_summary, should_load_saved_review_fallback,
         sync_lookup_target, update_mouse_scroll_block, Args, BlockedMouseScroll, Command,
-        GhComment, GhCommentUser, GhProviderComment, GhReviewThreadsResponse, InputMode,
-        MouseScrollTarget, PendingMouseScroll, ProviderPr, ProviderUser, ReviewCommand,
-        ReviewCommentCommand, ReviewProviderKind, ReviewProviderPushOps, ReviewTargetMetadata,
-        MAX_DISCRETE_MOUSE_SCROLL_ACTIONS_PER_FRAME,
+        GhComment, GhCommentUser, GhIssueComment, GhProviderComment, GhRepo, GhReview,
+        GhReviewThreadsResponse, InputMode, MouseScrollTarget, PendingMouseScroll, ProviderPr,
+        ProviderUser, ReviewCommand, ReviewCommentCommand, ReviewProviderKind,
+        ReviewProviderPushOps, ReviewTargetMetadata, MAX_DISCRETE_MOUSE_SCROLL_ACTIONS_PER_FRAME,
     };
     use crate::app::{
         review::{
@@ -8571,6 +8791,92 @@ mod tests {
     }
 
     #[test]
+    fn github_canonical_repo_drives_all_mutation_endpoints_and_provider_links() {
+        let response: GhRepo = serde_json::from_value(serde_json::json!({
+            "full_name": "new-owner/new-repo"
+        }))
+        .unwrap();
+        let canonical = github_canonical_repo_with("old-owner/old-repo", |endpoint| {
+            assert_eq!(endpoint, "repos/old-owner/old-repo");
+            Ok(response)
+        })
+        .unwrap();
+        let mut pr = test_provider_pr();
+        pr.repo = canonical.clone();
+        let endpoints = [
+            github_repo_endpoint(&pr, format!("pulls/{}/comments", pr.number)),
+            github_repo_endpoint(&pr, format!("pulls/{}/comments/10/replies", pr.number)),
+            github_repo_endpoint(&pr, "pulls/comments/10"),
+            github_repo_endpoint(&pr, "pulls/comments/10"),
+            github_repo_endpoint(&pr, format!("issues/{}/comments", pr.number)),
+            github_repo_endpoint(&pr, "issues/comments/20"),
+            github_repo_endpoint(&pr, "issues/comments/20"),
+        ];
+        assert_eq!(endpoints.len(), 7);
+        assert!(endpoints
+            .iter()
+            .all(|endpoint| endpoint.starts_with("repos/new-owner/new-repo/")));
+
+        let user = GhCommentUser {
+            login: "reviewer".to_string(),
+            avatar_url: None,
+        };
+        let review = GhComment {
+            id: 10,
+            body: "Review".to_string(),
+            path: "f.txt".to_string(),
+            line: Some(1),
+            original_line: None,
+            side: Some("RIGHT".to_string()),
+            in_reply_to_id: None,
+            user: user.clone(),
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+        };
+        let issue = GhIssueComment {
+            id: 20,
+            body: "Conversation".to_string(),
+            user,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+        };
+        assert_eq!(clean_provider_link(&pr, "me", &review).repo, canonical);
+        assert_eq!(
+            clean_issue_provider_link(&pr, "me", &issue).repo,
+            "new-owner/new-repo"
+        );
+
+        let diff = MultiFileDiff::from_file_pair(
+            PathBuf::from("file.rs"),
+            PathBuf::from("file.rs"),
+            "old\n".to_string(),
+            "new\n".to_string(),
+        );
+        let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+        app.set_review_persist_enabled(false);
+        app.enable_review_mode();
+        let old_id = app.upsert_provider_review_comment(sync_comment(
+            10,
+            "review",
+            Some("thread"),
+            Some(false),
+            false,
+        ));
+        assert!(app.canonicalize_review_provider_repo("github", pr.number, "new-owner/new-repo"));
+        let mut incoming = sync_comment(10, "review", Some("thread"), Some(false), false);
+        incoming.provider.as_mut().unwrap().repo = "new-owner/new-repo".to_string();
+        let canonical_id = app.upsert_provider_review_comment(incoming);
+        assert_eq!(old_id, canonical_id);
+        assert_eq!(app.review_comment_count(), 1);
+    }
+
+    #[test]
+    fn github_canonical_repo_failure_stops_before_provider_construction() {
+        let result = github_canonical_repo_with("old-owner/old-repo", |_| Err(anyhow!("HTTP 500")));
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn github_delete_treats_not_found_as_already_deleted() {
         assert!(ignore_github_delete_not_found(Err(anyhow!("gh: Not Found (HTTP 404)"))).is_ok());
         assert!(ignore_github_delete_not_found(Err(anyhow!(
@@ -8648,7 +8954,85 @@ mod tests {
         assert_eq!(provider.thread_id.as_deref(), Some("PRRT_thread"));
         assert_eq!(provider.thread_resolved, Some(true));
         assert_eq!(provider.in_reply_to_id.as_deref(), Some("41"));
+        assert_eq!(provider.comment_id, "42");
         assert_eq!(provider.api_kind, "review");
+        assert_eq!(provider.sync_state, "clean");
+    }
+
+    #[test]
+    fn github_review_body_imports_as_read_only_conversation_comment_idempotently() {
+        assert_eq!(super::github_review_state_label("COMMENTED"), "Commented");
+        assert_eq!(super::github_review_state_label("APPROVED"), "Approved");
+        assert_eq!(
+            super::github_review_state_label("CHANGES_REQUESTED"),
+            "Changes requested"
+        );
+        let diff = MultiFileDiff::from_file_pair(
+            PathBuf::from("file.rs"),
+            PathBuf::from("file.rs"),
+            "old\n".to_string(),
+            "new\n".to_string(),
+        );
+        let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+        app.set_review_persist_enabled(false);
+        app.enable_review_mode();
+        let review = GhReview {
+            id: 4_690_177_737,
+            body: Some("I don't see any issues with integrations.".to_string()),
+            state: "APPROVED".to_string(),
+            user: Some(GhCommentUser {
+                login: "remotelytrue".to_string(),
+                avatar_url: None,
+            }),
+            submitted_at: Some("2026-01-01T00:00:00Z".to_string()),
+        };
+        let comment = github_review_to_review_comment(&app, &test_provider_pr(), review.clone())
+            .unwrap()
+            .unwrap();
+        assert_eq!(comment.anchor.kind, ReviewTargetKind::PullRequest);
+        assert_eq!(
+            comment.body,
+            "Review state: Approved\n\nI don't see any issues with integrations."
+        );
+        assert!(!comment.can_edit);
+        assert_eq!(
+            comment
+                .author
+                .as_ref()
+                .and_then(|author| author.usernames.get("github"))
+                .map(String::as_str),
+            Some("remotelytrue")
+        );
+        let provider = comment.provider.as_ref().unwrap();
+        assert_eq!(provider.comment_id, "4690177737");
+        assert_eq!(provider.api_kind, "review_submission");
+        assert_eq!(provider.sync_state, "clean");
+
+        let first = app.upsert_provider_review_comment(comment);
+        let second = app.upsert_provider_review_comment(
+            github_review_to_review_comment(&app, &test_provider_pr(), review)
+                .unwrap()
+                .unwrap(),
+        );
+        assert_eq!(first, second);
+        assert_eq!(app.review_comment_count(), 1);
+        assert!(!app.pull_request_comment_can_reply(first));
+
+        let empty = GhReview {
+            id: 2,
+            body: Some("  ".to_string()),
+            state: "COMMENTED".to_string(),
+            user: Some(GhCommentUser {
+                login: "reviewer".to_string(),
+                avatar_url: None,
+            }),
+            submitted_at: Some("2026-01-01T00:00:00Z".to_string()),
+        };
+        assert!(
+            github_review_to_review_comment(&app, &test_provider_pr(), empty)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -9345,6 +9729,91 @@ mod tests {
     }
 
     #[test]
+    fn review_target_flags_and_positionals_trim_to_the_same_value() {
+        let status_flag =
+            Args::try_parse_from(["oy", "review", "status", "-t", " feature", "--json"]).unwrap();
+        let comment_flag =
+            Args::try_parse_from(["oy", "review", "comment", "-t", " feature", "--json"]).unwrap();
+        let new_flag = Args::try_parse_from([
+            "oy",
+            "review",
+            "comment",
+            "new",
+            "-t",
+            " feature",
+            "--file",
+            "f.txt",
+            "--new-line",
+            "1",
+            "--body",
+            "A",
+        ])
+        .unwrap();
+        let positional =
+            Args::try_parse_from(["oy", "review", "status", "feature", "--json"]).unwrap();
+
+        let status_target = match status_flag.command.unwrap() {
+            Command::Review {
+                command:
+                    Some(ReviewCommand::Status {
+                        revision, target, ..
+                    }),
+                ..
+            } => combine_review_targets(&[revision.as_deref(), target.as_deref()]).unwrap(),
+            _ => panic!("unexpected status command"),
+        };
+        let comment_target = match comment_flag.command.unwrap() {
+            Command::Review {
+                command:
+                    Some(ReviewCommand::Comment {
+                        revision, target, ..
+                    }),
+                ..
+            } => combine_review_targets(&[revision.as_deref(), target.as_deref()]).unwrap(),
+            _ => panic!("unexpected comment command"),
+        };
+        let new_target = match new_flag.command.unwrap() {
+            Command::Review {
+                command:
+                    Some(ReviewCommand::Comment {
+                        revision,
+                        target,
+                        command:
+                            Some(ReviewCommentCommand::New {
+                                revision: inner_revision,
+                                target: inner_target,
+                                ..
+                            }),
+                        ..
+                    }),
+                ..
+            } => combine_review_targets(&[
+                revision.as_deref(),
+                target.as_deref(),
+                inner_revision.as_deref(),
+                inner_target.as_deref(),
+            ])
+            .unwrap(),
+            _ => panic!("unexpected new comment command"),
+        };
+        let positional_target = match positional.command.unwrap() {
+            Command::Review {
+                command:
+                    Some(ReviewCommand::Status {
+                        revision, target, ..
+                    }),
+                ..
+            } => combine_review_targets(&[revision.as_deref(), target.as_deref()]).unwrap(),
+            _ => panic!("unexpected positional command"),
+        };
+
+        assert_eq!(status_target.as_deref(), Some("feature"));
+        assert_eq!(status_target, comment_target);
+        assert_eq!(status_target, new_target);
+        assert_eq!(status_target, positional_target);
+    }
+
+    #[test]
     fn review_target_option_parses_before_or_after_comment_subcommand() {
         let before =
             Args::try_parse_from(["oy", "review", "comment", "-t", "feature", "resolve", "1"])
@@ -9399,6 +9868,27 @@ mod tests {
             }
             _ => panic!("unexpected review command"),
         }
+    }
+
+    #[test]
+    fn jj_range_normalization_accepts_git_muscle_memory() {
+        assert_eq!(normalize_jj_revision("main...feature"), "main..feature");
+        assert_eq!(normalize_jj_revision("main..feature"), "main..feature");
+        assert_eq!(
+            normalize_jj_revision("trunk()..feature"),
+            "trunk()..feature"
+        );
+    }
+
+    #[test]
+    fn provider_revision_uses_the_workspace_range_syntax() {
+        let pr = test_provider_pr();
+        assert_eq!(provider_revision(None, &pr, true), "main..feature");
+        assert_eq!(provider_revision(None, &pr, false), "main...feature");
+        assert_eq!(
+            provider_revision(Some("other...feature"), &pr, true),
+            "other..feature"
+        );
     }
 
     #[test]
@@ -9513,8 +10003,13 @@ mod tests {
             .unwrap();
         assert!(!old_range.status.success());
 
+        assert!(matches!(
+            detect_input_mode_in(&[PathBuf::from("main...feature")], &repo),
+            InputMode::JjRevision { rev } if rev == "main..feature"
+        ));
         let range = build_jj_diff(&repo, "trunk()..feature", None).unwrap();
         let explicit_range = build_jj_diff(&repo, "main..feature", None).unwrap();
+        let git_style_range = build_jj_diff(&repo, "main...feature", None).unwrap();
         assert_eq!(jj_bookmark_revset("feature"), "trunk()..feature");
         assert_eq!(
             range
@@ -9523,6 +10018,18 @@ mod tests {
                 .map(|file| file.path.as_path())
                 .collect::<Vec<_>>(),
             explicit_range
+                .files
+                .iter()
+                .map(|file| file.path.as_path())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            explicit_range
+                .files
+                .iter()
+                .map(|file| file.path.as_path())
+                .collect::<Vec<_>>(),
+            git_style_range
                 .files
                 .iter()
                 .map(|file| file.path.as_path())
@@ -9557,6 +10064,128 @@ mod tests {
         ));
 
         let _ = std::fs::remove_dir_all(repo);
+    }
+
+    #[test]
+    fn jj_range_review_keeps_comments_across_amends_and_equivalent_revsets() {
+        if ProcessCommand::new("jj").arg("--version").output().is_err() {
+            return;
+        }
+        let repo = temp_path("jj-range-review-key");
+        let storage = temp_path("jj-range-review-storage");
+        std::fs::create_dir_all(&repo).unwrap();
+        let init = ProcessCommand::new("jj")
+            .arg("--config")
+            .arg("signing.behavior=\"drop\"")
+            .args(["git", "init"])
+            .arg(&repo)
+            .output()
+            .unwrap();
+        assert!(
+            init.status.success(),
+            "{}",
+            String::from_utf8_lossy(&init.stderr)
+        );
+        test_jj(&repo, &["config", "set", "--repo", "user.name", "Test"]);
+        test_jj(
+            &repo,
+            &["config", "set", "--repo", "user.email", "test@example.com"],
+        );
+        std::fs::write(repo.join("f.txt"), "base\n").unwrap();
+        test_jj(&repo, &["commit", "-m", "base"]);
+        test_jj(&repo, &["bookmark", "create", "main", "-r", "@-"]);
+        test_jj(
+            &repo,
+            &[
+                "config",
+                "set",
+                "--repo",
+                "revset-aliases.'trunk()'",
+                "main",
+            ],
+        );
+        test_jj(&repo, &["new", "main"]);
+        std::fs::write(repo.join("f.txt"), "base\none\n").unwrap();
+        test_jj(&repo, &["bookmark", "create", "feature", "-r", "@"]);
+
+        let flag_target = canonical_review_target(&repo, " feature");
+        assert_eq!(flag_target, "trunk()..feature");
+        let first_metadata = jj_target_metadata_in(&repo, &flag_target, &flag_target).unwrap();
+        let first_commit = first_metadata.jj_commit_id.clone();
+        assert_eq!(first_metadata.jj_change_ids.as_ref().map(Vec::len), Some(1));
+        let mut first = App::new(
+            build_jj_diff(&repo, &flag_target, None).unwrap(),
+            ViewMode::UnifiedPane,
+            0,
+            false,
+            None,
+        );
+        first.set_review_workspace_root(Some(repo.clone()));
+        first.set_review_base_dir(Some(storage.clone()));
+        first.set_review_target_metadata(Some(first_metadata.clone()));
+        first.enable_review_mode();
+        let review_key = first.review_storage_key().to_string();
+        first
+            .add_review_comment_from_cli(
+                "f.txt",
+                ReviewTargetKind::Line,
+                Some(ReviewSide::New),
+                None,
+                Some(ReviewRange { start: 2, end: 2 }),
+                "A".to_string(),
+            )
+            .unwrap();
+        drop(first);
+
+        std::fs::write(repo.join("f.txt"), "base\none\ntwo\n").unwrap();
+        let list_target = canonical_review_target(&repo, "feature");
+        assert_eq!(flag_target, list_target);
+        let amended_metadata = jj_target_metadata_in(&repo, &list_target, &list_target).unwrap();
+        assert_eq!(first_metadata.jj_change_ids, amended_metadata.jj_change_ids);
+        assert_ne!(first_commit, amended_metadata.jj_commit_id);
+        let mut amended = App::new(
+            build_jj_diff(&repo, &list_target, None).unwrap(),
+            ViewMode::UnifiedPane,
+            0,
+            false,
+            None,
+        );
+        amended.set_review_workspace_root(Some(repo.clone()));
+        amended.set_review_base_dir(Some(storage.clone()));
+        amended.set_review_target_metadata(Some(amended_metadata));
+        amended.load_review_mode();
+        assert_eq!(amended.review_storage_key(), review_key);
+        assert_eq!(amended.review_comment_count(), 1);
+        amended
+            .add_review_comment_from_cli(
+                "f.txt",
+                ReviewTargetKind::Line,
+                Some(ReviewSide::New),
+                None,
+                Some(ReviewRange { start: 3, end: 3 }),
+                "B".to_string(),
+            )
+            .unwrap();
+        drop(amended);
+
+        let mut reopened = App::new(
+            build_jj_diff(&repo, "main..feature", None).unwrap(),
+            ViewMode::UnifiedPane,
+            0,
+            false,
+            None,
+        );
+        reopened.set_review_workspace_root(Some(repo.clone()));
+        reopened.set_review_base_dir(Some(storage.clone()));
+        reopened.set_review_target_metadata(Some(
+            jj_target_metadata_in(&repo, "main..feature", "main..feature").unwrap(),
+        ));
+        reopened.load_review_mode();
+        assert_eq!(reopened.review_storage_key(), review_key);
+        assert_eq!(reopened.review_comment_count(), 2);
+
+        let _ = std::fs::remove_dir_all(repo);
+        let _ = std::fs::remove_dir_all(storage);
     }
 
     #[test]
@@ -9859,6 +10488,7 @@ mod tests {
             label: "feature".to_string(),
             vcs: "git".to_string(),
             jj_change_id: None,
+            jj_change_ids: None,
             jj_commit_id: None,
             git_base_ref: Some("main".to_string()),
             git_head_ref: Some("feature".to_string()),
