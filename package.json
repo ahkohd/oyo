@@ -1,6 +1,6 @@
 {
   "name": "@ahkohd/oyo",
-  "version": "0.1.48",
+  "version": "0.1.49",
   "description": "A step-through diff viewer for the terminal.",
   "license": "MIT",
   "repository": {
@@ -24,10 +24,10 @@
     "node": ">=18"
   },
   "optionalDependencies": {
-    "@ahkohd/oyo-darwin-arm64": "0.1.48",
-    "@ahkohd/oyo-darwin-x64": "0.1.48",
-    "@ahkohd/oyo-linux-arm64-gnu": "0.1.48",
-    "@ahkohd/oyo-linux-x64-gnu": "0.1.48"
+    "@ahkohd/oyo-darwin-arm64": "0.1.49",
+    "@ahkohd/oyo-darwin-x64": "0.1.49",
+    "@ahkohd/oyo-linux-arm64-gnu": "0.1.49",
+    "@ahkohd/oyo-linux-x64-gnu": "0.1.49"
   },
   "scripts": {
     "pack:dry": "npm pack --dry-run",
