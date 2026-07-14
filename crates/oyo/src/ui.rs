@@ -476,18 +476,14 @@ fn no_changes_hint_line(app: &App) -> Line<'static> {
         .fg(app.theme.accent)
         .add_modifier(Modifier::BOLD);
     let dashboard_style = if app.no_changes_dashboard_hover {
-        Style::default()
-            .fg(app.theme.text_muted)
-            .add_modifier(Modifier::BOLD)
+        key_style
     } else {
-        Style::default().fg(app.theme.text_muted)
+        text_style
     };
     let quit_style = if app.no_changes_quit_hover {
-        Style::default()
-            .fg(app.theme.text_muted)
-            .add_modifier(Modifier::BOLD)
+        key_style
     } else {
-        Style::default().fg(app.theme.text_muted)
+        text_style
     };
     let mut spans = Vec::new();
     if app.watch {
@@ -504,66 +500,38 @@ fn no_changes_hint_line(app: &App) -> Line<'static> {
     Line::from(spans)
 }
 
-fn no_changes_hint_text(app: &App) -> String {
-    if app.watch {
-        "Watching for changes. ctrl-r history  q quit".to_string()
-    } else {
-        "R refresh  ctrl-r history  q quit".to_string()
-    }
-}
-
-fn no_changes_action_hit(
-    app: &App,
-    area: Rect,
-    hint_y: u16,
-    prefix: &str,
-    action: &str,
-) -> (u16, u16, u16, u16) {
-    let full_width = text_width(&no_changes_hint_text(app)) as u16;
-    let x = area
-        .x
-        .saturating_add(area.width.saturating_sub(full_width) / 2)
-        .saturating_add(text_width(prefix) as u16);
-    (x, hint_y, text_width(action) as u16, 1)
-}
-
-fn no_changes_dashboard_hit(app: &App, area: Rect, hint_y: u16) -> (u16, u16, u16, u16) {
-    let prefix = if app.watch {
-        "Watching for changes. "
-    } else {
-        "R refresh  "
-    };
-    no_changes_action_hit(app, area, hint_y, prefix, "ctrl-r history")
-}
-
-fn no_changes_quit_hit(app: &App, area: Rect, hint_y: u16) -> (u16, u16, u16, u16) {
-    let prefix = if app.watch {
-        "Watching for changes. ctrl-r history  "
-    } else {
-        "R refresh  ctrl-r history  "
-    };
-    no_changes_action_hit(app, area, hint_y, prefix, "q quit")
-}
-
-fn draw_no_changes(frame: &mut Frame, app: &mut App, area: Rect) {
+fn draw_empty_file_tab(frame: &mut Frame, app: &mut App, area: Rect) {
     if let Some(bg) = app.theme.background {
         frame.render_widget(Block::default().style(Style::default().bg(bg)), area);
     }
     let height = 3.min(area.height);
     let y = area.y + area.height.saturating_sub(height) / 2;
     let hint_y = y.saturating_add(2);
-    app.no_changes_dashboard_hit =
-        (height > 2).then(|| no_changes_dashboard_hit(app, area, hint_y));
-    app.no_changes_quit_hit = (height > 2).then(|| no_changes_quit_hit(app, area, hint_y));
 
     let mut message = Paragraph::new(Line::from(Span::styled(
-        no_changes_message(app),
+        no_changes_message(app).to_string(),
         Style::default()
             .fg(app.theme.text)
             .add_modifier(Modifier::BOLD),
     )))
     .alignment(Alignment::Center);
-    let mut hint = Paragraph::new(no_changes_hint_line(app)).alignment(Alignment::Center);
+    let hint_line = no_changes_hint_line(app);
+    if height > 2 {
+        let history_start = if app.watch { 1 } else { 2 };
+        let quit_start = if app.watch { 4 } else { 5 };
+        let line_width = spans_width(&hint_line.spans) as u16;
+        let line_x = area
+            .x
+            .saturating_add(area.width.saturating_sub(line_width) / 2);
+        let segment_hit = |start: usize| {
+            let offset = spans_width(&hint_line.spans[..start]) as u16;
+            let width = spans_width(&hint_line.spans[start..start + 2]) as u16;
+            (line_x.saturating_add(offset), hint_y, width, 1)
+        };
+        app.no_changes_dashboard_hit = Some(segment_hit(history_start));
+        app.no_changes_quit_hit = Some(segment_hit(quit_start));
+    }
+    let mut hint = Paragraph::new(hint_line).alignment(Alignment::Center);
     if let Some(bg) = app.theme.background {
         let style = Style::default().bg(bg);
         message = message.style(style);
@@ -593,30 +561,6 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     app.no_changes_dashboard_hit = None;
     app.no_changes_quit_hit = None;
     app.topbar_area = None;
-
-    if app.multi_diff.file_count() == 0
-        && !matches!(
-            app.active_topbar_content(),
-            Some(TopbarTabContent::Help | TopbarTabContent::Settings)
-        )
-    {
-        app.clear_diff_selection();
-        app.set_diff_selection_cells(Vec::new());
-        draw_no_changes(frame, app, frame.area());
-        if app.theme_picker_active() {
-            draw_theme_picker_popover(frame, app);
-        }
-        if app.settings_leave_confirmation_active() {
-            draw_settings_leave_confirmation(frame, app);
-        } else if app.quit_confirmation_active() {
-            draw_confirmation(frame, app, true);
-        } else {
-            app.set_settings_leave_hits(Vec::new());
-            app.set_review_delete_confirmation_hits(Vec::new());
-        }
-        draw_toasts(frame, app);
-        return;
-    }
 
     if app.zen_mode {
         // Zen mode: just the content with minimal progress indicator
@@ -1305,7 +1249,18 @@ fn reskin_toast(
 }
 
 fn draw_preview_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
-    let mode = " PREVIEW ";
+    let file_count = app.multi_diff.file_count();
+    let mode = if file_count == 0 {
+        match app.view_mode {
+            ViewMode::UnifiedPane => " UNIFIED ",
+            ViewMode::Split => " SPLIT ",
+            ViewMode::Evolution => " EVOLUTION ",
+            ViewMode::Blame => " BLAME ",
+            ViewMode::Preview => " PREVIEW ",
+        }
+    } else {
+        " PREVIEW "
+    };
     let path = app.current_file_path();
     app.status_mode_hit = Some((area.x, area.y, text_width(mode) as u16, 1));
     let available_width = area.width as usize;
@@ -1351,8 +1306,11 @@ fn draw_preview_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
         right_spans.extend(spans);
         right_spans.push(Span::raw("  "));
     }
-    let file_count = app.multi_diff.file_count();
-    let current_file = app.multi_diff.selected_index + 1;
+    let current_file = if file_count > 0 {
+        app.multi_diff.selected_index + 1
+    } else {
+        0
+    };
     let file_label = format!("file {}/{}", current_file, file_count);
     let file_start = spans_width(&right_spans);
     let file_width = text_width(&file_label);
@@ -1426,7 +1384,7 @@ fn line_input_status_spans(app: &App) -> Option<Vec<Span<'static>>> {
 fn draw_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
     app.status_comments_hit = None;
     app.status_file_hit = None;
-    if app.view_mode == ViewMode::Preview {
+    if app.view_mode == ViewMode::Preview || app.multi_diff.file_count() == 0 {
         draw_preview_status_bar(frame, app, area);
         return;
     }
@@ -1999,27 +1957,30 @@ fn topbar_tab_spans(app: &mut App, area: Rect, max_width: usize) -> Vec<Span<'st
             (title, "")
         } else {
             match tab.content {
-                TopbarTabContent::File(file_index) => {
-                    let Some(file) = app
-                        .outdated_live_files()
-                        .and_then(|files| files.get(file_index))
-                        .or_else(|| app.multi_diff.files.get(file_index))
-                    else {
-                        continue;
-                    };
-                    let file_name = file
-                        .display_name
-                        .rsplit('/')
-                        .next()
-                        .unwrap_or(&file.display_name)
-                        .to_string();
-                    let changed = if app.file_changed_on_disk(file_index) {
-                        "*"
-                    } else {
-                        ""
-                    };
-                    (file_name, changed)
-                }
+                TopbarTabContent::File(file_index) => match app
+                    .outdated_live_files()
+                    .and_then(|files| files.get(file_index))
+                    .or_else(|| app.multi_diff.files.get(file_index))
+                {
+                    Some(file) => {
+                        let file_name = file
+                            .display_name
+                            .rsplit('/')
+                            .next()
+                            .unwrap_or(&file.display_name)
+                            .to_string();
+                        let changed = if app.file_changed_on_disk(file_index) {
+                            "*"
+                        } else {
+                            ""
+                        };
+                        (file_name, changed)
+                    }
+                    None if app.multi_diff.file_count() == 0 && file_index == 0 => {
+                        ("No changes".to_string(), "")
+                    }
+                    None => continue,
+                },
                 TopbarTabContent::Help => ("Help".to_string(), ""),
                 TopbarTabContent::Settings => ("Settings".to_string(), ""),
                 TopbarTabContent::PrComments => (
@@ -2234,6 +2195,7 @@ fn blame_age_legend_spans(app: &App) -> Vec<Span<'static>> {
 }
 
 fn draw_content(frame: &mut Frame, app: &mut App, area: Rect, show_topbar: bool) {
+    app.ensure_topbar_tabs();
     // Auto-hide file panel if viewport is too narrow (need at least 50 cols for diff view)
     // But respect user's manual toggle preference
     let min_width_for_panel = FILE_PANEL_MIN_WIDTH + DIFF_VIEW_MIN_WIDTH;
@@ -2964,10 +2926,14 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
     );
 
     let has_query = !app.file_filter.is_empty();
-    let no_results = has_query && filtered_indices.is_empty();
-    if no_results {
+    if filtered_indices.is_empty() {
+        let text = if has_query {
+            "No Filter Results"
+        } else {
+            "No changes"
+        };
         let mut empty = Paragraph::new(Line::from(Span::styled(
-            "No Filter Results",
+            text,
             Style::default().fg(app.theme.text_muted),
         )))
         .alignment(Alignment::Center)
@@ -5709,13 +5675,20 @@ fn draw_diff_view(frame: &mut Frame, app: &mut App, area: Rect) {
         );
         return;
     }
-    if app.multi_diff.file_count() == 0
-        && !matches!(
-            app.active_topbar_content(),
-            Some(TopbarTabContent::Help | TopbarTabContent::Settings)
-        )
-    {
-        draw_no_changes(frame, app, area);
+    if app.multi_diff.file_count() == 0 {
+        match app.active_topbar_content() {
+            Some(TopbarTabContent::Settings) => render_settings_view(frame, app, area),
+            Some(TopbarTabContent::PrComments) => render_pr_comments_view(frame, app, area),
+            Some(TopbarTabContent::OutdatedComments) => {
+                render_outdated_comments_view(frame, app, area)
+            }
+            Some(TopbarTabContent::Help) => render_preview(frame, app, area),
+            Some(TopbarTabContent::File(_)) | None => {
+                app.clear_diff_selection();
+                app.set_diff_selection_cells(Vec::new());
+                draw_empty_file_tab(frame, app, area);
+            }
+        }
         return;
     }
     if app.active_settings_view() {
@@ -5840,6 +5813,11 @@ fn draw_diff_selection(frame: &mut Frame, app: &App) {
 
 fn draw_review_line_add_button(frame: &mut Frame, app: &mut App) {
     app.clear_review_line_add_hit();
+    if app.multi_diff.file_count() == 0 {
+        app.review_line_add_row = None;
+        app.review_line_add_hover = false;
+        return;
+    }
     if !matches!(app.active_topbar_content(), Some(TopbarTabContent::File(_))) {
         return;
     }
@@ -8345,8 +8323,8 @@ fn draw_comment_picker_popover(frame: &mut Frame, app: &mut App) {
 mod tests {
     use super::counted_binding_label;
     use crate::app::{
-        App, FoldContextDirection, SelectionToolbarAction, SettingsLeaveAction,
-        SettingsResetAction, ViewMode,
+        review::ReviewTargetKind, App, FilePanelMode, FoldContextDirection, SelectionToolbarAction,
+        SettingsLeaveAction, SettingsResetAction, TopbarTabContent, ViewMode,
     };
     use crate::config::{FoldContextMode, ResolvedTheme, SyntaxMode};
     use crate::markdown::{
@@ -8459,7 +8437,7 @@ mod tests {
     }
 
     #[test]
-    fn no_changes_quit_hint_styles_hotkey_and_hover() {
+    fn no_changes_hint_styles_hotkeys() {
         let multi = MultiFileDiff::from_file_pair(
             std::path::PathBuf::from("a.txt"),
             std::path::PathBuf::from("a.txt"),
@@ -8475,11 +8453,208 @@ mod tests {
 
         assert_eq!(line.spans[1].content.as_ref(), "ctrl-r");
         assert_eq!(line.spans[1].style.fg, Some(app.theme.accent));
-        assert_eq!(line.spans[2].style.fg, Some(app.theme.text_muted));
+        assert_eq!(line.spans[2].style.fg, Some(app.theme.accent));
         assert!(line.spans[2].style.add_modifier.contains(Modifier::BOLD));
         assert_eq!(line.spans[4].content.as_ref(), "q");
         assert_eq!(line.spans[4].style.fg, Some(app.theme.accent));
+        assert_eq!(line.spans[5].style.fg, Some(app.theme.accent));
         assert!(line.spans[5].style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn zero_files_without_comments_shows_empty_file_tab_in_shell() {
+        let multi = MultiFileDiff::from_raw_files(None, Vec::new());
+        let mut app = App::new(multi, ViewMode::UnifiedPane, 0, false, None);
+        app.review_line_add_row = Some(10);
+        app.review_line_add_hover = true;
+        let backend = TestBackend::new(100, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| super::draw(frame, &mut app)).unwrap();
+        let lines = ascii_buffer_lines(&terminal);
+        let text = lines.join("\n");
+        let topbar_y = app.topbar_area.unwrap().1 as usize;
+        let (diff_x, diff_y, diff_width, diff_height) = app.diff_view_area.unwrap();
+        let diff_text = (diff_y..diff_y.saturating_add(diff_height))
+            .map(|row| {
+                lines[row as usize][diff_x as usize..diff_x.saturating_add(diff_width) as usize]
+                    .to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(lines[topbar_y].contains("No changes"), "screen: {text}");
+        assert!(!lines[topbar_y].contains("File"), "screen: {text}");
+        assert!(!diff_text.contains(" + "), "diff: {diff_text}");
+        assert!(app.review_line_add_hit.is_none());
+        assert!(app.review_line_add_row.is_none());
+        assert!(!app.review_line_add_hover);
+        assert!(text.contains("No changes found."), "screen: {text}");
+        assert!(text.contains("ctrl-r history"), "screen: {text}");
+        assert!(text.contains("q quit"), "screen: {text}");
+        assert!(text.contains("file 0/0"), "screen: {text}");
+        assert!(app.topbar_area.is_some());
+        let dashboard_hit = app.no_changes_dashboard_hit.unwrap();
+        let quit_hit = app.no_changes_quit_hit.unwrap();
+        assert!(app.update_topbar_hover(dashboard_hit.0, dashboard_hit.1));
+        assert!(app.no_changes_dashboard_hover);
+        assert!(!app.no_changes_quit_hover);
+        assert!(app.update_topbar_hover(quit_hit.0, quit_hit.1));
+        assert!(!app.no_changes_dashboard_hover);
+        assert!(app.no_changes_quit_hover);
+        assert!(app.handle_no_changes_dashboard_click(dashboard_hit.0, dashboard_hit.1));
+        assert!(app.open_dashboard);
+        assert!(app.handle_no_changes_quit_click(quit_hit.0, quit_hit.1));
+        assert!(app.should_quit || app.quit_confirmation_active());
+        app.open_dashboard = false;
+        app.should_quit = false;
+        app.cancel_quit_confirmation();
+        assert!(app.can_show_file_panel());
+        assert!(app.file_panel_rect.is_some());
+        assert_eq!(app.file_panel_mode, FilePanelMode::Files);
+        let panel_text = ascii_rect_text(&lines, app.file_panel_rect.unwrap());
+        assert!(panel_text.contains("No changes"), "panel: {panel_text}");
+
+        app.toggle_file_panel_mode();
+        terminal.draw(|frame| super::draw(frame, &mut app)).unwrap();
+        let lines = ascii_buffer_lines(&terminal);
+        let panel_text = ascii_rect_text(&lines, app.file_panel_rect.unwrap());
+        assert!(panel_text.contains("No Comments"), "panel: {panel_text}");
+
+        app.toggle_file_panel_mode();
+        app.file_filter = "missing".to_string();
+        terminal.draw(|frame| super::draw(frame, &mut app)).unwrap();
+        let lines = ascii_buffer_lines(&terminal);
+        let panel_text = ascii_rect_text(&lines, app.file_panel_rect.unwrap());
+        assert!(
+            panel_text.contains("No Filter Results"),
+            "panel: {panel_text}"
+        );
+        app.file_filter.clear();
+        app.toggle_file_panel();
+        terminal.draw(|frame| super::draw(frame, &mut app)).unwrap();
+        assert!(app.file_panel_rect.is_none());
+        app.toggle_file_panel();
+        terminal.draw(|frame| super::draw(frame, &mut app)).unwrap();
+        assert!(app.file_panel_rect.is_some());
+
+        app.set_review_persist_enabled(false);
+        app.enable_review_mode();
+        let id = app
+            .add_review_comment_from_cli(
+                "Deleted review",
+                ReviewTargetKind::PullRequest,
+                None,
+                None,
+                None,
+                "Deleted feedback".to_string(),
+            )
+            .unwrap();
+        assert!(app.remove_review_comment_from_cli(id));
+        app.no_changes_message = Some("No changes in range main..@.".to_string());
+        app.watch = true;
+        terminal.draw(|frame| super::draw(frame, &mut app)).unwrap();
+        let text = ascii_buffer_lines(&terminal).join("\n");
+        assert!(
+            text.contains("No changes in range main..@."),
+            "screen: {text}"
+        );
+        assert!(text.contains("Watching for changes."), "screen: {text}");
+        assert!(text.contains("ctrl-r history"), "screen: {text}");
+        assert!(text.contains("file 0/0"), "screen: {text}");
+        assert!(app.topbar_area.is_some());
+    }
+
+    #[test]
+    fn zero_files_sidebar_auto_hides_on_narrow_terminal() {
+        let multi = MultiFileDiff::from_raw_files(None, Vec::new());
+        let mut app = App::new(multi, ViewMode::UnifiedPane, 0, false, None);
+        let backend = TestBackend::new(40, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| super::draw(frame, &mut app)).unwrap();
+
+        assert!(app.can_show_file_panel());
+        assert!(app.file_panel_auto_hidden);
+        assert!(app.file_panel_rect.is_none());
+    }
+
+    #[test]
+    fn non_empty_file_keeps_filename_and_add_comment_button() {
+        let multi = MultiFileDiff::from_file_pair(
+            "old.txt".into(),
+            "new.txt".into(),
+            "old\n".to_string(),
+            "new\n".to_string(),
+        );
+        let mut app = App::new(multi, ViewMode::UnifiedPane, 0, false, None);
+        app.set_review_persist_enabled(false);
+        app.enable_review_mode();
+        app.review_line_add_row = Some(10);
+        app.review_line_add_hover = true;
+        let backend = TestBackend::new(100, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| super::draw(frame, &mut app)).unwrap();
+        let lines = ascii_buffer_lines(&terminal);
+        let topbar_y = app.topbar_area.unwrap().1 as usize;
+        let hit = app.review_line_add_hit.as_ref().unwrap();
+
+        assert!(lines[topbar_y].contains("new.txt"));
+        assert_eq!(
+            terminal.backend().buffer()[(hit.x + 1, hit.y)].symbol(),
+            "+"
+        );
+    }
+
+    #[test]
+    fn zero_files_with_pr_comments_stays_on_file_tab() {
+        let multi = MultiFileDiff::from_raw_files(None, Vec::new());
+        let mut app = App::new(multi, ViewMode::UnifiedPane, 0, false, None);
+        app.set_review_persist_enabled(false);
+        app.enable_review_mode();
+        app.add_review_comment_from_cli(
+            "Review sync dogfood",
+            ReviewTargetKind::PullRequest,
+            None,
+            None,
+            None,
+            "PR feedback remains readable".to_string(),
+        )
+        .unwrap();
+        let file_tab = app.active_topbar_tab.unwrap();
+        let backend = TestBackend::new(100, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal.draw(|frame| super::draw(frame, &mut app)).unwrap();
+        let lines = ascii_buffer_lines(&terminal);
+        let text = lines.join("\n");
+        let panel_text = ascii_rect_text(&lines, app.file_panel_rect.unwrap());
+        assert_eq!(app.file_panel_mode, FilePanelMode::Files);
+        assert_eq!(app.active_topbar_content(), Some(TopbarTabContent::File(0)));
+        assert!(panel_text.contains("No changes"), "panel: {panel_text}");
+        assert!(text.contains("No changes found."), "screen: {text}");
+        assert!(text.contains("ctrl-r history"), "screen: {text}");
+
+        app.toggle_file_panel_mode();
+        terminal.draw(|frame| super::draw(frame, &mut app)).unwrap();
+        let text = ascii_buffer_lines(&terminal).join("\n");
+        assert_eq!(app.file_panel_mode, FilePanelMode::Comments);
+        assert!(text.contains("PR feedback remai"), "screen: {text}");
+
+        app.open_pr_comments_tab(None);
+        terminal.draw(|frame| super::draw(frame, &mut app)).unwrap();
+        let text = ascii_buffer_lines(&terminal).join("\n");
+        assert_eq!(
+            app.active_topbar_content(),
+            Some(TopbarTabContent::PrComments)
+        );
+        assert!(text.contains("Pull request comments"), "screen: {text}");
+        assert!(
+            text.contains("PR feedback remains readable"),
+            "screen: {text}"
+        );
+
+        app.select_topbar_tab(file_tab);
+        terminal.draw(|frame| super::draw(frame, &mut app)).unwrap();
+        assert_eq!(app.active_topbar_content(), Some(TopbarTabContent::File(0)));
     }
 
     #[test]
@@ -9245,6 +9420,16 @@ mod tests {
     #[test]
     fn split_review_card_shows_edit_action() {
         assert_review_card_action_hover(ViewMode::Split);
+    }
+
+    fn ascii_rect_text(lines: &[String], rect: (u16, u16, u16, u16)) -> String {
+        let (x, y, width, height) = rect;
+        (y..y.saturating_add(height))
+            .map(|row| {
+                lines[row as usize][x as usize..x.saturating_add(width) as usize].to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     fn ascii_buffer_lines(terminal: &Terminal<TestBackend>) -> Vec<String> {

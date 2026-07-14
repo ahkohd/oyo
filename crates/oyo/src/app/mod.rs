@@ -519,13 +519,9 @@ pub struct App {
     git_index_baseline: FileDiskStamp,
     /// Message shown when a git diff currently has no files
     pub no_changes_message: Option<String>,
-    /// Open History action area on the no changes screen.
     pub(crate) no_changes_dashboard_hit: Option<(u16, u16, u16, u16)>,
-    /// True when the no changes History action is hovered.
     pub(crate) no_changes_dashboard_hover: bool,
-    /// Quit action area on the no changes screen.
     pub(crate) no_changes_quit_hit: Option<(u16, u16, u16, u16)>,
-    /// True when the no changes quit action is hovered.
     pub(crate) no_changes_quit_hover: bool,
     /// Defer heavy view rebuild by one frame (for large-file jumps)
     view_build_defer: bool,
@@ -1315,21 +1311,18 @@ impl App {
             diff_scrollbar_dragging: false,
             file_panel_scrollbar: None,
             file_panel_scrollbar_dragging: false,
-            topbar_tabs: (file_count > 0)
-                .then(|| TopbarTab {
-                    id: 1,
-                    content: TopbarTabContent::File(0),
-                    view_mode,
-                    step_view_mode: view_mode,
-                    stepping: true,
-                    scroll_offset: 0,
-                    horizontal_scroll: 0,
-                    preview_rendered: true,
-                    navigator_state: None,
-                })
-                .into_iter()
-                .collect(),
-            active_topbar_tab: (file_count > 0).then_some(1),
+            topbar_tabs: vec![TopbarTab {
+                id: 1,
+                content: TopbarTabContent::File(0),
+                view_mode,
+                step_view_mode: view_mode,
+                stepping: true,
+                scroll_offset: 0,
+                horizontal_scroll: 0,
+                preview_rendered: true,
+                navigator_state: None,
+            }],
+            active_topbar_tab: Some(1),
             next_topbar_tab_id: 2,
             topbar_tab_scroll: 0,
             topbar_tab_hits: Vec::new(),

@@ -2709,6 +2709,9 @@ impl App {
     }
 
     fn scroll_to_review_anchor(&mut self, anchor: &ReviewAnchor) {
+        if self.multi_diff.file_count() == 0 {
+            return;
+        }
         let Some((start, _)) = self.review_anchor_display_span(anchor) else {
             return;
         };
@@ -7028,6 +7031,9 @@ impl App {
     }
 
     fn review_visible_lines_with_idx(&mut self) -> Vec<(usize, ViewLine)> {
+        if self.multi_diff.file_count() == 0 {
+            return Vec::new();
+        }
         let view = self.current_view_with_frame(AnimationFrame::Idle);
         let mut out = Vec::new();
         let mut display_idx = 0usize;
@@ -9054,6 +9060,14 @@ mod tests {
         }
     }
 
+    fn zero_file_review_app() -> App {
+        let diff = MultiFileDiff::from_raw_files(None, Vec::new());
+        let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+        app.set_review_persist_enabled(false);
+        app.enable_review_mode();
+        app
+    }
+
     fn line_comment() -> ReviewComment {
         ReviewComment {
             id: 1,
@@ -9081,6 +9095,118 @@ mod tests {
             created_at: 1,
             updated_at: 1,
         }
+    }
+
+    #[test]
+    fn zero_file_review_stays_on_file_tab_with_pr_comments() {
+        let mut app = zero_file_review_app();
+        app.add_review_comment_from_cli(
+            "Pull request",
+            ReviewTargetKind::PullRequest,
+            None,
+            None,
+            None,
+            "conversation".to_string(),
+        )
+        .unwrap();
+
+        app.ensure_topbar_tabs();
+
+        assert_eq!(
+            app.active_topbar_content(),
+            Some(crate::app::TopbarTabContent::File(0))
+        );
+        assert_eq!(app.view_mode, ViewMode::UnifiedPane);
+        assert_eq!(app.pull_request_comment_overlays().len(), 1);
+    }
+
+    #[test]
+    fn zero_file_review_stays_on_file_tab_with_outdated_comments() {
+        let mut app = zero_file_review_app();
+        let mut comment = line_comment();
+        comment.outdated = true;
+        app.review_comments.push(comment);
+
+        app.ensure_topbar_tabs();
+
+        assert_eq!(
+            app.active_topbar_content(),
+            Some(crate::app::TopbarTabContent::File(0))
+        );
+        assert_eq!(app.view_mode, ViewMode::UnifiedPane);
+    }
+
+    #[test]
+    fn zero_file_review_keeps_file_tab_for_no_or_inline_comments() {
+        let mut empty = zero_file_review_app();
+        empty.ensure_topbar_tabs();
+        assert_eq!(
+            empty.active_topbar_content(),
+            Some(crate::app::TopbarTabContent::File(0))
+        );
+
+        let mut inline = zero_file_review_app();
+        inline.review_comments.push(line_comment());
+        inline.ensure_topbar_tabs();
+        assert_eq!(
+            inline.active_topbar_content(),
+            Some(crate::app::TopbarTabContent::File(0))
+        );
+        assert_eq!(inline.review_comment_count(), 1);
+    }
+
+    #[test]
+    fn zero_file_review_ignores_pr_comments_after_async_arrival() {
+        let mut app = zero_file_review_app();
+        app.ensure_topbar_tabs();
+        assert_eq!(
+            app.active_topbar_content(),
+            Some(crate::app::TopbarTabContent::File(0))
+        );
+        app.add_review_comment_from_cli(
+            "Pull request",
+            ReviewTargetKind::PullRequest,
+            None,
+            None,
+            None,
+            "arrived later".to_string(),
+        )
+        .unwrap();
+
+        app.ensure_topbar_tabs();
+
+        assert_eq!(
+            app.active_topbar_content(),
+            Some(crate::app::TopbarTabContent::File(0))
+        );
+    }
+
+    #[test]
+    fn zero_file_review_does_not_override_explicit_file_tab_choice() {
+        let mut app = zero_file_review_app();
+        app.ensure_topbar_tabs();
+        let file_tab = app.active_topbar_tab.unwrap();
+        app.select_topbar_tab(file_tab);
+        app.add_review_comment_from_cli(
+            "Pull request",
+            ReviewTargetKind::PullRequest,
+            None,
+            None,
+            None,
+            "arrived later".to_string(),
+        )
+        .unwrap();
+
+        app.ensure_topbar_tabs();
+
+        assert_eq!(
+            app.active_topbar_content(),
+            Some(crate::app::TopbarTabContent::File(0))
+        );
+        assert!(!app
+            .topbar_tabs
+            .iter()
+            .any(|tab| tab.content == crate::app::TopbarTabContent::PrComments));
     }
 
     #[test]
@@ -9321,6 +9447,34 @@ mod tests {
         assert!(!app.reconcile_review_comment_anchor(0, None));
         assert!(app.review_comments[0].resolved);
         assert!(!app.review_comments[0].outdated);
+    }
+
+    #[test]
+    fn zero_file_review_can_open_resolved_line_comment() {
+        let mut source = test_app_with_new_content("one\ntwo\ntarget\nfour\nfive\nsix\n");
+        source
+            .add_review_comment_from_cli(
+                "new.txt",
+                ReviewTargetKind::Line,
+                Some(ReviewSide::New),
+                None,
+                Some(ReviewRange { start: 3, end: 3 }),
+                "please fix".to_string(),
+            )
+            .unwrap();
+        source.review_comments[0].resolved = true;
+
+        let diff = MultiFileDiff::from_raw_files(None, Vec::new());
+        let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+        app.review_comments = source.review_comments;
+
+        assert!(app.open_review_comment(0));
+        assert_eq!(
+            app.active_review_comment_id,
+            Some(app.review_comments[0].id)
+        );
+        assert!(!app.inline_review_actions_available());
+        assert_eq!(app.multi_diff.file_count(), 0);
     }
 
     #[test]

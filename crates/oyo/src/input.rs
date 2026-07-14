@@ -254,9 +254,6 @@ fn handle_selection_key(app: &mut App, key: KeyEvent) -> bool {
 fn handle_global_key(app: &mut App, key: KeyEvent) -> bool {
     match app.keybindings.global(key) {
         Dispatch::Matched(GlobalAction::OpenCommandPalette) => {
-            if app.multi_diff.file_count() == 0 {
-                return false;
-            }
             app.reset_count();
             if app.command_palette_active() {
                 app.stop_command_palette();
@@ -830,6 +827,8 @@ fn dispatch_normal_action(
             action,
             NormalAction::Quit
                 | NormalAction::Refresh
+                | NormalAction::OpenDashboard
+                | NormalAction::OpenCommandPalette
                 | NormalAction::ToggleHelp
                 | NormalAction::OpenCommentPicker
                 | NormalAction::OpenOutdatedComments
@@ -1431,6 +1430,27 @@ mod tests {
         assert!(handle_global_key(&mut app, ctrl('p')));
         assert!(app.command_palette_active());
         assert!(!app.search_active());
+    }
+
+    #[test]
+    fn empty_file_tab_keeps_palette_and_history_available() {
+        let diff = MultiFileDiff::from_raw_files(None, Vec::new());
+        let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+        assert!(handle_global_key(&mut app, ctrl('p')));
+        assert!(app.command_palette_active());
+        app.stop_command_palette();
+
+        let mut terminal = test_terminal();
+        let mut pending_event = None;
+        handle_app_key(
+            &mut app,
+            ctrl('r'),
+            &mut pending_event,
+            &mut terminal,
+            &config::EditorConfig::default(),
+        )
+        .unwrap();
+        assert!(app.open_dashboard);
     }
 
     #[test]

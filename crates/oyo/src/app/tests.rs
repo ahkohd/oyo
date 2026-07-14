@@ -1397,21 +1397,6 @@ fn topbar_overflow_buttons_scroll_tabs() {
 }
 
 #[test]
-fn no_changes_dashboard_click_opens_history() {
-    let diff = MultiFileDiff::from_file_pair(
-        std::path::PathBuf::from("a.txt"),
-        std::path::PathBuf::from("a.txt"),
-        "a\n".to_string(),
-        "aa\n".to_string(),
-    );
-    let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
-    app.no_changes_dashboard_hit = Some((2, 9, 14, 1));
-
-    assert!(app.handle_no_changes_dashboard_click(3, 9));
-    assert!(app.open_dashboard);
-}
-
-#[test]
 fn status_bar_mode_click_cycles_views() {
     let diff = MultiFileDiff::from_file_pair(
         std::path::PathBuf::from("a.txt"),
@@ -1826,11 +1811,20 @@ fn topbar_sidebar_toggle_button_toggles_file_panel() {
 }
 
 #[test]
-fn empty_help_tab_can_close_as_last_tab() {
+fn empty_help_tab_closes_back_to_file_placeholder() {
     let diff = MultiFileDiff::from_file_pairs(Vec::new());
     let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
     app.open_help_tab();
     let tab_id = app.active_topbar_tab.unwrap();
+    let file_tab_id = app
+        .topbar_tabs
+        .iter()
+        .find(|tab| tab.content == TopbarTabContent::File(0))
+        .unwrap()
+        .id;
+    assert!(!app.topbar_close_allowed(file_tab_id));
+    app.close_topbar_tab(file_tab_id);
+    assert_eq!(app.topbar_tabs.len(), 2);
     app.topbar_tab_hits = vec![TopbarTabHit {
         tab_id,
         row: 0,
@@ -1842,8 +1836,8 @@ fn empty_help_tab_can_close_as_last_tab() {
     assert!(app.update_topbar_hover(6, 0));
     assert_eq!(app.topbar_hover_close, Some(tab_id));
     assert!(app.handle_topbar_mouse_down(6, 0));
-    assert!(app.topbar_tabs.is_empty());
-    assert_eq!(app.active_topbar_content(), None);
+    assert_eq!(app.topbar_tabs.len(), 1);
+    assert_eq!(app.active_topbar_content(), Some(TopbarTabContent::File(0)));
     assert_eq!(app.view_mode, ViewMode::UnifiedPane);
 }
 
@@ -1929,7 +1923,11 @@ fn help_opens_as_preview_tab_for_empty_diff() {
     assert!(!app.show_help);
     assert_eq!(app.view_mode, ViewMode::Preview);
     assert_eq!(app.active_topbar_content(), Some(TopbarTabContent::Help));
-    assert_eq!(app.topbar_tabs.len(), 1);
+    assert_eq!(app.topbar_tabs.len(), 2);
+    assert!(app
+        .topbar_tabs
+        .iter()
+        .any(|tab| tab.content == TopbarTabContent::File(0)));
 
     app.ensure_topbar_tabs();
     assert_eq!(app.active_topbar_content(), Some(TopbarTabContent::Help));

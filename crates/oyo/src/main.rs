@@ -2431,7 +2431,14 @@ fn jj_bookmarks_for_rev_in(root: &Path, rev: &str) -> Vec<String> {
     }
     run_jj(
         root,
-        &["log", "--no-graph", "-r", rev, "-T", "bookmarks ++ \"\\n\""],
+        &[
+            "log",
+            "--no-graph",
+            "-r",
+            rev,
+            "-T",
+            "local_bookmarks.map(|b| b.name()).join(\" \")",
+        ],
     )
     .ok()
     .and_then(|output| output.lines().next().map(str::to_string))
@@ -8655,7 +8662,7 @@ mod tests {
         git_ref_input_mode, github_canonical_repo_with, github_comment_to_review_comment,
         github_repo_endpoint, github_review_to_review_comment, gitlab,
         ignore_github_delete_not_found, insert_review_thread_states, jj_bookmark_revset,
-        jj_summary_paths, jj_target_metadata_in, local_pr_review_revision,
+        jj_bookmarks_for_rev_in, jj_summary_paths, jj_target_metadata_in, local_pr_review_revision,
         mouse_horizontal_scroll_delta, normalize_jj_revision, parse_range, parse_remote_url,
         provider_revision, push_pending_mouse_scroll, push_review_comments_to_provider_with,
         push_review_comments_to_provider_with_ops, render_editor_args, review_author_from_cli,
@@ -10000,6 +10007,68 @@ mod tests {
             normalize_jj_revision("trunk()..feature"),
             "trunk()..feature"
         );
+    }
+
+    #[test]
+    fn jj_bookmark_lookup_uses_clean_local_names() {
+        if ProcessCommand::new("jj").arg("--version").output().is_err() {
+            return;
+        }
+        let base = temp_path("jj-clean-bookmarks");
+        let repo = base.join("work");
+        let remote = base.join("remote.git");
+        std::fs::create_dir_all(&repo).unwrap();
+        let git_init = ProcessCommand::new("git")
+            .args(["init", "--bare", "--quiet"])
+            .arg(&remote)
+            .output()
+            .unwrap();
+        assert!(git_init.status.success());
+        let jj_init = ProcessCommand::new("jj")
+            .arg("--config")
+            .arg("signing.behavior=\"drop\"")
+            .args(["git", "init", "--colocate"])
+            .arg(&repo)
+            .output()
+            .unwrap();
+        assert!(
+            jj_init.status.success(),
+            "{}",
+            String::from_utf8_lossy(&jj_init.stderr)
+        );
+        test_jj(&repo, &["config", "set", "--repo", "user.name", "Test"]);
+        test_jj(
+            &repo,
+            &["config", "set", "--repo", "user.email", "test@example.com"],
+        );
+        std::fs::write(repo.join("file.txt"), "base\n").unwrap();
+        test_jj(&repo, &["commit", "-m", "base"]);
+        test_jj(&repo, &["bookmark", "create", "main", "-r", "@-"]);
+        let remote = remote.to_str().unwrap();
+        let git_remote = ProcessCommand::new("git")
+            .current_dir(&repo)
+            .args(["remote", "add", "origin", remote])
+            .output()
+            .unwrap();
+        assert!(git_remote.status.success());
+        test_jj(
+            &repo,
+            &["git", "push", "--remote", "origin", "--bookmark", "main"],
+        );
+        std::fs::write(repo.join("file.txt"), "base\nahead\n").unwrap();
+        test_jj(&repo, &["commit", "-m", "ahead"]);
+        test_jj(&repo, &["bookmark", "set", "main", "-r", "@-"]);
+
+        assert_eq!(jj_bookmarks_for_rev_in(&repo, "main"), vec!["main"]);
+        test_jj(&repo, &["bookmark", "create", "also", "-r", "main"]);
+        let mut bookmarks = jj_bookmarks_for_rev_in(&repo, "main");
+        bookmarks.sort();
+        assert_eq!(bookmarks, vec!["also", "main"]);
+        test_jj(&repo, &["bookmark", "delete", "also"]);
+        test_jj(&repo, &["bookmark", "delete", "main"]);
+        assert!(jj_bookmarks_for_rev_in(&repo, "main@origin").is_empty());
+
+        let _ = std::fs::remove_dir_all(base);
     }
 
     #[test]

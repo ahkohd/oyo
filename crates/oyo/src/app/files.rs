@@ -331,16 +331,45 @@ impl App {
             self.topbar_tabs.retain(|tab| {
                 matches!(
                     tab.content,
-                    TopbarTabContent::Help
+                    TopbarTabContent::File(0)
+                        | TopbarTabContent::Help
                         | TopbarTabContent::Settings
                         | TopbarTabContent::PrComments
                         | TopbarTabContent::OutdatedComments
                 )
             });
+            if !self
+                .topbar_tabs
+                .iter()
+                .any(|tab| tab.content == TopbarTabContent::File(0))
+            {
+                let id = self.next_topbar_tab_id;
+                self.next_topbar_tab_id = self.next_topbar_tab_id.saturating_add(1);
+                self.topbar_tabs.insert(
+                    0,
+                    TopbarTab {
+                        id,
+                        content: TopbarTabContent::File(0),
+                        view_mode: self.view_mode,
+                        step_view_mode: self.step_view_mode,
+                        stepping: self.stepping,
+                        scroll_offset: 0,
+                        horizontal_scroll: 0,
+                        preview_rendered: true,
+                        navigator_state: None,
+                    },
+                );
+            }
             self.active_topbar_tab = self
                 .active_topbar_tab
                 .filter(|id| self.topbar_tabs.iter().any(|tab| tab.id == *id))
                 .or_else(|| self.topbar_tabs.first().map(|tab| tab.id));
+            if matches!(
+                self.active_topbar_content(),
+                Some(TopbarTabContent::PrComments | TopbarTabContent::OutdatedComments)
+            ) {
+                self.view_mode = ViewMode::Preview;
+            }
             self.topbar_drag_target = None;
             return;
         }
@@ -433,9 +462,6 @@ impl App {
     }
 
     pub(crate) fn save_active_topbar_tab_state(&mut self) {
-        if self.multi_diff.file_count() == 0 {
-            return;
-        }
         let Some(active) = self.active_topbar_tab else {
             return;
         };
@@ -466,7 +492,10 @@ impl App {
         let scroll_offset = self.scroll_offset;
         let horizontal_scroll = self.horizontal_scroll;
         let navigator_state = match content {
-            TopbarTabContent::File(_) => Some(self.multi_diff.current_navigator().state().clone()),
+            TopbarTabContent::File(_) if self.multi_diff.file_count() > 0 => {
+                Some(self.multi_diff.current_navigator().state().clone())
+            }
+            TopbarTabContent::File(_) => None,
             TopbarTabContent::Help
             | TopbarTabContent::Settings
             | TopbarTabContent::PrComments
@@ -519,6 +548,14 @@ impl App {
     }
 
     pub(crate) fn topbar_close_allowed(&self, tab_id: usize) -> bool {
+        if self.multi_diff.file_count() == 0
+            && self
+                .topbar_tabs
+                .iter()
+                .any(|tab| tab.id == tab_id && tab.content == TopbarTabContent::File(0))
+        {
+            return false;
+        }
         if self.topbar_tabs.len() > 1 {
             return true;
         }
@@ -583,9 +620,7 @@ impl App {
         }
         let history_origin = self.view_history_origin();
         self.restore_live_diff_after_outdated_view();
-        if self.multi_diff.file_count() == 0 {
-            return;
-        }
+        let file_count = self.multi_diff.file_count();
         let Some(tab) = self
             .topbar_tabs
             .iter()
@@ -595,7 +630,7 @@ impl App {
             return;
         };
         if let TopbarTabContent::File(index) = tab.content {
-            if index >= self.multi_diff.file_count() {
+            if index >= file_count && !(file_count == 0 && index == 0) {
                 return;
             }
         }
@@ -618,10 +653,12 @@ impl App {
         ) {
             self.clear_virtual_comment_view_state();
         }
-        if !self.stepping {
+        if file_count > 0 && !self.stepping {
             self.save_no_step_state_snapshot(old_index);
         }
-        self.save_scroll_position_for(old_index);
+        if file_count > 0 {
+            self.save_scroll_position_for(old_index);
+        }
         self.clear_step_edge_hint();
         self.clear_hunk_edge_hint();
         self.clear_blame_step_hint();
@@ -640,7 +677,7 @@ impl App {
         self.reset_search_for_file_switch();
         self.centered_once = false;
         match tab.content {
-            TopbarTabContent::File(index) => {
+            TopbarTabContent::File(index) if file_count > 0 => {
                 self.multi_diff.select_file(index);
                 self.apply_content_view_mode();
                 self.update_file_list_scroll();
@@ -653,6 +690,10 @@ impl App {
                 } else {
                     self.handle_file_enter();
                 }
+            }
+            TopbarTabContent::File(_) => {
+                self.preview_forced_by_content = false;
+                self.clear_diff_selection();
             }
             TopbarTabContent::Help => {
                 self.view_mode = ViewMode::Preview;
@@ -711,6 +752,15 @@ impl App {
             _ => return,
         };
         if self.request_settings_leave(target) {
+            return;
+        }
+        if self.multi_diff.file_count() == 0
+            && matches!(
+                self.active_topbar_content(),
+                Some(TopbarTabContent::File(0))
+            )
+        {
+            self.open_virtual_comments_tab(content, focus);
             return;
         }
         self.restore_live_diff_after_outdated_view();
@@ -2037,7 +2087,7 @@ impl App {
     }
 
     pub fn can_show_file_panel(&self) -> bool {
-        self.multi_diff.file_count() > 0
+        true
     }
 
     fn update_file_list_scroll(&mut self) {
