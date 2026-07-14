@@ -406,26 +406,92 @@ fn wrap_review_card_spans(spans: Vec<Span<'static>>, width: usize) -> Vec<Vec<Sp
     if width == 0 {
         return vec![spans];
     }
+
+    struct Grapheme {
+        text: String,
+        style: Style,
+        width: usize,
+    }
+    struct Run {
+        whitespace: bool,
+        graphemes: Vec<Grapheme>,
+        width: usize,
+    }
+
+    let mut runs = Vec::<Run>::new();
+    for span in spans {
+        for text in span.content.graphemes(true) {
+            let whitespace = text.chars().all(char::is_whitespace);
+            let grapheme = Grapheme {
+                text: text.to_string(),
+                style: span.style,
+                width: UnicodeWidthStr::width(text),
+            };
+            if let Some(run) = runs.last_mut().filter(|run| run.whitespace == whitespace) {
+                run.width = run.width.saturating_add(grapheme.width);
+                run.graphemes.push(grapheme);
+            } else {
+                runs.push(Run {
+                    whitespace,
+                    width: grapheme.width,
+                    graphemes: vec![grapheme],
+                });
+            }
+        }
+    }
+
+    let push_grapheme = |line: &mut Vec<Span<'static>>, grapheme: Grapheme| {
+        if let Some(span) = line.last_mut().filter(|span| span.style == grapheme.style) {
+            span.content.to_mut().push_str(&grapheme.text);
+        } else {
+            line.push(Span::styled(grapheme.text, grapheme.style));
+        }
+    };
     let mut lines = vec![Vec::new()];
     let mut col = 0usize;
-    for span in spans {
-        let style = span.style;
-        let mut buf = String::new();
-        for grapheme in span.content.graphemes(true) {
-            let grapheme_width = UnicodeWidthStr::width(grapheme);
-            if col > 0 && col.saturating_add(grapheme_width) > width {
-                if !buf.is_empty() {
-                    lines.last_mut().unwrap().push(Span::styled(buf, style));
-                    buf = String::new();
-                }
+    let mut whitespace = None::<Run>;
+    for run in runs {
+        if run.whitespace {
+            whitespace = Some(run);
+            continue;
+        }
+        let whitespace_width = whitespace.as_ref().map_or(0, |run| run.width);
+        let fits = col
+            .saturating_add(whitespace_width)
+            .saturating_add(run.width)
+            <= width;
+        if col > 0 && !fits {
+            lines.push(Vec::new());
+            col = 0;
+        } else if col > 0 || (lines.len() == 1 && fits) {
+            for grapheme in whitespace.take().into_iter().flat_map(|run| run.graphemes) {
+                col = col.saturating_add(grapheme.width);
+                push_grapheme(lines.last_mut().unwrap(), grapheme);
+            }
+        }
+        whitespace = None;
+
+        if run.width <= width {
+            for grapheme in run.graphemes {
+                col = col.saturating_add(grapheme.width);
+                push_grapheme(lines.last_mut().unwrap(), grapheme);
+            }
+            continue;
+        }
+        for grapheme in run.graphemes {
+            if col > 0 && col.saturating_add(grapheme.width) > width {
                 lines.push(Vec::new());
                 col = 0;
             }
-            buf.push_str(grapheme);
-            col = col.saturating_add(grapheme_width);
+            col = col.saturating_add(grapheme.width);
+            push_grapheme(lines.last_mut().unwrap(), grapheme);
         }
-        if !buf.is_empty() {
-            lines.last_mut().unwrap().push(Span::styled(buf, style));
+    }
+    if let Some(whitespace) = whitespace
+        .filter(|run| (col > 0 || lines.len() == 1) && col.saturating_add(run.width) <= width)
+    {
+        for grapheme in whitespace.graphemes {
+            push_grapheme(lines.last_mut().unwrap(), grapheme);
         }
     }
     lines

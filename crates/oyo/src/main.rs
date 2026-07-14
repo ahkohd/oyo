@@ -2422,11 +2422,15 @@ fn jj_bookmarks_for_rev(rev: &str) -> Vec<String> {
     let Ok(root) = current_review_workspace() else {
         return Vec::new();
     };
-    if !is_jj_repo(&root) {
+    jj_bookmarks_for_rev_in(&root, rev)
+}
+
+fn jj_bookmarks_for_rev_in(root: &Path, rev: &str) -> Vec<String> {
+    if !is_jj_repo(root) {
         return Vec::new();
     }
     run_jj(
-        &root,
+        root,
         &["log", "--no-graph", "-r", rev, "-T", "bookmarks ++ \"\\n\""],
     )
     .ok()
@@ -4028,26 +4032,31 @@ fn github_canonical_repo(repo: &str) -> Result<String> {
         .with_context(|| format!("Could not resolve canonical GitHub repository for {repo}"))
 }
 
-fn gh_pr(remote: &ReviewRemote, target: Option<&str>) -> Result<ProviderPr> {
+fn gh_pr_with(
+    remote: &ReviewRemote,
+    target: Option<&str>,
+    canonical_repo: impl FnOnce(&str) -> Result<String>,
+    fetch_pr: impl FnOnce(&[&str]) -> Result<GhPr>,
+) -> Result<ProviderPr> {
+    let canonical_repo = canonical_repo(&remote.repo)?;
     let mut args = vec![
         "pr",
         "view",
         "--repo",
-        &remote.repo,
+        &canonical_repo,
         "--json",
         "number,title,url,baseRefName,headRefName,baseRefOid,headRefOid",
     ];
     if let Some(target) = target {
         args.insert(2, target);
     }
-    let pr: GhPr = gh_json(&args).with_context(|| {
+    let pr = fetch_pr(&args).with_context(|| {
         format!(
             "No pull request found for {} in {}.",
             target.unwrap_or("the current branch"),
-            remote.repo
+            canonical_repo
         )
     })?;
-    let canonical_repo = github_canonical_repo(&remote.repo)?;
     Ok(ProviderPr {
         provider: remote.provider,
         remote: remote.name.clone(),
@@ -4062,6 +4071,10 @@ fn gh_pr(remote: &ReviewRemote, target: Option<&str>) -> Result<ProviderPr> {
         start_commit: None,
         head_commit: pr.head_ref_oid,
     })
+}
+
+fn gh_pr(remote: &ReviewRemote, target: Option<&str>) -> Result<ProviderPr> {
+    gh_pr_with(remote, target, github_canonical_repo, gh_json)
 }
 
 fn gh_comments(pr: &ProviderPr) -> Result<Vec<GhComment>> {
@@ -4637,6 +4650,16 @@ fn sync_pr_target(target: Option<&str>) -> Option<&str> {
     })
 }
 
+pub(crate) fn usable_sync_pr_target(target: &str) -> Option<&str> {
+    let target = sync_pr_target(Some(target))?.trim();
+    (!target.is_empty()
+        && !matches!(
+            target,
+            "@" | "HEAD" | "INDEX" | "staged" | "worktree" | "current target"
+        ))
+    .then_some(target)
+}
+
 trait ReviewProviderAdapter: Send + Sync {
     fn find_pr(&self, remote: &ReviewRemote, target: Option<&str>) -> Result<ProviderPr>;
     fn whoami(&self, pr: &ProviderPr) -> Result<ProviderUser>;
@@ -4692,17 +4715,41 @@ fn provider_whoami(pr: &ProviderPr) -> Result<ProviderUser> {
     provider_adapter(pr.provider)?.whoami(pr)
 }
 
+fn sync_lookup_target_in(workspace: &Path, supplied_target: Option<&str>) -> Result<String> {
+    if let Some(target) = supplied_target.and_then(usable_sync_pr_target) {
+        return Ok(target.to_string());
+    }
+    if let Some(branch) = git_output(workspace, &["branch", "--show-current"])
+        .ok()
+        .filter(|branch| !branch.trim().is_empty())
+    {
+        return Ok(branch);
+    }
+    if is_jj_repo(workspace) {
+        let bookmarks = jj_bookmarks_for_rev_in(workspace, "@");
+        return match bookmarks.as_slice() {
+            [bookmark] => Ok(bookmark.clone()),
+            [] => anyhow::bail!(
+                "Could not determine a pull request target from the open review or jj bookmark. Pass a review target."
+            ),
+            _ => anyhow::bail!(
+                "Several jj bookmarks point to the working copy. Pass a review target."
+            ),
+        };
+    }
+    anyhow::bail!(
+        "Could not determine a pull request target from the open review or Git branch. Pass a review target."
+    )
+}
+
 fn resolve_sync_target_parts(
     target: Option<String>,
     remote_name: String,
 ) -> Result<(Option<String>, ReviewRemote, ProviderPr, String)> {
     let workspace = current_review_workspace()?;
     let remote = review_remote(&workspace, Some(&remote_name))?;
-    let lookup_target = sync_pr_target(target.as_deref())
-        .map(str::to_string)
-        .or_else(|| git_output(&workspace, &["branch", "--show-current"]).ok())
-        .filter(|branch| !branch.is_empty());
-    let pr = provider_pr(&remote, lookup_target.as_deref())?;
+    let lookup_target = sync_lookup_target_in(&workspace, target.as_deref())?;
+    let pr = provider_pr(&remote, Some(&lookup_target))?;
     let revision = provider_revision(target.as_deref(), &pr, is_jj_repo(&workspace));
     Ok((target, remote, pr, revision))
 }
@@ -5428,12 +5475,15 @@ fn spawn_review_pr_lookup_worker(target: Option<String>) -> ReviewPrLookupWorker
     ReviewPrLookupWorker { rx }
 }
 
-fn spawn_review_pull_worker(action: ReviewSyncAction, remote: Option<String>) -> ReviewSyncWorker {
+fn spawn_review_pull_worker(
+    action: ReviewSyncAction,
+    target: Option<String>,
+    remote: String,
+) -> ReviewSyncWorker {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let result = (|| {
-            let items = remote.into_iter().collect::<Vec<_>>();
-            let (_target, _remote, pr, _revision) = resolve_sync_target_items(&items)?;
+            let (_target, _remote, pr, _revision) = resolve_sync_target_parts(target, remote)?;
             let user = provider_whoami(&pr)?;
             let data = fetch_provider_comments_for_pull(pr, user)?;
             Ok(ReviewSyncWorkerResult::Pull {
@@ -5470,14 +5520,14 @@ fn spawn_review_push_worker(
 
 fn spawn_review_push_request_worker(
     action: ReviewSyncAction,
-    remote: Option<String>,
+    target: Option<String>,
+    remote: String,
     comments: Vec<ReviewComment>,
 ) -> ReviewSyncWorker {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let result = (|| {
-            let items = remote.into_iter().collect::<Vec<_>>();
-            let (_target, _remote, pr, _revision) = resolve_sync_target_items(&items)?;
+            let (_target, _remote, pr, _revision) = resolve_sync_target_parts(target, remote)?;
             let user = provider_whoami(&pr)?;
             let outcome = push_review_comments_to_provider(comments, &pr, &user)?;
             Ok(ReviewSyncWorkerResult::Push {
@@ -7241,7 +7291,7 @@ fn run_app(
     let mut review_sync_pull_stats: Option<ReviewPullStats> = None;
     let mut review_pr_lookup_worker = app
         .review_pull_request_lookup_needed()
-        .then(|| spawn_review_pr_lookup_worker(app.review_pull_request_lookup_target()));
+        .then(|| spawn_review_pr_lookup_worker(app.review_pull_request_lookup_target(None)));
     let workspace = app
         .review_workspace_root()
         .map(PathBuf::from)
@@ -8008,8 +8058,8 @@ fn run_app(
         }
 
         if let Some(request) = app.take_review_sync_requested() {
-            if request.remote.is_none() {
-                match review_remote_options() {
+            match request.remote {
+                None => match review_remote_options() {
                     Ok(remotes) if remotes.is_empty() => app.notify(
                         ToastEvent::SelectionActionFailed("No Git remotes found".to_string()),
                     ),
@@ -8021,24 +8071,28 @@ fn run_app(
                     Err(error) => app.notify(ToastEvent::SelectionActionFailed(format!(
                         "Sync failed: {error}"
                     ))),
+                },
+                Some(_) if review_sync_worker.is_some() => {
+                    app.notify(ToastEvent::SelectionActionFailed(
+                        "Review sync is already running".to_string(),
+                    ));
                 }
-            } else if review_sync_worker.is_some() {
-                app.notify(ToastEvent::SelectionActionFailed(
-                    "Review sync is already running".to_string(),
-                ));
-            } else {
-                app.set_review_sync_status(Some(request.action));
-                review_sync_pull_stats = None;
-                review_sync_worker = Some(match request.action {
-                    ReviewSyncAction::Push => spawn_review_push_request_worker(
-                        request.action,
-                        request.remote,
-                        app.review_comments_for_sync(),
-                    ),
-                    ReviewSyncAction::Pull | ReviewSyncAction::Sync => {
-                        spawn_review_pull_worker(request.action, request.remote)
-                    }
-                });
+                Some(remote) => {
+                    app.set_review_sync_status(Some(request.action));
+                    review_sync_pull_stats = None;
+                    let target = app.review_pull_request_lookup_target(Some(&remote));
+                    review_sync_worker = Some(match request.action {
+                        ReviewSyncAction::Push => spawn_review_push_request_worker(
+                            request.action,
+                            target,
+                            remote,
+                            app.review_comments_for_sync(),
+                        ),
+                        ReviewSyncAction::Pull | ReviewSyncAction::Sync => {
+                            spawn_review_pull_worker(request.action, target, remote)
+                        }
+                    });
+                }
             }
             needs_draw = true;
         }
@@ -8595,27 +8649,29 @@ fn run_commit_picker<B: Backend>(
 #[cfg(test)]
 mod tests {
     use super::{
-        blocks_mouse_scroll, build_jj_diff, canonical_review_target, clean_issue_provider_link,
-        clean_provider_link, combine_review_targets, config, dedupe_review_log_entries,
-        detect_input_mode, detect_input_mode_in, git_ref_input_mode, github_canonical_repo_with,
-        github_comment_to_review_comment, github_repo_endpoint, github_review_to_review_comment,
-        gitlab, ignore_github_delete_not_found, insert_review_thread_states, jj_bookmark_revset,
+        basic_review_target_metadata, blocks_mouse_scroll, build_jj_diff, canonical_review_target,
+        clean_issue_provider_link, clean_provider_link, combine_review_targets, config,
+        dedupe_review_log_entries, detect_input_mode, detect_input_mode_in, gh_pr_with, git_output,
+        git_ref_input_mode, github_canonical_repo_with, github_comment_to_review_comment,
+        github_repo_endpoint, github_review_to_review_comment, gitlab,
+        ignore_github_delete_not_found, insert_review_thread_states, jj_bookmark_revset,
         jj_summary_paths, jj_target_metadata_in, local_pr_review_revision,
         mouse_horizontal_scroll_delta, normalize_jj_revision, parse_range, parse_remote_url,
         provider_revision, push_pending_mouse_scroll, push_review_comments_to_provider_with,
         push_review_comments_to_provider_with_ops, render_editor_args, review_author_from_cli,
         review_comments_json_value, review_pr_target_metadata, review_provider_for_configured_host,
         review_status_json_value, review_target_summary, should_load_saved_review_fallback,
-        sync_lookup_target, update_mouse_scroll_block, Args, BlockedMouseScroll, Command,
-        GhComment, GhCommentUser, GhIssueComment, GhProviderComment, GhRepo, GhReview,
-        GhReviewThreadsResponse, InputMode, MouseScrollTarget, PendingMouseScroll, ProviderPr,
-        ProviderUser, ReviewCommand, ReviewCommentCommand, ReviewProviderKind,
-        ReviewProviderPushOps, ReviewTargetMetadata, MAX_DISCRETE_MOUSE_SCROLL_ACTIONS_PER_FRAME,
+        sync_lookup_target, sync_lookup_target_in, update_mouse_scroll_block, Args,
+        BlockedMouseScroll, Command, GhComment, GhCommentUser, GhIssueComment, GhPr,
+        GhProviderComment, GhRepo, GhReview, GhReviewThreadsResponse, InputMode, MouseScrollTarget,
+        PendingMouseScroll, ProviderPr, ProviderUser, ReviewCommand, ReviewCommentCommand,
+        ReviewProviderKind, ReviewProviderPushOps, ReviewRemote, ReviewTargetMetadata,
+        MAX_DISCRETE_MOUSE_SCROLL_ACTIONS_PER_FRAME,
     };
     use crate::app::{
         review::{
-            ReviewAnchor, ReviewComment, ReviewCommentFilter, ReviewProviderComment, ReviewRange,
-            ReviewSide, ReviewTargetKind,
+            ReviewAnchor, ReviewComment, ReviewCommentFilter, ReviewProviderComment,
+            ReviewPullRequestTarget, ReviewRange, ReviewSide, ReviewTargetKind,
         },
         App, ViewMode,
     };
@@ -8653,6 +8709,15 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    fn test_github_remote(repo: &str) -> ReviewRemote {
+        ReviewRemote {
+            name: "origin".to_string(),
+            provider: ReviewProviderKind::GitHub,
+            host: "github.com".to_string(),
+            repo: repo.to_string(),
+        }
     }
 
     fn test_provider_pr() -> ProviderPr {
@@ -8871,9 +8936,66 @@ mod tests {
     }
 
     #[test]
-    fn github_canonical_repo_failure_stops_before_provider_construction() {
-        let result = github_canonical_repo_with("old-owner/old-repo", |_| Err(anyhow!("HTTP 500")));
+    fn github_pr_canonicalizes_repo_before_lookup() {
+        let remote = test_github_remote("old-owner/old-repo");
+        let canonicalized = std::cell::Cell::new(false);
+        let pr = gh_pr_with(
+            &remote,
+            Some("feature"),
+            |repo| {
+                assert_eq!(repo, "old-owner/old-repo");
+                canonicalized.set(true);
+                Ok("new-owner/new-repo".to_string())
+            },
+            |args| {
+                assert!(canonicalized.get());
+                assert_eq!(args[2], "feature");
+                assert_eq!(args[4], "new-owner/new-repo");
+                Ok(GhPr {
+                    number: 7,
+                    title: "PR".to_string(),
+                    url: "https://github.com/new-owner/new-repo/pull/7".to_string(),
+                    base_ref_name: "main".to_string(),
+                    head_ref_name: "feature".to_string(),
+                    base_ref_oid: "base".to_string(),
+                    head_ref_oid: "head".to_string(),
+                })
+            },
+        )
+        .unwrap();
+        assert_eq!(pr.repo, "new-owner/new-repo");
+    }
+
+    #[test]
+    fn github_pr_lookup_error_uses_canonical_repo() {
+        let remote = test_github_remote("old-owner/old-repo");
+        let error = gh_pr_with(
+            &remote,
+            Some("feature"),
+            |_| Ok("new-owner/new-repo".to_string()),
+            |_| Err(anyhow!("not found")),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("new-owner/new-repo"));
+        assert!(!error.contains("old-owner/old-repo"));
+    }
+
+    #[test]
+    fn github_canonical_repo_failure_stops_before_pr_lookup() {
+        let remote = test_github_remote("old-owner/old-repo");
+        let queried = std::cell::Cell::new(false);
+        let result = gh_pr_with(
+            &remote,
+            Some("feature"),
+            |_| Err(anyhow!("HTTP 500")),
+            |_| {
+                queried.set(true);
+                unreachable!()
+            },
+        );
         assert!(result.is_err());
+        assert!(!queried.get());
     }
 
     #[test]
@@ -9878,6 +10000,89 @@ mod tests {
             normalize_jj_revision("trunk()..feature"),
             "trunk()..feature"
         );
+    }
+
+    #[test]
+    fn open_jj_review_target_beats_detached_git_head_and_bookmark_is_fallback() {
+        if ProcessCommand::new("jj").arg("--version").output().is_err() {
+            return;
+        }
+        let repo = temp_path("jj-sync-target");
+        std::fs::create_dir_all(&repo).unwrap();
+        let init = ProcessCommand::new("jj")
+            .arg("--config")
+            .arg("signing.behavior=\"drop\"")
+            .args(["git", "init", "--colocate"])
+            .arg(&repo)
+            .output()
+            .unwrap();
+        assert!(
+            init.status.success(),
+            "{}",
+            String::from_utf8_lossy(&init.stderr)
+        );
+        test_jj(&repo, &["config", "set", "--repo", "user.name", "Test"]);
+        test_jj(
+            &repo,
+            &["config", "set", "--repo", "user.email", "test@example.com"],
+        );
+        std::fs::write(repo.join("file.txt"), "base\n").unwrap();
+        test_jj(&repo, &["commit", "-m", "base"]);
+        test_jj(&repo, &["bookmark", "create", "fallback", "-r", "@"]);
+        assert_eq!(
+            git_output(&repo, &["branch", "--show-current"]).unwrap(),
+            ""
+        );
+
+        let diff = MultiFileDiff::from_file_pair(
+            PathBuf::from("file.txt"),
+            PathBuf::from("file.txt"),
+            "base\n".to_string(),
+            "changed\n".to_string(),
+        );
+        let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+        app.set_review_persist_enabled(false);
+        app.set_review_target_metadata(Some(basic_review_target_metadata("file.txt", "jj")));
+        assert_eq!(app.review_pull_request_lookup_target(None), None);
+        app.set_review_target_metadata(Some(basic_review_target_metadata("main..@", "jj")));
+        assert_eq!(app.review_pull_request_lookup_target(None), None);
+        assert_eq!(
+            sync_lookup_target_in(&repo, Some("main..@")).unwrap(),
+            "fallback"
+        );
+        app.set_review_target_metadata(Some(basic_review_target_metadata(
+            "main..open-feature",
+            "jj",
+        )));
+        let open_target = app.review_pull_request_lookup_target(None);
+        assert_eq!(open_target.as_deref(), Some("main..open-feature"));
+        assert_eq!(
+            sync_lookup_target_in(&repo, open_target.as_deref()).unwrap(),
+            "open-feature"
+        );
+        app.set_review_pull_request_target(Some(ReviewPullRequestTarget {
+            provider: "github".to_string(),
+            remote: "origin".to_string(),
+            repo: "owner/repo".to_string(),
+            number: 7,
+            title: "PR".to_string(),
+        }));
+        assert_eq!(
+            app.review_pull_request_lookup_target(Some("origin"))
+                .as_deref(),
+            Some("7")
+        );
+        assert_eq!(
+            app.review_pull_request_lookup_target(Some("upstream"))
+                .as_deref(),
+            Some("main..open-feature")
+        );
+        assert_eq!(sync_lookup_target_in(&repo, None).unwrap(), "fallback");
+
+        test_jj(&repo, &["bookmark", "delete", "fallback"]);
+        let error = sync_lookup_target_in(&repo, None).unwrap_err().to_string();
+        assert!(error.contains("Pass a review target"));
+        let _ = std::fs::remove_dir_all(repo);
     }
 
     #[test]

@@ -12,13 +12,14 @@ use crate::test_utils::TestApp;
 use crate::views::{
     extent_marker_text, fold_context_band, render_blame, render_diff_scrollbar, render_evolution,
     render_split, render_unified_pane, review_note_block, show_extent_marker,
-    unified_pane::TRAILING_REVIEW_SPACER_ROWS,
+    unified_pane::TRAILING_REVIEW_SPACER_ROWS, wrap_review_card_spans,
 };
 use oyo_core::{AnimationFrame, LineKind, MultiFileDiff, ViewLine};
 use ratatui::{
     backend::TestBackend,
     buffer::Buffer,
-    style::{Color, Modifier},
+    style::{Color, Modifier, Style},
+    text::Span,
     Terminal,
 };
 use unicode_width::UnicodeWidthStr;
@@ -815,6 +816,47 @@ fn settings_dirty_value_uses_warning_without_moving_the_column() {
     let saved_cell = value_cell(&saved, "Scrollbar", &dirty_chevrons);
     assert_ne!(saved[saved_cell].fg, app.theme.warning);
     let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn review_card_wraps_words_across_styles() {
+    let bold = Style::default().add_modifier(Modifier::BOLD);
+    let lines = wrap_review_card_spans(
+        vec![
+            Span::styled("lorem", bold),
+            Span::raw(" "),
+            Span::raw("ipsum"),
+        ],
+        8,
+    );
+    let text = lines
+        .iter()
+        .map(|line| {
+            line.iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(text, ["lorem", "ipsum"]);
+    assert_eq!(lines[0][0].style, bold);
+    assert_eq!(lines[1][0].style, Style::default());
+}
+
+#[test]
+fn review_card_splits_only_overlong_words() {
+    let lines = wrap_review_card_spans(vec![Span::raw("abcdefghijk")], 4);
+    let text = lines
+        .iter()
+        .map(|line| {
+            line.iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(text, ["abcd", "efgh", "ijk"]);
+    assert!(lines.iter().all(|line| super::spans_width(line) <= 4));
 }
 
 #[test]

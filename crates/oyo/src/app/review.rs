@@ -3221,17 +3221,42 @@ impl App {
         self.review_mode && !self.pull_request_comment_target_available()
     }
 
-    pub(crate) fn review_pull_request_lookup_target(&self) -> Option<String> {
-        self.review_target_metadata
+    pub(crate) fn review_pull_request_lookup_target(
+        &self,
+        selected_remote: Option<&str>,
+    ) -> Option<String> {
+        self.review_pull_request_target
             .as_ref()
-            .filter(|metadata| metadata.vcs == "git")
-            .and_then(|metadata| {
-                metadata
-                    .branch
-                    .clone()
-                    .or_else(|| metadata.git_head_ref.clone())
+            .filter(|target| selected_remote.is_none_or(|remote| target.remote.as_str() == remote))
+            .map(|target| target.number.to_string())
+            .or_else(|| {
+                if selected_remote.is_some() {
+                    return None;
+                }
+                self.review_target_metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.pr_number.map(|number| number.to_string()))
             })
-            .filter(|target| !target.trim().is_empty() && target != "HEAD" && target != "INDEX")
+            .or_else(|| {
+                self.review_target_metadata.as_ref().and_then(|metadata| {
+                    if metadata.vcs != "jj" {
+                        return metadata
+                            .branch
+                            .clone()
+                            .or_else(|| metadata.git_head_ref.clone());
+                    }
+                    if metadata.label.contains("..") {
+                        return Some(metadata.label.clone());
+                    }
+                    let bookmarks = metadata
+                        .bookmarks
+                        .as_deref()?
+                        .split_whitespace()
+                        .collect::<Vec<_>>();
+                    (bookmarks.len() == 1).then(|| bookmarks[0].to_string())
+                })
+            })
+            .filter(|target| crate::usable_sync_pr_target(target).is_some())
     }
 
     pub(crate) fn pull_request_comment_target_available(&self) -> bool {
