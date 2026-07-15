@@ -29,7 +29,9 @@ impl App {
     }
 
     pub(crate) fn start_syntax_engine_load(&mut self) {
-        if !self.syntax_enabled() || self.syntax_engine.is_some() || self.syntax_engine_rx.is_some()
+        if matches!(self.syntax_mode, crate::config::SyntaxMode::Off)
+            || self.syntax_engine.is_some()
+            || self.syntax_engine_rx.is_some()
         {
             return;
         }
@@ -165,6 +167,106 @@ impl App {
         }
         let cache = self.ensure_syntax_cache()?;
         cache.rendered_spans(side, line_num - 1)
+    }
+
+    pub(crate) fn review_grep_syntax_spans(
+        &mut self,
+        file_index: usize,
+        side: super::review::ReviewSide,
+        line_number: usize,
+        text: &str,
+    ) -> Option<Vec<Span<'static>>> {
+        if matches!(self.syntax_mode, crate::config::SyntaxMode::Off) || line_number == 0 {
+            return None;
+        }
+        let diff_revision = self.diff_revision();
+        let identity_matches = self
+            .review_grep
+            .syntax_identity
+            .as_ref()
+            .is_some_and(|identity| {
+                identity.diff_revision == diff_revision
+                    && identity.ui_theme.as_ref() == self.ui_theme_name.as_ref()
+                    && identity.syntax_theme == self.syntax_theme
+                    && identity.light == self.theme_is_light
+            });
+        if !identity_matches {
+            self.review_grep.syntax_identity = Some(super::grep::ReviewGrepSyntaxIdentity {
+                diff_revision,
+                ui_theme: self.ui_theme_name.clone(),
+                syntax_theme: self.syntax_theme.clone(),
+                light: self.theme_is_light,
+            });
+            self.review_grep.syntax_spans.clear();
+        }
+        let side_key = match side {
+            super::review::ReviewSide::Old => 0,
+            super::review::ReviewSide::New => 1,
+        };
+        let key = (file_index, side_key, line_number);
+        if let Some(spans) = self.review_grep.syntax_spans.get(&key) {
+            return spans.clone();
+        }
+        let file = self.multi_diff.files.get(file_index)?;
+        let file_name = file.display_name.clone();
+        if file.binary {
+            self.review_grep.syntax_spans.insert(key, None);
+            #[cfg(test)]
+            {
+                self.review_grep.syntax_cache_misses += 1;
+            }
+            return None;
+        }
+        if !self.ensure_syntax_engine() {
+            return None;
+        }
+        if !self.syntax_engine.as_ref()?.has_syntax_for_file(&file_name) {
+            self.review_grep.syntax_spans.insert(key, None);
+            #[cfg(test)]
+            {
+                self.review_grep.syntax_cache_misses += 1;
+            }
+            return None;
+        }
+        let syntax_side = match side {
+            super::review::ReviewSide::Old => SyntaxSide::Old,
+            super::review::ReviewSide::New => SyntaxSide::New,
+        };
+        let spans = self
+            .syntax_caches
+            .get(file_index)
+            .and_then(Option::as_ref)
+            .and_then(|cache| cache.cached_rendered_spans(syntax_side, line_number - 1))
+            .or_else(|| {
+                self.syntax_engine
+                    .as_ref()?
+                    .highlight(text, &file_name)
+                    .into_iter()
+                    .next()
+                    .map(|line| {
+                        line.into_iter()
+                            .map(|span| Span::styled(span.text, span.style))
+                            .collect()
+                    })
+            })?;
+        #[cfg(test)]
+        {
+            self.review_grep.syntax_cache_misses += 1;
+        }
+        self.review_grep
+            .syntax_spans
+            .insert(key, Some(spans.clone()));
+        Some(spans)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn review_grep_syntax_cache_misses(&self) -> usize {
+        self.review_grep.syntax_cache_misses
+    }
+
+    #[cfg(test)]
+    pub(crate) fn review_grep_syntax_cache_len(&self) -> usize {
+        self.review_grep.syntax_spans.len()
     }
 
     pub(crate) fn maybe_warm_syntax_cache(&mut self) -> bool {

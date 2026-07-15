@@ -520,6 +520,7 @@ Use `[keybindings.<mode>]` tables to override keys.
 [keybindings.global]
 open_command_palette = ["ctrl-p"]
 open_file_search = ["ctrl-shift-p"]
+open_review_grep = ["ctrl-shift-f"]
 open_theme_picker = ["ctrl-t"]
 
 [keybindings.normal]
@@ -530,6 +531,11 @@ start_selection = ["v"]
 start_line_selection = ["V"]
 start_block_selection = ["ctrl-v"]
 toggle_help = ["?"]
+
+[keybindings.review_grep]
+toggle_scope = ["tab"]
+select_changes = ["alt-d"]
+select_everything = ["alt-e"]
 
 [keybindings.review_editor]
 save = ["ctrl-s"]

@@ -472,6 +472,13 @@ impl SyntaxEngine {
         &self.syntax_for_file(file_name).name
     }
 
+    pub fn has_syntax_for_file(&self, file_name: &str) -> bool {
+        !std::ptr::eq(
+            self.syntax_for_file(file_name),
+            self.syntax_set.find_syntax_plain_text(),
+        )
+    }
+
     pub fn syntax_ref(&self, file_name: &str) -> SyntaxReference {
         self.syntax_for_file(file_name).clone()
     }
@@ -1167,6 +1174,42 @@ impl SyntaxCache {
         match side {
             SyntaxSide::Old => rendered_spans_for_store(&mut self.old, line_index),
             SyntaxSide::New => rendered_spans_for_store(&mut self.new, line_index),
+        }
+    }
+
+    pub fn cached_rendered_spans(
+        &self,
+        side: SyntaxSide,
+        line_index: usize,
+    ) -> Option<Vec<Span<'static>>> {
+        let store = match side {
+            SyntaxSide::Old => &self.old,
+            SyntaxSide::New => &self.new,
+        };
+        match store {
+            SyntaxStore::Full(cache) => cache
+                .rendered
+                .get(line_index)
+                .and_then(Option::as_ref)
+                .cloned()
+                .or_else(|| {
+                    cache
+                        .lines
+                        .get(line_index)
+                        .map(|spans| syntax_spans_to_ratatui(spans))
+                }),
+            SyntaxStore::Lazy(cache) => cache
+                .rendered
+                .get(line_index)
+                .and_then(Option::as_ref)
+                .cloned()
+                .or_else(|| {
+                    cache
+                        .spans
+                        .get(line_index)
+                        .and_then(Option::as_ref)
+                        .map(|spans| syntax_spans_to_ratatui(spans))
+                }),
         }
     }
 

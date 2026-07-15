@@ -19,7 +19,8 @@ use crate::config::FilePanelPosition;
 use crate::csv_preview::{CsvPreviewSignature, CsvPreviewState};
 use crate::keybindings::{
     BindingAction, DashboardAction, DashboardFilterAction, FileFilterAction, GlobalAction,
-    HelpAction, LineInputAction, NormalAction, PickerAction, ReviewEditorAction, SelectionAction,
+    HelpAction, LineInputAction, NormalAction, PickerAction, ReviewEditorAction, ReviewGrepAction,
+    SelectionAction,
 };
 use crate::markdown::{
     markdown_preview_lines as render_markdown_preview_lines,
@@ -53,7 +54,206 @@ use std::{
     collections::HashMap,
     path::{Path, PathBuf},
 };
+use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+fn fuzzy_highlight_spans(
+    text: &str,
+    indices: &[usize],
+    base_style: Style,
+    highlight_style: Style,
+) -> Vec<Span<'static>> {
+    if indices.is_empty() {
+        return vec![Span::styled(text.to_string(), base_style)];
+    }
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    for (byte_index, grapheme) in text.grapheme_indices(true) {
+        let end = byte_index + grapheme.len();
+        let highlighted = indices
+            .binary_search_by(|index| {
+                if *index < byte_index {
+                    std::cmp::Ordering::Less
+                } else if *index >= end {
+                    std::cmp::Ordering::Greater
+                } else {
+                    std::cmp::Ordering::Equal
+                }
+            })
+            .is_ok();
+        let style = if highlighted {
+            highlight_style
+        } else {
+            base_style
+        };
+        if let Some(last) = spans.last_mut().filter(|last| last.style == style) {
+            last.content.to_mut().push_str(grapheme);
+        } else {
+            spans.push(Span::styled(grapheme.to_string(), style));
+        }
+    }
+    spans
+}
+
+struct FuzzySnippet {
+    text: String,
+    indices: Vec<usize>,
+    source_start: usize,
+    source_len: usize,
+    prefix_len: usize,
+}
+
+fn fuzzy_match_snippet(text: &str, indices: &[usize], max_width: usize) -> FuzzySnippet {
+    if text_width(text) <= max_width {
+        return FuzzySnippet {
+            text: text.to_string(),
+            indices: indices.to_vec(),
+            source_start: 0,
+            source_len: text.len(),
+            prefix_len: 0,
+        };
+    }
+    if indices.is_empty() {
+        let snippet = truncate_text(text, max_width);
+        let source_len = snippet.strip_suffix('\u{2026}').unwrap_or(&snippet).len();
+        return FuzzySnippet {
+            text: snippet,
+            indices: Vec::new(),
+            source_start: 0,
+            source_len,
+            prefix_len: 0,
+        };
+    }
+    let mut first_match = indices[0].min(text.len());
+    while first_match > 0 && !text.is_char_boundary(first_match) {
+        first_match -= 1;
+    }
+    let mut start_byte = first_match;
+    let mut context_width = 0usize;
+    for (index, ch) in text[..first_match].char_indices().rev() {
+        let width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if context_width.saturating_add(width) > max_width / 3 {
+            break;
+        }
+        context_width = context_width.saturating_add(width);
+        start_byte = index;
+    }
+    let prefix = if start_byte == 0 { "" } else { "..." };
+    let snippet = truncate_text(&format!("{prefix}{}", &text[start_byte..]), max_width);
+    let source = snippet.strip_prefix(prefix).unwrap_or("");
+    let visible_source = if max_width <= 3 {
+        ""
+    } else {
+        source.strip_suffix('\u{2026}').unwrap_or(source)
+    };
+    let source_len = visible_source.len();
+    let rendered_prefix_len = if snippet.starts_with(prefix) {
+        prefix.len()
+    } else {
+        0
+    };
+    let adjusted = indices
+        .iter()
+        .filter_map(|index| {
+            let relative = index.checked_sub(start_byte)?;
+            (relative < visible_source.len()).then_some(rendered_prefix_len + relative)
+        })
+        .collect();
+    FuzzySnippet {
+        text: snippet,
+        indices: adjusted,
+        source_start: start_byte,
+        source_len,
+        prefix_len: rendered_prefix_len,
+    }
+}
+
+fn syntax_spans_for_snippet(
+    snippet: &FuzzySnippet,
+    line_spans: &[Span<'static>],
+    fallback_style: Style,
+) -> Option<Vec<Span<'static>>> {
+    let mut out = Vec::new();
+    if snippet.prefix_len > 0 {
+        out.push(Span::styled(
+            snippet.text[..snippet.prefix_len].to_string(),
+            fallback_style,
+        ));
+    }
+    let source_end = snippet.source_start.saturating_add(snippet.source_len);
+    let mut copied = 0usize;
+    let mut offset = 0usize;
+    for span in line_spans {
+        let span_end = offset.saturating_add(span.content.len());
+        let start = snippet.source_start.max(offset);
+        let end = source_end.min(span_end);
+        if start < end {
+            let local_start = start - offset;
+            let local_end = end - offset;
+            if span.content.is_char_boundary(local_start)
+                && span.content.is_char_boundary(local_end)
+            {
+                out.push(Span::styled(
+                    span.content[local_start..local_end].to_string(),
+                    span.style,
+                ));
+                copied += local_end - local_start;
+            }
+        }
+        offset = span_end;
+        if offset >= source_end {
+            break;
+        }
+    }
+    if copied != snippet.source_len {
+        return None;
+    }
+    let suffix_start = snippet.prefix_len.saturating_add(snippet.source_len);
+    if suffix_start < snippet.text.len() {
+        out.push(Span::styled(
+            snippet.text[suffix_start..].to_string(),
+            fallback_style,
+        ));
+    }
+    Some(out)
+}
+
+fn emphasize_fuzzy_syntax_spans(
+    spans: Vec<Span<'static>>,
+    indices: &[usize],
+) -> Vec<Span<'static>> {
+    let mut out: Vec<Span<'static>> = Vec::new();
+    let mut offset = 0usize;
+    for span in spans {
+        for (local_index, grapheme) in span.content.grapheme_indices(true) {
+            let start = offset + local_index;
+            let end = start + grapheme.len();
+            let highlighted = indices
+                .binary_search_by(|index| {
+                    if *index < start {
+                        std::cmp::Ordering::Less
+                    } else if *index >= end {
+                        std::cmp::Ordering::Greater
+                    } else {
+                        std::cmp::Ordering::Equal
+                    }
+                })
+                .is_ok();
+            let style = if highlighted {
+                span.style
+                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+            } else {
+                span.style
+            };
+            if let Some(last) = out.last_mut().filter(|last| last.style == style) {
+                last.content.to_mut().push_str(grapheme);
+            } else {
+                out.push(Span::styled(grapheme.to_string(), style));
+            }
+        }
+        offset += span.content.len();
+    }
+    out
+}
 
 fn take_width_prefix(text: &str, max_width: usize) -> String {
     let mut out = String::new();
@@ -612,6 +812,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     if app.file_search_active() {
         draw_file_search_popover(frame, app);
+    }
+
+    if app.review_grep_active() {
+        draw_review_grep_popover(frame, app);
     }
 
     if app.comment_picker_active() {
@@ -2682,7 +2886,12 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
         frame.render_widget(blank, action_area);
     }
 
-    let filtered_indices = app.filtered_file_indices();
+    let has_query = !app.file_filter.is_empty();
+    let fuzzy_matches = app.fuzzy_file_matches_for_query(&app.file_filter);
+    let filtered_indices = fuzzy_matches
+        .iter()
+        .map(|matched| matched.file_index)
+        .collect::<Vec<_>>();
     let total_file_rows = app.file_list_total_rows(&filtered_indices);
     let visible_file_rows = list_area.height.saturating_sub(2) as usize;
     let show_file_scrollbar = app.scrollbar_visible
@@ -2707,7 +2916,7 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
         let file = &files[file_idx];
         let group = app.file_list_group(file_idx);
 
-        if current_group.as_deref() != Some(&group) {
+        if !has_query && current_group.as_deref() != Some(&group) {
             if current_group.is_some() {
                 if row_index >= row_offset {
                     items.push(ListItem::new(Line::raw("")));
@@ -2802,17 +3011,23 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
         let file_changed = app.file_changed_on_disk(file_idx);
         let changed_marker_len = if file_changed { 2 } else { 0 };
 
-        // Truncate filename to fit (preserve extension)
-        let file_name = file
-            .display_name
-            .rsplit('/')
-            .next()
-            .unwrap_or(&file.display_name);
+        let file_name = if has_query {
+            file.display_name.as_str()
+        } else {
+            file.display_name
+                .rsplit('/')
+                .next()
+                .unwrap_or(&file.display_name)
+        };
         let max_name_len = list_content_area
             .width
             .saturating_sub(8 + signs_len as u16 + changed_marker_len as u16)
             .max(1) as usize;
-        let name = truncate_filename_keep_ext(file_name, max_name_len);
+        let name = if has_query {
+            truncate_path(file_name, max_name_len)
+        } else {
+            truncate_filename_keep_ext(file_name, max_name_len)
+        };
 
         let mut icon_style = status_style;
         if let Some(bg) = selected_bg {
@@ -2840,13 +3055,35 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
         };
         let marker = if is_selected { "•" } else { " " };
 
+        let match_indices = if has_query && name == file.display_name {
+            fuzzy_matches
+                .iter()
+                .find(|matched| matched.file_index == file_idx)
+                .map(|matched| matched.indices.clone())
+                .unwrap_or_default()
+        } else if has_query {
+            crate::app::grep::fuzzy_text_indices(&app.file_filter, &name)
+        } else {
+            Vec::new()
+        };
+        let mut fuzzy_style = name_style
+            .fg(app.theme.accent)
+            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
+        if let Some(bg) = selected_bg {
+            fuzzy_style = fuzzy_style.bg(bg);
+        }
         let mut line_spans = vec![
             Span::styled(marker, marker_style),
             Span::raw(" "),
             Span::styled("■", icon_style),
             Span::raw(" "),
-            Span::styled(name, name_style),
         ];
+        line_spans.extend(fuzzy_highlight_spans(
+            &name,
+            &match_indices,
+            name_style,
+            fuzzy_style,
+        ));
 
         if show_comment_count {
             let comment_style = if app.file_list_focused && is_selected {
@@ -2925,7 +3162,6 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
         visible_file_rows,
     );
 
-    let has_query = !app.file_filter.is_empty();
     if filtered_indices.is_empty() {
         let text = if has_query {
             "No Filter Results"
@@ -5532,6 +5768,7 @@ fn help_markdown(app: &App) -> String {
     out.push_str("- use `J` and `K` to scroll\n");
     out.push_str("- use `tab` to change view\n");
     out.push_str("- use `ctrl-shift-p` to open file search\n");
+    out.push_str("- use `ctrl-shift-f` to search reviewed file content\n");
     out.push_str("- use `ctrl-t` to open theme picker\n");
     out.push_str("- use `?` to focus this help tab\n\n");
 
@@ -5560,6 +5797,10 @@ fn help_markdown(app: &App) -> String {
     out.push_str(&keybinding_section::<PickerAction, _>(
         "File search",
         |action| app.keybindings.file_search_keys(action),
+    ));
+    out.push_str(&keybinding_section::<ReviewGrepAction, _>(
+        "Find in files",
+        |action| app.keybindings.review_grep_keys(action),
     ));
     out.push_str(&keybinding_section::<PickerAction, _>(
         "Theme picker",
@@ -7879,10 +8120,21 @@ fn picker_input_line(app: &App, query: &str, placeholder: &str, width: u16) -> L
     }
 }
 
+fn spotlight_popup_rect(area: Rect, popup_height: u16) -> Rect {
+    let height = popup_height.min(area.height);
+    let width = (area.width.saturating_mul(3) / 5)
+        .clamp(80, 130)
+        .min(area.width.saturating_sub(4));
+    let x = area.x.saturating_add(area.width.saturating_sub(width) / 2);
+    let y = area
+        .y
+        .saturating_add((area.height / 5).min(area.height.saturating_sub(height)));
+    Rect::new(x, y, width, height)
+}
+
 fn draw_command_palette_popover(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
-    let popup_width = 56u16.min(area.width.saturating_sub(4));
-    let max_height = (area.height / 2).saturating_sub(2).max(6);
+    let max_height = (area.height / 2).saturating_sub(2).max(6).min(area.height);
     let entries = app.command_palette_filtered_entries();
     let selection = app.command_palette_selection();
     let item_height = 1u16;
@@ -7892,12 +8144,7 @@ fn draw_command_palette_popover(frame: &mut Frame, app: &mut App) {
     let popup_height = (list_height as u16)
         .saturating_add(overhead)
         .min(max_height);
-
-    let popup_x = (area.width.saturating_sub(popup_width)) / 2;
-    let desired_y = area.height / 4;
-    let max_y = area.height.saturating_sub(popup_height);
-    let popup_y = desired_y.min(max_y);
-    let popup_area = Rect::new(popup_x, popup_y, popup_width, popup_height);
+    let popup_area = spotlight_popup_rect(area, popup_height);
 
     frame.render_widget(Clear, popup_area);
     let mut block = Block::default()
@@ -8097,9 +8344,12 @@ fn draw_theme_picker_popover(frame: &mut Frame, app: &mut App) {
 
 fn draw_file_search_popover(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
-    let popup_width = 60u16.min(area.width.saturating_sub(4));
-    let max_height = (area.height / 2).saturating_sub(2).max(6);
-    let indices = app.file_search_filtered_indices();
+    let max_height = (area.height / 2).saturating_sub(2).max(6).min(area.height);
+    let fuzzy_matches = app.fuzzy_file_matches_for_query(app.file_search_query());
+    let indices = fuzzy_matches
+        .iter()
+        .map(|matched| matched.file_index)
+        .collect::<Vec<_>>();
     let selection = app.file_search_selection();
     let item_height = 1u16;
     let overhead = 6u16;
@@ -8108,12 +8358,7 @@ fn draw_file_search_popover(frame: &mut Frame, app: &mut App) {
     let popup_height = (list_height as u16)
         .saturating_add(overhead)
         .min(max_height);
-
-    let popup_x = (area.width.saturating_sub(popup_width)) / 2;
-    let desired_y = area.height / 4;
-    let max_y = area.height.saturating_sub(popup_height);
-    let popup_y = desired_y.min(max_y);
-    let popup_area = Rect::new(popup_x, popup_y, popup_width, popup_height);
+    let popup_area = spotlight_popup_rect(area, popup_height);
 
     frame.render_widget(Clear, popup_area);
     let mut block = Block::default()
@@ -8178,14 +8423,32 @@ fn draw_file_search_popover(frame: &mut Frame, app: &mut App) {
         item_height,
     );
 
+    let files = app
+        .outdated_live_files()
+        .unwrap_or(app.multi_diff.files.as_slice());
     let items: Vec<ListItem> = visible
         .iter()
         .map(|idx| {
-            let name = app.multi_diff.files[*idx].display_name.clone();
+            let name = files[*idx].display_name.clone();
             let label = truncate_path(&name, list_width);
-            ListItem::new(Line::from(Span::styled(
-                label,
-                Style::default().fg(app.theme.text),
+            let indices = if label == name {
+                fuzzy_matches
+                    .iter()
+                    .find(|matched| matched.file_index == *idx)
+                    .map(|matched| matched.indices.clone())
+                    .unwrap_or_default()
+            } else {
+                crate::app::grep::fuzzy_text_indices(app.file_search_query(), &label)
+            };
+            let base_style = Style::default().fg(app.theme.text);
+            let highlight_style = Style::default()
+                .fg(app.theme.accent)
+                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
+            ListItem::new(Line::from(fuzzy_highlight_spans(
+                &label,
+                &indices,
+                base_style,
+                highlight_style,
             )))
         })
         .collect();
@@ -8199,6 +8462,242 @@ fn draw_file_search_popover(frame: &mut Frame, app: &mut App) {
     }
     let list = List::new(items).highlight_style(highlight_style);
     frame.render_stateful_widget(list, chunks[1], &mut state);
+}
+
+fn find_in_files_popup_width(area_width: u16) -> u16 {
+    (area_width.saturating_mul(5) / 6)
+        .clamp(80, 160)
+        .min(area_width.saturating_sub(4))
+}
+
+fn draw_review_grep_popover(frame: &mut Frame, app: &mut App) {
+    let area = frame.area();
+    let popup_width = find_in_files_popup_width(area.width);
+    let popup_height = (area.height * 3 / 4)
+        .max(8)
+        .min(area.height.saturating_sub(2));
+    let popup_x = area.width.saturating_sub(popup_width) / 2;
+    let popup_y = area.height.saturating_sub(popup_height) / 2;
+    let popup_area = Rect::new(popup_x, popup_y, popup_width, popup_height);
+    let result_count = app.review_grep_results().len();
+    let selection = app.review_grep_selection();
+
+    frame.render_widget(Clear, popup_area);
+    let mut block = Block::default()
+        .title(" Find in files ")
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(Style::default().fg(app.theme.border_active));
+    if let Some(bg) = app.theme.background {
+        block = block.style(Style::default().bg(bg));
+    }
+    frame.render_widget(block.clone(), popup_area);
+    let inner = block.inner(popup_area).inner(Margin {
+        vertical: 1,
+        horizontal: 1,
+    });
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Length(1),
+            Constraint::Min(1),
+        ])
+        .split(inner);
+    let changes_text = "alt-d Changes";
+    let everything_text = "alt-e All";
+    let separator = "   ";
+    let scope_width = text_width(changes_text)
+        .saturating_add(text_width(separator))
+        .saturating_add(text_width(everything_text)) as u16;
+    let scope_x = chunks[0]
+        .x
+        .saturating_add(chunks[0].width.saturating_sub(scope_width));
+    let input_width = scope_x.saturating_sub(chunks[0].x).saturating_sub(2);
+    let input_area = Rect::new(chunks[0].x, chunks[0].y, input_width, chunks[0].height);
+    let input = picker_input_line(
+        app,
+        app.review_grep_query(),
+        "Search content in changed files...",
+        input_width,
+    );
+    frame.render_widget(Paragraph::new(input), input_area);
+
+    let changes_width = text_width(changes_text) as u16;
+    let everything_x = scope_x
+        .saturating_add(changes_width)
+        .saturating_add(text_width(separator) as u16);
+    app.set_review_grep_scope_hits(
+        (scope_x, chunks[0].y, changes_width, 1),
+        (
+            everything_x,
+            chunks[0].y,
+            text_width(everything_text) as u16,
+            1,
+        ),
+    );
+    let active_scope = app.review_grep_scope();
+    let scope_hover = app.review_grep_scope_hover();
+    let segment_styles = |scope| {
+        let active = active_scope == scope;
+        let hovered = scope_hover == Some(scope);
+        let key = Style::default()
+            .fg(app.theme.accent)
+            .add_modifier(Modifier::BOLD);
+        let mut label = Style::default().fg(if active || hovered {
+            app.theme.text
+        } else {
+            app.theme.text_muted
+        });
+        if active {
+            label = label.add_modifier(Modifier::BOLD);
+        }
+        (key, label)
+    };
+    let (changes_key, changes_label) = segment_styles(crate::app::grep::ReviewGrepScope::Changes);
+    let (everything_key, everything_label) =
+        segment_styles(crate::app::grep::ReviewGrepScope::Everything);
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("alt-d", changes_key),
+            Span::styled(" Changes", changes_label),
+            Span::styled(separator, Style::default().fg(app.theme.border_subtle)),
+            Span::styled("alt-e", everything_key),
+            Span::styled(" All", everything_label),
+        ])),
+        Rect::new(scope_x, chunks[0].y, scope_width, 1),
+    );
+
+    let pending = app.review_grep_pending_files();
+    let status = if app.review_grep_query().is_empty() {
+        String::new()
+    } else {
+        let matches = if result_count == 1 {
+            "1 match".to_string()
+        } else {
+            format!("{result_count} matches")
+        };
+        if pending > 0 {
+            format!("{matches}; indexing {pending} more...")
+        } else {
+            matches
+        }
+    };
+    frame.render_widget(
+        Paragraph::new(Span::styled(
+            status,
+            Style::default().fg(app.theme.text_muted),
+        )),
+        chunks[1],
+    );
+
+    if result_count == 0 {
+        app.set_review_grep_list_area(None, 0, 0, 1);
+        if !app.review_grep_query().is_empty() && !app.review_grep_searching() {
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    "No results",
+                    Style::default().fg(app.theme.text_muted),
+                ))
+                .alignment(Alignment::Center),
+                chunks[2],
+            );
+        }
+        return;
+    }
+
+    let visible_count = (chunks[2].height as usize).max(1);
+    let mut start = app
+        .review_grep_list_start()
+        .min(result_count.saturating_sub(visible_count));
+    if selection < start {
+        start = selection;
+    } else if selection >= start.saturating_add(visible_count) {
+        start = selection + 1 - visible_count;
+    }
+    let end = (start + visible_count).min(result_count);
+    app.set_review_grep_list_area(
+        Some((chunks[2].x, chunks[2].y, chunks[2].width, chunks[2].height)),
+        start,
+        end.saturating_sub(start),
+        1,
+    );
+    let visible = app.review_grep_results()[start..end].to_vec();
+    let width = chunks[2].width.saturating_sub(2) as usize;
+    let mut items = Vec::with_capacity(visible.len());
+    for result in &visible {
+        let path = app
+            .outdated_live_files()
+            .unwrap_or(app.multi_diff.files.as_slice())
+            .get(result.file_index)
+            .map(|file| file.display_name.clone())
+            .unwrap_or_else(|| "unknown".to_string());
+        let side = match result.side {
+            crate::app::review::ReviewSide::Old => 'L',
+            crate::app::review::ReviewSide::New => 'R',
+        };
+        let marker = format!("  {side}{}  ", result.line_number);
+        let path = truncate_path(&path, (width / 3).min(40));
+        let snippet = fuzzy_match_snippet(
+            result.text(),
+            &result.indices,
+            width.saturating_sub(text_width(&path) + text_width(&marker)),
+        );
+        let syntax_spans = app.review_grep_syntax_spans(
+            result.file_index,
+            result.side,
+            result.line_number,
+            result.text(),
+        );
+        let mut spans = vec![
+            Span::styled(
+                path,
+                Style::default()
+                    .fg(app.theme.text_muted)
+                    .add_modifier(Modifier::DIM),
+            ),
+            Span::styled(
+                marker,
+                Style::default()
+                    .fg(app.theme.text_muted)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ];
+        let syntax_snippet = syntax_spans.and_then(|syntax_spans| {
+            syntax_spans_for_snippet(
+                &snippet,
+                &syntax_spans,
+                Style::default().fg(app.theme.text_muted),
+            )
+        });
+        if let Some(syntax_snippet) = syntax_snippet {
+            spans.extend(emphasize_fuzzy_syntax_spans(
+                syntax_snippet,
+                &snippet.indices,
+            ));
+        } else {
+            spans.extend(fuzzy_highlight_spans(
+                &snippet.text,
+                &snippet.indices,
+                Style::default().fg(app.theme.text_muted),
+                Style::default()
+                    .fg(app.theme.accent)
+                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+            ));
+        }
+        items.push(ListItem::new(Line::from(spans)));
+    }
+    let mut state = ListState::default();
+    state.select(Some(selection.saturating_sub(start).min(visible.len() - 1)));
+    let mut highlight = Style::default().add_modifier(Modifier::BOLD);
+    if let Some(bg) = app.theme.background_element.or(app.theme.background_panel) {
+        highlight = highlight.bg(bg);
+    }
+    frame.render_stateful_widget(
+        List::new(items).highlight_style(highlight),
+        chunks[2],
+        &mut state,
+    );
 }
 
 fn draw_comment_picker_popover(frame: &mut Frame, app: &mut App) {
@@ -8655,6 +9154,383 @@ mod tests {
         app.select_topbar_tab(file_tab);
         terminal.draw(|frame| super::draw(frame, &mut app)).unwrap();
         assert_eq!(app.active_topbar_content(), Some(TopbarTabContent::File(0)));
+    }
+
+    #[test]
+    fn fuzzy_file_filter_and_picker_rank_and_highlight_typos() {
+        let mut pairs = (0..100)
+            .map(|index| {
+                (
+                    format!("src/generated/file_{index}.rs").into(),
+                    "old\n".to_string(),
+                    "new\n".to_string(),
+                )
+            })
+            .collect::<Vec<_>>();
+        pairs.push((
+            "src/services/user_service.rs".into(),
+            "old\n".to_string(),
+            "new\n".to_string(),
+        ));
+        let multi = MultiFileDiff::from_file_pairs(pairs);
+        let mut app = App::new(multi, ViewMode::UnifiedPane, 0, false, None);
+        app.file_filter = "usrservce".to_string();
+        let backend = TestBackend::new(120, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| super::draw(frame, &mut app)).unwrap();
+        let lines = ascii_buffer_lines(&terminal);
+        let text = lines.join("\n");
+        assert_eq!(app.filtered_file_indices()[0], 100);
+        let (x, y) = text_pos(&lines, "user_service").expect(&text);
+        assert!((0.."user_service".len() as u16)
+            .any(|offset| terminal.backend().buffer()[(x + offset, y)]
+                .modifier
+                .contains(Modifier::UNDERLINED)));
+
+        app.start_file_search();
+        for ch in "usrservce".chars() {
+            app.push_file_search_char(ch);
+        }
+        terminal.draw(|frame| super::draw(frame, &mut app)).unwrap();
+        let lines = ascii_buffer_lines(&terminal);
+        let text = lines.join("\n");
+        assert_eq!(app.file_search_filtered_indices()[0], 100);
+        let (x, y) = text_pos(&lines, "user_service").expect(&text);
+        assert!((0.."user_service".len() as u16)
+            .any(|offset| terminal.backend().buffer()[(x + offset, y)]
+                .modifier
+                .contains(Modifier::UNDERLINED)));
+    }
+
+    #[test]
+    fn fuzzy_highlight_uses_byte_offsets_after_unicode_prefixes() {
+        let text = "éé secretword";
+        let indices = crate::app::grep::fuzzy_text_indices("secret", text);
+        let spans = super::fuzzy_highlight_spans(
+            text,
+            &indices,
+            Style::default(),
+            Style::default().fg(Color::Red),
+        );
+        assert!(spans
+            .iter()
+            .any(|span| { span.content.contains("secret") && span.style.fg == Some(Color::Red) }));
+        let snippet = super::fuzzy_match_snippet(text, &indices, 40);
+        assert_eq!(snippet.text, "éé secretword");
+        assert_eq!(snippet.indices, indices);
+
+        let text = "prefix prefix prefix secretword tail";
+        let indices = crate::app::grep::fuzzy_text_indices("secret", text);
+        let snippet = super::fuzzy_match_snippet(text, &indices, 14);
+        assert!(snippet.text.starts_with("..."));
+        assert!(!snippet.indices.is_empty());
+        assert!(super::fuzzy_highlight_spans(
+            &snippet.text,
+            &snippet.indices,
+            Style::default(),
+            Style::default().fg(Color::Red),
+        )
+        .iter()
+        .any(|span| span.style.fg == Some(Color::Red)));
+    }
+
+    #[test]
+    fn spotlight_picker_geometry_is_shared_and_responsive() {
+        assert_eq!(
+            super::spotlight_popup_rect(Rect::new(0, 0, 200, 50), 20),
+            Rect::new(40, 10, 120, 20)
+        );
+        assert_eq!(
+            super::spotlight_popup_rect(Rect::new(0, 0, 100, 50), 20),
+            Rect::new(10, 10, 80, 20)
+        );
+        assert_eq!(
+            super::spotlight_popup_rect(Rect::new(0, 0, 60, 30), 10),
+            Rect::new(2, 6, 56, 10)
+        );
+        assert_eq!(
+            super::spotlight_popup_rect(Rect::new(5, 7, 240, 80), 20),
+            Rect::new(60, 23, 130, 20)
+        );
+        assert_eq!(
+            super::spotlight_popup_rect(Rect::new(0, 0, 60, 4), 10),
+            Rect::new(2, 0, 56, 4)
+        );
+    }
+
+    #[test]
+    fn find_in_files_popover_width_is_responsive() {
+        assert_eq!(super::find_in_files_popup_width(60), 56);
+        assert_eq!(super::find_in_files_popup_width(100), 83);
+        assert_eq!(super::find_in_files_popup_width(120), 100);
+        assert_eq!(super::find_in_files_popup_width(240), 160);
+    }
+
+    #[test]
+    fn find_in_files_empty_query_has_no_status_hint() {
+        let multi = MultiFileDiff::from_file_pairs(vec![(
+            "src/one.rs".into(),
+            "old\n".to_string(),
+            "new\n".to_string(),
+        )]);
+        let mut app = App::new(multi, ViewMode::UnifiedPane, 0, false, None);
+        app.start_review_grep();
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| super::draw(frame, &mut app)).unwrap();
+        let lines = ascii_buffer_lines(&terminal);
+        let text = lines.join("\n");
+        assert!(text.contains("Find in files"), "screen: {text}");
+        assert!(!text.contains("Type to search"), "screen: {text}");
+        let (_, input_y) = text_pos(&lines, "Search content in changed files").unwrap();
+        let (scope_x, scope_y) = text_pos(&lines, "alt-d Changes").unwrap();
+        let (all_x, all_y) = text_pos(&lines, "alt-e All").unwrap();
+        assert_eq!(input_y, scope_y);
+        assert_eq!(scope_y, all_y);
+        assert!(!lines[scope_y as usize].contains('|'));
+        assert_eq!(
+            terminal.backend().buffer()[(scope_x + 6, scope_y)].bg,
+            terminal.backend().buffer()[(all_x + 6, all_y)].bg
+        );
+        assert!(app.update_review_grep_scope_hover(scope_x, scope_y));
+        terminal.draw(|frame| super::draw(frame, &mut app)).unwrap();
+        let hovered_label = &terminal.backend().buffer()[(scope_x + 6, scope_y)];
+        assert_eq!(hovered_label.fg, app.theme.text);
+        assert!(!hovered_label.modifier.contains(Modifier::BOLD));
+        let active_label = &terminal.backend().buffer()[(all_x + 6, all_y)];
+        assert_eq!(active_label.fg, app.theme.text);
+        assert!(active_label.modifier.contains(Modifier::BOLD));
+        assert!(app.handle_review_grep_click(scope_x, scope_y));
+        assert_eq!(
+            app.review_grep_scope(),
+            crate::app::grep::ReviewGrepScope::Changes
+        );
+
+        for _ in 0..100 {
+            app.push_review_grep_char('x');
+        }
+        terminal.draw(|frame| super::draw(frame, &mut app)).unwrap();
+        let lines = ascii_buffer_lines(&terminal);
+        let text = lines.join("\n");
+        let (scope_x, scope_y) = text_pos(&lines, "alt-d Changes").expect(&text);
+        let last_query_x = (0..scope_x)
+            .rev()
+            .find(|x| terminal.backend().buffer()[(*x, scope_y)].symbol() == "x")
+            .unwrap();
+        assert!(last_query_x.saturating_add(2) < scope_x);
+        assert!(text.contains("alt-e All"), "screen: {text}");
+        assert!(text.contains("0 matches"), "screen: {text}");
+        assert!(!text.contains("Searching"), "screen: {text}");
+    }
+
+    #[test]
+    fn find_in_files_popover_shows_flat_highlighted_matches() {
+        let multi = MultiFileDiff::from_file_pairs(vec![
+            (
+                "src/one.rs".into(),
+                "old\n".to_string(),
+                "// secretword comment\nlet secretword = 42;\n".to_string(),
+            ),
+            (
+                "src/two.rs".into(),
+                "old\n".to_string(),
+                "nothing here\n".to_string(),
+            ),
+        ]);
+        let mut app = App::new(multi, ViewMode::UnifiedPane, 0, false, None);
+        app.start_review_grep();
+        for ch in "secrtword".chars() {
+            app.push_review_grep_char(ch);
+        }
+        for _ in 0..100 {
+            app.poll_review_grep();
+            if !app.review_grep_searching() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| super::draw(frame, &mut app)).unwrap();
+        let lines = ascii_buffer_lines(&terminal);
+        let text = lines.join("\n");
+
+        assert!(text.contains("Find in files"), "screen: {text}");
+        assert!(text.contains("alt-d Changes"), "screen: {text}");
+        assert!(text.contains("alt-e All"), "screen: {text}");
+        assert_eq!(app.review_grep_results().len(), 2);
+        assert!(text.matches("src/one.rs").count() >= 2, "screen: {text}");
+        assert!(text.contains("2 matches"), "screen: {text}");
+        let (x, y) = text_pos(&lines, "secretword").unwrap();
+        let syntax_fg = app
+            .review_grep_syntax_spans(
+                0,
+                crate::app::review::ReviewSide::New,
+                1,
+                "// secretword comment",
+            )
+            .unwrap()
+            .into_iter()
+            .find(|span| span.content.contains("secretword"))
+            .and_then(|span| span.style.fg)
+            .unwrap();
+        assert_eq!(terminal.backend().buffer()[(x, y)].fg, syntax_fg);
+        assert_ne!(syntax_fg, app.theme.text_muted);
+        let modifier = terminal.backend().buffer()[(x, y)].modifier;
+        assert!(modifier.contains(Modifier::BOLD));
+        assert!(modifier.contains(Modifier::UNDERLINED));
+    }
+
+    #[test]
+    fn find_in_files_syntax_snippet_is_safe_on_narrow_terminals() {
+        let multi = MultiFileDiff::from_file_pairs(vec![(
+            "src/narrow.rs".into(),
+            String::new(),
+            "prefix needle\n".to_string(),
+        )]);
+        let mut app = App::new(multi, ViewMode::UnifiedPane, 0, false, None);
+        app.start_review_grep();
+        for ch in "needle".chars() {
+            app.push_review_grep_char(ch);
+        }
+        for _ in 0..100 {
+            app.poll_review_grep();
+            if !app.review_grep_searching() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let backend = TestBackend::new(20, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| super::draw(frame, &mut app)).unwrap();
+        assert!(app.review_grep_active());
+    }
+
+    #[test]
+    fn find_in_files_plain_text_uses_muted_fallback() {
+        let multi = MultiFileDiff::from_file_pairs(vec![(
+            "notes.unknown_extension".into(),
+            String::new(),
+            "plain needle text\n".to_string(),
+        )]);
+        let mut app = App::new(multi, ViewMode::UnifiedPane, 0, false, None);
+        app.start_review_grep();
+        for ch in "needle".chars() {
+            app.push_review_grep_char(ch);
+        }
+        for _ in 0..100 {
+            app.poll_review_grep();
+            if !app.review_grep_searching() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let backend = TestBackend::new(100, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| super::draw(frame, &mut app)).unwrap();
+        let lines = ascii_buffer_lines(&terminal);
+        let (plain_x, y) = text_pos(&lines, "plain needle text").unwrap();
+        let needle_x = plain_x + "plain ".len() as u16;
+        assert_eq!(
+            terminal.backend().buffer()[(plain_x, y)].fg,
+            app.theme.text_muted
+        );
+        assert_eq!(
+            terminal.backend().buffer()[(needle_x, y)].fg,
+            app.theme.accent
+        );
+        assert!(terminal.backend().buffer()[(needle_x, y)]
+            .modifier
+            .contains(Modifier::UNDERLINED));
+        let misses = app.review_grep_syntax_cache_misses();
+        assert_eq!(misses, 1);
+        terminal.draw(|frame| super::draw(frame, &mut app)).unwrap();
+        assert_eq!(app.review_grep_syntax_cache_misses(), misses);
+        assert_eq!(app.review_grep_syntax_cache_len(), 1);
+        app.stop_review_grep();
+        assert_eq!(app.review_grep_syntax_cache_len(), 0);
+    }
+
+    #[test]
+    fn find_in_files_virtualizes_and_hovers_flat_match_rows() {
+        let match_count = 2_000usize;
+        let content = (1..=match_count)
+            .map(|line| format!("needle {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let multi =
+            MultiFileDiff::from_file_pairs(vec![("src/many.rs".into(), String::new(), content)]);
+        let mut app = App::new(multi, ViewMode::UnifiedPane, 0, false, None);
+        app.toggle_stepping();
+        app.auto_center = false;
+        app.start_review_grep();
+        for ch in "needle".chars() {
+            app.push_review_grep_char(ch);
+        }
+        for _ in 0..100 {
+            app.poll_review_grep();
+            if !app.review_grep_searching() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(app.review_grep_results().len(), match_count);
+        app.move_review_grep_selection(1_900);
+
+        let backend = TestBackend::new(100, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| super::draw(frame, &mut app)).unwrap();
+        let lines = ascii_buffer_lines(&terminal);
+        let text = lines.join("\n");
+        assert!(text.contains("2000 matches"), "screen: {text}");
+        let (column, row, _, _, visible_count) = app.review_grep_list_test_geometry().unwrap();
+        assert!(visible_count >= 2 && visible_count < match_count);
+        let initial_misses = app.review_grep_syntax_cache_misses();
+        assert_eq!(initial_misses, visible_count);
+        let start = app.review_grep_list_start();
+        assert!(start > 0);
+        assert!(app.update_review_grep_list_hover(column, row));
+        assert_eq!(app.review_grep_selection(), start);
+
+        terminal.draw(|frame| super::draw(frame, &mut app)).unwrap();
+        assert_eq!(app.review_grep_list_start(), start);
+        assert_eq!(app.review_grep_syntax_cache_misses(), initial_misses);
+        assert!(terminal.backend().buffer()[(column, row)]
+            .modifier
+            .contains(Modifier::BOLD));
+
+        app.move_review_grep_selection(visible_count as isize);
+        terminal.draw(|frame| super::draw(frame, &mut app)).unwrap();
+        let scrolled_misses = app.review_grep_syntax_cache_misses();
+        assert!(scrolled_misses > initial_misses);
+        assert!(scrolled_misses <= initial_misses + visible_count);
+        app.move_review_grep_selection(-(visible_count as isize));
+        terminal.draw(|frame| super::draw(frame, &mut app)).unwrap();
+        assert_eq!(app.review_grep_list_start(), start);
+        assert_eq!(app.review_grep_syntax_cache_misses(), scrolled_misses);
+
+        app.set_ui_theme_name(Some("dracula".to_string()));
+        terminal.draw(|frame| super::draw(frame, &mut app)).unwrap();
+        let ui_theme_misses = app.review_grep_syntax_cache_misses();
+        assert_eq!(ui_theme_misses, scrolled_misses + visible_count);
+        app.set_syntax_theme("nord".to_string());
+        terminal.draw(|frame| super::draw(frame, &mut app)).unwrap();
+        assert_eq!(
+            app.review_grep_syntax_cache_misses(),
+            ui_theme_misses + visible_count
+        );
+        let syntax_theme_misses = app.review_grep_syntax_cache_misses();
+        app.mark_diff_changed();
+        terminal.draw(|frame| super::draw(frame, &mut app)).unwrap();
+        assert_eq!(
+            app.review_grep_syntax_cache_misses(),
+            syntax_theme_misses + visible_count
+        );
+
+        assert!(app.handle_review_grep_click(column, row));
+        assert!(!app.review_grep_active());
+        let view = app.current_view_with_frame(oyo_core::AnimationFrame::Idle);
+        assert_eq!(view[app.scroll_offset].new_line, Some(start + 1));
     }
 
     #[test]

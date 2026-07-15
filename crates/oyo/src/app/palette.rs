@@ -22,6 +22,9 @@ pub(crate) enum PaletteAction {
     NavigateBack,
     NavigateForward,
     OpenFileSearch,
+    OpenReviewGrep,
+    OpenReviewGrepChanges,
+    OpenReviewGrepEverything,
     OpenThemePicker,
     OpenCommentPicker,
     OpenPrComments,
@@ -196,7 +199,7 @@ impl App {
         self.pending_session_rename.take()
     }
 
-    fn reset_picker_cursor(&mut self) {
+    pub(super) fn reset_picker_cursor(&mut self) {
         self.file_filter_cursor_visible = true;
         self.file_filter_cursor_last_blink = std::time::Instant::now();
     }
@@ -210,6 +213,7 @@ impl App {
         self.clear_search();
         self.clear_goto();
         self.stop_file_search();
+        self.stop_review_grep();
         self.stop_comment_picker();
         self.stop_theme_picker();
     }
@@ -411,6 +415,18 @@ impl App {
                 label: "Files...".to_string(),
                 action: PaletteAction::OpenFileSearch,
             });
+            entries.push(PaletteEntry {
+                label: "Find in files\u{2026}".to_string(),
+                action: PaletteAction::OpenReviewGrep,
+            });
+            entries.push(PaletteEntry {
+                label: "Find in files: changes\u{2026}".to_string(),
+                action: PaletteAction::OpenReviewGrepChanges,
+            });
+            entries.push(PaletteEntry {
+                label: "Find in files: all\u{2026}".to_string(),
+                action: PaletteAction::OpenReviewGrepEverything,
+            });
         }
 
         let diff_file_active = self.multi_diff.file_count() > 0
@@ -561,6 +577,13 @@ impl App {
                 self.navigate_view_forward();
             }
             PaletteAction::OpenFileSearch => self.start_file_search(),
+            PaletteAction::OpenReviewGrep => self.start_review_grep(),
+            PaletteAction::OpenReviewGrepChanges => {
+                self.open_review_grep_scope(super::grep::ReviewGrepScope::Changes)
+            }
+            PaletteAction::OpenReviewGrepEverything => {
+                self.open_review_grep_scope(super::grep::ReviewGrepScope::Everything)
+            }
             PaletteAction::OpenThemePicker => self.start_theme_picker(),
             PaletteAction::OpenCommentPicker => self.start_comment_picker(),
             PaletteAction::OpenPrComments => self.open_pr_comments_in_current_tab(None),
@@ -591,6 +614,7 @@ impl App {
         self.clear_search();
         self.clear_goto();
         self.stop_command_palette();
+        self.stop_review_grep();
         self.stop_comment_picker();
         self.stop_theme_picker();
     }
@@ -709,6 +733,7 @@ impl App {
         self.clear_goto();
         self.stop_command_palette();
         self.stop_file_search();
+        self.stop_review_grep();
         self.stop_theme_picker();
     }
 
@@ -857,6 +882,7 @@ impl App {
         self.clear_goto();
         self.stop_command_palette();
         self.stop_file_search();
+        self.stop_review_grep();
         self.stop_comment_picker();
     }
 
@@ -1059,6 +1085,18 @@ mod tests {
         let mut app = app();
         let entries = app.command_palette_entries();
         assert!(entries.iter().any(|entry| {
+            entry.label == "Find in files\u{2026}"
+                && matches!(entry.action, PaletteAction::OpenReviewGrep)
+        }));
+        assert!(entries.iter().any(|entry| {
+            entry.label == "Find in files: changes\u{2026}"
+                && matches!(entry.action, PaletteAction::OpenReviewGrepChanges)
+        }));
+        assert!(entries.iter().any(|entry| {
+            entry.label == "Find in files: all\u{2026}"
+                && matches!(entry.action, PaletteAction::OpenReviewGrepEverything)
+        }));
+        assert!(entries.iter().any(|entry| {
             entry.label == "Navigate back" && matches!(entry.action, PaletteAction::NavigateBack)
         }));
         assert!(entries.iter().any(|entry| {
@@ -1154,5 +1192,18 @@ mod tests {
                 | PaletteAction::CopyFileCursorPosition
                 | PaletteAction::CopyAbsoluteFileCursorPosition
         )));
+
+        let mut scoped = self::app();
+        scoped.execute_palette_action(PaletteAction::OpenReviewGrepChanges);
+        assert!(scoped.review_grep_active());
+        assert_eq!(
+            scoped.review_grep_scope(),
+            super::super::grep::ReviewGrepScope::Changes
+        );
+        scoped.execute_palette_action(PaletteAction::OpenReviewGrepEverything);
+        assert_eq!(
+            scoped.review_grep_scope(),
+            super::super::grep::ReviewGrepScope::Everything
+        );
     }
 }

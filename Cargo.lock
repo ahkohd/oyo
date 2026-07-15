@@ -1132,6 +1132,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "neo_frizbee"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7a2f6120a8da26bea3587731072111062c5d8c51ca3a3a75a716bd8b735d5882"
+
+[[package]]
 name = "num-conv"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1232,6 +1238,7 @@ dependencies = [
  "keymap",
  "lazy_static",
  "logos",
+ "neo_frizbee",
  "oyo-core",
  "pulldown-cmark",
  "ratatui",

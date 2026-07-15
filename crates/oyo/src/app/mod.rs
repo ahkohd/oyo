@@ -33,6 +33,7 @@ mod content_worker;
 mod diff_worker;
 mod file_panel;
 mod files;
+pub(crate) mod grep;
 mod history;
 mod navigation;
 mod palette;
@@ -821,6 +822,8 @@ pub struct App {
     command_palette_list_count: usize,
     /// Command palette list item height (rows per item)
     command_palette_item_height: u16,
+    /// Cross-file review grep state.
+    pub(crate) review_grep: grep::ReviewGrepState,
     /// Quick file search query
     file_search_query: String,
     /// True when quick file search is active
@@ -1469,6 +1472,7 @@ impl App {
             command_palette_list_start: 0,
             command_palette_list_count: 0,
             command_palette_item_height: 1,
+            review_grep: grep::ReviewGrepState::default(),
             file_search_query: String::new(),
             file_search_active: false,
             file_search_selection: 0,
@@ -1790,6 +1794,8 @@ impl App {
             self.syntax_engine = None;
             self.syntax_engine_rx = None;
             self.syntax_caches = vec![None; self.multi_diff.file_count()];
+        } else {
+            self.start_syntax_engine_load();
         }
     }
 
@@ -3080,6 +3086,7 @@ impl App {
             || self.diff_inflight.is_some()
             || !self.diff_queue.is_empty()
             || self.syntax_warmup_pending()
+            || self.review_grep_searching()
             || self.step_edge_hint.is_some()
             || self.hunk_edge_hint.is_some()
             || self.review_sync_status.is_some()
@@ -3111,6 +3118,7 @@ impl App {
         let text_cursor_active = self.file_filter_active
             || self.command_palette_active
             || self.file_search_active
+            || self.review_grep_active()
             || self.comment_picker_active
             || self.theme_picker_active
             || self.session_rename_active
@@ -3146,7 +3154,9 @@ impl App {
         dirty |= self.expire_recent_file_changes(now);
         dirty |= self.toast_tick();
         dirty |= self.poll_content_responses();
+        dirty |= self.poll_review_grep();
         dirty |= self.poll_diff_responses();
+        dirty |= self.poll_review_grep_jump();
         dirty |= self.poll_outdated_reconstruction_responses();
         dirty |= self.outdated_reconstruction_pending();
         dirty |= self.maybe_queue_idle_diff();

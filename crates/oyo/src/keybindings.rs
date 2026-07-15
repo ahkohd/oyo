@@ -12,6 +12,7 @@ pub(crate) enum KeybindingMode {
     ReviewEditor,
     CommandPalette,
     FileSearch,
+    ReviewGrep,
     CommentPicker,
     ThemePicker,
     FileFilter,
@@ -31,6 +32,7 @@ impl KeybindingMode {
             Self::ReviewEditor => "review_editor",
             Self::CommandPalette => "command_palette",
             Self::FileSearch => "file_search",
+            Self::ReviewGrep => "review_grep",
             Self::CommentPicker => "comment_picker",
             Self::ThemePicker => "theme_picker",
             Self::FileFilter => "file_filter",
@@ -48,6 +50,7 @@ impl KeybindingMode {
 pub(crate) enum GlobalAction {
     OpenCommandPalette,
     OpenFileSearch,
+    OpenReviewGrep,
     OpenCommentPicker,
     OpenThemePicker,
 }
@@ -126,6 +129,7 @@ pub(crate) enum NormalAction {
     ToggleHelp,
     OpenCommandPalette,
     OpenFileSearch,
+    OpenReviewGrep,
     OpenCommentPicker,
     OpenOutdatedComments,
     OpenSettings,
@@ -166,6 +170,19 @@ pub(crate) enum PickerAction {
     Clear,
     SelectNext,
     SelectPrev,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum ReviewGrepAction {
+    Cancel,
+    Accept,
+    Backspace,
+    Clear,
+    SelectNext,
+    SelectPrev,
+    ToggleScope,
+    SelectChanges,
+    SelectEverything,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -272,6 +289,7 @@ macro_rules! binding_action {
 binding_action!(GlobalAction, [
     OpenCommandPalette => ("open_command_palette", "Command palette", ["ctrl-p"]),
     OpenFileSearch => ("open_file_search", "Quick file search", ["ctrl-shift-p"]),
+    OpenReviewGrep => ("open_review_grep", "Find in files", ["ctrl-shift-f"]),
     OpenCommentPicker => ("open_comment_picker", "Comment picker", ["ctrl-shift-c"]),
     OpenThemePicker => ("open_theme_picker", "Theme picker", ["ctrl-t"]),
 ]);
@@ -349,6 +367,7 @@ binding_action!(NormalAction, [
     ToggleHelp => ("toggle_help", "Toggle help", ["?"]),
     OpenCommandPalette => ("open_command_palette", "Command palette", ["ctrl-p"]),
     OpenFileSearch => ("open_file_search", "Quick file search", ["ctrl-shift-p", "g f"]),
+    OpenReviewGrep => ("open_review_grep", "Find in files", ["ctrl-shift-f"]),
     OpenCommentPicker => ("open_comment_picker", "Comment picker", ["g c"]),
     OpenOutdatedComments => ("open_outdated_comments", "Outdated comments", ["g o"]),
     OpenSettings => ("open_settings", "Settings", ["g s"]),
@@ -386,6 +405,18 @@ binding_action!(PickerAction, [
     Clear => ("clear", "Clear query", ["ctrl-u"]),
     SelectNext => ("select_next", "Select next", ["down"]),
     SelectPrev => ("select_prev", "Select previous", ["up"]),
+]);
+
+binding_action!(ReviewGrepAction, [
+    Cancel => ("cancel", "Cancel", ["esc"]),
+    Accept => ("accept", "Open selection", ["enter"]),
+    Backspace => ("backspace", "Backspace", ["backspace"]),
+    Clear => ("clear", "Clear query", ["ctrl-u"]),
+    SelectNext => ("select_next", "Select next", ["down", "alt-n"]),
+    SelectPrev => ("select_prev", "Select previous", ["up", "alt-p"]),
+    ToggleScope => ("toggle_scope", "Toggle find scope", ["tab"]),
+    SelectChanges => ("select_changes", "Search changes", ["alt-d"]),
+    SelectEverything => ("select_everything", "Search all", ["alt-e"]),
 ]);
 
 binding_action!(LineInputAction, [
@@ -457,6 +488,7 @@ pub(crate) struct Keybindings {
     review_editor: ModeBindings<ReviewEditorAction>,
     command_palette: ModeBindings<PickerAction>,
     file_search: ModeBindings<PickerAction>,
+    review_grep: ModeBindings<ReviewGrepAction>,
     comment_picker: ModeBindings<PickerAction>,
     theme_picker: ModeBindings<PickerAction>,
     file_filter: ModeBindings<FileFilterAction>,
@@ -508,6 +540,7 @@ impl Keybindings {
             review_editor: ModeBindings::build(KeybindingMode::ReviewEditor, config, warnings),
             command_palette: ModeBindings::build(KeybindingMode::CommandPalette, config, warnings),
             file_search: ModeBindings::build(KeybindingMode::FileSearch, config, warnings),
+            review_grep: ModeBindings::build(KeybindingMode::ReviewGrep, config, warnings),
             comment_picker: ModeBindings::build(KeybindingMode::CommentPicker, config, warnings),
             theme_picker: ModeBindings::build(KeybindingMode::ThemePicker, config, warnings),
             file_filter: ModeBindings::build(KeybindingMode::FileFilter, config, warnings),
@@ -536,6 +569,7 @@ impl Keybindings {
             Some(KeybindingMode::ReviewEditor) => self.review_editor.clear_sequence(),
             Some(KeybindingMode::CommandPalette) => self.command_palette.clear_sequence(),
             Some(KeybindingMode::FileSearch) => self.file_search.clear_sequence(),
+            Some(KeybindingMode::ReviewGrep) => self.review_grep.clear_sequence(),
             Some(KeybindingMode::CommentPicker) => self.comment_picker.clear_sequence(),
             Some(KeybindingMode::ThemePicker) => self.theme_picker.clear_sequence(),
             Some(KeybindingMode::FileFilter) => self.file_filter.clear_sequence(),
@@ -580,6 +614,11 @@ impl Keybindings {
     pub(crate) fn file_search(&mut self, key: KeyEvent) -> Dispatch<PickerAction> {
         self.prepare_mode(KeybindingMode::FileSearch);
         dispatch_mode(&mut self.active_sequence_mode, &mut self.file_search, key)
+    }
+
+    pub(crate) fn review_grep(&mut self, key: KeyEvent) -> Dispatch<ReviewGrepAction> {
+        self.prepare_mode(KeybindingMode::ReviewGrep);
+        dispatch_mode(&mut self.active_sequence_mode, &mut self.review_grep, key)
     }
 
     pub(crate) fn comment_picker(&mut self, key: KeyEvent) -> Dispatch<PickerAction> {
@@ -652,6 +691,10 @@ impl Keybindings {
 
     pub(crate) fn file_search_keys(&self, action: PickerAction) -> String {
         self.file_search.keys_label(action)
+    }
+
+    pub(crate) fn review_grep_keys(&self, action: ReviewGrepAction) -> String {
+        self.review_grep.keys_label(action)
     }
 
     pub(crate) fn theme_picker_keys(&self, action: PickerAction) -> String {
@@ -812,6 +855,8 @@ fn warn_unknown_modes(config: &KeybindingsConfig, warnings: &mut Vec<String>) {
             KeybindingMode::ReviewEditor.id(),
             KeybindingMode::CommandPalette.id(),
             KeybindingMode::FileSearch.id(),
+            KeybindingMode::ReviewGrep.id(),
+            KeybindingMode::CommentPicker.id(),
             KeybindingMode::ThemePicker.id(),
             KeybindingMode::FileFilter.id(),
             KeybindingMode::Goto.id(),
@@ -1211,6 +1256,22 @@ mod tests {
         assert_eq!(
             bindings.normal(key),
             Dispatch::Matched(NormalAction::OpenFileSearch)
+        );
+        let key = KeyEvent::new(
+            KeyCode::Char('f'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        );
+        assert_eq!(
+            bindings.global(key),
+            Dispatch::Matched(GlobalAction::OpenReviewGrep)
+        );
+        let key = KeyEvent::new(
+            KeyCode::Char('f'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        );
+        assert_eq!(
+            bindings.normal(key),
+            Dispatch::Matched(NormalAction::OpenReviewGrep)
         );
         assert_eq!(
             bindings.global(ctrl('p')),

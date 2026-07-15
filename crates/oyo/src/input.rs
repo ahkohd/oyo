@@ -2,7 +2,7 @@ use crate::app::{App, FilePanelMode, FoldContextDirection, TopbarTabContent, Vie
 use crate::config;
 use crate::keybindings::{
     Dispatch, FileFilterAction, GlobalAction, HelpAction, LineInputAction, NormalAction,
-    PickerAction, ReviewEditorAction, SelectionAction,
+    PickerAction, ReviewEditorAction, ReviewGrepAction, SelectionAction,
 };
 use anyhow::Result;
 use crossterm::{
@@ -139,6 +139,11 @@ pub(crate) fn handle_app_key(
         return Ok(());
     }
 
+    if app.review_grep_active() {
+        handle_review_grep_key(app, key);
+        return Ok(());
+    }
+
     if app.comment_picker_active() {
         handle_comment_picker_key(app, key);
         return Ok(());
@@ -271,6 +276,18 @@ fn handle_global_key(app: &mut App, key: KeyEvent) -> bool {
                 app.stop_file_search();
             } else {
                 app.start_file_search();
+            }
+            true
+        }
+        Dispatch::Matched(GlobalAction::OpenReviewGrep) => {
+            if app.multi_diff.file_count() == 0 {
+                return false;
+            }
+            app.reset_count();
+            if app.review_grep_active() {
+                app.stop_review_grep();
+            } else {
+                app.start_review_grep();
             }
             true
         }
@@ -421,6 +438,34 @@ fn handle_theme_picker_key(app: &mut App, key: KeyEvent) {
         Dispatch::Unmatched => {
             if let Some(c) = printable_char(key) {
                 app.push_theme_picker_char(c);
+            }
+        }
+    }
+}
+
+fn handle_review_grep_key(app: &mut App, key: KeyEvent) {
+    match app.keybindings.review_grep(key) {
+        Dispatch::Matched(ReviewGrepAction::Cancel) => app.stop_review_grep(),
+        Dispatch::Matched(ReviewGrepAction::Accept) => app.apply_review_grep_selection(),
+        Dispatch::Matched(ReviewGrepAction::Backspace) => {
+            if !app.review_grep_query().is_empty() {
+                app.pop_review_grep_char();
+            }
+        }
+        Dispatch::Matched(ReviewGrepAction::Clear) => app.clear_review_grep_text(),
+        Dispatch::Matched(ReviewGrepAction::SelectNext) => app.move_review_grep_selection(1),
+        Dispatch::Matched(ReviewGrepAction::SelectPrev) => app.move_review_grep_selection(-1),
+        Dispatch::Matched(ReviewGrepAction::ToggleScope) => app.toggle_review_grep_scope(),
+        Dispatch::Matched(ReviewGrepAction::SelectChanges) => {
+            app.select_review_grep_scope(crate::app::grep::ReviewGrepScope::Changes)
+        }
+        Dispatch::Matched(ReviewGrepAction::SelectEverything) => {
+            app.select_review_grep_scope(crate::app::grep::ReviewGrepScope::Everything)
+        }
+        Dispatch::Pending => {}
+        Dispatch::Unmatched => {
+            if let Some(c) = printable_char(key) {
+                app.push_review_grep_char(c);
             }
         }
     }
@@ -1332,6 +1377,14 @@ fn dispatch_normal_action(
                 app.start_file_search();
             }
         }
+        NormalAction::OpenReviewGrep => {
+            app.reset_count();
+            if app.review_grep_active() {
+                app.stop_review_grep();
+            } else {
+                app.start_review_grep();
+            }
+        }
         NormalAction::OpenCommentPicker => {
             app.reset_count();
             if app.comment_picker_active() {
@@ -1375,6 +1428,17 @@ mod tests {
 
     fn ctrl(ch: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(ch), KeyModifiers::CONTROL)
+    }
+
+    fn ctrl_shift(ch: char) -> KeyEvent {
+        KeyEvent::new(
+            KeyCode::Char(ch),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        )
+    }
+
+    fn alt(ch: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(ch), KeyModifiers::ALT)
     }
 
     fn test_terminal() -> TuiTerminal {
@@ -1451,6 +1515,110 @@ mod tests {
         )
         .unwrap();
         assert!(app.open_dashboard);
+    }
+
+    #[test]
+    fn review_grep_binding_opens_and_navigates_results() {
+        let diff = MultiFileDiff::from_file_pairs(vec![
+            (
+                "one.txt".into(),
+                "old\n".to_string(),
+                "needle one\nneedle second\n".to_string(),
+            ),
+            (
+                "two.txt".into(),
+                "old\n".to_string(),
+                "needle two\n".to_string(),
+            ),
+        ]);
+        let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+        app.toggle_stepping();
+        app.auto_center = false;
+        assert!(handle_global_key(&mut app, ctrl_shift('f')));
+        assert!(app.review_grep_active());
+        for ch in "needle".chars() {
+            handle_review_grep_key(&mut app, key(ch));
+        }
+        for _ in 0..100 {
+            app.poll_review_grep();
+            if !app.review_grep_searching() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(app.review_grep_query(), "needle");
+        assert_eq!(app.review_grep_results().len(), 3);
+        handle_review_grep_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Down, KeyModifiers::empty()),
+        );
+        assert_eq!(app.review_grep_selection(), 1);
+        handle_review_grep_key(&mut app, KeyEvent::new(KeyCode::Up, KeyModifiers::empty()));
+        assert_eq!(app.review_grep_selection(), 0);
+        handle_review_grep_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Down, KeyModifiers::empty()),
+        );
+        handle_review_grep_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+        );
+        assert!(!app.review_grep_active());
+        assert_eq!(app.multi_diff.selected_index, 0);
+        let view = app.current_view_with_frame(oyo_core::AnimationFrame::Idle);
+        assert_eq!(view[app.scroll_offset].new_line, Some(2));
+    }
+
+    #[test]
+    fn review_grep_scope_keys_do_not_consume_query_text() {
+        let diff = MultiFileDiff::from_file_pairs(vec![(
+            "one.txt".into(),
+            "old\n".to_string(),
+            "new\n".to_string(),
+        )]);
+        let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+        app.start_review_grep();
+        assert_eq!(
+            app.review_grep_scope(),
+            crate::app::grep::ReviewGrepScope::Everything
+        );
+        handle_review_grep_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::empty()),
+        );
+        assert!(app.review_grep_active());
+
+        handle_review_grep_key(&mut app, key('d'));
+        handle_review_grep_key(&mut app, key('e'));
+        assert_eq!(app.review_grep_query(), "de");
+        handle_review_grep_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::empty()),
+        );
+        assert_eq!(app.review_grep_query(), "d");
+        handle_review_grep_key(&mut app, key('e'));
+        assert_eq!(
+            app.review_grep_scope(),
+            crate::app::grep::ReviewGrepScope::Everything
+        );
+
+        handle_review_grep_key(&mut app, alt('d'));
+        assert_eq!(
+            app.review_grep_scope(),
+            crate::app::grep::ReviewGrepScope::Changes
+        );
+        handle_review_grep_key(&mut app, alt('e'));
+        assert_eq!(
+            app.review_grep_scope(),
+            crate::app::grep::ReviewGrepScope::Everything
+        );
+        handle_review_grep_key(&mut app, KeyEvent::new(KeyCode::Tab, KeyModifiers::empty()));
+        assert_eq!(
+            app.review_grep_scope(),
+            crate::app::grep::ReviewGrepScope::Changes
+        );
+        handle_review_grep_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
+        assert!(!app.review_grep_active());
     }
 
     #[test]

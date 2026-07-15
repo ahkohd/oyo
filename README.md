@@ -65,6 +65,8 @@ Oyo helps you complete a review without leaving the terminal. You can:
 - use the review CLI and installed skill with coding agents
 - read changes in scroll mode or step mode
 - move between hunks and files
+- find reviewed files with typo-tolerant path search
+- find text in changed lines or complete reviewed file content
 - switch between unified, split, evolution, blame and preview views
 - open multiple views in tabs
 - preview Markdown, JSON, YAML, TOML, CSV and images
@@ -330,6 +332,7 @@ Common defaults:
 | `M` | Add or update a hunk comment |
 | `ctrl-s` | Save an inline comment |
 | `ctrl-p` | Open the command palette |
+| `ctrl-shift-f` | Search content across reviewed files |
 | `R` | Refresh files |
 | `?` | Show help |
 | `q` | Quit |

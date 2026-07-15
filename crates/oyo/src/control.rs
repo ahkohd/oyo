@@ -1393,6 +1393,7 @@ fn apply_action(app: &mut App, id: &str, count: usize) -> Result<()> {
         "normal.toggle_help" => app.open_help_tab(),
         "normal.open_command_palette" => app.start_command_palette(),
         "normal.open_file_search" => app.start_file_search(),
+        "normal.open_review_grep" => app.start_review_grep(),
         "normal.open_comment_picker" => app.start_comment_picker(),
         "normal.open_theme_picker" => app.start_theme_picker(),
         "normal.blame_hint" => app.trigger_blame_hint(),

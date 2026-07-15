@@ -2114,6 +2114,9 @@ impl App {
     }
 
     pub(crate) fn file_list_total_rows(&self, indices: &[usize]) -> usize {
+        if !self.file_filter.is_empty() {
+            return indices.len();
+        }
         let mut rows = 0usize;
         let mut current_group: Option<String> = None;
         for &index in indices {
@@ -2131,6 +2134,9 @@ impl App {
     }
 
     fn file_list_row_for_file(&self, indices: &[usize], target: usize) -> Option<usize> {
+        if !self.file_filter.is_empty() {
+            return indices.iter().position(|index| *index == target);
+        }
         let mut row = 0usize;
         let mut current_group: Option<String> = None;
         for &index in indices {
@@ -2176,7 +2182,7 @@ impl App {
     }
 
     fn ensure_selection_matches_filter(&mut self) {
-        if self.file_filter.is_empty() {
+        if self.file_panel_mode != FilePanelMode::Files || self.file_filter.is_empty() {
             return;
         }
         let indices = self.filtered_file_indices();
@@ -2193,18 +2199,9 @@ impl App {
     }
 
     pub(super) fn file_indices_for_query(&self, query: &str) -> Vec<usize> {
-        let files = self
-            .outdated_live_files()
-            .unwrap_or(self.multi_diff.files.as_slice());
-        if query.is_empty() {
-            return (0..files.len()).collect();
-        }
-        let query = query.to_ascii_lowercase();
-        files
-            .iter()
-            .enumerate()
-            .filter(|(_, file)| file.display_name.to_ascii_lowercase().contains(&query))
-            .map(|(idx, _)| idx)
+        self.fuzzy_file_matches_for_query(query)
+            .into_iter()
+            .map(|matched| matched.file_index)
             .collect()
     }
 

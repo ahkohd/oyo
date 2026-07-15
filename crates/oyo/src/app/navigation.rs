@@ -2422,7 +2422,7 @@ impl App {
                         }
                         old_idx += 1;
                         old_last = Some(old_idx - 1);
-                    } else if fold_line {
+                    } else if fold_line || (self.split_align_lines && line.new_line.is_some()) {
                         old_idx += 1;
                         old_last = Some(old_idx - 1);
                     }
@@ -2433,7 +2433,7 @@ impl App {
                         }
                         new_idx += 1;
                         new_last = Some(new_idx - 1);
-                    } else if fold_line {
+                    } else if fold_line || (self.split_align_lines && line.old_line.is_some()) {
                         new_idx += 1;
                         new_last = Some(new_idx - 1);
                     }
@@ -2536,6 +2536,89 @@ impl App {
                         .set_cursor_change(Some(change_id)),
                     None => self.multi_diff.current_navigator().clear_cursor_change(),
                 }
+            }
+        }
+    }
+
+    pub(super) fn goto_review_grep_line(
+        &mut self,
+        side: super::review::ReviewSide,
+        line_number: usize,
+    ) {
+        let diff_status = self.multi_diff.current_file_diff_status();
+        if self.stepping
+            && !matches!(
+                diff_status,
+                oyo_core::multi::DiffStatus::Ready | oyo_core::multi::DiffStatus::Disabled
+            )
+        {
+            return;
+        }
+        if self.stepping && diff_status == oyo_core::multi::DiffStatus::Ready {
+            self.multi_diff
+                .ensure_full_navigator(self.multi_diff.selected_index);
+        }
+        if self.view_mode == ViewMode::Preview
+            || (side == super::review::ReviewSide::Old && self.view_mode == ViewMode::Evolution)
+        {
+            self.view_mode = ViewMode::UnifiedPane;
+            self.preview_forced_by_content = false;
+        }
+        self.clear_peek();
+        self.expand_all_context_folds();
+        let view = self.current_view_with_frame(AnimationFrame::Idle);
+        let target = if self.view_mode == ViewMode::Split {
+            let mut pane_idx = 0usize;
+            let mut target = None;
+            for line in view.iter() {
+                let (line_number_for_side, other_side_has_line) = match side {
+                    super::review::ReviewSide::Old => (line.old_line, line.new_line.is_some()),
+                    super::review::ReviewSide::New => (line.new_line, line.old_line.is_some()),
+                };
+                if line_number_for_side == Some(line_number) {
+                    target = Some((pane_idx, (line.hunk_index, line.change_id)));
+                    break;
+                }
+                if line_number_for_side.is_some()
+                    || is_fold_line(line)
+                    || (self.split_align_lines && other_side_has_line)
+                {
+                    pane_idx += 1;
+                }
+            }
+            target
+        } else {
+            view.iter().enumerate().find_map(|(idx, line)| {
+                let matches = match side {
+                    super::review::ReviewSide::Old => line.old_line == Some(line_number),
+                    super::review::ReviewSide::New => line.new_line == Some(line_number),
+                };
+                matches.then_some((idx, (line.hunk_index, line.change_id)))
+            })
+        };
+        let Some((idx, cursor_target)) = target else {
+            return;
+        };
+        let viewport_height = self.last_viewport_height.max(1);
+        if self.auto_center {
+            self.scroll_offset = idx.saturating_sub(viewport_height / 2);
+            self.centered_once = true;
+        } else {
+            self.scroll_offset = idx;
+            self.centered_once = false;
+        }
+        self.needs_scroll_to_active = false;
+        self.multi_diff.current_navigator().set_hunk_scope(false);
+        if !self.stepping {
+            match cursor_target {
+                (Some(hidx), change_id) => self
+                    .multi_diff
+                    .current_navigator()
+                    .set_cursor_hunk(hidx, Some(change_id)),
+                (None, change_id) => self
+                    .multi_diff
+                    .current_navigator()
+                    .set_cursor_change(Some(change_id)),
             }
         }
     }

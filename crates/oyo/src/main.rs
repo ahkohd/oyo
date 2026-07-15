@@ -82,6 +82,7 @@ type TuiTerminal = Terminal<TuiBackend>;
 enum MouseScrollTarget {
     CommandPalette,
     FileSearch,
+    ReviewGrep,
     FilePanel,
     Step,
     Diff,
@@ -7537,6 +7538,43 @@ fn run_app(
                         }
                         continue;
                     }
+                    if app.review_grep_active() {
+                        match me.kind {
+                            MouseEventKind::Moved => {
+                                let hover_changed = app
+                                    .update_review_grep_scope_hover(me.column, me.row)
+                                    | app.update_review_grep_list_hover(me.column, me.row);
+                                needs_draw |= hover_changed;
+                            }
+                            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                                if queue_mouse_scroll(
+                                    app,
+                                    MouseScrollTarget::ReviewGrep,
+                                    me.kind,
+                                    &mut pending_event,
+                                    &mut pending_mouse_scroll,
+                                    &mut blocked_mouse_scroll,
+                                    last_scroll_draw,
+                                )? {
+                                    schedule_mouse_scroll_draw(
+                                        &mut needs_draw,
+                                        &mut scroll_draw_pending,
+                                        last_scroll_draw,
+                                    );
+                                } else {
+                                    needs_draw = false;
+                                    scroll_draw_pending = false;
+                                }
+                            }
+                            MouseEventKind::Down(MouseButton::Left)
+                                if !app.handle_review_grep_click(me.column, me.row) =>
+                            {
+                                app.stop_review_grep();
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
                     if app.comment_picker_active() {
                         match me.kind {
                             MouseEventKind::ScrollUp => app.move_comment_picker_selection(-1),
@@ -8226,6 +8264,7 @@ fn mouse_scroll_action_cap(target: MouseScrollTarget) -> Option<isize> {
         MouseScrollTarget::Diff => None,
         MouseScrollTarget::CommandPalette
         | MouseScrollTarget::FileSearch
+        | MouseScrollTarget::ReviewGrep
         | MouseScrollTarget::FilePanel
         | MouseScrollTarget::Step => Some(MAX_DISCRETE_MOUSE_SCROLL_ACTIONS_PER_FRAME),
     }
@@ -8346,6 +8385,11 @@ fn apply_mouse_scroll(app: &mut App, scroll: PendingMouseScroll) {
         MouseScrollTarget::FileSearch => {
             if app.file_search_active() {
                 app.move_file_search_selection(delta);
+            }
+        }
+        MouseScrollTarget::ReviewGrep => {
+            if app.review_grep_active() {
+                app.move_review_grep_selection(delta);
             }
         }
         MouseScrollTarget::FilePanel | MouseScrollTarget::Step | MouseScrollTarget::Diff => {

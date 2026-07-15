@@ -12,6 +12,7 @@ If you do not set an action, Oyo uses the default keys. Set an action to an empt
 [keybindings.global]
 open_command_palette = ["ctrl-p"]
 open_file_search = ["ctrl-shift-p"]
+open_review_grep = ["ctrl-shift-f"]
 open_comment_picker = ["ctrl-shift-c"]
 open_theme_picker = ["ctrl-t"]
 
@@ -62,7 +63,7 @@ In `normal` mode, plain `1` to `9` are reserved for counts. Plain `0` means `lin
 
 `global` runs before most input modes. It does not run before `help` or `review_editor`.
 
-`normal.open_command_palette`, `normal.open_file_search`, `normal.open_comment_picker` and `normal.open_theme_picker` still work in normal mode. Use `global` if you want shortcuts to work while a picker, search box or filter is active.
+`normal.open_command_palette`, `normal.open_file_search`, `normal.open_review_grep`, `normal.open_comment_picker` and `normal.open_theme_picker` still work in normal mode. Use `global` if you want shortcuts to work while a picker, search box or filter is active.
 
 In review mode, `r`, `v`, `x` and `o` are contextual when the current file shows inline comments. Use indexed actions such as `ra reply`, `va resolve` on a thread root, `xa delete` and `oa overflow`. Reply cards omit the resolve action because resolved state belongs to the thread. These prefixes take priority over their normal-mode actions while review cards are visible.
 
@@ -94,6 +95,8 @@ Mouse actions use built-in behaviour and cannot be changed with keybindings.
 | Click a comment in the sidebar | Open it for editing |
 | Click the comments sidebar overflow menu | Pull or push review comments |
 | Click a comment picker item | Jump to that review comment |
+| Click a Find in files scope | Search changes or all reviewed file content |
+| Click a Find in files result | Open that match |
 | Click an item in History | Open it |
 | Control-click an item in History | Mark the range start |
 | Right-click an item in History | Open the range context menu |
@@ -124,6 +127,7 @@ Use each mode as `[keybindings.<mode>]`.
 | `review_editor` | `[keybindings.review_editor]` | Inline comment editor |
 | `command_palette` | `[keybindings.command_palette]` | Command palette picker |
 | `file_search` | `[keybindings.file_search]` | Quick file search picker |
+| `review_grep` | `[keybindings.review_grep]` | Find in files picker |
 | `comment_picker` | `[keybindings.comment_picker]` | Comment picker |
 | `theme_picker` | `[keybindings.theme_picker]` | Theme picker |
 | `file_filter` | `[keybindings.file_filter]` | File panel filter |
@@ -139,6 +143,7 @@ Use each mode as `[keybindings.<mode>]`.
 | --- | --- | --- |
 | `open_command_palette` | `ctrl-p` | Open the command palette |
 | `open_file_search` | `ctrl-shift-p` | Open quick file search |
+| `open_review_grep` | `ctrl-shift-f` | Search reviewed file content |
 | `open_comment_picker` | `ctrl-shift-c` | Open comment picker |
 | `open_theme_picker` | `ctrl-t` | Open theme picker |
 
@@ -220,6 +225,7 @@ Use each mode as `[keybindings.<mode>]`.
 | `toggle_help` | `?` | Show or hide help |
 | `open_command_palette` | `ctrl-p` | Open the command palette in normal mode |
 | `open_file_search` | `ctrl-shift-p`, `g f` | Open quick file search in normal mode |
+| `open_review_grep` | `ctrl-shift-f` | Search reviewed file content |
 | `open_comment_picker` | `g c` | Open comment picker in normal mode |
 | `open_outdated_comments` | `g o` | Open outdated comments in normal mode |
 | `open_settings` | `g s` | Open Settings in normal mode |
@@ -278,6 +284,22 @@ folds.
 | `clear` | `ctrl-u` | Clear the query |
 | `select_next` | `down` | Select the next item |
 | `select_prev` | `up` | Select the previous item |
+
+## Find in files mode
+
+Find in files uses typo-tolerant fuzzy matching over files in the review. It shows one row for each match and keeps rows from the same file together. The default All scope searches complete current content. Changes searches added and deleted lines, plus the context shown around each change. Deleted files use their old content in both scopes. Oyo keeps your last scope for the session. It never searches files outside the review. The sidebar file filter and quick file search use the same fuzzy path matching.
+
+| Action | Default keys | What it does |
+| --- | --- | --- |
+| `cancel` | `esc` | Cancel |
+| `accept` | `enter` | Open the selected match |
+| `backspace` | `backspace` | Delete the previous character |
+| `clear` | `ctrl-u` | Clear the query |
+| `select_next` | `down`, `alt-n` | Select the next match |
+| `select_prev` | `up`, `alt-p` | Select the previous match |
+| `toggle_scope` | `tab` | Switch between Changes and All |
+| `select_changes` | `alt-d` | Search changed and context lines |
+| `select_everything` | `alt-e` | Search complete reviewed file content |
 
 ## Comment picker mode
 
