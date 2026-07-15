@@ -1225,7 +1225,7 @@ checksum = "1a80800c0488c3a21695ea981a54918fbb37abf04f4d0720c453632255e2ff0e"
 
 [[package]]
 name = "oyo"
-version = "0.1.50"
+version = "0.1.51"
 dependencies = [
  "anyhow",
  "base64",
@@ -1262,7 +1262,7 @@ dependencies = [
 
 [[package]]
 name = "oyo-core"
-version = "0.1.50"
+version = "0.1.51"
 dependencies = [
  "anyhow",
  "criterion",
