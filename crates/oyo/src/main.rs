@@ -48,7 +48,10 @@ use crossterm::{
         PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{
+        disable_raw_mode, enable_raw_mode, BeginSynchronizedUpdate, EndSynchronizedUpdate,
+        EnterAlternateScreen, LeaveAlternateScreen,
+    },
 };
 use oyo_core::{
     multi::{FileSide, RawFileDiff},
@@ -71,7 +74,17 @@ const MAX_COALESCED_MOUSE_SCROLL_READS: usize = 4096;
 const MAX_DISCRETE_MOUSE_SCROLL_ACTIONS_PER_FRAME: isize = 16;
 const MAX_EXIT_INPUT_DRAIN_EVENTS: usize = 65_536;
 const EXIT_INPUT_DRAIN: Duration = Duration::from_millis(100);
-const MOUSE_SCROLL_FRAME: Duration = Duration::from_millis(16);
+// Paces scroll redraws at up to ~120fps so high-refresh displays (e.g. ProMotion)
+// get one paint per refresh instead of coalescing wheel events into 60fps jumps.
+const MOUSE_SCROLL_FRAME: Duration = Duration::from_millis(8);
+const MOUSE_SCROLL_MOMENTUM_LATCH: Duration = Duration::from_millis(40);
+const MOUSE_SCROLL_MOMENTUM_CONTINUITY: Duration = Duration::from_millis(150);
+const MOUSE_SCROLL_SUPPRESSION_CAP: Duration = Duration::from_secs(3);
+/// Max pause between events that still belong to the same scroll run.
+const MOUSE_SCROLL_STREAM_GAP: Duration = Duration::from_millis(100);
+/// Minimum accumulated volume for a scroll run to count as a flick that can
+/// leave a momentum tail behind. Gentle wiggle legs stay far below this.
+const MOUSE_SCROLL_FLICK_VOLUME: isize = 10;
 const OYO_CODE_REVIEW_SKILL: &str = include_str!("../docs/SKILL.md");
 const OYO_CONTROL_SKILL: &str = include_str!("../docs/CONTROL.md");
 
@@ -98,6 +111,84 @@ struct PendingMouseScroll {
 struct BlockedMouseScroll {
     target: MouseScrollTarget,
     direction: isize,
+}
+
+/// A run of mouse scrolling in one direction: accumulated delta over events
+/// that follow each other closely. Distinguishes a flick (dense, can leave a
+/// momentum tail) from a gentle nudge (sparse, no momentum). `started_at`
+/// orders overlapping runs: when opposite streams interleave, the older one
+/// is the momentum tail.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MouseScrollRun {
+    target: MouseScrollTarget,
+    volume: isize,
+    started_at: Instant,
+    last_at: Instant,
+}
+
+impl MouseScrollRun {
+    fn is_flick(&self) -> bool {
+        self.volume >= MOUSE_SCROLL_FLICK_VOLUME
+    }
+
+    fn is_live(&self, target: MouseScrollTarget, now: Instant) -> bool {
+        self.target == target && now.duration_since(self.last_at) <= MOUSE_SCROLL_STREAM_GAP
+    }
+}
+
+/// Scroll runs tracked per direction, so a momentum tail's run keeps its
+/// volume while the user's reversal events interleave with it.
+#[derive(Clone, Copy, Debug, Default)]
+struct MouseScrollRuns {
+    backward: Option<MouseScrollRun>,
+    forward: Option<MouseScrollRun>,
+}
+
+impl MouseScrollRuns {
+    fn get(&self, direction: isize) -> Option<MouseScrollRun> {
+        if direction < 0 {
+            self.backward
+        } else {
+            self.forward
+        }
+    }
+
+    fn slot(&mut self, direction: isize) -> &mut Option<MouseScrollRun> {
+        if direction < 0 {
+            &mut self.backward
+        } else {
+            &mut self.forward
+        }
+    }
+
+    fn record(&mut self, target: MouseScrollTarget, delta: isize, now: Instant) {
+        if delta == 0 {
+            return;
+        }
+        let slot = self.slot(delta.signum());
+        let continues_run = slot.is_some_and(|run| run.is_live(target, now));
+        *slot = Some(match *slot {
+            Some(run) if continues_run => MouseScrollRun {
+                volume: run.volume.saturating_add(delta.abs()),
+                last_at: now,
+                ..run
+            },
+            _ => MouseScrollRun {
+                target,
+                volume: delta.abs(),
+                started_at: now,
+                last_at: now,
+            },
+        });
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SuppressedMouseScroll {
+    target: MouseScrollTarget,
+    direction: isize,
+    expires_at: Instant,
+    hard_deadline: Instant,
 }
 
 #[derive(Parser, Debug)]
@@ -7295,6 +7386,8 @@ fn run_app(
     let mut last_scroll_draw = Instant::now() - MOUSE_SCROLL_FRAME;
     let mut pending_mouse_scroll: Option<PendingMouseScroll> = None;
     let mut blocked_mouse_scroll: Option<BlockedMouseScroll> = None;
+    let mut momentum_mouse_scroll: Option<SuppressedMouseScroll> = None;
+    let mut mouse_scroll_runs = MouseScrollRuns::default();
     let mut review_sync_worker: Option<ReviewSyncWorker> = None;
     let mut review_sync_pull_stats: Option<ReviewPullStats> = None;
     let mut review_pr_lookup_worker = app
@@ -7335,9 +7428,12 @@ fn run_app(
             if apply_pending_mouse_scroll(app, &mut pending_mouse_scroll) {
                 scroll_draw_pending = false;
             }
-            terminal
-                .draw(|f| ui::draw(f, app))
-                .map_err(|e| anyhow!("{e}"))?;
+            // Synchronized updates (CSI 2026) make the terminal present the frame
+            // atomically, preventing tearing mid-paint; unsupported terminals ignore it.
+            let _ = execute!(terminal.backend_mut(), BeginSynchronizedUpdate);
+            let draw_result = terminal.draw(|f| ui::draw(f, app)).map(|_| ());
+            let _ = execute!(terminal.backend_mut(), EndSynchronizedUpdate);
+            draw_result.map_err(|e| anyhow!("{e}"))?;
             needs_draw = false;
             last_scroll_draw = Instant::now();
             update_mouse_scroll_block(
@@ -7367,8 +7463,8 @@ fn run_app(
         };
         let event = if let Some(event) = pending_event.take() {
             Some(event)
-        } else if event::poll(poll_timeout)? {
-            Some(event::read()?)
+        } else if input_event_poll(poll_timeout)? {
+            Some(input_event_read()?)
         } else {
             None
         };
@@ -7381,6 +7477,7 @@ fn run_app(
             needs_draw = true;
             if !is_mouse_scroll_event(&event) {
                 blocked_mouse_scroll = None;
+                momentum_mouse_scroll = None;
                 if apply_pending_mouse_scroll(app, &mut pending_mouse_scroll) {
                     scroll_draw_pending = false;
                 }
@@ -7486,6 +7583,8 @@ fn run_app(
                                     &mut pending_event,
                                     &mut pending_mouse_scroll,
                                     &mut blocked_mouse_scroll,
+                                    &mut momentum_mouse_scroll,
+                                    &mut mouse_scroll_runs,
                                     last_scroll_draw,
                                 )? {
                                     schedule_mouse_scroll_draw(
@@ -7517,6 +7616,8 @@ fn run_app(
                                     &mut pending_event,
                                     &mut pending_mouse_scroll,
                                     &mut blocked_mouse_scroll,
+                                    &mut momentum_mouse_scroll,
+                                    &mut mouse_scroll_runs,
                                     last_scroll_draw,
                                 )? {
                                     schedule_mouse_scroll_draw(
@@ -7554,6 +7655,8 @@ fn run_app(
                                     &mut pending_event,
                                     &mut pending_mouse_scroll,
                                     &mut blocked_mouse_scroll,
+                                    &mut momentum_mouse_scroll,
+                                    &mut mouse_scroll_runs,
                                     last_scroll_draw,
                                 )? {
                                     schedule_mouse_scroll_draw(
@@ -7915,6 +8018,8 @@ fn run_app(
                                 &mut pending_event,
                                 &mut pending_mouse_scroll,
                                 &mut blocked_mouse_scroll,
+                                &mut momentum_mouse_scroll,
+                                &mut mouse_scroll_runs,
                                 last_scroll_draw,
                             )? {
                                 schedule_mouse_scroll_draw(
@@ -8158,8 +8263,8 @@ fn coalesce_key_repeats(
 ) -> std::io::Result<usize> {
     let mut count = 1usize;
     let same_key = |next: &KeyEvent| next.code == first.code && next.modifiers == first.modifiers;
-    while event::poll(Duration::from_millis(0))? {
-        let next = event::read()?;
+    while input_event_poll(Duration::from_millis(0))? {
+        let next = input_event_read()?;
         match next {
             Event::Key(key)
                 if same_key(&key)
@@ -8186,6 +8291,139 @@ fn toast_mouse_button(kind: MouseEventKind) -> Option<ratatui_comfy_toaster::Toa
         }
         _ => None,
     }
+}
+
+/// Progress of a char stream toward matching the tail of an SGR mouse report
+/// (`[<button;column;rowM` or `m` — everything after the sequence's ESC byte).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SgrFragmentState {
+    Invalid,
+    Incomplete,
+    Complete,
+}
+
+fn sgr_mouse_fragment_state(fragment: &str) -> SgrFragmentState {
+    let mut chars = fragment.chars();
+    for expected in ['[', '<'] {
+        match chars.next() {
+            None => return SgrFragmentState::Incomplete,
+            Some(ch) if ch == expected => {}
+            Some(_) => return SgrFragmentState::Invalid,
+        }
+    }
+    for section in 0..3usize {
+        let is_last_section = section == 2;
+        let mut digits = 0usize;
+        loop {
+            match chars.next() {
+                None => return SgrFragmentState::Incomplete,
+                Some(ch) if ch.is_ascii_digit() => {
+                    digits += 1;
+                    if digits > 4 {
+                        return SgrFragmentState::Invalid;
+                    }
+                }
+                Some(';') if !is_last_section && digits > 0 => break,
+                Some('M' | 'm') if is_last_section && digits > 0 => {
+                    return if chars.next().is_none() {
+                        SgrFragmentState::Complete
+                    } else {
+                        SgrFragmentState::Invalid
+                    };
+                }
+                Some(_) => return SgrFragmentState::Invalid,
+            }
+        }
+    }
+    SgrFragmentState::Incomplete
+}
+
+// When a fast wheel flood splits a terminal write right after a mouse
+// sequence's ESC byte, crossterm reports a bare Esc key and then delivers the
+// remaining bytes as plain character keys ("[<64;40;20M" = prev-file, comment,
+// count keys...). After a bare Esc, wait briefly for those characters and
+// swallow the whole run when they spell out a mouse report; no human can type
+// it that fast, so real input is never eaten.
+const SGR_FRAGMENT_FIRST_CHAR_WAIT: Duration = Duration::from_millis(40);
+const SGR_FRAGMENT_NEXT_CHAR_WAIT: Duration = Duration::from_millis(5);
+
+thread_local! {
+    static REPLAYED_INPUT_EVENTS: std::cell::RefCell<std::collections::VecDeque<Event>> =
+        const { std::cell::RefCell::new(std::collections::VecDeque::new()) };
+}
+
+fn input_event_poll(timeout: Duration) -> std::io::Result<bool> {
+    if REPLAYED_INPUT_EVENTS.with(|queue| !queue.borrow().is_empty()) {
+        return Ok(true);
+    }
+    event::poll(timeout)
+}
+
+fn input_event_read() -> std::io::Result<Event> {
+    loop {
+        let replayed = REPLAYED_INPUT_EVENTS.with(|queue| queue.borrow_mut().pop_front());
+        if let Some(event) = replayed {
+            return Ok(event);
+        }
+        let event = event::read()?;
+        if is_bare_escape_key(&event) && swallow_sgr_mouse_fragment()? {
+            continue;
+        }
+        return Ok(event);
+    }
+}
+
+fn is_bare_escape_key(event: &Event) -> bool {
+    matches!(
+        event,
+        Event::Key(key)
+            if key.code == KeyCode::Esc
+                && key.modifiers.is_empty()
+                && matches!(key.kind, KeyEventKind::Press)
+    )
+}
+
+fn sgr_fragment_char(event: &Event) -> Option<char> {
+    match event {
+        Event::Key(key)
+            if matches!(key.kind, KeyEventKind::Press)
+                && key.modifiers.difference(KeyModifiers::SHIFT).is_empty() =>
+        {
+            match key.code {
+                KeyCode::Char(ch) => Some(ch),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Returns true when a complete SGR mouse report fragment followed the bare
+/// Esc and was dropped. Otherwise replays whatever was consumed, in order.
+fn swallow_sgr_mouse_fragment() -> std::io::Result<bool> {
+    let mut consumed: Vec<Event> = Vec::new();
+    let mut fragment = String::new();
+    let mut wait = SGR_FRAGMENT_FIRST_CHAR_WAIT;
+    loop {
+        if !event::poll(wait)? {
+            break;
+        }
+        let event = event::read()?;
+        let Some(ch) = sgr_fragment_char(&event) else {
+            consumed.push(event);
+            break;
+        };
+        consumed.push(event);
+        fragment.push(ch);
+        match sgr_mouse_fragment_state(&fragment) {
+            SgrFragmentState::Complete => return Ok(true),
+            SgrFragmentState::Invalid => break,
+            SgrFragmentState::Incomplete => {}
+        }
+        wait = SGR_FRAGMENT_NEXT_CHAR_WAIT;
+    }
+    REPLAYED_INPUT_EVENTS.with(|queue| queue.borrow_mut().extend(consumed));
+    Ok(false)
 }
 
 fn schedule_mouse_scroll_draw(
@@ -8232,10 +8470,10 @@ fn collect_mouse_scroll_delta(
         let timeout = read_until
             .checked_duration_since(Instant::now())
             .unwrap_or_default();
-        if !event::poll(timeout)? {
+        if !input_event_poll(timeout)? {
             break;
         }
-        let next = event::read()?;
+        let next = input_event_read()?;
         match next {
             Event::Mouse(mouse) => {
                 if let Some(next_delta) = mouse_scroll_delta(mouse.kind) {
@@ -8285,6 +8523,67 @@ fn blocks_mouse_scroll(
 ) -> bool {
     delta != 0
         && blocked.is_some_and(|block| block.target == target && block.direction == delta.signum())
+}
+
+/// Trackpad flicks keep emitting momentum wheel events long after the finger
+/// left, and the terminal gives no phase info to tell them apart from real
+/// input. Mimic what native scroll views do: a direction reversal starts a new
+/// gesture that cancels the old one, so events in the old direction are
+/// treated as the momentum tail and swallowed while their stream stays
+/// continuous.
+///
+/// Two safeguards keep deliberate input out of the suppression: only a flick
+/// can leave a tail, so a reversal after gentle scrolling arms nothing; and a
+/// tail streams straight through the reversal, so it must show up within the
+/// short latch window right after the flip or suppression disarms. Together
+/// they keep quick wiggles (whose legs are at least ~100ms apart) fully
+/// responsive. Once latched, a gap in the stream means the tail ended and the
+/// direction is real input again; a hard cap guarantees a deliberate sustained
+/// scroll is never eaten for long.
+fn cancels_momentum_scroll(
+    momentum: &mut Option<SuppressedMouseScroll>,
+    runs: &MouseScrollRuns,
+    target: MouseScrollTarget,
+    delta: isize,
+    now: Instant,
+) -> bool {
+    if delta == 0 {
+        return false;
+    }
+    if let Some(current) = *momentum {
+        if current.target == target && now < current.expires_at {
+            if delta.signum() == current.direction {
+                *momentum = Some(SuppressedMouseScroll {
+                    expires_at: (now + MOUSE_SCROLL_MOMENTUM_CONTINUITY).min(current.hard_deadline),
+                    ..current
+                });
+                return true;
+            }
+            return false;
+        }
+        *momentum = None;
+    }
+    let opposite_direction = -delta.signum();
+    let opposite_run = runs
+        .get(opposite_direction)
+        .filter(|run| run.is_live(target, now) && run.is_flick());
+    if let Some(opposite) = opposite_run {
+        // Only the older of two interleaved streams can be a momentum tail;
+        // if our own direction's run predates the opposite one, the opposite
+        // stream is the user's counter-scroll, not leftover momentum.
+        let own_run_is_older = runs
+            .get(delta.signum())
+            .is_some_and(|run| run.is_live(target, now) && run.started_at < opposite.started_at);
+        if !own_run_is_older {
+            *momentum = Some(SuppressedMouseScroll {
+                target,
+                direction: opposite_direction,
+                expires_at: now + MOUSE_SCROLL_MOMENTUM_LATCH,
+                hard_deadline: now + MOUSE_SCROLL_SUPPRESSION_CAP,
+            });
+        }
+    }
+    false
 }
 
 fn update_mouse_scroll_block(
@@ -8340,6 +8639,7 @@ fn push_pending_mouse_scroll(
     None
 }
 
+#[allow(clippy::too_many_arguments)]
 fn queue_mouse_scroll(
     app: &mut App,
     target: MouseScrollTarget,
@@ -8347,10 +8647,20 @@ fn queue_mouse_scroll(
     pending_event: &mut Option<Event>,
     pending: &mut Option<PendingMouseScroll>,
     blocked: &mut Option<BlockedMouseScroll>,
+    momentum: &mut Option<SuppressedMouseScroll>,
+    scroll_runs: &mut MouseScrollRuns,
     last_scroll_draw: Instant,
 ) -> std::io::Result<bool> {
     let delta =
         collect_mouse_scroll_delta(kind, pending_event, last_scroll_draw + MOUSE_SCROLL_FRAME)?;
+    let now = Instant::now();
+    let swallowed = cancels_momentum_scroll(momentum, scroll_runs, target, delta, now);
+    // Swallowed momentum still counts toward its run so the tail's flick
+    // status survives while user events interleave with it.
+    scroll_runs.record(target, delta, now);
+    if swallowed {
+        return Ok(false);
+    }
     if blocks_mouse_scroll(*blocked, target, delta) {
         return Ok(false);
     }
@@ -8700,24 +9010,27 @@ fn run_commit_picker<B: Backend>(
 #[cfg(test)]
 mod tests {
     use super::{
-        basic_review_target_metadata, blocks_mouse_scroll, build_jj_diff, canonical_review_target,
-        clean_issue_provider_link, clean_provider_link, combine_review_targets, config,
-        dedupe_review_log_entries, detect_input_mode, detect_input_mode_in, gh_pr_with, git_output,
-        git_ref_input_mode, github_canonical_repo_with, github_comment_to_review_comment,
-        github_repo_endpoint, github_review_to_review_comment, gitlab,
-        ignore_github_delete_not_found, insert_review_thread_states, jj_bookmark_revset,
-        jj_bookmarks_for_rev_in, jj_summary_paths, jj_target_metadata_in, local_pr_review_revision,
-        mouse_horizontal_scroll_delta, normalize_jj_revision, parse_range, parse_remote_url,
-        provider_revision, push_pending_mouse_scroll, push_review_comments_to_provider_with,
+        basic_review_target_metadata, blocks_mouse_scroll, build_jj_diff, cancels_momentum_scroll,
+        canonical_review_target, clean_issue_provider_link, clean_provider_link,
+        combine_review_targets, config, dedupe_review_log_entries, detect_input_mode,
+        detect_input_mode_in, gh_pr_with, git_output, git_ref_input_mode,
+        github_canonical_repo_with, github_comment_to_review_comment, github_repo_endpoint,
+        github_review_to_review_comment, gitlab, ignore_github_delete_not_found,
+        insert_review_thread_states, jj_bookmark_revset, jj_bookmarks_for_rev_in, jj_summary_paths,
+        jj_target_metadata_in, local_pr_review_revision, mouse_horizontal_scroll_delta,
+        normalize_jj_revision, parse_range, parse_remote_url, provider_revision,
+        push_pending_mouse_scroll, push_review_comments_to_provider_with,
         push_review_comments_to_provider_with_ops, render_editor_args, review_author_from_cli,
         review_comments_json_value, review_pr_target_metadata, review_provider_for_configured_host,
-        review_status_json_value, review_target_summary, should_load_saved_review_fallback,
-        sync_lookup_target, sync_lookup_target_in, update_mouse_scroll_block, Args,
-        BlockedMouseScroll, Command, GhComment, GhCommentUser, GhIssueComment, GhPr,
-        GhProviderComment, GhRepo, GhReview, GhReviewThreadsResponse, InputMode, MouseScrollTarget,
-        PendingMouseScroll, ProviderPr, ProviderUser, ReviewCommand, ReviewCommentCommand,
-        ReviewProviderKind, ReviewProviderPushOps, ReviewRemote, ReviewTargetMetadata,
-        MAX_DISCRETE_MOUSE_SCROLL_ACTIONS_PER_FRAME,
+        review_status_json_value, review_target_summary, sgr_mouse_fragment_state,
+        should_load_saved_review_fallback, sync_lookup_target, sync_lookup_target_in,
+        update_mouse_scroll_block, Args, BlockedMouseScroll, Command, GhComment, GhCommentUser,
+        GhIssueComment, GhPr, GhProviderComment, GhRepo, GhReview, GhReviewThreadsResponse,
+        InputMode, MouseScrollRuns, MouseScrollTarget, PendingMouseScroll, ProviderPr,
+        ProviderUser, ReviewCommand, ReviewCommentCommand, ReviewProviderKind,
+        ReviewProviderPushOps, ReviewRemote, ReviewTargetMetadata, SgrFragmentState,
+        MAX_DISCRETE_MOUSE_SCROLL_ACTIONS_PER_FRAME, MOUSE_SCROLL_FLICK_VOLUME,
+        MOUSE_SCROLL_SUPPRESSION_CAP,
     };
     use crate::app::{
         review::{
@@ -8732,7 +9045,7 @@ mod tests {
     use oyo_core::MultiFileDiff;
     use std::path::{Path, PathBuf};
     use std::process::Command as ProcessCommand;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     fn temp_path(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
@@ -10672,6 +10985,354 @@ mod tests {
         );
         assert!(blocks_mouse_scroll(blocked, MouseScrollTarget::Diff, 1));
         assert!(!blocks_mouse_scroll(blocked, MouseScrollTarget::Diff, -1));
+    }
+
+    fn runs_with(direction: isize, volume: isize, at: Instant) -> MouseScrollRuns {
+        let mut runs = MouseScrollRuns::default();
+        runs.record(MouseScrollTarget::Diff, direction * volume, at);
+        runs
+    }
+
+    fn flick_runs(direction: isize, at: Instant) -> MouseScrollRuns {
+        runs_with(direction, MOUSE_SCROLL_FLICK_VOLUME * 4, at)
+    }
+
+    fn gentle_runs(direction: isize, at: Instant) -> MouseScrollRuns {
+        runs_with(direction, 2, at)
+    }
+
+    #[test]
+    fn mouse_scroll_reversal_cancels_momentum_mid_scroll() {
+        let now = Instant::now();
+        let mut momentum = None;
+        let scrolling_up = flick_runs(-1, now);
+
+        // A direction flip starts a new gesture: it passes through and arms
+        // suppression of the old direction.
+        assert!(!cancels_momentum_scroll(
+            &mut momentum,
+            &scrolling_up,
+            MouseScrollTarget::Diff,
+            1,
+            now,
+        ));
+        assert!(momentum.is_some());
+
+        // The tail streams through the flip, confirming momentum within the
+        // latch window; it stays swallowed while the new gesture's events keep
+        // flowing.
+        assert!(cancels_momentum_scroll(
+            &mut momentum,
+            &scrolling_up,
+            MouseScrollTarget::Diff,
+            -5,
+            now + Duration::from_millis(20),
+        ));
+        assert!(!cancels_momentum_scroll(
+            &mut momentum,
+            &scrolling_up,
+            MouseScrollTarget::Diff,
+            2,
+            now + Duration::from_millis(60),
+        ));
+        assert!(cancels_momentum_scroll(
+            &mut momentum,
+            &scrolling_up,
+            MouseScrollTarget::Diff,
+            -1,
+            now + Duration::from_millis(150),
+        ));
+    }
+
+    #[test]
+    fn mouse_scroll_wiggle_stays_responsive_without_momentum() {
+        let now = Instant::now();
+        let mut momentum = None;
+        let scrolling_up = gentle_runs(-1, now);
+        let scrolling_down = gentle_runs(1, now);
+
+        // Wiggle leg down after gentle scrolling: no flick, nothing arms.
+        assert!(!cancels_momentum_scroll(
+            &mut momentum,
+            &scrolling_up,
+            MouseScrollTarget::Diff,
+            1,
+            now,
+        ));
+
+        // No tail arrives within the latch window, so the wiggle-back leg
+        // 100ms later is real input and passes.
+        assert!(!cancels_momentum_scroll(
+            &mut momentum,
+            &scrolling_down,
+            MouseScrollTarget::Diff,
+            -1,
+            now + Duration::from_millis(100),
+        ));
+
+        // And so does the next alternation.
+        assert!(!cancels_momentum_scroll(
+            &mut momentum,
+            &scrolling_up,
+            MouseScrollTarget::Diff,
+            1,
+            now + Duration::from_millis(200),
+        ));
+    }
+
+    #[test]
+    fn mouse_scroll_same_direction_does_not_arm_momentum_cancellation() {
+        let now = Instant::now();
+        let mut momentum = None;
+        let scrolling_up = flick_runs(-1, now);
+
+        assert!(!cancels_momentum_scroll(
+            &mut momentum,
+            &scrolling_up,
+            MouseScrollTarget::Diff,
+            -3,
+            now,
+        ));
+        assert!(momentum.is_none());
+    }
+
+    #[test]
+    fn mouse_scroll_flick_reversal_disarms_when_no_tail_appears() {
+        let now = Instant::now();
+        let mut momentum = None;
+        let scrolling_up = flick_runs(-1, now);
+        let scrolling_down = flick_runs(1, now);
+
+        // Reversal after a flick arms the latch...
+        assert!(!cancels_momentum_scroll(
+            &mut momentum,
+            &scrolling_up,
+            MouseScrollTarget::Diff,
+            1,
+            now,
+        ));
+        assert!(momentum.is_some());
+
+        // ...but no tail shows up inside the latch window, so a wiggle-back
+        // leg after it is real input and passes.
+        assert!(!cancels_momentum_scroll(
+            &mut momentum,
+            &scrolling_down,
+            MouseScrollTarget::Diff,
+            -1,
+            now + Duration::from_millis(100),
+        ));
+    }
+
+    #[test]
+    fn mouse_scroll_stale_tail_never_arms_against_newer_counter_scroll() {
+        let now = Instant::now();
+        let mut momentum = None;
+
+        // An up flick's tail (older run) interleaves with the user's newer
+        // down scroll, both dense enough to be flicks.
+        let mut runs = MouseScrollRuns::default();
+        runs.record(
+            MouseScrollTarget::Diff,
+            -(MOUSE_SCROLL_FLICK_VOLUME * 4),
+            now,
+        );
+        let user_at = now + Duration::from_millis(50);
+        runs.record(
+            MouseScrollTarget::Diff,
+            MOUSE_SCROLL_FLICK_VOLUME * 4,
+            user_at,
+        );
+
+        // A leftover tail event escaping suppression must not flip the
+        // roles and start swallowing the user's down scroll.
+        let tail_at = user_at + Duration::from_millis(10);
+        assert!(!cancels_momentum_scroll(
+            &mut momentum,
+            &runs,
+            MouseScrollTarget::Diff,
+            -1,
+            tail_at,
+        ));
+        assert!(
+            momentum.is_none(),
+            "older stream must not arm suppression against the newer one"
+        );
+
+        // While the user's down events still re-arm against the older tail.
+        assert!(!cancels_momentum_scroll(
+            &mut momentum,
+            &runs,
+            MouseScrollTarget::Diff,
+            1,
+            tail_at,
+        ));
+        assert_eq!(momentum.map(|state| state.direction), Some(-1));
+    }
+
+    #[test]
+    fn mouse_scroll_runs_accumulate_per_direction_and_reset_on_pause() {
+        let now = Instant::now();
+        let mut runs = MouseScrollRuns::default();
+
+        runs.record(MouseScrollTarget::Diff, -4, now);
+        runs.record(MouseScrollTarget::Diff, -8, now + Duration::from_millis(50));
+        assert!(runs
+            .get(-1)
+            .is_some_and(|run| run.volume == 12 && run.is_flick()));
+
+        // Opposite-direction events accumulate separately, so an interleaved
+        // tail keeps its flick status.
+        runs.record(MouseScrollTarget::Diff, 1, now + Duration::from_millis(60));
+        assert!(runs.get(-1).is_some_and(|run| run.volume == 12));
+        assert!(runs
+            .get(1)
+            .is_some_and(|run| run.volume == 1 && !run.is_flick()));
+
+        // A pause starts a fresh run in that direction.
+        runs.record(
+            MouseScrollTarget::Diff,
+            -2,
+            now + Duration::from_millis(300),
+        );
+        assert!(runs
+            .get(-1)
+            .is_some_and(|run| run.volume == 2 && !run.is_flick()));
+    }
+
+    #[test]
+    fn mouse_scroll_momentum_tail_renews_suppression_until_a_gap() {
+        let now = Instant::now();
+        let mut momentum = None;
+        let scrolling_up = flick_runs(-1, now);
+
+        assert!(!cancels_momentum_scroll(
+            &mut momentum,
+            &scrolling_up,
+            MouseScrollTarget::Diff,
+            1,
+            now,
+        ));
+
+        // The tail confirms within the latch window, then keeps getting
+        // swallowed well past it because each swallowed event renews the
+        // continuity window.
+        let mut at = now + Duration::from_millis(20);
+        assert!(cancels_momentum_scroll(
+            &mut momentum,
+            &scrolling_up,
+            MouseScrollTarget::Diff,
+            -3,
+            at,
+        ));
+        for _ in 0..10 {
+            at += Duration::from_millis(100);
+            assert!(cancels_momentum_scroll(
+                &mut momentum,
+                &scrolling_up,
+                MouseScrollTarget::Diff,
+                -3,
+                at,
+            ));
+        }
+
+        // A gap longer than the continuity window means the tail ended: the
+        // old direction is real input again, itself a reversal that arms
+        // suppression against the (still live) opposite flick.
+        let gap_at = at + Duration::from_millis(200);
+        let scrolling_down = flick_runs(1, gap_at);
+        assert!(!cancels_momentum_scroll(
+            &mut momentum,
+            &scrolling_down,
+            MouseScrollTarget::Diff,
+            -1,
+            gap_at,
+        ));
+        assert_eq!(
+            momentum.map(|state| state.direction),
+            Some(1),
+            "gap should re-arm suppression against the previous direction"
+        );
+    }
+
+    #[test]
+    fn mouse_scroll_suppression_hard_cap_lets_sustained_scrolling_through() {
+        let now = Instant::now();
+        let mut momentum = None;
+        let scrolling_up = flick_runs(-1, now);
+
+        assert!(!cancels_momentum_scroll(
+            &mut momentum,
+            &scrolling_up,
+            MouseScrollTarget::Diff,
+            1,
+            now,
+        ));
+
+        // Even a gapless old-direction stream stops being swallowed once the
+        // hard cap elapses.
+        let mut at = now;
+        let mut swallowed = 0usize;
+        for _ in 0..200 {
+            at += Duration::from_millis(30);
+            if cancels_momentum_scroll(
+                &mut momentum,
+                &scrolling_up,
+                MouseScrollTarget::Diff,
+                -1,
+                at,
+            ) {
+                swallowed += 1;
+            } else {
+                break;
+            }
+        }
+        assert!(swallowed > 0);
+        assert!(
+            at - now <= MOUSE_SCROLL_SUPPRESSION_CAP + Duration::from_millis(100),
+            "suppression outlived the hard cap: {:?}",
+            at - now
+        );
+    }
+
+    #[test]
+    fn sgr_mouse_fragment_matches_scroll_and_click_reports() {
+        assert_eq!(
+            sgr_mouse_fragment_state("[<64;40;20M"),
+            SgrFragmentState::Complete
+        );
+        assert_eq!(
+            sgr_mouse_fragment_state("[<65;120;3M"),
+            SgrFragmentState::Complete
+        );
+        assert_eq!(
+            sgr_mouse_fragment_state("[<0;1;1m"),
+            SgrFragmentState::Complete
+        );
+
+        for prefix in ["", "[", "[<", "[<64", "[<64;", "[<64;40", "[<64;40;20"] {
+            assert_eq!(
+                sgr_mouse_fragment_state(prefix),
+                SgrFragmentState::Incomplete,
+                "prefix: {prefix:?}"
+            );
+        }
+
+        assert_eq!(sgr_mouse_fragment_state("q"), SgrFragmentState::Invalid);
+        assert_eq!(sgr_mouse_fragment_state("[q"), SgrFragmentState::Invalid);
+        assert_eq!(sgr_mouse_fragment_state("[<;"), SgrFragmentState::Invalid);
+        assert_eq!(
+            sgr_mouse_fragment_state("[<64;40M"),
+            SgrFragmentState::Invalid
+        );
+        assert_eq!(
+            sgr_mouse_fragment_state("[<64;40;20Mx"),
+            SgrFragmentState::Invalid
+        );
+        assert_eq!(
+            sgr_mouse_fragment_state("[<12345"),
+            SgrFragmentState::Invalid
+        );
     }
 
     #[test]
