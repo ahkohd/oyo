@@ -18,8 +18,8 @@ If you are reading from the repo, use [the SKILL.md file](../crates/oyo/docs/SKI
 
 Example instruction:
 
-```text
-Run oy skill path, read the file it prints, then use oy and oy review for this task.
+```markdown
+Run `oy skill path`, read the file it prints, then use `oy` and `oy review` for this task.
 ```
 
 ## Workflows
@@ -30,51 +30,55 @@ These are the common ways to work with an agent in Oyo.
 
 Use this when you want the agent to inspect a diff and leave feedback.
 
-Ask the agent to:
+Example request:
 
-1. read the Oyo skill
-2. confirm the review target
-3. open the diff with `oy`, `oy --staged`, `oy --range main...HEAD` or the jj target
-4. set agent identity with `OYO_REVIEW_AUTHOR_TYPE=agent`
-5. add comments with `oy review comment new` when useful
-6. report the target reviewed and the checks run
-
-Example agent identity and comment:
-
-```sh
-export OYO_REVIEW_AUTHOR_TYPE=agent
-export OYO_REVIEW_AUTHOR_NAME="Agent name"
-oy review comment new \
-  --file src/lib.rs \
-  --new-line 42 \
-  --body "Handle empty input."
+```markdown
+Run `oy skill path` and read the file it prints. Review the current change with Oyo. Leave local comments where useful under your agent identity.
 ```
+
+Name a Git branch, range or jj revset when you do not want the current change reviewed.
 
 ### Agent works on comments
 
-Use this when you have left Oyo comments and want the agent to respond or make changes.
+Use this when you want the agent to address one comment or work through all unresolved comments.
 
-Ask the agent to:
+To share one comment, open its more menu in Oyo and select `Copy id (#N)`, where `N` is the comment number. Include the copied ID in your request:
 
-1. read the Oyo skill
-2. run `oy review status` to see the comment summary
-3. run `oy review comment --unresolved` to read full comment bodies
-4. treat the returned comments as the task list; this filter excludes outdated comments
-5. edit the referenced files
-6. run the smallest useful checks
-7. run `oy review comment resolve <id>` for comments you addressed
-8. report what changed and which comments are still unresolved
-
-Oyo marks a comment outdated when its anchored line changed or vanished as the diff evolved. It hides outdated comments from live inline overlays. Re-anchored comments follow their code without becoming outdated.
-
-`--unresolved` excludes outdated comments by default because stale anchors are not actionable. Agents can inspect stale unresolved comments with:
-
-```sh
-oy review status --unresolved --outdated
-oy review comment --unresolved --outdated
+```markdown
+Run `oy skill path` and read the file it prints. Address Oyo comment `#7` in the current Oyo review. Resolve it if you fix it.
 ```
 
-Use `--outdated` alone to show only outdated comments. Use `--no-outdated` to hide them explicitly. Filtered JSON counts only matching comments. With `--since`, an outdated-state transition has `changeType: "updated"` and a deleted comment has `changeType: "removed"`.
+To share the whole task list, ask the agent to work through all unresolved comments:
+
+```markdown
+Run `oy skill path` and read the file it prints. Work through all unresolved comments in the current Oyo review. Resolve the comments you address and report what remains.
+```
+
+Oyo excludes outdated comments from the unresolved task list. See [review commands](./REVIEW.md) to inspect outdated comments.
+
+### Agent walks you through code
+
+Use this when you want the agent to explain a live diff one file at a time. Start Oyo before making the request.
+
+Example request:
+
+```markdown
+Run `oy skill path walkthrough` and read the file it prints. Use my running Oyo session to walk me through this change one file at a time. Wait for me to say `next`.
+```
+
+The agent should use your existing Oyo session. It should only add review comments when you ask.
+
+### Agent controls Oyo
+
+Use this when you want the agent to steer a running Oyo session. It can open files, jump to lines, switch targets or views, and control playback.
+
+Example request:
+
+```markdown
+Run `oy skill path control` and read the file it prints. Use my running Oyo session to open `src/lib.rs` and show me line 42.
+```
+
+Your keyboard and mouse input take priority over queued agent commands.
 
 ## Pick the right target
 

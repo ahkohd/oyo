@@ -87,6 +87,7 @@ const MOUSE_SCROLL_STREAM_GAP: Duration = Duration::from_millis(100);
 const MOUSE_SCROLL_FLICK_VOLUME: isize = 10;
 const OYO_CODE_REVIEW_SKILL: &str = include_str!("../docs/SKILL.md");
 const OYO_CONTROL_SKILL: &str = include_str!("../docs/CONTROL.md");
+const OYO_CODE_WALKTHROUGH_SKILL: &str = include_str!("../docs/WALKTHROUGH.md");
 
 type TuiBackend = CrosstermBackend<Box<dyn io::Write>>;
 type TuiTerminal = Terminal<TuiBackend>;
@@ -323,6 +324,7 @@ enum Command {
 enum SkillName {
     Review,
     Control,
+    Walkthrough,
 }
 
 impl SkillName {
@@ -330,6 +332,7 @@ impl SkillName {
         match self {
             SkillName::Review => "oyo-code-review",
             SkillName::Control => "oyo-tui-control",
+            SkillName::Walkthrough => "oyo-code-walkthrough",
         }
     }
 
@@ -337,6 +340,7 @@ impl SkillName {
         match self {
             SkillName::Review => OYO_CODE_REVIEW_SKILL,
             SkillName::Control => OYO_CONTROL_SKILL,
+            SkillName::Walkthrough => OYO_CODE_WALKTHROUGH_SKILL,
         }
     }
 }

@@ -64,7 +64,15 @@ export default defineConfig({
                 { label: "Control", slug: "control" },
               ],
             },
-            { label: "Working With Agents", slug: "agents" },
+            {
+              label: "Working with agents",
+              items: [
+                { label: "Overview", slug: "agents" },
+                { label: "Review", slug: "review-skill" },
+                { label: "Walkthrough", slug: "walkthrough-skill" },
+                { label: "Control", slug: "control-skill" },
+              ],
+            },
           ],
         },
         {

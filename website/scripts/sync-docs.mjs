@@ -23,9 +23,11 @@ const PAGES = [
   { file: "KEYBINDINGS.md",   slug: "keybindings",   title: "Keybindings",           group: "guide", order: 3 },
   { file: "REVIEW.md",        slug: "review",        title: "Review",                group: "guide", order: 4 },
   { file: "CONTROL.md",       slug: "control",       title: "Control",               group: "guide", order: 5 },
-  { file: "AGENT.md",         slug: "agents",        title: "Working With Agents",   group: "guide", order: 6 },
-  { file: "SKILL.md",         source: "../crates/oyo/docs/SKILL.md", slug: "agent-skill", title: "Oyo code review skill", group: "guide", order: 7 },
-  { file: "REVIEW_HOOKS.md",  slug: "hooks",         title: "Hooks",                 group: "guide", order: 8 },
+  { file: "AGENT.md",         slug: "agents",        title: "Working with agents",   group: "guide", order: 6 },
+  { file: "SKILL.md",         source: "../crates/oyo/docs/SKILL.md", slug: "review-skill", title: "Oyo code review skill", group: "guide", order: 7 },
+  { file: "CONTROL_SKILL.md", source: "../crates/oyo/docs/CONTROL.md", slug: "control-skill", title: "Oyo TUI control skill", group: "guide", order: 8 },
+  { file: "WALKTHROUGH.md",   source: "../crates/oyo/docs/WALKTHROUGH.md", slug: "walkthrough-skill", title: "Oyo code walkthrough skill", group: "guide", order: 9 },
+  { file: "REVIEW_HOOKS.md",  slug: "hooks",         title: "Hooks",                 group: "guide", order: 10 },
   { file: "DIFF_VIEWER.md",   slug: "diff-viewer",   title: "Diff Viewer Behaviour", group: "ref",   order: 1 },
   { file: "DIFF_PREVIEWS.md", slug: "diff-styling",  title: "Diff Styling Previews", group: "ref",   order: 2 },
 ];
@@ -42,8 +44,8 @@ function rewrite(md) {
       return `](../${slug}/${anchor})`;
     },
   );
-  // Skill link: [text](../crates/oyo/docs/SKILL.md) -> [text](../agent-skill/)
-  md = md.replace(/\]\(\.\.\/crates\/oyo\/docs\/SKILL\.md\)/g, "](../agent-skill/)");
+  // Skill link: [text](../crates/oyo/docs/SKILL.md) -> [text](../review-skill/)
+  md = md.replace(/\]\(\.\.\/crates\/oyo\/docs\/SKILL\.md\)/g, "](../review-skill/)");
   // Screenshot images: ![alt](../assets/x.png) -> co-located ![alt](./assets/x.png)
   md = md.replace(/\]\(\.\.\/assets\//g, "](./assets/");
   return md;
@@ -65,6 +67,8 @@ for (const page of PAGES) {
     continue;
   }
   let body = fs.readFileSync(srcPath, "utf8");
+  // Skill files have their own agent metadata. Starlight only needs the page title.
+  body = body.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n+/, "");
   // Drop the leading "# Title" heading. Starlight renders the frontmatter title.
   body = body.replace(/^#\s+.+\r?\n+/, "");
   body = rewrite(body);
