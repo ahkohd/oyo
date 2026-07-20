@@ -7,7 +7,7 @@
     "provenance": true
   },
   "type": "module",
-  "description": "Pi package that points the agent at the Oyo code-review skill",
+  "description": "Pi package that points the agent at the installed Oyo skills",
   "license": "MIT",
   "repository": {
     "type": "git",

@@ -1,10 +1,14 @@
 # pi-oyo
 
-Pi package that points the agent at the Oyo code-review skill.
+Pi package that points the agent at the installed Oyo skills.
 
-When enabled, it appends a short instruction to the agent's system prompt telling it to
-read the installed Oyo skill (`oy skill path`) and use `oy` / `oy review` for reviews and
-Oyo comments. That is all — the agent drives `oy` itself.
+When enabled, it adds short routing instructions to the agent's system prompt:
+
+- code reviews and comments use `oy skill path`
+- guided walkthroughs use `oy skill path walkthrough`
+- live TUI control uses `oy skill path control`
+
+The agent reads the matching skill and drives `oy` itself.
 
 ## Install
 
@@ -27,8 +31,8 @@ pi install ./packages/pi-oyo
 ## Commands
 
 - `/oyo [on|off|status]`
-  - `on` (default): inject the Oyo skill instruction into the agent's system prompt
-  - `off`: stop injecting it
+  - `on` (default): add the Oyo skill instructions to the agent's system prompt
+  - `off`: stop adding them
   - `status`: report the current mode
 
-The mode persists across a session; the default is `on`.
+The mode persists across a session. The default is `on`.

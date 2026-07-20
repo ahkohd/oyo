@@ -96,7 +96,7 @@ npm i -g @ahkohd/oyo
 
 ### Pi package
 
-The Pi package adds the `/oyo` command. It points the coding agent at the Oyo review skill.
+The Pi package adds the `/oyo` command. It points the coding agent at the Oyo review, walkthrough and control skills.
 
 ```sh
 pi install npm:@ahkohd/pi-oyo

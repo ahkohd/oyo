@@ -5,9 +5,9 @@ type OyoMode = "on" | "off";
 const ENTRY_TYPE = "oyo-mode";
 
 const OYO_PROMPT = [
-  "OYO CODE REVIEW.",
-  "To review code changes, read Oyo comments, or work on comments in Git or jj, use the oyo-code-review skill.",
-  "Run `oy skill path`, read the file it prints, then use `oy` and `oy review` for the task.",
+  "For code reviews or comments in Git or jj, use oyo-code-review: run `oy skill path` and read the file it prints.",
+  "For a guided walkthrough of a live diff, use oyo-code-walkthrough: run `oy skill path walkthrough` and read the file it prints.",
+  "To steer a running Oyo TUI, use oyo-tui-control: run `oy skill path control` and read the file it prints.",
 ].join("\n");
 
 let mode: OyoMode = "on";
@@ -29,7 +29,7 @@ function parseMode(input: string): OyoMode | "status" | undefined {
 function setMode(next: OyoMode, ctx: UiContext, pi: ExtensionAPI): void {
   mode = next;
   pi.appendEntry(ENTRY_TYPE, { mode: next });
-  ctx.ui.notify(`Oyo review: ${next}`, "info");
+  ctx.ui.notify(`Oyo: ${next}`, "info");
 }
 
 export default function oyoExtension(pi: ExtensionAPI): void {
@@ -50,12 +50,12 @@ export default function oyoExtension(pi: ExtensionAPI): void {
   });
 
   pi.registerCommand("oyo", {
-    description: "Set Oyo review instruction: on|off|status",
+    description: "Set Oyo skill instructions: on|off|status",
     handler: async (args, ctx) => {
       const next = parseMode(args);
 
       if (next === "status") {
-        ctx.ui.notify(`Oyo review: ${mode}`, "info");
+        ctx.ui.notify(`Oyo: ${mode}`, "info");
         return;
       }
 
