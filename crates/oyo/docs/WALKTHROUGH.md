@@ -28,7 +28,7 @@ A good walkthrough:
 - explains purpose, ownership and lifecycle
 - distinguishes the main fix from mechanical updates
 - says what behaviour did not change
-- uses focused Oyo comments only when the user asks
+- confirms comment mode before the first file when the request does not specify it
 - pauses after each file
 
 Do not turn the walkthrough into a code review unless the user asks for one. Do not edit code, commit, push or publish comments without explicit permission.
@@ -62,6 +62,24 @@ Verify:
 - the TUI is showing the intended Git branch, Jujutsu change or pull request
 
 Stop and ask if the target does not match. Do not explain one diff while Oyo shows another.
+
+## Choose comment mode before starting
+
+Before navigating to the first file, confirm whether the walkthrough should:
+
+- remain conversational
+- add durable Oyo comments as it progresses
+
+If the request already specifies the mode, do not ask again.
+
+If the user chooses comments, also confirm:
+
+- human or agent authorship
+- local-only or published comments
+
+Do not infer authorship or publication from the walkthrough request. Do not start the first file until these choices are clear.
+
+If the user chooses a conversational walkthrough, do not add comments unless they change their mind later.
 
 ## Plan the story before moving files
 
@@ -140,11 +158,11 @@ Separate cause from symptom:
 - symptom: leaked listeners, duplicate requests, stale state or warnings
 - fix: the smallest ownership change that makes cleanup reliable
 
-## Add Oyo comments only when asked
+## Add Oyo comments only in comment mode
 
-The walkthrough can remain conversational. Add durable Oyo comments only when the user asks for comments or notes.
+Add durable Oyo comments only when the user selected comment mode before the walkthrough or asks for comments later.
 
-Before the first comment, confirm the intended author:
+Before the first comment, confirm the intended author and destination if they are not already clear:
 
 - use an agent identity for agent-authored review feedback
 - use the user's identity only when they explicitly ask
@@ -306,6 +324,8 @@ Before starting:
 - [ ] read the Oyo review and control skills
 - [ ] select the exact user session
 - [ ] verify workspace and target
+- [ ] confirm conversational or durable comment mode
+- [ ] if using comments, confirm author and local or published destination
 - [ ] inspect the complete file list
 - [ ] plan a root-cause-first order
 
@@ -314,7 +334,7 @@ For every file:
 - [ ] navigate before explaining
 - [ ] explain ownership and lifecycle
 - [ ] distinguish cause, fix and unchanged behaviour
-- [ ] add a focused comment only when requested
+- [ ] add a focused comment when durable comment mode is active
 - [ ] stop and wait for `next`
 
 Before finishing:
