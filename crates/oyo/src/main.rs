@@ -3986,6 +3986,56 @@ fn git_remotes(root: &Path) -> Vec<String> {
         .unwrap_or_default()
 }
 
+fn parse_jj_git_remotes(output: &str) -> Vec<(String, String)> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.split_whitespace();
+            Some((parts.next()?.to_string(), parts.next()?.to_string()))
+        })
+        .collect()
+}
+
+fn jj_git_remotes(root: &Path) -> Vec<(String, String)> {
+    if !is_jj_repo(root) {
+        return Vec::new();
+    }
+    let mut command = ProcessCommand::new("jj");
+    command
+        .arg("-R")
+        .arg(root)
+        .arg("--no-pager")
+        .arg("--color")
+        .arg("never")
+        .arg("git")
+        .arg("remote")
+        .arg("list");
+    run_output(command)
+        .map(|output| parse_jj_git_remotes(&output))
+        .unwrap_or_default()
+}
+
+fn review_remotes(root: &Path) -> Vec<String> {
+    let remotes = git_remotes(root);
+    if remotes.is_empty() {
+        jj_git_remotes(root)
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect()
+    } else {
+        remotes
+    }
+}
+
+fn review_remote_url(root: &Path, name: &str) -> Result<String> {
+    git_output(root, &["remote", "get-url", name]).or_else(|git_error| {
+        jj_git_remotes(root)
+            .into_iter()
+            .find_map(|(remote, url)| (remote == name).then_some(url))
+            .ok_or(git_error)
+    })
+}
+
 fn default_review_remote(root: &Path) -> Result<String> {
     if let Ok(upstream) = git_output(
         root,
@@ -4002,7 +4052,7 @@ fn default_review_remote(root: &Path) -> Result<String> {
             }
         }
     }
-    let remotes = git_remotes(root);
+    let remotes = review_remotes(root);
     if remotes.iter().any(|remote| remote == "origin") {
         return Ok("origin".to_string());
     }
@@ -4035,7 +4085,7 @@ fn review_remote(root: &Path, remote: Option<&str>) -> Result<ReviewRemote> {
         Some(remote) => remote.to_string(),
         None => default_review_remote(root)?,
     };
-    let url = git_output(root, &["remote", "get-url", &name])?;
+    let url = review_remote_url(root, &name)?;
     let Some((host, repo)) = parse_remote_url(&url) else {
         anyhow::bail!("Unsupported review remote URL: {url}");
     };
@@ -4090,7 +4140,7 @@ fn glab_host_configured(host: &str) -> bool {
 }
 
 fn parse_sync_args(root: &Path, items: &[String]) -> Result<(Option<String>, String)> {
-    let remotes = git_remotes(root);
+    let remotes = review_remotes(root);
     match items {
         [] => Ok((None, default_review_remote(root)?)),
         [one] if remotes.iter().any(|remote| remote == one) => Ok((None, one.clone())),
@@ -5648,8 +5698,8 @@ fn spawn_review_push_request_worker(
 fn review_remote_options() -> Result<Vec<ReviewRemoteOption>> {
     let workspace = current_review_workspace()?;
     let mut options = Vec::new();
-    for name in git_remotes(&workspace) {
-        let label = git_output(&workspace, &["remote", "get-url", &name])
+    for name in review_remotes(&workspace) {
+        let label = review_remote_url(&workspace, &name)
             .ok()
             .and_then(|url| parse_remote_url(&url).map(|(_, repo)| repo).or(Some(url)))
             .unwrap_or_default();
@@ -9016,16 +9066,17 @@ mod tests {
     use super::{
         basic_review_target_metadata, blocks_mouse_scroll, build_jj_diff, cancels_momentum_scroll,
         canonical_review_target, clean_issue_provider_link, clean_provider_link,
-        combine_review_targets, config, dedupe_review_log_entries, detect_input_mode,
-        detect_input_mode_in, gh_pr_with, git_output, git_ref_input_mode,
+        combine_review_targets, config, dedupe_review_log_entries, default_review_remote,
+        detect_input_mode, detect_input_mode_in, gh_pr_with, git_output, git_ref_input_mode,
         github_canonical_repo_with, github_comment_to_review_comment, github_repo_endpoint,
         github_review_to_review_comment, gitlab, ignore_github_delete_not_found,
         insert_review_thread_states, jj_bookmark_revset, jj_bookmarks_for_rev_in, jj_summary_paths,
         jj_target_metadata_in, local_pr_review_revision, mouse_horizontal_scroll_delta,
-        normalize_jj_revision, parse_range, parse_remote_url, provider_revision,
-        push_pending_mouse_scroll, push_review_comments_to_provider_with,
-        push_review_comments_to_provider_with_ops, render_editor_args, review_author_from_cli,
-        review_comments_json_value, review_pr_target_metadata, review_provider_for_configured_host,
+        normalize_jj_revision, parse_jj_git_remotes, parse_range, parse_remote_url,
+        parse_sync_args, provider_revision, push_pending_mouse_scroll,
+        push_review_comments_to_provider_with, push_review_comments_to_provider_with_ops,
+        render_editor_args, review_author_from_cli, review_comments_json_value,
+        review_pr_target_metadata, review_provider_for_configured_host, review_remote,
         review_status_json_value, review_target_summary, sgr_mouse_fragment_state,
         should_load_saved_review_fallback, sync_lookup_target, sync_lookup_target_in,
         update_mouse_scroll_block, Args, BlockedMouseScroll, Command, GhComment, GhCommentUser,
@@ -9047,6 +9098,7 @@ mod tests {
     use clap::Parser;
     use crossterm::event::{KeyModifiers, MouseEventKind};
     use oyo_core::MultiFileDiff;
+    use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::Command as ProcessCommand;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -9221,6 +9273,115 @@ mod tests {
             parse_remote_url("git@gitlab.com:group/subgroup/repo.git"),
             Some(("gitlab.com".to_string(), "group/subgroup/repo".to_string()))
         );
+    }
+
+    #[test]
+    fn jj_remote_list_parses_ssh_https_and_multiple_remotes() {
+        assert_eq!(
+            parse_jj_git_remotes(
+                "origin git@github.com:owner/repo.git\nupstream https://gitlab.com/group/repo.git\n"
+            ),
+            vec![
+                (
+                    "origin".to_string(),
+                    "git@github.com:owner/repo.git".to_string()
+                ),
+                (
+                    "upstream".to_string(),
+                    "https://gitlab.com/group/repo.git".to_string()
+                )
+            ]
+        );
+    }
+
+    #[test]
+    fn review_remote_discovers_shared_git_remotes_from_secondary_jj_workspace() {
+        if ProcessCommand::new("jj").arg("--version").output().is_err() {
+            return;
+        }
+        let root = temp_path("secondary-jj-remote");
+        let primary = root.join("primary");
+        let secondary = root.join("secondary");
+        fs::create_dir_all(&root).unwrap();
+        let output = ProcessCommand::new("jj")
+            .arg("git")
+            .arg("init")
+            .arg("--colocate")
+            .arg(&primary)
+            .output()
+            .expect("init jj repo");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        test_jj(
+            &primary,
+            &[
+                "git",
+                "remote",
+                "add",
+                "origin",
+                "git@github.com:owner/repo.git",
+            ],
+        );
+        test_jj(&primary, &["workspace", "add", secondary.to_str().unwrap()]);
+        assert!(!secondary.join(".git").exists());
+        assert!(secondary.join(".jj").exists());
+        assert!(git_output(&secondary, &["remote"]).is_err());
+
+        assert_eq!(default_review_remote(&secondary).unwrap(), "origin");
+        assert_eq!(
+            parse_sync_args(&secondary, &["origin".to_string()]).unwrap(),
+            (None, "origin".to_string())
+        );
+        let remote = review_remote(&secondary, Some("origin")).unwrap();
+        assert_eq!(remote.name, "origin");
+        assert_eq!(remote.provider, ReviewProviderKind::GitHub);
+        assert_eq!(remote.host, "github.com");
+        assert_eq!(remote.repo, "owner/repo");
+
+        test_jj(&primary, &["git", "remote", "remove", "origin"]);
+        test_jj(
+            &primary,
+            &[
+                "git",
+                "remote",
+                "add",
+                "upstream",
+                "https://github.com/other/repo.git",
+            ],
+        );
+        assert_eq!(default_review_remote(&secondary).unwrap(), "upstream");
+        assert_eq!(review_remote(&secondary, None).unwrap().repo, "other/repo");
+
+        test_jj(&primary, &["git", "remote", "remove", "upstream"]);
+        assert_eq!(
+            default_review_remote(&secondary).unwrap_err().to_string(),
+            "No Git remote found."
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn plain_git_review_remote_still_uses_git() {
+        let repo = temp_path("plain-git-remote");
+        fs::create_dir_all(&repo).unwrap();
+        git_output(&repo, &["init"]).unwrap();
+        git_output(
+            &repo,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/owner/repo.git",
+            ],
+        )
+        .unwrap();
+        let remote = review_remote(&repo, None).unwrap();
+        assert_eq!(remote.name, "origin");
+        assert_eq!(remote.repo, "owner/repo");
+        fs::remove_dir_all(repo).unwrap();
     }
 
     #[test]
