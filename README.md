@@ -9,7 +9,7 @@ Oyo is your complete terminal code review tool.
 
 </div>
 
-> Oyo is under active development. Expect rough edges and bugs in current 0.1 releases. Please [report problems on GitHub](https://github.com/ahkohd/oyo/issues/new).
+> Oyo is under active development. Expect rough edges and bugs in current 0.1 releases. Feel free to [open an issue](https://github.com/ahkohd/oyo/issues/new).
 
 Read any change, comment on exact lines and work every thread through to resolved. Oyo keeps the whole review in your terminal.
 
