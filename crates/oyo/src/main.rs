@@ -9296,6 +9296,9 @@ mod tests {
 
     #[test]
     fn review_remote_discovers_shared_git_remotes_from_secondary_jj_workspace() {
+        if ProcessCommand::new("jj").arg("--version").output().is_err() {
+            return;
+        }
         let root = temp_path("secondary-jj-remote");
         let primary = root.join("primary");
         let secondary = root.join("secondary");
