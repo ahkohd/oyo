@@ -52,7 +52,7 @@ function rewrite(md) {
 }
 
 function frontmatter({ title }) {
-  return `---\ntitle: "${title.replace(/"/g, '\\"')}"\n---\n\n`;
+  return `---\ntitle: "${title.replace(/"/g, '\\"')}"\nbanner:\n  content: 'Oyo is under active development. Expect rough edges and bugs in current 0.1 releases. <a href="https://github.com/ahkohd/oyo/issues/new">Report problems on GitHub.</a>'\n---\n\n`;
 }
 
 // Clean previous output, then rebuild.

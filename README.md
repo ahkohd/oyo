@@ -9,6 +9,8 @@ Oyo is your complete terminal code review tool.
 
 </div>
 
+> Oyo is under active development. Expect rough edges and bugs in current 0.1 releases. Please [report problems on GitHub](https://github.com/ahkohd/oyo/issues/new).
+
 Read any change, comment on exact lines and work every thread through to resolved. Oyo keeps the whole review in your terminal.
 
 Diff viewing is how you read a change. Oyo also stores comments, tracks replies, syncs review threads and gives agents the same workflow.
