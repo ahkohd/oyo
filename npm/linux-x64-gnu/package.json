@@ -1,6 +1,6 @@
 {
   "name": "@ahkohd/oyo-linux-x64-gnu",
-  "version": "0.1.54",
+  "version": "0.1.55",
   "description": "Prebuilt binary for @ahkohd/oyo (linux x64 glibc)",
   "license": "MIT",
   "repository": {
