@@ -2752,11 +2752,11 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
     };
     let files_active = app.file_panel_mode == FilePanelMode::Files;
     let files_segment = if files_active {
-        "• files"
+        "• changes"
     } else if app.files_tab_unseen {
-        "* files"
+        "* changes"
     } else {
-        "  files"
+        "  changes"
     };
     let comments_segment = if files_active {
         if app.comments_tab_unseen {
@@ -2811,7 +2811,7 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
     let mut tabs = vec![Span::raw(" ")];
     if !files_active && app.files_tab_unseen {
         tabs.push(Span::styled("*", Style::default().fg(app.theme.warning)));
-        tabs.push(Span::styled(" files", files_style));
+        tabs.push(Span::styled(" changes", files_style));
     } else {
         tabs.push(Span::styled(files_segment, files_style));
     }
@@ -2951,13 +2951,6 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
             }
         }
 
-        let status_style = match file.status {
-            FileStatus::Added | FileStatus::Untracked => Style::default().fg(app.theme.success),
-            FileStatus::Deleted => Style::default().fg(app.theme.error),
-            FileStatus::Modified => Style::default().fg(app.theme.warning),
-            FileStatus::Renamed => Style::default().fg(app.theme.info),
-        };
-
         let is_selected = file_idx == selected_file;
         let is_hovered = app.file_list_hover == Some(file_idx);
         let selected_bg = if is_selected {
@@ -3021,18 +3014,13 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
         };
         let max_name_len = list_content_area
             .width
-            .saturating_sub(8 + signs_len as u16 + changed_marker_len as u16)
+            .saturating_sub(6 + signs_len as u16 + changed_marker_len as u16)
             .max(1) as usize;
         let name = if has_query {
             truncate_path(file_name, max_name_len)
         } else {
             truncate_filename_keep_ext(file_name, max_name_len)
         };
-
-        let mut icon_style = status_style;
-        if let Some(bg) = selected_bg {
-            icon_style = icon_style.bg(bg);
-        }
 
         let mut name_style = Style::default().fg(if is_selected || is_hovered {
             app.theme.accent
@@ -3072,12 +3060,7 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
         if let Some(bg) = selected_bg {
             fuzzy_style = fuzzy_style.bg(bg);
         }
-        let mut line_spans = vec![
-            Span::styled(marker, marker_style),
-            Span::raw(" "),
-            Span::styled("■", icon_style),
-            Span::raw(" "),
-        ];
+        let mut line_spans = vec![Span::styled(marker, marker_style), Span::raw(" ")];
         line_spans.extend(fuzzy_highlight_spans(
             &name,
             &match_indices,
@@ -3301,7 +3284,7 @@ fn draw_comment_list(
                 row_map.push(None);
             }
             CommentRow::ItemTitle(comment_idx) => {
-                let Some((file_idx, path, mut location, _preview, outdated, resolved)) =
+                let Some((_file_idx, path, mut location, _preview, outdated, resolved)) =
                     app.review_comment_sidebar_item(*comment_idx)
                 else {
                     continue;
@@ -3332,21 +3315,6 @@ fn draw_comment_list(
                 } else {
                     Style::default().fg(app.theme.text_muted)
                 };
-                let icon_color = if location.is_empty() {
-                    app.theme.text
-                } else {
-                    app.multi_diff
-                        .files
-                        .get(file_idx)
-                        .map(|file| match file.status {
-                            FileStatus::Added | FileStatus::Untracked => app.theme.success,
-                            FileStatus::Deleted => app.theme.error,
-                            FileStatus::Modified => app.theme.warning,
-                            FileStatus::Renamed => app.theme.info,
-                        })
-                        .unwrap_or(app.theme.warning)
-                };
-                let mut icon_style = Style::default().fg(icon_color);
                 let mut name_style = Style::default().fg(if is_active || is_hovered {
                     app.theme.accent
                 } else if outdated || resolved {
@@ -3358,7 +3326,6 @@ fn draw_comment_list(
                     name_style = name_style.add_modifier(Modifier::BOLD);
                 }
                 if outdated || resolved {
-                    icon_style = icon_style.add_modifier(Modifier::DIM);
                     name_style = name_style.add_modifier(Modifier::DIM);
                 }
                 let mut location_style = if outdated {
@@ -3372,7 +3339,6 @@ fn draw_comment_list(
                 };
                 if let Some(bg) = selected_bg {
                     marker_style = marker_style.bg(bg);
-                    icon_style = icon_style.bg(bg);
                     name_style = name_style.bg(bg);
                     location_style = location_style.bg(bg);
                 }
@@ -3384,14 +3350,12 @@ fn draw_comment_list(
                 } else {
                     1 + UnicodeWidthStr::width(location.as_str())
                 };
-                let name_width = width.saturating_sub(4 + suffix_width).max(1);
+                let name_width = width.saturating_sub(2 + suffix_width).max(1);
                 let name = truncate_with_dots(&path, name_width);
                 let marker = if is_active { "•" } else { " " };
 
                 let mut spans = vec![
                     Span::styled(marker, marker_style),
-                    Span::raw(" "),
-                    Span::styled("■", icon_style),
                     Span::raw(" "),
                     Span::styled(name, name_style),
                 ];
@@ -9135,6 +9099,12 @@ mod tests {
         app.toggle_file_panel_mode();
         terminal.draw(|frame| super::draw(frame, &mut app)).unwrap();
         let text = ascii_buffer_lines(&terminal).join("\n");
+        assert!(!terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .any(|cell| cell.symbol() == "■"));
         assert_eq!(app.file_panel_mode, FilePanelMode::Comments);
         assert!(text.contains("PR feedback remai"), "screen: {text}");
 
@@ -9180,6 +9150,12 @@ mod tests {
         terminal.draw(|frame| super::draw(frame, &mut app)).unwrap();
         let lines = ascii_buffer_lines(&terminal);
         let text = lines.join("\n");
+        assert!(!terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .any(|cell| cell.symbol() == "■"));
         assert_eq!(app.filtered_file_indices()[0], 100);
         let (x, y) = text_pos(&lines, "user_service").expect(&text);
         assert!((0.."user_service".len() as u16)
@@ -10349,6 +10325,7 @@ mod tests {
         terminal.draw(|frame| super::draw(frame, &mut app)).unwrap();
         let unseen_hit = app.file_panel_mode_toggle_hit;
         let lines = ascii_buffer_lines(&terminal);
+        assert!(lines.join("\n").contains("changes"));
         assert!(lines.join("\n").contains("* comments"));
         let (star_x, star_y) = text_pos(&lines, "* comments").unwrap();
         assert_eq!(
@@ -10365,11 +10342,16 @@ mod tests {
         assert_eq!(app.file_panel_mode_toggle_hit, unseen_hit);
 
         app.show_comments_sidebar();
+        terminal.draw(|frame| super::draw(frame, &mut app)).unwrap();
+        assert!(ascii_buffer_lines(&terminal)
+            .join("\n")
+            .contains("  changes"));
+
         app.files_tab_unseen = true;
         terminal.draw(|frame| super::draw(frame, &mut app)).unwrap();
         let lines = ascii_buffer_lines(&terminal);
-        assert!(lines.join("\n").contains("* files"));
-        let (star_x, star_y) = text_pos(&lines, "* files").unwrap();
+        assert!(lines.join("\n").contains("* changes"));
+        let (star_x, star_y) = text_pos(&lines, "* changes").unwrap();
         assert_eq!(
             terminal.backend().buffer()[(star_x, star_y)].fg,
             app.theme.warning
