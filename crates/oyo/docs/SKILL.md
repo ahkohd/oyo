@@ -270,7 +270,7 @@ oy review pull 7241 -t origin/main...pr-7241
 
 The number identifies the remote pull request or merge request. `-t` selects the local diff when its branch has another name. Use `--pr 7241` instead of the positional number when it makes a script clearer.
 
-After the first sync, Oyo saves the provider, repository and request number. Later commands use that identity:
+Oyo links the local review to the provider, repository and request number. Later syncs reuse that link:
 
 ```sh
 oy review pull

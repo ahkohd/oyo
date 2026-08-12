@@ -373,7 +373,7 @@ oy review pull 7241 origin -t origin/main...pr-7241
 
 Use `--pr 7241` instead of the positional number when it makes a script clearer. The number identifies the remote request. `--target` selects the local diff and Oyo checks that its head matches the remote request.
 
-After the first sync, Oyo saves the provider, repository and request number. Later commands use that identity without resolving the branch again:
+Oyo links the local review to the provider, repository and request number. Later syncs reuse that link:
 
 ```sh
 oy review pull
