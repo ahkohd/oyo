@@ -1551,11 +1551,16 @@ fn session_live(info: &ControlSessionInfo) -> bool {
 }
 
 fn pid_alive(pid: u32) -> bool {
-    let proc = Path::new("/proc");
-    if proc.exists() {
-        return proc.join(pid.to_string()).exists();
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return false;
+    };
+    if pid == 0 {
+        return false;
     }
-    true
+    if unsafe { libc::kill(pid, 0) } == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 fn same_path(a: &Path, b: &Path) -> bool {
@@ -1573,8 +1578,9 @@ fn now_secs() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{default_session_name, sanitize_name, validated_session_name};
+    use super::{default_session_name, pid_alive, sanitize_name, validated_session_name};
     use std::path::Path;
+    use std::process::Command;
 
     #[test]
     fn session_name_uses_repo_and_pid() {
@@ -1586,5 +1592,15 @@ mod tests {
     fn session_rename_rejects_empty_names() {
         assert!(validated_session_name("   ").is_err());
         assert_eq!(validated_session_name(" review-a ").unwrap(), "review-a");
+    }
+
+    #[test]
+    fn pid_liveness_detects_running_and_exited_processes() {
+        assert!(pid_alive(std::process::id()));
+
+        let mut child = Command::new("sh").arg("-c").arg("exit 0").spawn().unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        assert!(!pid_alive(pid));
     }
 }
