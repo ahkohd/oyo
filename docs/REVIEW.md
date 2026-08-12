@@ -363,25 +363,31 @@ Oyo supports GitHub, GitLab, Codeberg and self-hosted Forgejo. Authenticate `gh`
 
 Oyo finds the remote from the current branch upstream, then falls back to `origin`. Pass a remote name when you want another remote.
 
-Use `pull` to bring provider comments into Oyo:
+Use the pull request or merge request number when branch names differ, such as for a fork checked out as `pr-7241`:
+
+```sh
+oy review pull 7241
+oy review pull 7241 -t origin/main...pr-7241
+oy review pull 7241 origin -t origin/main...pr-7241
+```
+
+Use `--pr 7241` instead of the positional number when it makes a script clearer. The number identifies the remote request. `--target` selects the local diff and Oyo checks that its head matches the remote request.
+
+After the first sync, Oyo saves the provider, repository and request number. Later commands use that identity without resolving the branch again:
 
 ```sh
 oy review pull
-oy review pull main...feature
-oy review pull main...feature origin
+oy review push
 ```
 
-In Git, `pull` resolves the current branch or range head to the matching pull request or merge request. In jj, use a bookmark for a branch-like review target.
-
-Use `push` to send your local comments to the provider:
+Without a saved identity or explicit number, Oyo resolves the current Git branch, range head or jj bookmark. Existing target forms remain available:
 
 ```sh
-oy review push
-oy review push main...feature
+oy review pull main...feature
 oy review push main...feature origin
 ```
 
-Push and pull use the matching pull request or merge request. If Oyo cannot find one, it stops with an error.
+If Oyo cannot find one matching pull request or merge request, it stops with an error.
 
 GitHub uses `gh`. GitLab uses the matching host from `glab` configuration. Forgejo calls the host API with the token saved by `cb` or `fj`. Self-hosted Forgejo is live-verified. Self-hosted GitLab uses `glab` multi-host support but has not been live-verified.
 

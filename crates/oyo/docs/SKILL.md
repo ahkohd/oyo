@@ -264,16 +264,23 @@ The positional forms remain available for compatibility.
 Pull remote comments before you work on a pull request:
 
 ```sh
-oy review pull
-oy review pull -t main...feature
-oy review pull -t main...feature origin
+oy review pull 7241
+oy review pull 7241 -t origin/main...pr-7241
 ```
 
-Push local comments when you want to publish them:
+The number identifies the remote pull request or merge request. `-t` selects the local diff when its branch has another name. Use `--pr 7241` instead of the positional number when it makes a script clearer.
+
+After the first sync, Oyo saves the provider, repository and request number. Later commands use that identity:
 
 ```sh
+oy review pull
 oy review push
-oy review push -t main...feature
+```
+
+Existing branch, bookmark and range lookup remains available:
+
+```sh
+oy review pull -t main...feature
 oy review push -t main...feature origin
 ```
 
