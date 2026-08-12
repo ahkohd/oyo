@@ -636,24 +636,30 @@ enum ReviewCommand {
     },
     /// Pull provider comments into the local review
     Pull {
-        /// Optional target followed by optional remote
+        /// Optional PR number, target or remote followed by an optional remote
         #[arg(num_args = 0..=2)]
         args: Vec<String>,
-        /// Review target
+        /// Local review target
         #[arg(short = 't', long = "target", value_name = "REV")]
         target: Option<String>,
+        /// Pull request or merge request number
+        #[arg(long, value_name = "NUMBER")]
+        pr: Option<u64>,
         /// Print JSON
         #[arg(long)]
         json: bool,
     },
     /// Push local review comments to the provider
     Push {
-        /// Optional target followed by optional remote
+        /// Optional PR number, target or remote followed by an optional remote
         #[arg(num_args = 0..=2)]
         args: Vec<String>,
-        /// Review target
+        /// Local review target
         #[arg(short = 't', long = "target", value_name = "REV")]
         target: Option<String>,
+        /// Pull request or merge request number
+        #[arg(long, value_name = "NUMBER")]
+        pr: Option<u64>,
         /// Print JSON
         #[arg(long)]
         json: bool,
@@ -2871,6 +2877,7 @@ fn review_target_label(revision: Option<&str>, args: &Args) -> String {
     "current target".to_string()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn configure_review_state_for_app(
     app: &mut App,
     config: &config::Config,
@@ -2878,10 +2885,14 @@ fn configure_review_state_for_app(
     workspace_root: Option<PathBuf>,
     input_mode: &InputMode,
     revision: Option<&str>,
+    pr: Option<&ProviderPr>,
     create: bool,
 ) -> Result<()> {
     apply_review_storage_to_app(app, config, args, workspace_root);
-    let target_metadata = review_target_metadata_for_input_mode(input_mode);
+    let local_metadata = review_target_metadata_for_input_mode(input_mode);
+    let target_metadata = pr
+        .map(|pr| review_pr_target_metadata(pr, Some(&local_metadata)))
+        .unwrap_or(local_metadata);
     app.set_review_target_metadata(Some(target_metadata.clone()));
     app.set_review_persist_enabled(!args.no_review_persist);
     app.set_review_filter_to_current_diff(matches!(
@@ -2895,6 +2906,9 @@ fn configure_review_state_for_app(
         app.enable_review_mode();
     } else {
         app.load_review_mode();
+    }
+    if pr.is_some() {
+        app.set_review_target_metadata(Some(target_metadata.clone()));
     }
     if let InputMode::JjRevision { rev } = input_mode {
         if !app.review_has_stored_comments() && rev.contains("..") {
@@ -2929,6 +2943,16 @@ fn review_app_for_target(
     revision: Option<&str>,
     create: bool,
 ) -> Result<App> {
+    review_app_for_target_and_pr(config, args, revision, None, create)
+}
+
+fn review_app_for_target_and_pr(
+    config: &config::Config,
+    args: &Args,
+    revision: Option<&str>,
+    pr: Option<&ProviderPr>,
+    create: bool,
+) -> Result<App> {
     let input_mode = review_input_mode(revision, args)?;
     let built = build_diff_from_input_mode(&input_mode, config, args)?
         .ok_or_else(|| anyhow!("No changes found."))?;
@@ -2946,6 +2970,7 @@ fn review_app_for_target(
         built.workspace_root,
         &input_mode,
         revision,
+        pr,
         create,
     )?;
     Ok(app)
@@ -3279,6 +3304,17 @@ fn jj_change_id_sets_match(
 }
 
 fn metadata_matches_target(saved: &ReviewTargetMetadata, target: &ReviewTargetMetadata) -> bool {
+    if saved.pr_number.is_some()
+        && saved.pr_number == target.pr_number
+        && saved.pr_provider == target.pr_provider
+        && saved
+            .pr_repo
+            .as_ref()
+            .zip(target.pr_repo.as_ref())
+            .is_some_and(|(saved, target)| saved.eq_ignore_ascii_case(target))
+    {
+        return true;
+    }
     if saved.vcs != target.vcs {
         return false;
     }
@@ -3542,19 +3578,77 @@ fn load_jj_revset_snapshots_for_read(
     Ok(())
 }
 
-fn local_pr_review_revision(entries: &[serde_json::Value], branch: &str) -> Option<String> {
-    entries.iter().find_map(|entry| {
-        let metadata = review_log_entry_metadata(entry)?;
-        metadata.pr_number?;
-        let matches_branch = metadata.branch.as_deref() == Some(branch)
-            || metadata.git_head_ref.as_deref() == Some(branch);
-        if metadata.vcs != "git" || !matches_branch {
-            return None;
-        }
-        let base = metadata.git_base_commit.or(metadata.git_base_ref)?;
-        let head = metadata.git_head_ref.or(metadata.branch)?;
-        Some(format!("{base}...{head}"))
+fn saved_pr_revision(metadata: &ReviewTargetMetadata) -> Option<String> {
+    let base = metadata
+        .git_base_commit
+        .as_ref()
+        .or(metadata.git_base_ref.as_ref())?;
+    let head = metadata
+        .git_head_commit
+        .as_ref()
+        .or(metadata.git_head_ref.as_ref())
+        .or(metadata.branch.as_ref())?;
+    let separator = if metadata.vcs == "jj" { ".." } else { "..." };
+    Some(format!("{base}{separator}{head}"))
+}
+
+fn saved_pr_matches_current_head(
+    saved: &ReviewTargetMetadata,
+    current: &ReviewTargetMetadata,
+) -> bool {
+    saved.git_head_commit.as_ref().is_some_and(|saved_head| {
+        current.git_head_commit.as_ref() == Some(saved_head)
+            || current.git_base_commit.as_ref() == Some(saved_head)
+    }) || current.jj_change_id.as_ref().is_some_and(|current_id| {
+        saved.jj_change_id.as_ref() == Some(current_id)
+            || saved
+                .jj_change_ids
+                .as_ref()
+                .is_some_and(|ids| ids.contains(current_id))
     })
+}
+
+fn local_pr_review_metadata(
+    entries: &[serde_json::Value],
+    current: &ReviewTargetMetadata,
+) -> Result<Option<ReviewTargetMetadata>> {
+    let candidates = entries
+        .iter()
+        .filter_map(review_log_entry_metadata)
+        .filter(|metadata| {
+            metadata.pr_provider.is_some()
+                && metadata.pr_repo.is_some()
+                && metadata.pr_number.is_some()
+                && saved_pr_revision(metadata).is_some()
+        })
+        .collect::<Vec<_>>();
+    let scoped = candidates
+        .iter()
+        .filter(|metadata| metadata_in_current_scope(metadata, current))
+        .cloned()
+        .collect::<Vec<_>>();
+    let matches = if scoped.is_empty() {
+        candidates
+            .into_iter()
+            .filter(|metadata| saved_pr_matches_current_head(metadata, current))
+            .collect::<Vec<_>>()
+    } else {
+        scoped
+    };
+    let identities = matches
+        .iter()
+        .filter_map(|metadata| {
+            Some((
+                metadata.pr_provider.clone()?,
+                metadata.pr_repo.clone()?,
+                metadata.pr_number?,
+            ))
+        })
+        .collect::<BTreeSet<_>>();
+    if identities.len() > 1 {
+        anyhow::bail!("Several saved pull requests match this checkout. Pass a PR number.");
+    }
+    Ok(matches.into_iter().next())
 }
 
 fn canonical_review_target(cwd: &Path, target: &str) -> String {
@@ -3587,14 +3681,12 @@ fn resolve_review_target(
         return Ok(None);
     }
     let root = oyo_core::git::get_repo_root(&cwd)?;
-    let Some(branch) = oyo_core::git::get_current_branch(&root)
-        .ok()
-        .filter(|branch| branch != "HEAD" && !branch.is_empty())
+    let current = review_target_metadata(None, args);
+    let Some(metadata) = local_pr_review_metadata(&review_log_entries(config, args)?, &current)?
     else {
         return Ok(None);
     };
-    let target = local_pr_review_revision(&review_log_entries(config, args)?, &branch);
-    let Some(target) = target else {
+    let Some(target) = saved_pr_revision(&metadata) else {
         return Ok(None);
     };
     let valid = parse_range(&target).is_ok_and(|(base, head)| {
@@ -3604,7 +3696,7 @@ fn resolve_review_target(
         Ok(Some(target))
     } else {
         eprintln!(
-            "Notice: the saved PR review for branch '{branch}' is unavailable; using the working tree."
+            "Notice: the saved PR review for this checkout is unavailable; using the working tree."
         );
         Ok(None)
     }
@@ -3809,18 +3901,46 @@ fn review_pull_request_target(pr: &ProviderPr) -> ReviewPullRequestTarget {
     }
 }
 
-fn review_pr_target_metadata(pr: &ProviderPr) -> ReviewTargetMetadata {
-    let mut metadata =
-        basic_review_target_metadata(format!("{}#{}", pr.provider.id(), pr.number), "git");
-    metadata.git_base_ref = Some(pr.base_branch.clone());
-    metadata.git_head_ref = Some(pr.head_branch.clone());
-    metadata.git_base_commit = Some(pr.base_commit.clone());
-    metadata.git_head_commit = Some(pr.head_commit.clone());
-    metadata.branch = Some(pr.head_branch.clone());
+fn review_pr_target_metadata(
+    pr: &ProviderPr,
+    local: Option<&ReviewTargetMetadata>,
+) -> ReviewTargetMetadata {
+    let mut metadata = local.cloned().unwrap_or_else(|| {
+        basic_review_target_metadata(format!("{}#{}", pr.provider.id(), pr.number), "git")
+    });
+    metadata.label = format!("{}#{}", pr.provider.id(), pr.number);
+    if metadata.git_base_ref.is_none() {
+        metadata.git_base_ref = Some(pr.base_branch.clone());
+    }
+    if metadata.git_head_ref.is_none() {
+        metadata.git_head_ref = Some(pr.head_branch.clone());
+    }
+    if metadata.git_head_commit.is_none() {
+        metadata.git_base_commit = Some(pr.base_commit.clone());
+        metadata.git_head_commit = Some(pr.head_commit.clone());
+    } else if metadata.git_base_commit.is_none() {
+        metadata.git_base_commit = Some(pr.base_commit.clone());
+    }
+    if metadata.vcs == "git" {
+        metadata.branch = current_review_workspace()
+            .ok()
+            .and_then(|root| {
+                let branch = oyo_core::git::get_current_branch(&root).ok()?;
+                (git_commit(&root, &branch).as_deref() == Some(pr.head_commit.as_str()))
+                    .then_some(branch)
+            })
+            .or(metadata.branch)
+            .or_else(|| Some(pr.head_branch.clone()));
+    }
     metadata.pr_provider = Some(pr.provider.id().to_string());
     metadata.pr_repo = Some(pr.repo.clone());
     metadata.pr_number = Some(pr.number);
     metadata
+}
+
+fn set_review_pr_target_metadata(app: &mut App, pr: &ProviderPr) {
+    let metadata = review_pr_target_metadata(pr, app.review_target_metadata());
+    app.set_review_target_metadata(Some(metadata));
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -4369,19 +4489,63 @@ fn parse_github_time(value: &str) -> u64 {
         .unwrap_or(0)
 }
 
-fn provider_revision(target: Option<&str>, pr: &ProviderPr, jj: bool) -> String {
-    let revision = target
-        .filter(|target| target.contains(".."))
-        .map(str::to_string)
-        .unwrap_or_else(|| {
-            let separator = if jj { ".." } else { "..." };
-            format!("{}{separator}{}", pr.base_branch, pr.head_branch)
-        });
+fn provider_revision(target: Option<&str>, pr: &ProviderPr, jj: bool, pinned: bool) -> String {
+    let separator = if jj { ".." } else { "..." };
+    let revision = match target {
+        Some(target) if target.contains("..") => target.to_string(),
+        Some(target) if pinned => format!("{}{separator}{target}", pr.base_commit),
+        _ if pinned => format!("{}{separator}{}", pr.base_commit, pr.head_commit),
+        _ => format!("{}{separator}{}", pr.base_branch, pr.head_branch),
+    };
     if jj {
         normalize_jj_revision(&revision)
     } else {
         revision
     }
+}
+
+fn verify_pr_revision_head(
+    workspace: &Path,
+    revision: &str,
+    pr: &ProviderPr,
+    jj: bool,
+) -> Result<()> {
+    let (_, head) = parse_range(revision)?;
+    let commit = if jj {
+        let output = run_jj(
+            workspace,
+            &[
+                "log",
+                "--no-graph",
+                "-r",
+                &head,
+                "-T",
+                "commit_id ++ \"\\n\"",
+            ],
+        )?;
+        let commits = output
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect::<BTreeSet<_>>();
+        match commits.len() {
+            1 => commits.iter().next().unwrap().to_string(),
+            0 => anyhow::bail!("Review target head '{head}' is not available locally."),
+            _ => anyhow::bail!("Review target head '{head}' resolves to several commits."),
+        }
+    } else {
+        git_commit(workspace, &head)
+            .ok_or_else(|| anyhow!("Review target head '{head}' is not available locally."))?
+    };
+    if !commit.eq_ignore_ascii_case(&pr.head_commit) {
+        anyhow::bail!(
+            "Review target head {commit} does not match {} #{} head {}.",
+            pr.provider.short_review_noun(),
+            pr.number,
+            pr.head_commit
+        );
+    }
+    Ok(())
 }
 
 fn github_issue_comment_to_review_comment(
@@ -4895,16 +5059,46 @@ fn sync_lookup_target_in(workspace: &Path, supplied_target: Option<&str>) -> Res
     )
 }
 
+fn resolve_sync_target_parts_with_revision(
+    lookup_target: Option<String>,
+    revision_target: Option<String>,
+    remote_name: String,
+    pinned_pr: bool,
+) -> Result<(Option<String>, ReviewRemote, ProviderPr, String)> {
+    let workspace = current_review_workspace()?;
+    let remote = review_remote(&workspace, Some(&remote_name))?;
+    let lookup_target = sync_lookup_target_in(&workspace, lookup_target.as_deref())?;
+    let pr = provider_pr(&remote, Some(&lookup_target))?;
+    let jj = is_jj_repo(&workspace);
+    let revision = provider_revision(revision_target.as_deref(), &pr, jj, pinned_pr);
+    let revision = if !jj
+        && revision_target
+            .as_deref()
+            .is_none_or(|target| !target.contains("..") || target.contains("..."))
+    {
+        let (base_target, head) = parse_range(&revision)?;
+        let base = git_merge_base_in(&workspace, &base_target, &head).ok_or_else(|| {
+            anyhow!(
+                "Could not determine the merge base for {} #{}. Fetch its history and retry.",
+                pr.provider.short_review_noun(),
+                pr.number
+            )
+        })?;
+        format!("{base}...{head}")
+    } else {
+        revision
+    };
+    if pinned_pr {
+        verify_pr_revision_head(&workspace, &revision, &pr, jj)?;
+    }
+    Ok((revision_target, remote, pr, revision))
+}
+
 fn resolve_sync_target_parts(
     target: Option<String>,
     remote_name: String,
 ) -> Result<(Option<String>, ReviewRemote, ProviderPr, String)> {
-    let workspace = current_review_workspace()?;
-    let remote = review_remote(&workspace, Some(&remote_name))?;
-    let lookup_target = sync_lookup_target_in(&workspace, target.as_deref())?;
-    let pr = provider_pr(&remote, Some(&lookup_target))?;
-    let revision = provider_revision(target.as_deref(), &pr, is_jj_repo(&workspace));
-    Ok((target, remote, pr, revision))
+    resolve_sync_target_parts_with_revision(target.clone(), target, remote_name, false)
 }
 
 fn resolve_sync_target_items(
@@ -4915,9 +5109,22 @@ fn resolve_sync_target_items(
     resolve_sync_target_parts(target, remote_name)
 }
 
-fn sync_lookup_target(explicit: Option<String>, default: Option<String>) -> Option<String> {
-    explicit.or_else(|| {
-        default.map(|target| sync_pr_target(Some(&target)).unwrap_or(&target).to_string())
+fn sync_pr_number(value: &str) -> Option<u64> {
+    value
+        .strip_prefix('#')
+        .or_else(|| value.strip_prefix('!'))
+        .unwrap_or(value)
+        .parse()
+        .ok()
+}
+
+fn saved_pr_remote_name(workspace: &Path, metadata: &ReviewTargetMetadata) -> Option<String> {
+    let provider = metadata.pr_provider.as_deref()?;
+    let repo = metadata.pr_repo.as_deref()?;
+    review_remotes(workspace).into_iter().find(|name| {
+        review_remote(workspace, Some(name)).is_ok_and(|remote| {
+            remote.provider.id() == provider && remote.repo.eq_ignore_ascii_case(repo)
+        })
     })
 }
 
@@ -4926,16 +5133,61 @@ fn resolve_sync_target(
     args: &Args,
     items: &[String],
     option_target: Option<&str>,
+    option_pr: Option<u64>,
 ) -> Result<(Option<String>, ReviewRemote, ProviderPr, String)> {
     let workspace = current_review_workspace()?;
-    let (positional_target, remote_name) = parse_sync_args(&workspace, items)?;
-    let explicit = combine_review_targets(&[option_target, positional_target.as_deref()])?;
-    let default = if explicit.is_none() {
-        resolve_review_target(config, args, None)?
-    } else {
+    let (positional_target, mut remote_name) = parse_sync_args(&workspace, items)?;
+    let positional_pr = positional_target.as_deref().and_then(sync_pr_number);
+    if option_pr.is_some() && positional_pr.is_some() {
+        anyhow::bail!("Pass the pull request number once.");
+    }
+    let pr_number = option_pr.or(positional_pr);
+    if pr_number == Some(0) {
+        anyhow::bail!("Pull request number must be greater than zero.");
+    }
+    let positional_revision = if positional_pr.is_some() {
         None
+    } else {
+        positional_target
     };
-    let target = sync_lookup_target(explicit, default);
+    let explicit_revision =
+        combine_review_targets(&[option_target, positional_revision.as_deref()])?;
+
+    if let Some(number) = pr_number {
+        return resolve_sync_target_parts_with_revision(
+            Some(number.to_string()),
+            explicit_revision,
+            remote_name,
+            true,
+        );
+    }
+    if let Some(target) = explicit_revision {
+        return resolve_sync_target_parts(Some(target), remote_name);
+    }
+
+    let current = review_target_metadata(None, args);
+    if let Some(metadata) = local_pr_review_metadata(&review_log_entries(config, args)?, &current)?
+    {
+        if items.is_empty() {
+            remote_name = saved_pr_remote_name(&workspace, &metadata).ok_or_else(|| {
+                anyhow!(
+                    "No Git remote matches the saved pull request repository {}. Pass a remote.",
+                    metadata.pr_repo.as_deref().unwrap_or_default()
+                )
+            })?;
+        }
+        let number = metadata
+            .pr_number
+            .ok_or_else(|| anyhow!("Saved pull request has no number."))?;
+        return resolve_sync_target_parts_with_revision(
+            Some(number.to_string()),
+            None,
+            remote_name,
+            true,
+        );
+    }
+
+    let target = resolve_review_target(config, args, None)?;
     resolve_sync_target_parts(target, remote_name)
 }
 
@@ -4943,9 +5195,10 @@ fn review_app_for_pr(
     config: &config::Config,
     args: &Args,
     revision: &str,
+    pr: &ProviderPr,
     create: bool,
 ) -> Result<App> {
-    review_app_for_target(config, args, Some(revision), create)
+    review_app_for_target_and_pr(config, args, Some(revision), Some(pr), create)
 }
 
 #[derive(Debug)]
@@ -5711,13 +5964,14 @@ fn review_remote_options() -> Result<Vec<ReviewRemoteOption>> {
 fn handle_review_pull_command(
     items: &[String],
     target: Option<&str>,
+    pr_number: Option<u64>,
     json: bool,
     config: &config::Config,
     args: &Args,
 ) -> Result<()> {
-    let (_target, _remote, pr, revision) = resolve_sync_target(config, args, items, target)?;
-    let mut app = review_app_for_pr(config, args, &revision, true)?;
-    app.set_review_target_metadata(Some(review_pr_target_metadata(&pr)));
+    let (_target, _remote, pr, revision) =
+        resolve_sync_target(config, args, items, target, pr_number)?;
+    let mut app = review_app_for_pr(config, args, &revision, &pr, true)?;
     let user = provider_whoami(&pr)?;
     let stats = pull_provider_comments_into_app(&mut app, &pr, &user)?;
     if json {
@@ -5755,13 +6009,14 @@ fn handle_review_pull_command(
 fn handle_review_push_command(
     items: &[String],
     target: Option<&str>,
+    pr_number: Option<u64>,
     json: bool,
     config: &config::Config,
     args: &Args,
 ) -> Result<()> {
-    let (_target, _remote, pr, revision) = resolve_sync_target(config, args, items, target)?;
-    let mut app = review_app_for_pr(config, args, &revision, false)?;
-    app.set_review_target_metadata(Some(review_pr_target_metadata(&pr)));
+    let (_target, _remote, pr, revision) =
+        resolve_sync_target(config, args, items, target, pr_number)?;
+    let mut app = review_app_for_pr(config, args, &revision, &pr, false)?;
     let user = provider_whoami(&pr)?;
     let stats = push_app_comments_to_provider(&mut app, &pr, &user)?;
     if json {
@@ -6707,13 +6962,15 @@ fn handle_review_command(command: &Command, config: &config::Config, args: &Args
         Some(ReviewCommand::Pull {
             args: items,
             target,
+            pr,
             json,
-        }) => handle_review_pull_command(items, target.as_deref(), *json, config, args),
+        }) => handle_review_pull_command(items, target.as_deref(), *pr, *json, config, args),
         Some(ReviewCommand::Push {
             args: items,
             target,
+            pr,
             json,
-        }) => handle_review_push_command(items, target.as_deref(), *json, config, args),
+        }) => handle_review_push_command(items, target.as_deref(), *pr, *json, config, args),
         Some(ReviewCommand::Gc {
             revision,
             target,
@@ -7225,6 +7482,7 @@ fn run() -> Result<()> {
                 built.workspace_root,
                 &input_mode,
                 None,
+                None,
                 true,
             )?;
             app.start_content_loading();
@@ -7376,6 +7634,7 @@ fn run() -> Result<()> {
             &args,
             built.workspace_root,
             &input_mode,
+            None,
             None,
             true,
         )?;
@@ -8176,7 +8435,7 @@ fn run_app(
                         user.avatar_url.clone(),
                     );
                     app.set_review_pull_request_target(Some(review_pull_request_target(&pr)));
-                    app.set_review_target_metadata(Some(review_pr_target_metadata(&pr)));
+                    set_review_pr_target_metadata(app, &pr);
                     match apply_provider_comments_to_app(app, *data) {
                         Ok(pull) if action == ReviewSyncAction::Sync => {
                             review_sync_pull_stats = Some(pull);
@@ -9071,21 +9330,21 @@ mod tests {
         github_canonical_repo_with, github_comment_to_review_comment, github_repo_endpoint,
         github_review_to_review_comment, gitlab, ignore_github_delete_not_found,
         insert_review_thread_states, jj_bookmark_revset, jj_bookmarks_for_rev_in, jj_summary_paths,
-        jj_target_metadata_in, local_pr_review_revision, mouse_horizontal_scroll_delta,
-        normalize_jj_revision, parse_jj_git_remotes, parse_range, parse_remote_url,
-        parse_sync_args, provider_revision, push_pending_mouse_scroll,
+        jj_target_metadata_in, local_pr_review_metadata, metadata_matches_target,
+        mouse_horizontal_scroll_delta, normalize_jj_revision, parse_jj_git_remotes, parse_range,
+        parse_remote_url, parse_sync_args, provider_revision, push_pending_mouse_scroll,
         push_review_comments_to_provider_with, push_review_comments_to_provider_with_ops,
         render_editor_args, review_author_from_cli, review_comments_json_value,
         review_pr_target_metadata, review_provider_for_configured_host, review_remote,
-        review_status_json_value, review_target_summary, sgr_mouse_fragment_state,
-        should_load_saved_review_fallback, sync_lookup_target, sync_lookup_target_in,
-        update_mouse_scroll_block, Args, BlockedMouseScroll, Command, GhComment, GhCommentUser,
-        GhIssueComment, GhPr, GhProviderComment, GhRepo, GhReview, GhReviewThreadsResponse,
-        InputMode, MouseScrollRuns, MouseScrollTarget, PendingMouseScroll, ProviderPr,
-        ProviderUser, ReviewCommand, ReviewCommentCommand, ReviewProviderKind,
-        ReviewProviderPushOps, ReviewRemote, ReviewTargetMetadata, SgrFragmentState,
-        MAX_DISCRETE_MOUSE_SCROLL_ACTIONS_PER_FRAME, MOUSE_SCROLL_FLICK_VOLUME,
-        MOUSE_SCROLL_SUPPRESSION_CAP,
+        review_status_json_value, review_target_summary, saved_pr_revision,
+        set_review_pr_target_metadata, sgr_mouse_fragment_state, should_load_saved_review_fallback,
+        sync_lookup_target_in, sync_pr_number, update_mouse_scroll_block, verify_pr_revision_head,
+        Args, BlockedMouseScroll, Command, GhComment, GhCommentUser, GhIssueComment, GhPr,
+        GhProviderComment, GhRepo, GhReview, GhReviewThreadsResponse, InputMode, MouseScrollRuns,
+        MouseScrollTarget, PendingMouseScroll, ProviderPr, ProviderUser, ReviewCommand,
+        ReviewCommentCommand, ReviewProviderKind, ReviewProviderPushOps, ReviewRemote,
+        ReviewTargetMetadata, SgrFragmentState, MAX_DISCRETE_MOUSE_SCROLL_ACTIONS_PER_FRAME,
+        MOUSE_SCROLL_FLICK_VOLUME, MOUSE_SCROLL_SUPPRESSION_CAP,
     };
     use crate::app::{
         review::{
@@ -10356,27 +10615,115 @@ mod tests {
             }),
         ];
 
+        let mut current = basic_review_target_metadata("@", "git");
+        current.branch = Some("feature".to_string());
+        current.git_base_commit = Some("head-oid".to_string());
+        let metadata = local_pr_review_metadata(&entries, &current)
+            .unwrap()
+            .unwrap();
         assert_eq!(
-            local_pr_review_revision(&entries, "feature").as_deref(),
-            Some("base-oid...feature")
+            saved_pr_revision(&metadata).as_deref(),
+            Some("base-oid...head-oid")
         );
-        assert_eq!(local_pr_review_revision(&entries, "other"), None);
+
+        current.branch = Some("other".to_string());
+        current.git_base_commit = Some("other-oid".to_string());
+        assert_eq!(local_pr_review_metadata(&entries, &current).unwrap(), None);
     }
 
     #[test]
-    fn sync_default_uses_saved_head_but_explicit_range_stays_exact() {
+    fn explicit_pr_uses_commit_range_and_keeps_local_range() {
+        let pr = test_provider_pr();
         assert_eq!(
-            sync_lookup_target(None, Some("base...feature".to_string())).as_deref(),
-            Some("feature")
+            provider_revision(None, &pr, false, true),
+            format!("{}...{}", pr.base_commit, pr.head_commit)
         );
         assert_eq!(
-            sync_lookup_target(
-                Some("other-base...feature".to_string()),
-                Some("base...feature".to_string()),
-            )
-            .as_deref(),
-            Some("other-base...feature")
+            provider_revision(Some("origin/main...pr-7"), &pr, false, true),
+            "origin/main...pr-7"
         );
+        assert_eq!(sync_pr_number("7"), Some(7));
+        assert_eq!(sync_pr_number("#7"), Some(7));
+        assert_eq!(sync_pr_number("0"), Some(0));
+        assert_eq!(sync_pr_number("feature"), None);
+
+        let args = Args::try_parse_from(["oy", "review", "pull", "7", "-t", "origin/main...pr-7"])
+            .unwrap();
+        assert!(matches!(
+            args.command,
+            Some(Command::Review {
+                command: Some(ReviewCommand::Pull { ref args, ref target, pr: None, .. }),
+                ..
+            }) if args == &["7"] && target.as_deref() == Some("origin/main...pr-7")
+        ));
+    }
+
+    #[test]
+    fn pr_metadata_replaces_worktree_commits_but_keeps_range_commits() {
+        let pr = test_provider_pr();
+        let mut worktree = basic_review_target_metadata("@", "git");
+        worktree.git_base_commit = Some("local-head".to_string());
+        let associated = review_pr_target_metadata(&pr, Some(&worktree));
+        assert_eq!(
+            associated.git_base_commit.as_deref(),
+            Some(pr.base_commit.as_str())
+        );
+        assert_eq!(
+            associated.git_head_commit.as_deref(),
+            Some(pr.head_commit.as_str())
+        );
+
+        let mut range = basic_review_target_metadata("base...feature", "git");
+        range.git_base_commit = Some("merge-base".to_string());
+        range.git_head_commit = Some(pr.head_commit.clone());
+        let associated = review_pr_target_metadata(&pr, Some(&range));
+        assert_eq!(associated.git_base_commit.as_deref(), Some("merge-base"));
+        assert_eq!(
+            associated.git_head_commit.as_deref(),
+            Some(pr.head_commit.as_str())
+        );
+
+        let mut older = associated.clone();
+        older.vcs = "jj".to_string();
+        older.git_base_commit = Some("old-base".to_string());
+        assert!(metadata_matches_target(&older, &associated));
+    }
+
+    #[test]
+    fn explicit_pr_rejects_a_different_local_head() {
+        let root = temp_path("pr-head");
+        fs::create_dir_all(&root).unwrap();
+        git_output(&root, &["init"]).unwrap();
+        git_output(&root, &["config", "user.name", "Reviewer"]).unwrap();
+        git_output(&root, &["config", "user.email", "reviewer@example.com"]).unwrap();
+        fs::write(root.join("file.txt"), "base\n").unwrap();
+        git_output(&root, &["add", "file.txt"]).unwrap();
+        git_output(
+            &root,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "base"],
+        )
+        .unwrap();
+        let base = git_output(&root, &["rev-parse", "HEAD"]).unwrap();
+        fs::write(root.join("file.txt"), "head\n").unwrap();
+        git_output(&root, &["add", "file.txt"]).unwrap();
+        git_output(
+            &root,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "head"],
+        )
+        .unwrap();
+        let head = git_output(&root, &["rev-parse", "HEAD"]).unwrap();
+        let mut pr = test_provider_pr();
+        pr.base_commit = base.clone();
+        pr.head_commit = head.clone();
+
+        verify_pr_revision_head(&root, &format!("{base}...{head}"), &pr, false).unwrap();
+        assert!(
+            verify_pr_revision_head(&root, &format!("{base}...{base}"), &pr, false)
+                .unwrap_err()
+                .to_string()
+                .contains("does not match")
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -10679,10 +11026,10 @@ mod tests {
     #[test]
     fn provider_revision_uses_the_workspace_range_syntax() {
         let pr = test_provider_pr();
-        assert_eq!(provider_revision(None, &pr, true), "main..feature");
-        assert_eq!(provider_revision(None, &pr, false), "main...feature");
+        assert_eq!(provider_revision(None, &pr, true, false), "main..feature");
+        assert_eq!(provider_revision(None, &pr, false, false), "main...feature");
         assert_eq!(
-            provider_revision(Some("other...feature"), &pr, true),
+            provider_revision(Some("other...feature"), &pr, true, false),
             "other..feature"
         );
     }
@@ -11568,7 +11915,7 @@ mod tests {
         let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
         app.set_review_persist_enabled(false);
         app.enable_review_mode();
-        app.set_review_target_metadata(Some(review_pr_target_metadata(&test_provider_pr())));
+        set_review_pr_target_metadata(&mut app, &test_provider_pr());
         app.add_review_comment_from_cli(
             "new.txt",
             ReviewTargetKind::Line,
@@ -11621,7 +11968,7 @@ mod tests {
             "new\n".to_string(),
         );
         let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
-        app.set_review_target_metadata(Some(review_pr_target_metadata(&test_gitlab_pr())));
+        set_review_pr_target_metadata(&mut app, &test_gitlab_pr());
 
         assert_eq!(review_target_summary(&app).label, "MR #1 (feature)");
     }
