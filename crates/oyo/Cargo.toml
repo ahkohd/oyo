@@ -19,6 +19,7 @@ oyo-core = { path = "../oyo-core", version = "0.1.0" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
+libc = { workspace = true }
 ratatui = { workspace = true }
 ratatui-image = { workspace = true }
 ratatui-comfy-toaster = "0.4"
