@@ -29,7 +29,7 @@ oy c where --json
 4. oy control target --session review-a TARGET    # change target if needed
 5. oy control goto --session review-a ...         # move to the right place
 6. oy review comment ...                          # create or update review data
-7. oy control where --session review-a --json     # check lastAppliedSeq after queued work
+7. oy control where --session review-a --json     # check queued work for success or failure
 8. oy control cancel --session review-a           # stop queued work if needed
 ```
 
@@ -65,7 +65,8 @@ oy control diff --session review-a --json --include-patch
 
 - `list` shows running sessions
 - `get` shows session metadata, including workspace and target
-- `where --json` shows the current file, cursor, selection, active tab and `lastAppliedSeq`
+- `where --json` shows the current file, cursor, selection, active tab, `lastAppliedSeq` and `lastError`
+- `lastError` is null or contains `seq` and `message`; text output shows `Last error: none` or `Last error: seq N: message`
 - `diff --json` shows files and hunks without raw patch text by default
 - add `--include-patch` only when you need patch text
 
@@ -110,7 +111,7 @@ oy control target --session review-a --staged
 - use `--worktree` for the Git working tree
 - use `--staged` for the Git index
 - pass the same Git or jj target you would pass to `oy`
-- if the command is queued, poll `oy control where --json` until `lastAppliedSeq` reaches the returned `seq`
+- if the command is queued, poll `oy control where --json` until `lastAppliedSeq` reaches `seq` or `lastError.seq` reaches `seq`
 
 ### Modes
 
@@ -198,7 +199,12 @@ If a response includes `queued: true` and `seq`, wait like this:
 oy control where --session review-a --json
 ```
 
-Check `lastAppliedSeq`. Continue when it is greater than or equal to the queued `seq`.
+Stop polling when either condition is true:
+
+- `lastAppliedSeq` is greater than or equal to `seq`: the command succeeded
+- `lastError.seq` is greater than or equal to `seq`: the command failed; read `lastError.message`
+
+A failed command does not advance `lastAppliedSeq`.
 
 Use this to stop queued work:
 
@@ -271,7 +277,7 @@ Guidelines:
 - `More than one visible diff file matches PATH.` - pass the full path
 - `Specify exactly one navigation target` - use one of `--new-line`, `--old-line`, `--hunk`, `--step-number`, `--start` or `--end`
 - `Pass a target, --worktree or --staged` - add a target to `oy control target`
-- `Control queue full. Cancel or wait.` - run `oy control cancel` or wait for `lastAppliedSeq`
+- `Control queue full. Cancel or wait.` - run `oy control cancel`, or poll `where --json` for `lastAppliedSeq` or `lastError.seq`
 - `Use on, off or toggle` - pass one of those values to the mode command
 - `Unknown view mode: MODE` - use `unified`, `split`, `evolution`, `blame`, `preview`, `next` or `prev`
 - `Unsupported control action: ID` - use a supported action ID, or use a named control command

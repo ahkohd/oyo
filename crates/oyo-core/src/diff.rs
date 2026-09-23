@@ -156,7 +156,11 @@ impl DiffEngine {
 
         let old_lines: Vec<&str> = old.lines().collect();
         let new_lines: Vec<&str> = new.lines().collect();
-        let ranges = diff_ranges(Algorithm::Histogram, old, new);
+        let ranges = diff_ranges(
+            Algorithm::Histogram,
+            TokenSlice { tokens: &old_lines },
+            TokenSlice { tokens: &new_lines },
+        );
 
         let mut old_idx = 0usize;
 
@@ -605,6 +609,17 @@ mod tests {
         assert_eq!(result.insertions, 0);
         assert_eq!(result.deletions, 0);
         assert!(result.significant_changes.is_empty());
+    }
+
+    #[test]
+    fn line_ending_only_changes_have_no_diff_steps_or_stats() {
+        for (old, new) in [("x\ny", "x\ny\n"), ("a\r\nb\r\n", "a\nb\n")] {
+            let result = DiffEngine::new().diff_strings(old, new);
+
+            assert_eq!((result.insertions, result.deletions), (0, 0));
+            assert!(result.significant_changes.is_empty());
+            assert!(result.hunks.is_empty());
+        }
     }
 
     #[test]

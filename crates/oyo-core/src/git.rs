@@ -285,14 +285,34 @@ pub fn get_diff_numstat(
     repo_path: &Path,
     args: &[String],
 ) -> Result<HashMap<PathBuf, (usize, usize)>, GitError> {
-    let output = Command::new("git")
+    get_diff_numstat_with_paths(repo_path, args, None)
+}
+
+pub(crate) fn get_diff_numstat_for_paths(
+    repo_path: &Path,
+    args: &[String],
+    paths: &[PathBuf],
+) -> Result<HashMap<PathBuf, (usize, usize)>, GitError> {
+    get_diff_numstat_with_paths(repo_path, args, Some(paths))
+}
+
+fn get_diff_numstat_with_paths(
+    repo_path: &Path,
+    args: &[String],
+    paths: Option<&[PathBuf]>,
+) -> Result<HashMap<PathBuf, (usize, usize)>, GitError> {
+    let mut command = Command::new("git");
+    command
         .arg("-C")
         .arg(repo_path)
         .arg("diff")
         .args(args)
         .arg("--numstat")
-        .arg("-z")
-        .output()?;
+        .arg("-z");
+    if let Some(paths) = paths {
+        command.arg("--").args(paths);
+    }
+    let output = command.output()?;
     if !output.status.success() {
         return Err(GitError::CommandFailed(
             String::from_utf8_lossy(&output.stderr).to_string(),
@@ -641,24 +661,27 @@ fn parse_name_status(output: &[u8], changes: &mut Vec<ChangedFile>) {
             None
         };
 
-        let status = match status_char {
-            b'M' => FileStatus::Modified,
-            b'A' => FileStatus::Added,
-            b'D' => FileStatus::Deleted,
-            b'R' => FileStatus::Renamed,
+        let (status, old_path, path) = match status_char {
+            b'M' => (FileStatus::Modified, None, path_from_git_bytes(first_path)),
+            b'A' => (FileStatus::Added, None, path_from_git_bytes(first_path)),
+            b'D' => (FileStatus::Deleted, None, path_from_git_bytes(first_path)),
+            b'R' => {
+                let Some(new_path) = second_path else {
+                    continue;
+                };
+                (
+                    FileStatus::Renamed,
+                    Some(path_from_git_bytes(first_path)),
+                    path_from_git_bytes(new_path),
+                )
+            }
+            b'C' => {
+                let Some(new_path) = second_path else {
+                    continue;
+                };
+                (FileStatus::Added, None, path_from_git_bytes(new_path))
+            }
             _ => continue,
-        };
-
-        let (old_path, path) = if status == FileStatus::Renamed {
-            let Some(new_path) = second_path else {
-                continue;
-            };
-            (
-                Some(path_from_git_bytes(first_path)),
-                path_from_git_bytes(new_path),
-            )
-        } else {
-            (None, path_from_git_bytes(first_path))
         };
 
         changes.push(ChangedFile {
@@ -792,12 +815,82 @@ mod tests {
     }
 
     #[test]
+    fn numstat_path_filter_limits_results_and_includes_rename_paths() {
+        let root = std::env::temp_dir().join(format!(
+            "oyo-git-numstat-paths-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["init", "-q"])
+            .status()
+            .unwrap()
+            .success());
+        for (key, value) in [
+            ("user.name", "Test"),
+            ("user.email", "test@example.com"),
+            ("core.quotepath", "false"),
+        ] {
+            assert!(Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args(["config", key, value])
+                .status()
+                .unwrap()
+                .success());
+        }
+        std::fs::write(root.join("old.txt"), "same\ncontent\n").unwrap();
+        std::fs::write(root.join("other.txt"), "before\n").unwrap();
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["add", "."])
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["-c", "commit.gpgsign=false", "commit", "-qm", "fixture",])
+            .status()
+            .unwrap()
+            .success());
+        std::fs::rename(root.join("old.txt"), root.join("new.txt")).unwrap();
+        std::fs::write(root.join("other.txt"), "after\n").unwrap();
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["add", "-A"])
+            .status()
+            .unwrap()
+            .success());
+
+        let stats = get_diff_numstat_for_paths(
+            &root,
+            &["--cached".to_string(), "--find-renames".to_string()],
+            &[PathBuf::from("old.txt"), PathBuf::from("new.txt")],
+        )
+        .unwrap();
+
+        assert_eq!(stats.get(Path::new("old.txt")), Some(&(0, 0)));
+        assert_eq!(stats.get(Path::new("new.txt")), Some(&(0, 0)));
+        assert!(!stats.contains_key(Path::new("other.txt")));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn test_parse_name_status() {
-        let output = b"T\0Modified-name.rs\0M\0src/main.rs\0A\0src/new.rs\0D\0src/old.rs\0R100\0src/old-name.rs\0src/new-name.rs\0";
+        let output = b"T\0Modified-name.rs\0M\0src/main.rs\0A\0src/new.rs\0D\0src/old.rs\0R100\0src/old-name.rs\0src/new-name.rs\0C099\0src/source.rs\0src/copy.rs\0";
         let mut changes = Vec::new();
         parse_name_status(output, &mut changes);
 
-        assert_eq!(changes.len(), 4);
+        assert_eq!(changes.len(), 5);
         assert_eq!(changes[0].status, FileStatus::Modified);
         assert_eq!(changes[0].path, Path::new("src/main.rs"));
         assert_eq!(changes[1].status, FileStatus::Added);
@@ -808,6 +901,9 @@ mod tests {
             Some(Path::new("src/old-name.rs"))
         );
         assert_eq!(changes[3].path, Path::new("src/new-name.rs"));
+        assert_eq!(changes[4].status, FileStatus::Added);
+        assert_eq!(changes[4].path, Path::new("src/copy.rs"));
+        assert_eq!(changes[4].old_path, None);
     }
 
     #[cfg(unix)]

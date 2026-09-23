@@ -2550,6 +2550,17 @@ impl App {
                 .map(|tab| tab.content)
         });
         let live_backup = std::mem::replace(&mut self.multi_diff, reconstructed);
+        let worker_state = super::OutdatedDiffWorkerState {
+            valid: true,
+            diff_queue: std::mem::take(&mut self.diff_queue),
+            diff_inflight: self.diff_inflight.take(),
+            diff_refresh_restore_end: self.diff_refresh_restore_end.take(),
+            diff_worker_tx: self.diff_worker_tx.take(),
+            diff_worker_rx: self.diff_worker_rx.take(),
+            content_worker_rx: self.content_worker_rx.take(),
+            content_generation: self.content_generation,
+            content_loading: std::mem::take(&mut self.content_loading),
+        };
         self.outdated_diff_view = Some(super::OutdatedDiffView {
             comment_id: comment.id,
             file_path: comment.anchor.file_path.clone(),
@@ -2557,6 +2568,7 @@ impl App {
             active_tab_id,
             active_tab_content,
             cache_on_restore: true,
+            worker_state,
         });
         if let Some(id) = active_tab_id {
             if let Some(tab) = self.topbar_tabs.iter_mut().find(|tab| tab.id == id) {
@@ -2575,23 +2587,44 @@ impl App {
         let Some(view) = self.outdated_diff_view.take() else {
             return cancelled_pending;
         };
-        let reconstructed = std::mem::replace(&mut self.multi_diff, view.live_backup);
-        if view.cache_on_restore {
+        let super::OutdatedDiffView {
+            comment_id,
+            live_backup,
+            active_tab_id,
+            active_tab_content,
+            cache_on_restore,
+            worker_state,
+            ..
+        } = view;
+        let reconstructed = std::mem::replace(&mut self.multi_diff, live_backup);
+        if cache_on_restore {
             self.outdated_reconstruction_cache.insert(
-                view.comment_id,
+                comment_id,
                 OutdatedReconstructionState::Ready(Box::new(reconstructed)),
             );
         }
-        if let Some(id) = view.active_tab_id {
+        if let Some(id) = active_tab_id {
             if let Some(tab) = self.topbar_tabs.iter_mut().find(|tab| tab.id == id) {
-                if let Some(content) = view.active_tab_content {
+                if let Some(content) = active_tab_content {
                     tab.content = content;
                 }
                 tab.navigator_state = None;
             }
         }
         self.reset_after_file_list_refresh(false);
-        self.start_content_loading();
+        if worker_state.valid {
+            self.diff_queue = worker_state.diff_queue;
+            self.diff_inflight = worker_state.diff_inflight;
+            self.diff_refresh_restore_end = worker_state.diff_refresh_restore_end;
+            self.diff_worker_tx = worker_state.diff_worker_tx;
+            self.diff_worker_rx = worker_state.diff_worker_rx;
+            self.content_generation = worker_state.content_generation;
+            self.content_worker_rx = worker_state.content_worker_rx;
+            self.content_loading = worker_state.content_loading;
+        }
+        if self.content_loading.is_empty() {
+            self.start_content_loading();
+        }
         true
     }
 
@@ -9095,6 +9128,146 @@ mod tests {
             created_at: 1,
             updated_at: 1,
         }
+    }
+
+    #[test]
+    fn outdated_diff_view_restores_live_content_loading() {
+        let file = oyo_core::multi::FileEntry {
+            path: "new.txt".into(),
+            old_path: None,
+            old_source_path: None,
+            new_source_path: None,
+            display_name: "new.txt".to_string(),
+            status: oyo_core::git::FileStatus::Modified,
+            insertions: 1,
+            deletions: 1,
+            binary: false,
+        };
+        let live_diff = MultiFileDiff::from_pending_files(
+            None,
+            vec![(
+                file,
+                oyo_core::multi::ContentSource::Empty,
+                oyo_core::multi::ContentSource::Empty,
+            )],
+            true,
+        );
+        let mut app = App::new(live_diff, ViewMode::UnifiedPane, 0, false, None);
+        app.set_review_persist_enabled(false);
+        app.enable_review_mode();
+        assert!(app.start_content_loading());
+        assert_eq!(app.content_loading_count(), 1);
+
+        let reconstructed = MultiFileDiff::from_file_pair(
+            PathBuf::from("new.txt"),
+            PathBuf::from("new.txt"),
+            "old\n".to_string(),
+            "new\n".to_string(),
+        );
+        app.show_reconstructed_outdated_diff(&line_comment(), reconstructed);
+        assert!(app.restore_live_diff_after_outdated_view());
+        assert_eq!(app.content_loading_count(), 1);
+
+        for _ in 0..100 {
+            app.poll_content_responses();
+            if app.content_loading_count() == 0 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+
+        assert_eq!(app.content_loading_count(), 0);
+        assert_eq!(
+            app.multi_diff.diff_status(0),
+            oyo_core::multi::DiffStatus::Ready
+        );
+    }
+
+    #[test]
+    fn outdated_diff_restore_reloads_content_after_live_backup_replacement() {
+        let root = temp_path("outdated-live-replacement");
+        std::fs::create_dir_all(&root).unwrap();
+        write_file(&root.join("old-live.txt"), "old live\n");
+        write_file(&root.join("new-live.txt"), "new live\n");
+        write_file(&root.join("old-current.txt"), "old current\n");
+        write_file(&root.join("new-current.txt"), "new current\n");
+        write_file(&root.join("old-pending.txt"), "old pending\n");
+        write_file(&root.join("new-pending.txt"), "new pending\n");
+
+        let pending_diff = |entries: Vec<(&str, &str, &str)>| {
+            MultiFileDiff::from_pending_files(
+                Some(root.clone()),
+                entries
+                    .into_iter()
+                    .map(|(name, old, new)| {
+                        let file = oyo_core::multi::FileEntry {
+                            path: name.into(),
+                            old_path: None,
+                            old_source_path: None,
+                            new_source_path: None,
+                            display_name: name.to_string(),
+                            status: oyo_core::git::FileStatus::Modified,
+                            insertions: 1,
+                            deletions: 1,
+                            binary: false,
+                        };
+                        (
+                            file,
+                            oyo_core::multi::ContentSource::File(root.join(old)),
+                            oyo_core::multi::ContentSource::File(root.join(new)),
+                        )
+                    })
+                    .collect(),
+                true,
+            )
+        };
+
+        let mut app = App::new(
+            pending_diff(vec![("stale.txt", "old-live.txt", "new-live.txt")]),
+            ViewMode::UnifiedPane,
+            0,
+            false,
+            None,
+        );
+        app.set_review_persist_enabled(false);
+        app.enable_review_mode();
+        assert!(app.start_content_loading());
+        assert_eq!(app.content_loading_count(), 1);
+
+        app.show_reconstructed_outdated_diff(
+            &line_comment(),
+            MultiFileDiff::from_file_pair(
+                PathBuf::from("historical.txt"),
+                PathBuf::from("historical.txt"),
+                "old history\n".to_string(),
+                "new history\n".to_string(),
+            ),
+        );
+        app.replace_multi_diff(pending_diff(vec![
+            ("current.txt", "old-current.txt", "new-current.txt"),
+            ("pending.txt", "old-pending.txt", "new-pending.txt"),
+        ]));
+
+        assert!(app.restore_live_diff_after_outdated_view());
+        assert_eq!(app.content_loading_count(), 1);
+        for _ in 0..100 {
+            app.poll_content_responses();
+            if app.content_loading_count() == 0 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+
+        assert_eq!(app.content_loading_count(), 0);
+        assert_eq!(
+            app.multi_diff.file_contents(1),
+            Some(("old pending\n", "new pending\n"))
+        );
+        assert_eq!(
+            app.multi_diff.diff_status(1),
+            oyo_core::multi::DiffStatus::Ready
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

@@ -210,6 +210,13 @@ struct QueuedControl {
     request: ControlRequest,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ControlLastError {
+    seq: u64,
+    message: String,
+}
+
 pub(crate) struct ControlSession {
     info: ControlSessionInfo,
     listener: UnixListener,
@@ -217,8 +224,10 @@ pub(crate) struct ControlSession {
     queue: VecDeque<QueuedControl>,
     play: Option<(u64, QueuedPlay)>,
     in_flight_seq: Option<u64>,
+    pending_target_seq: Option<u64>,
     next_seq: u64,
     last_applied_seq: u64,
+    last_error: Option<ControlLastError>,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -274,8 +283,10 @@ impl ControlSession {
             queue: VecDeque::new(),
             play: None,
             in_flight_seq: None,
+            pending_target_seq: None,
             next_seq: last_applied_seq.saturating_add(1),
             last_applied_seq,
+            last_error: None,
         })
     }
 
@@ -321,6 +332,9 @@ impl ControlSession {
             return self.rename_session(app, &name);
         }
         if async_request(app, &request) {
+            if let Err(error) = validate_queued_request(app, &request) {
+                return ControlResponse::err(Some(&self.info.name), error.to_string());
+            }
             return match self.enqueue(request) {
                 Ok(seq) => ControlResponse::queued(
                     &self.info.name,
@@ -330,7 +344,13 @@ impl ControlSession {
                 Err(error) => ControlResponse::err(Some(&self.info.name), error.to_string()),
             };
         }
-        match apply_request(app, &self.info, self.last_applied_seq, request) {
+        match apply_request(
+            app,
+            &self.info,
+            self.last_applied_seq,
+            self.last_error.as_ref(),
+            request,
+        ) {
             Ok(response) => response,
             Err(error) => ControlResponse::err(Some(&self.info.name), error.to_string()),
         }
@@ -371,7 +391,11 @@ impl ControlSession {
     }
 
     pub(crate) fn preempt(&mut self, app: &mut App) -> bool {
-        if self.queue.is_empty() && self.play.is_none() && self.in_flight_seq.is_none() {
+        if self.queue.is_empty()
+            && self.play.is_none()
+            && self.in_flight_seq.is_none()
+            && self.pending_target_seq.is_none()
+        {
             return false;
         }
         self.clear_async(app);
@@ -404,6 +428,7 @@ impl ControlSession {
         self.queue.clear();
         self.play = None;
         self.in_flight_seq = None;
+        self.pending_target_seq = None;
         app.stop_control_motion();
         self.next_seq.saturating_sub(1)
     }
@@ -419,8 +444,22 @@ impl ControlSession {
         true
     }
 
+    pub(crate) fn target_failed(&mut self, seq: u64, message: impl Into<String>) {
+        if self.pending_target_seq == Some(seq) {
+            self.pending_target_seq = None;
+            self.record_error(seq, message);
+        }
+    }
+
+    fn record_error(&mut self, seq: u64, message: impl Into<String>) {
+        self.last_error = Some(ControlLastError {
+            seq,
+            message: message.into(),
+        });
+    }
+
     fn advance_async(&mut self, app: &mut App) -> Option<(ControlTarget, u64)> {
-        if self.in_flight_seq.is_some() {
+        if self.in_flight_seq.is_some() || self.pending_target_seq.is_some() {
             return None;
         }
         if let Some((seq, mut play)) = self.play.take() {
@@ -445,14 +484,23 @@ impl ControlSession {
             return self.advance_async(app);
         }
         if let Some(target) = control_target_from_request(&queued.request) {
-            self.last_applied_seq = self.last_applied_seq.max(queued.seq);
+            self.pending_target_seq = Some(queued.seq);
             return Some((target, queued.seq));
         }
-        let _ = apply_request(app, &self.info, self.last_applied_seq, queued.request);
-        if app.animation_phase == AnimationPhase::Idle {
-            self.last_applied_seq = self.last_applied_seq.max(queued.seq);
-        } else {
-            self.in_flight_seq = Some(queued.seq);
+        match apply_request(
+            app,
+            &self.info,
+            self.last_applied_seq,
+            self.last_error.as_ref(),
+            queued.request,
+        ) {
+            Ok(_) if app.animation_phase == AnimationPhase::Idle => {
+                self.last_applied_seq = self.last_applied_seq.max(queued.seq);
+            }
+            Ok(_) => self.in_flight_seq = Some(queued.seq),
+            Err(error) => {
+                self.record_error(queued.seq, error.to_string());
+            }
         }
         None
     }
@@ -620,6 +668,58 @@ fn async_request(app: &App, request: &ControlRequest) -> bool {
     }
 }
 
+fn validate_queued_request(app: &App, request: &ControlRequest) -> Result<()> {
+    match request {
+        ControlRequest::File {
+            target: Some(path), ..
+        } if !matches!(path.as_str(), "next" | "prev" | "previous") => {
+            resolve_file_index(&app.multi_diff.files, path)?;
+        }
+        ControlRequest::Goto {
+            file,
+            new_line,
+            old_line,
+            hunk,
+            step,
+            start,
+            end,
+        } => {
+            if let Some(file) = file {
+                resolve_file_index(&app.multi_diff.files, file)?;
+            }
+            let target_count = [
+                new_line.is_some(),
+                old_line.is_some(),
+                hunk.is_some(),
+                step.is_some(),
+                *start,
+                *end,
+            ]
+            .into_iter()
+            .filter(|value| *value)
+            .count();
+            if target_count != 1 {
+                anyhow::bail!("Specify exactly one navigation target");
+            }
+        }
+        ControlRequest::Hunk { mode, .. }
+            if !matches!(
+                mode.as_str(),
+                "next" | "prev" | "previous" | "start" | "end"
+            ) =>
+        {
+            anyhow::bail!("Use next, prev, start or end");
+        }
+        ControlRequest::Target {
+            target: Some(target),
+            worktree: false,
+            staged: false,
+        } if target.trim().is_empty() => anyhow::bail!("Target revision cannot be empty"),
+        _ => {}
+    }
+    Ok(())
+}
+
 fn action_async(app: &App, id: &str) -> bool {
     let movement = matches!(
         id,
@@ -699,6 +799,7 @@ fn apply_request(
     app: &mut App,
     info: &ControlSessionInfo,
     last_applied_seq: u64,
+    last_error: Option<&ControlLastError>,
     request: ControlRequest,
 ) -> Result<ControlResponse> {
     if matches!(
@@ -721,7 +822,7 @@ fn apply_request(
             serde_json::to_value(info)?,
         )),
         ControlRequest::Rename { .. } => anyhow::bail!("Rename must be applied by the session"),
-        ControlRequest::Where => Ok(where_response(app, info, last_applied_seq)),
+        ControlRequest::Where => Ok(where_response(app, info, last_applied_seq, last_error)),
         ControlRequest::Diff { include_patch } => Ok(diff_response(app, info, include_patch)),
         ControlRequest::Next { count } => {
             for _ in 0..count.max(1) {
@@ -731,7 +832,12 @@ fn apply_request(
                     app.scroll_down();
                 }
             }
-            Ok(applied_where_response(app, info, last_applied_seq))
+            Ok(applied_where_response(
+                app,
+                info,
+                last_applied_seq,
+                last_error,
+            ))
         }
         ControlRequest::Prev { count } => {
             for _ in 0..count.max(1) {
@@ -741,11 +847,21 @@ fn apply_request(
                     app.scroll_up();
                 }
             }
-            Ok(applied_where_response(app, info, last_applied_seq))
+            Ok(applied_where_response(
+                app,
+                info,
+                last_applied_seq,
+                last_error,
+            ))
         }
         ControlRequest::Hunk { mode, count } => {
             apply_hunk(app, &mode, count.max(1))?;
-            Ok(applied_where_response(app, info, last_applied_seq))
+            Ok(applied_where_response(
+                app,
+                info,
+                last_applied_seq,
+                last_error,
+            ))
         }
         ControlRequest::File {
             target,
@@ -766,7 +882,12 @@ fn apply_request(
                 Some(path) => select_file(app, path, new_tab)?,
                 None => {}
             }
-            Ok(applied_where_response(app, info, last_applied_seq))
+            Ok(applied_where_response(
+                app,
+                info,
+                last_applied_seq,
+                last_error,
+            ))
         }
         ControlRequest::Goto {
             file,
@@ -789,21 +910,41 @@ fn apply_request(
                     end,
                 },
             )?;
-            Ok(applied_where_response(app, info, last_applied_seq))
+            Ok(applied_where_response(
+                app,
+                info,
+                last_applied_seq,
+                last_error,
+            ))
         }
         ControlRequest::Target { .. } => anyhow::bail!("Pass a target, --worktree or --staged"),
         ControlRequest::Play { .. } => anyhow::bail!("Play must be queued"),
         ControlRequest::Pause => {
             app.stop_autoplay();
-            Ok(applied_where_response(app, info, last_applied_seq))
+            Ok(applied_where_response(
+                app,
+                info,
+                last_applied_seq,
+                last_error,
+            ))
         }
         ControlRequest::Cancel => {
             app.stop_control_motion();
-            Ok(applied_where_response(app, info, last_applied_seq))
+            Ok(applied_where_response(
+                app,
+                info,
+                last_applied_seq,
+                last_error,
+            ))
         }
         ControlRequest::View { mode } => {
             apply_view(app, &mode)?;
-            Ok(applied_where_response(app, info, last_applied_seq))
+            Ok(applied_where_response(
+                app,
+                info,
+                last_applied_seq,
+                last_error,
+            ))
         }
         ControlRequest::Step { mode } => {
             apply_bool_mode(&mode, app.stepping, |value| {
@@ -811,11 +952,21 @@ fn apply_request(
                     app.toggle_stepping();
                 }
             })?;
-            Ok(applied_where_response(app, info, last_applied_seq))
+            Ok(applied_where_response(
+                app,
+                info,
+                last_applied_seq,
+                last_error,
+            ))
         }
         ControlRequest::Watch { mode } => {
             apply_bool_mode(&mode, app.watch, |value| app.watch = value)?;
-            Ok(applied_where_response(app, info, last_applied_seq))
+            Ok(applied_where_response(
+                app,
+                info,
+                last_applied_seq,
+                last_error,
+            ))
         }
         ControlRequest::Speed { mode } => {
             match mode.as_str() {
@@ -823,7 +974,12 @@ fn apply_request(
                 "decrease" | "down" => app.decrease_speed(),
                 _ => anyhow::bail!("Use increase or decrease"),
             }
-            Ok(applied_where_response(app, info, last_applied_seq))
+            Ok(applied_where_response(
+                app,
+                info,
+                last_applied_seq,
+                last_error,
+            ))
         }
         ControlRequest::Animation { mode } => {
             apply_toggle_mode(
@@ -832,31 +988,66 @@ fn apply_request(
                 |app| app.toggle_animation(),
                 app,
             )?;
-            Ok(applied_where_response(app, info, last_applied_seq))
+            Ok(applied_where_response(
+                app,
+                info,
+                last_applied_seq,
+                last_error,
+            ))
         }
         ControlRequest::Wrap { mode } => {
             apply_toggle_mode(&mode, app.line_wrap, |app| app.toggle_line_wrap(), app)?;
-            Ok(applied_where_response(app, info, last_applied_seq))
+            Ok(applied_where_response(
+                app,
+                info,
+                last_applied_seq,
+                last_error,
+            ))
         }
         ControlRequest::Syntax { mode } => {
             apply_toggle_mode(&mode, app.syntax_enabled(), |app| app.toggle_syntax(), app)?;
-            Ok(applied_where_response(app, info, last_applied_seq))
+            Ok(applied_where_response(
+                app,
+                info,
+                last_applied_seq,
+                last_error,
+            ))
         }
         ControlRequest::Zen { mode } => {
             apply_toggle_mode(&mode, app.zen_mode, |app| app.toggle_zen(), app)?;
-            Ok(applied_where_response(app, info, last_applied_seq))
+            Ok(applied_where_response(
+                app,
+                info,
+                last_applied_seq,
+                last_error,
+            ))
         }
         ControlRequest::Sidebar { mode } => {
             apply_sidebar(app, &mode)?;
-            Ok(applied_where_response(app, info, last_applied_seq))
+            Ok(applied_where_response(
+                app,
+                info,
+                last_applied_seq,
+                last_error,
+            ))
         }
         ControlRequest::Tab { kind, file } => {
             apply_tab(app, &kind, file.as_deref())?;
-            Ok(applied_where_response(app, info, last_applied_seq))
+            Ok(applied_where_response(
+                app,
+                info,
+                last_applied_seq,
+                last_error,
+            ))
         }
         ControlRequest::Action { id, count } => {
             apply_action(app, &id, count.max(1))?;
-            Ok(applied_where_response(app, info, last_applied_seq))
+            Ok(applied_where_response(
+                app,
+                info,
+                last_applied_seq,
+                last_error,
+            ))
         }
     }
 }
@@ -865,8 +1056,9 @@ fn where_response(
     app: &mut App,
     info: &ControlSessionInfo,
     last_applied_seq: u64,
+    last_error: Option<&ControlLastError>,
 ) -> ControlResponse {
-    let data = context_json(app, info, last_applied_seq);
+    let data = context_json(app, info, last_applied_seq, last_error);
     ControlResponse::ok(&info.name, format_context(&data), data)
 }
 
@@ -874,8 +1066,9 @@ fn applied_where_response(
     app: &mut App,
     info: &ControlSessionInfo,
     last_applied_seq: u64,
+    last_error: Option<&ControlLastError>,
 ) -> ControlResponse {
-    let data = context_json(app, info, last_applied_seq);
+    let data = context_json(app, info, last_applied_seq, last_error);
     ControlResponse::applied(&info.name, format_context(&data), data)
 }
 
@@ -907,7 +1100,12 @@ fn diff_response(app: &mut App, info: &ControlSessionInfo, include_patch: bool) 
     ControlResponse::ok(&info.name, "Diff listed.", data)
 }
 
-fn context_json(app: &mut App, info: &ControlSessionInfo, last_applied_seq: u64) -> Value {
+fn context_json(
+    app: &mut App,
+    info: &ControlSessionInfo,
+    last_applied_seq: u64,
+    last_error: Option<&ControlLastError>,
+) -> Value {
     let state = app.multi_diff.current_navigator().state().clone();
     let tab = match app.active_topbar_content() {
         Some(TopbarTabContent::File(_)) => "file",
@@ -969,6 +1167,7 @@ fn context_json(app: &mut App, info: &ControlSessionInfo, last_applied_seq: u64)
         "syntax": app.syntax_enabled(),
         "zen": app.zen_mode,
         "lastAppliedSeq": last_applied_seq,
+        "lastError": last_error,
         "cursor": cursor,
         "selection": selection,
     })
@@ -1081,9 +1280,16 @@ fn selection_label(value: &Value) -> String {
     }
 }
 
+fn last_error_label(value: &Value) -> String {
+    match (value["seq"].as_u64(), value["message"].as_str()) {
+        (Some(seq), Some(message)) => format!("seq {seq}: {message}"),
+        _ => "none".to_string(),
+    }
+}
+
 fn format_context(data: &Value) -> String {
     format!(
-        "Session: {}\nWorkspace: {}\nTarget: {}\nFile: {}\nCursor: {}\nSelection: {}\nHunk: {} of {}\nStep: {} of {}\nLast applied seq: {}\nSidebar: {}\nTab: {}\nView: {}\nStep mode: {}\nAutoplay: {}\nWatch: {}",
+        "Session: {}\nWorkspace: {}\nTarget: {}\nFile: {}\nCursor: {}\nSelection: {}\nHunk: {} of {}\nStep: {} of {}\nLast applied seq: {}\nLast error: {}\nSidebar: {}\nTab: {}\nView: {}\nStep mode: {}\nAutoplay: {}\nWatch: {}",
         data["session"].as_str().unwrap_or_default(),
         data["workspace"].as_str().unwrap_or_default(),
         data["target"].as_str().unwrap_or_default(),
@@ -1095,6 +1301,7 @@ fn format_context(data: &Value) -> String {
         data["step"].as_u64().unwrap_or(0),
         data["stepCount"].as_u64().unwrap_or(0),
         data["lastAppliedSeq"].as_u64().unwrap_or(0),
+        last_error_label(&data["lastError"]),
         data["sidebar"].as_str().unwrap_or_default(),
         data["tab"].as_str().unwrap_or_default(),
         data["view"].as_str().unwrap_or_default(),
@@ -1184,9 +1391,6 @@ fn apply_hunk(app: &mut App, mode: &str, count: usize) -> Result<()> {
 }
 
 fn apply_goto(app: &mut App, target: GotoTarget<'_>) -> Result<()> {
-    if let Some(file) = target.file {
-        select_file(app, file, false)?;
-    }
     let target_count = [
         target.new_line.is_some(),
         target.old_line.is_some(),
@@ -1201,6 +1405,9 @@ fn apply_goto(app: &mut App, target: GotoTarget<'_>) -> Result<()> {
     if target_count != 1 {
         anyhow::bail!("Specify exactly one navigation target");
     }
+    if let Some(file) = target.file {
+        select_file(app, file, false)?;
+    }
     if target.start {
         app.goto_start();
         return Ok(());
@@ -1209,9 +1416,15 @@ fn apply_goto(app: &mut App, target: GotoTarget<'_>) -> Result<()> {
         app.goto_end();
         return Ok(());
     }
-    let query = if let Some(line) = target.new_line.or(target.old_line) {
-        line.to_string()
-    } else if let Some(hunk) = target.hunk {
+    if let Some(line) = target.new_line {
+        app.goto_line_on_side(true, line);
+        return Ok(());
+    }
+    if let Some(line) = target.old_line {
+        app.goto_line_on_side(false, line);
+        return Ok(());
+    }
+    let query = if let Some(hunk) = target.hunk {
         format!("h{hunk}")
     } else if let Some(step) = target.step {
         format!("s{step}")
@@ -1411,24 +1624,30 @@ fn repeat(count: usize, mut f: impl FnMut()) {
     }
 }
 
-fn select_file(app: &mut App, path: &str, new_tab: bool) -> Result<()> {
-    let matches = app
-        .multi_diff
-        .files
+fn resolve_file_index(files: &[oyo_core::multi::FileEntry], path: &str) -> Result<usize> {
+    if let Some((index, _)) = files
         .iter()
         .enumerate()
-        .filter(|(_, file)| {
-            file.display_name == path
-                || file.path == Path::new(path)
-                || file.display_name.ends_with(path)
-        })
+        .find(|(_, file)| file.display_name == path || file.path == Path::new(path))
+    {
+        return Ok(index);
+    }
+    let suffix = format!("/{path}");
+    let matches = files
+        .iter()
+        .enumerate()
+        .filter(|(_, file)| file.display_name.ends_with(&suffix))
         .map(|(index, _)| index)
         .collect::<Vec<_>>();
-    let index = match matches.as_slice() {
+    match matches.as_slice() {
         [] => anyhow::bail!("No visible diff file matches {path}."),
-        [index] => *index,
+        [index] => Ok(*index),
         _ => anyhow::bail!("More than one visible diff file matches {path}."),
-    };
+    }
+}
+
+fn select_file(app: &mut App, path: &str, new_tab: bool) -> Result<()> {
+    let index = resolve_file_index(&app.multi_diff.files, path)?;
     if new_tab {
         if let Some(id) = app
             .topbar_tabs
@@ -1578,9 +1797,26 @@ fn now_secs() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{default_session_name, pid_alive, sanitize_name, validated_session_name};
+    use super::{
+        context_json, default_session_name, format_context, pid_alive, resolve_file_index,
+        sanitize_name, validated_session_name, ControlSession, ControlSessionInfo,
+    };
+    use crate::app::{App, ViewMode};
+    use oyo_core::{FileStatus, MultiFileDiff};
     use std::path::Path;
     use std::process::Command;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn session_info() -> ControlSessionInfo {
+        ControlSessionInfo {
+            name: "test".to_string(),
+            pid: std::process::id(),
+            workspace: Path::new("/tmp/test").to_path_buf(),
+            target: "worktree".to_string(),
+            socket: Path::new("/tmp/test.sock").to_path_buf(),
+            created_at: 0,
+        }
+    }
 
     #[test]
     fn session_name_uses_repo_and_pid() {
@@ -1602,5 +1838,138 @@ mod tests {
         let pid = child.id();
         child.wait().unwrap();
         assert!(!pid_alive(pid));
+    }
+
+    #[test]
+    fn file_resolution_prefers_exact_paths_and_respects_component_boundaries() {
+        let files = vec![
+            oyo_core::multi::FileEntry {
+                path: Path::new("README.md").to_path_buf(),
+                old_path: None,
+                old_source_path: None,
+                new_source_path: None,
+                display_name: "README.md".to_string(),
+                status: FileStatus::Modified,
+                insertions: 0,
+                deletions: 0,
+                binary: false,
+            },
+            oyo_core::multi::FileEntry {
+                path: Path::new("docs/README.md").to_path_buf(),
+                old_path: None,
+                old_source_path: None,
+                new_source_path: None,
+                display_name: "docs/README.md".to_string(),
+                status: FileStatus::Modified,
+                insertions: 0,
+                deletions: 0,
+                binary: false,
+            },
+            oyo_core::multi::FileEntry {
+                path: Path::new("stdlib.rs").to_path_buf(),
+                old_path: None,
+                old_source_path: None,
+                new_source_path: None,
+                display_name: "stdlib.rs".to_string(),
+                status: FileStatus::Modified,
+                insertions: 0,
+                deletions: 0,
+                binary: false,
+            },
+        ];
+
+        assert_eq!(resolve_file_index(&files, "README.md").unwrap(), 0);
+        assert_eq!(resolve_file_index(&files, "docs/README.md").unwrap(), 1);
+        assert!(resolve_file_index(&files, "lib.rs").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_target_is_not_acknowledged_and_is_in_context() {
+        use std::os::unix::net::UnixListener;
+
+        let socket = std::env::temp_dir().join(format!(
+            "oyo-control-test-{}-{}.sock",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let listener = UnixListener::bind(&socket).unwrap();
+        let mut session = ControlSession {
+            info: session_info(),
+            listener,
+            meta_path: socket.with_extension("json"),
+            queue: Default::default(),
+            play: None,
+            in_flight_seq: None,
+            pending_target_seq: Some(1),
+            next_seq: 2,
+            last_applied_seq: 0,
+            last_error: None,
+        };
+        session.target_failed(1, "revision did not resolve");
+
+        let mut app = App::new(
+            MultiFileDiff::from_file_pair(
+                "a.txt".into(),
+                "a.txt".into(),
+                "old\n".to_string(),
+                "new\n".to_string(),
+            ),
+            ViewMode::UnifiedPane,
+            0,
+            false,
+            None,
+        );
+        let failed_target_context = context_json(
+            &mut app,
+            &session.info,
+            session.last_applied_seq,
+            session.last_error.as_ref(),
+        );
+        assert_eq!(failed_target_context["lastAppliedSeq"], 0);
+        assert_eq!(failed_target_context["lastError"]["seq"], 1);
+        assert_eq!(
+            failed_target_context["lastError"]["message"],
+            "revision did not resolve"
+        );
+
+        app.animation_enabled = true;
+        let invalid_goto = super::ControlRequest::Goto {
+            file: Some("missing.rs".to_string()),
+            new_line: Some(1),
+            old_line: None,
+            hunk: None,
+            step: None,
+            start: false,
+            end: false,
+        };
+        assert!(super::validate_queued_request(&app, &invalid_goto).is_err());
+        session.queue.push_back(super::QueuedControl {
+            seq: 2,
+            request: invalid_goto,
+        });
+        assert!(session.advance_async(&mut app).is_none());
+        assert_eq!(session.last_applied_seq, 0);
+        assert_eq!(session.last_error.as_ref().unwrap().seq, 2);
+        let context = context_json(
+            &mut app,
+            &session.info,
+            session.last_applied_seq,
+            session.last_error.as_ref(),
+        );
+        assert_eq!(context["lastAppliedSeq"], 0);
+        assert_eq!(context["lastError"]["seq"], 2);
+        assert!(context["lastError"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("missing.rs"));
+        assert!(format_context(&context).contains("Last error: seq 2: "));
+        let no_error_context = context_json(&mut app, &session.info, 0, None);
+        assert!(format_context(&no_error_context).contains("Last error: none"));
+        drop(session);
+        std::fs::remove_file(socket).unwrap();
     }
 }

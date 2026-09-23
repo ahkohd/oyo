@@ -8,6 +8,7 @@ use ignore::overrides::OverrideBuilder;
 use ignore::WalkBuilder;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -238,6 +239,67 @@ impl MultiFileDiff {
         Self::decode_bytes(bytes)
     }
 
+    fn read_link_bytes(path: &Path) -> Option<Vec<u8>> {
+        let target = std::fs::read_link(path).ok()?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            Some(target.as_os_str().as_bytes().to_vec())
+        }
+        #[cfg(not(unix))]
+        {
+            Some(target.to_string_lossy().as_bytes().to_vec())
+        }
+    }
+
+    fn read_git_worktree_or_binary(path: &Path) -> (String, bool) {
+        if path
+            .symlink_metadata()
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            return Self::read_link_bytes(path)
+                .map(Self::decode_bytes)
+                .unwrap_or_default();
+        }
+        Self::read_text_or_binary(path)
+    }
+
+    fn files_equal(left_path: &Path, right_path: &Path) -> bool {
+        let (Ok(left_metadata), Ok(right_metadata)) = (left_path.metadata(), right_path.metadata())
+        else {
+            return false;
+        };
+        if left_metadata.len() != right_metadata.len() {
+            return false;
+        }
+
+        let (Ok(left_file), Ok(right_file)) = (
+            std::fs::File::open(left_path),
+            std::fs::File::open(right_path),
+        ) else {
+            return false;
+        };
+        let mut left = BufReader::new(left_file);
+        let mut right = BufReader::new(right_file);
+        let mut left_buffer = [0; 8192];
+        let mut right_buffer = [0; 8192];
+        let mut remaining = left_metadata.len();
+        while remaining > 0 {
+            let chunk_len = remaining.min(left_buffer.len() as u64) as usize;
+            if left.read_exact(&mut left_buffer[..chunk_len]).is_err()
+                || right.read_exact(&mut right_buffer[..chunk_len]).is_err()
+            {
+                return false;
+            }
+            if left_buffer[..chunk_len] != right_buffer[..chunk_len] {
+                return false;
+            }
+            remaining -= chunk_len as u64;
+        }
+        true
+    }
+
     fn read_git_commit_or_binary(repo_root: &Path, commit: &str, path: &Path) -> (String, bool) {
         if let Some(size) = crate::git::get_file_at_commit_size(repo_root, commit, path) {
             if Self::text_too_large(size) {
@@ -339,8 +401,57 @@ impl MultiFileDiff {
         (diff.insertions, diff.deletions)
     }
 
+    fn git_numstat_for_mode(
+        repo_root: &Path,
+        mode: &GitDiffMode,
+    ) -> Option<std::collections::HashMap<PathBuf, (usize, usize)>> {
+        Self::git_numstat_for_mode_with_paths(repo_root, mode, None)
+    }
+
+    fn git_numstat_for_file(
+        repo_root: &Path,
+        mode: &GitDiffMode,
+        paths: &[PathBuf],
+    ) -> Option<std::collections::HashMap<PathBuf, (usize, usize)>> {
+        Self::git_numstat_for_mode_with_paths(repo_root, mode, Some(paths))
+    }
+
+    fn git_numstat_for_mode_with_paths(
+        repo_root: &Path,
+        mode: &GitDiffMode,
+        paths: Option<&[PathBuf]>,
+    ) -> Option<std::collections::HashMap<PathBuf, (usize, usize)>> {
+        let get_stats = |args: &[String]| match paths {
+            Some(paths) => crate::git::get_diff_numstat_for_paths(repo_root, args, paths),
+            None => crate::git::get_diff_numstat(repo_root, args),
+        };
+        let args = match mode {
+            GitDiffMode::Uncommitted => vec!["HEAD".to_string()],
+            GitDiffMode::Staged => vec!["--cached".to_string()],
+            GitDiffMode::Range { from, to } => vec![format!("{from}..{to}")],
+            GitDiffMode::IndexRange { from, to_index } => {
+                let mut args = vec!["--cached".to_string()];
+                if !to_index {
+                    args.push("-R".to_string());
+                }
+                args.push(from.clone());
+                args
+            }
+        };
+        match get_stats(&args) {
+            Ok(stats) => Some(stats),
+            Err(_) if matches!(mode, GitDiffMode::Uncommitted) => {
+                get_stats(&["4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_string()]).ok()
+            }
+            Err(_) => None,
+        }
+    }
+
     fn normalize_text(text: String) -> String {
-        if !text.lines().any(|line| line.len() > Self::MAX_LINE_CHARS) {
+        if !text
+            .lines()
+            .any(|line| line.chars().count() > Self::MAX_LINE_CHARS)
+        {
             return text;
         }
         let mut out = String::new();
@@ -350,7 +461,7 @@ impl MultiFileDiff {
             } else {
                 (chunk, false)
             };
-            if line.len() > Self::MAX_LINE_CHARS {
+            if line.chars().count() > Self::MAX_LINE_CHARS {
                 let cutoff = line
                     .char_indices()
                     .nth(Self::MAX_LINE_CHARS)
@@ -560,6 +671,33 @@ impl MultiFileDiff {
         }
     }
 
+    fn load_uncommitted_symlink_contents(&mut self) {
+        let Some(repo_root) = self.repo_root.clone() else {
+            return;
+        };
+        for idx in 0..self.files.len() {
+            let file = self.files[idx].clone();
+            let full_path = repo_root.join(&file.path);
+            if !full_path
+                .symlink_metadata()
+                .map(|metadata| metadata.file_type().is_symlink())
+                .unwrap_or(false)
+            {
+                continue;
+            }
+
+            let new = Self::read_link_bytes(&full_path);
+            let old_path = file.old_path.as_deref().unwrap_or(&file.path);
+            let old = match file.status {
+                FileStatus::Added | FileStatus::Untracked => Some(Vec::new()),
+                _ => crate::git::get_file_at_commit_bytes(&repo_root, "HEAD", old_path).ok(),
+            };
+            self.pending_content[idx] = None;
+            let content = Self::prepare_file_content(old, new);
+            self.apply_prepared_content(idx, content);
+        }
+    }
+
     pub fn from_git_changes_lazy(
         repo_root: PathBuf,
         changes: Vec<ChangedFile>,
@@ -580,7 +718,7 @@ impl MultiFileDiff {
             Err(error) => return Err(error.into()),
         };
         let root = repo_root.clone();
-        Ok(Self::from_git_pending(
+        let mut diff = Self::from_git_pending(
             repo_root,
             changes,
             stats,
@@ -602,7 +740,9 @@ impl MultiFileDiff {
                 };
                 (old, new)
             },
-        ))
+        );
+        diff.load_uncommitted_symlink_contents();
+        Ok(diff)
     }
 
     pub fn from_git_staged_lazy(
@@ -773,7 +913,7 @@ impl MultiFileDiff {
                 FileStatus::Deleted => (String::new(), false),
                 _ => {
                     let full_path = repo_root.join(&change.path);
-                    Self::read_text_or_binary(&full_path)
+                    Self::read_git_worktree_or_binary(&full_path)
                 }
             };
 
@@ -1127,40 +1267,53 @@ impl MultiFileDiff {
                 FileStatus::Modified
             };
 
-            let (old_content, old_binary, old_bytes) = if old_exists {
+            let (old_content, old_binary, old_bytes, old_fully_read) = if old_exists {
                 if let Ok(metadata) = old_path.metadata() {
                     if Self::text_too_large(metadata.len()) {
-                        (String::new(), true, Vec::new())
+                        (String::new(), true, Vec::new(), false)
                     } else {
-                        let bytes = std::fs::read(&old_path).unwrap_or_default();
-                        let (content, binary) = Self::decode_bytes(bytes.clone());
-                        (content, binary, bytes)
+                        match std::fs::read(&old_path) {
+                            Ok(bytes) => {
+                                let (content, binary) = Self::decode_bytes(bytes.clone());
+                                (content, binary, bytes, true)
+                            }
+                            Err(_) => (String::new(), false, Vec::new(), false),
+                        }
                     }
                 } else {
-                    (String::new(), false, Vec::new())
+                    (String::new(), false, Vec::new(), false)
                 }
             } else {
-                (String::new(), false, Vec::new())
+                (String::new(), false, Vec::new(), false)
             };
-            let (new_content, new_binary, new_bytes) = if new_exists {
+            let (new_content, new_binary, new_bytes, new_fully_read) = if new_exists {
                 if let Ok(metadata) = new_path.metadata() {
                     if Self::text_too_large(metadata.len()) {
-                        (String::new(), true, Vec::new())
+                        (String::new(), true, Vec::new(), false)
                     } else {
-                        let bytes = std::fs::read(&new_path).unwrap_or_default();
-                        let (content, binary) = Self::decode_bytes(bytes.clone());
-                        (content, binary, bytes)
+                        match std::fs::read(&new_path) {
+                            Ok(bytes) => {
+                                let (content, binary) = Self::decode_bytes(bytes.clone());
+                                (content, binary, bytes, true)
+                            }
+                            Err(_) => (String::new(), false, Vec::new(), false),
+                        }
                     }
                 } else {
-                    (String::new(), false, Vec::new())
+                    (String::new(), false, Vec::new(), false)
                 }
             } else {
-                (String::new(), false, Vec::new())
+                (String::new(), false, Vec::new(), false)
             };
             let binary = old_binary || new_binary;
 
             // Skip if no changes
-            if !binary && old_bytes == new_bytes {
+            if old_exists
+                && new_exists
+                && ((old_fully_read && new_fully_read && old_bytes == new_bytes)
+                    || (!(old_fully_read && new_fully_read)
+                        && Self::files_equal(&old_path, &new_path)))
+            {
                 continue;
             }
 
@@ -1827,6 +1980,9 @@ impl MultiFileDiff {
             Ok(c) => c,
             Err(_) => return false,
         };
+        let Some(stats) = Self::git_numstat_for_mode(&repo_root, &mode) else {
+            return false;
+        };
 
         // Rebuild the entire diff state
         let mut files = Vec::new();
@@ -1849,7 +2005,7 @@ impl MultiFileDiff {
                         FileStatus::Deleted => (String::new(), false),
                         _ => {
                             let full_path = repo_root.join(&change.path);
-                            Self::read_text_or_binary(&full_path)
+                            Self::read_git_worktree_or_binary(&full_path)
                         }
                     };
                     (old_content, old_binary, new_content, new_binary)
@@ -1902,7 +2058,13 @@ impl MultiFileDiff {
             };
 
             let binary = old_binary || new_binary;
-            let (insertions, deletions) = Self::diff_stats(&old_content, &new_content, binary);
+            let (insertions, deletions) = stats.get(&change.path).copied().unwrap_or_else(|| {
+                if change.status == FileStatus::Untracked && !binary {
+                    (new_content.lines().count(), 0)
+                } else {
+                    (0, 0)
+                }
+            });
             let (old_content, new_content, precomputed, diff_status) =
                 Self::maybe_defer_diff(old_content, new_content, binary);
 
@@ -1953,6 +2115,19 @@ impl MultiFileDiff {
         if idx >= self.files.len() || self.diff_status(idx) == DiffStatus::Loading {
             return;
         }
+        let git_mode = self.git_mode.is_some();
+        let git_stats = match (&self.repo_root, &self.git_mode) {
+            (Some(repo_root), Some(mode)) => {
+                let file = &self.files[idx];
+                let old_path = file.old_path.as_deref().unwrap_or(&file.path);
+                let mut paths = vec![file.path.clone()];
+                if old_path != file.path {
+                    paths.push(old_path.to_path_buf());
+                }
+                Self::git_numstat_for_file(repo_root, mode, &paths)
+            }
+            _ => None,
+        };
         let file = &self.files[idx];
         let old_path = file.old_path.clone().unwrap_or_else(|| file.path.clone());
 
@@ -1968,7 +2143,7 @@ impl MultiFileDiff {
                         FileStatus::Deleted => (String::new(), false),
                         _ => {
                             let full_path = repo_root.join(&file.path);
-                            Self::read_text_or_binary(&full_path)
+                            Self::read_git_worktree_or_binary(&full_path)
                         }
                     };
                     (old_content, old_binary, new_content, new_binary)
@@ -2038,7 +2213,22 @@ impl MultiFileDiff {
             };
 
         let binary = old_binary || new_binary;
-        let (insertions, deletions) = Self::diff_stats(&old_content, &new_content, binary);
+        let (insertions, deletions) = if let Some(stats) = git_stats {
+            stats
+                .get(&self.files[idx].path)
+                .copied()
+                .unwrap_or_else(|| {
+                    if self.files[idx].status == FileStatus::Untracked && !binary {
+                        (new_content.lines().count(), 0)
+                    } else {
+                        (0, 0)
+                    }
+                })
+        } else if git_mode {
+            (self.files[idx].insertions, self.files[idx].deletions)
+        } else {
+            Self::diff_stats(&old_content, &new_content, binary)
+        };
         let (old_content, new_content, precomputed, diff_status) =
             Self::maybe_defer_diff(old_content, new_content, binary);
 
@@ -2163,6 +2353,117 @@ mod tests {
             std::fs::create_dir_all(parent).unwrap();
         }
         std::fs::write(path, content).unwrap();
+    }
+
+    #[test]
+    fn identical_binary_files_are_skipped_in_directory_diffs() {
+        let root = temp_dir("identical-binary");
+        let old_dir = root.join("old");
+        let new_dir = root.join("new");
+        std::fs::create_dir_all(&old_dir).unwrap();
+        std::fs::write(old_dir.join("image.bin"), [0, 1, 2]).unwrap();
+        std::fs::create_dir_all(&new_dir).unwrap();
+        std::fs::copy(old_dir.join("image.bin"), new_dir.join("image.bin")).unwrap();
+        for dir in [&old_dir, &new_dir] {
+            let large = std::fs::File::create(dir.join("large.bin")).unwrap();
+            large.set_len(MultiFileDiff::MAX_TEXT_BYTES + 1).unwrap();
+        }
+
+        let diff = MultiFileDiff::from_directories(&old_dir, &new_dir).unwrap();
+
+        assert!(diff.files.is_empty());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn long_multibyte_lines_are_not_truncated_by_byte_length() {
+        let line = "é".repeat(10_000);
+        let diff = MultiFileDiff::from_file_pairs(vec![(
+            PathBuf::from("unicode.txt"),
+            line.clone(),
+            line.clone(),
+        )]);
+
+        assert_eq!(diff.file_contents(0), Some((line.as_str(), line.as_str())));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn uncommitted_symlink_diff_reads_the_link_target() {
+        use std::os::unix::fs::symlink;
+
+        let root = temp_dir("symlink-target");
+        std::fs::create_dir_all(&root).unwrap();
+        run_git(&root, &["init", "-q"]);
+        run_git(&root, &["config", "user.email", "test@example.com"]);
+        run_git(&root, &["config", "user.name", "Test"]);
+        write_file(&root.join("a.txt"), "alpha content\n");
+        write_file(&root.join("b.txt"), "beta content\n");
+        symlink("a.txt", root.join("link")).unwrap();
+        run_git(&root, &["add", "."]);
+        run_git(&root, &["commit", "-qm", "base"]);
+
+        std::fs::remove_file(root.join("link")).unwrap();
+        symlink("b.txt", root.join("link")).unwrap();
+
+        let changes = crate::git::get_uncommitted_changes(&root).unwrap();
+        let mut diff = MultiFileDiff::from_git_changes(root.clone(), changes).unwrap();
+        assert_eq!(diff.file_contents(0), Some(("a.txt", "b.txt")));
+        diff.refresh_file(0);
+        assert_eq!(diff.file_contents(0), Some(("a.txt", "b.txt")));
+
+        let changes = crate::git::get_uncommitted_changes(&root).unwrap();
+        let lazy = MultiFileDiff::from_git_changes_lazy(root.clone(), changes).unwrap();
+        assert_eq!(lazy.file_contents(0), Some(("a.txt", "b.txt")));
+        assert_eq!(lazy.pending_content_count(), 0);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn git_refreshes_keep_numstat_for_large_text_files() {
+        use std::fmt::Write as _;
+
+        let root = temp_dir("large-refresh-numstat");
+        std::fs::create_dir_all(&root).unwrap();
+        run_git(&root, &["init", "-q"]);
+        run_git(&root, &["config", "user.email", "test@example.com"]);
+        run_git(&root, &["config", "user.name", "Test"]);
+
+        let mut old = String::with_capacity(6_000_000);
+        let mut new = String::with_capacity(6_000_000);
+        for line in 0..300_000 {
+            writeln!(&mut old, "row {line:06} original payload").unwrap();
+            if line < 300 {
+                writeln!(&mut new, "row {line:06} updated payload").unwrap();
+            } else {
+                writeln!(&mut new, "row {line:06} original payload").unwrap();
+            }
+        }
+        assert!(new.len() > MultiFileDiff::MAX_WORD_LEVEL_BYTES as usize);
+        write_file(&root.join("big.txt"), &old);
+        run_git(&root, &["add", "big.txt"]);
+        run_git(&root, &["commit", "-qm", "base"]);
+        write_file(&root.join("big.txt"), &new);
+
+        let changes = crate::git::get_uncommitted_changes(&root).unwrap();
+        let mut diff = MultiFileDiff::from_git_changes(root.clone(), changes).unwrap();
+        assert_eq!(
+            (diff.files[0].insertions, diff.files[0].deletions),
+            (300, 300)
+        );
+        diff.refresh_file(0);
+        assert_eq!(
+            (diff.files[0].insertions, diff.files[0].deletions),
+            (300, 300)
+        );
+        assert!(diff.refresh_all_from_git());
+        assert_eq!(
+            (diff.files[0].insertions, diff.files[0].deletions),
+            (300, 300)
+        );
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     fn display_names(diff: &MultiFileDiff) -> Vec<String> {

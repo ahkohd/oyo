@@ -63,7 +63,7 @@ use serde::Deserialize;
 use std::collections::{hash_map::DefaultHasher, BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::hash::{Hash, Hasher};
-use std::io::{self, IsTerminal, Read};
+use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command as ProcessCommand;
 use std::time::{Duration, Instant};
@@ -1270,6 +1270,7 @@ struct EditorTarget {
     line: Option<usize>,
     cwd: Option<PathBuf>,
     refresh_after_edit: bool,
+    snapshot_dir: Option<PathBuf>,
 }
 
 fn resolve_editor_command(config: &config::EditorConfig) -> String {
@@ -1314,6 +1315,7 @@ fn current_editor_target(app: &mut App, needs_line: bool) -> Result<Option<Edito
             line,
             cwd: app.multi_diff.repo_root().map(Path::to_path_buf),
             refresh_after_edit: true,
+            snapshot_dir: None,
         }));
     }
 
@@ -1324,12 +1326,13 @@ fn current_editor_target(app: &mut App, needs_line: bool) -> Result<Option<Edito
         EditorSide::Old => old_content,
         EditorSide::New => new_content,
     };
-    let path = write_editor_snapshot(&display_path, side, content)?;
+    let (path, snapshot_dir) = write_editor_snapshot(&display_path, side, content)?;
     Ok(Some(EditorTarget {
         path,
         line,
         cwd: None,
         refresh_after_edit: false,
+        snapshot_dir: Some(snapshot_dir),
     }))
 }
 
@@ -1387,7 +1390,11 @@ fn snapshot_rel_path(path: &Path) -> PathBuf {
     out
 }
 
-fn write_editor_snapshot(display_path: &Path, side: EditorSide, content: &str) -> Result<PathBuf> {
+fn write_editor_snapshot(
+    display_path: &Path,
+    side: EditorSide,
+    content: &str,
+) -> Result<(PathBuf, PathBuf)> {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
@@ -1396,21 +1403,65 @@ fn write_editor_snapshot(display_path: &Path, side: EditorSide, content: &str) -
         EditorSide::Old => "old",
         EditorSide::New => "new",
     };
-    let mut path = std::env::temp_dir()
-        .join("oy-editor")
-        .join(format!("{}-{nanos}", std::process::id()))
-        .join(side_dir);
+    let snapshot_dir =
+        std::env::temp_dir().join(format!("oy-editor-{}-{nanos}", std::process::id()));
+    create_private_dir(&snapshot_dir)?;
+    let mut path = snapshot_dir.join(side_dir);
     path.push(snapshot_rel_path(display_path));
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        create_private_dir_all(parent)?;
     }
-    std::fs::write(&path, content)?;
-    if let Ok(metadata) = std::fs::metadata(&path) {
-        let mut permissions = metadata.permissions();
-        permissions.set_readonly(true);
-        let _ = std::fs::set_permissions(&path, permissions);
+    write_private_snapshot(&path, content)?;
+    Ok((path, snapshot_dir))
+}
+
+#[cfg(unix)]
+fn create_private_dir(path: &Path) -> Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    let mut builder = fs::DirBuilder::new();
+    builder.mode(0o700).create(path)?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn create_private_dir(path: &Path) -> Result<()> {
+    fs::create_dir(path)?;
+    Ok(())
+}
+
+fn create_private_dir_all(path: &Path) -> Result<()> {
+    if path.exists() {
+        return Ok(());
     }
-    Ok(path)
+    if let Some(parent) = path.parent() {
+        create_private_dir_all(parent)?;
+    }
+    create_private_dir(path)
+}
+
+#[cfg(unix)]
+fn write_private_snapshot(path: &Path, content: &str) -> Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o400)
+        .open(path)?
+        .write_all(content.as_bytes())?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn write_private_snapshot(path: &Path, content: &str) -> Result<()> {
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?
+        .write_all(content.as_bytes())?;
+    let mut permissions = fs::metadata(path)?.permissions();
+    permissions.set_readonly(true);
+    fs::set_permissions(path, permissions)?;
+    Ok(())
 }
 
 fn current_editor_focus(app: &mut App) -> Option<EditorFocus> {
@@ -1607,7 +1658,12 @@ fn open_current_file_in_editor(
     let command = resolve_editor_command(config);
     let args = render_editor_args(config, target.line, &target.path);
 
-    suspend_terminal_for_child(terminal)?;
+    if let Err(error) = suspend_terminal_for_child(terminal) {
+        if let Some(snapshot_dir) = target.snapshot_dir.as_deref() {
+            let _ = fs::remove_dir_all(snapshot_dir);
+        }
+        return Err(error);
+    }
     let editor_result = run_editor_command(&command, &args, target.cwd.as_deref());
     let resume_result = resume_terminal_after_child(terminal);
     resume_result?;
@@ -4222,21 +4278,39 @@ fn default_review_remote(root: &Path) -> Result<String> {
 }
 
 fn parse_remote_url(url: &str) -> Option<(String, String)> {
-    let (host, rest) = if let Some(rest) = url.strip_prefix("git@") {
-        let (host, rest) = rest.split_once(':')?;
-        (host, rest)
-    } else if let Some(rest) = url.strip_prefix("ssh://git@") {
-        rest.split_once('/')?
-    } else if let Some(rest) = url.strip_prefix("https://") {
+    let (authority, rest) = if let Some(rest) = url.strip_prefix("git@") {
+        rest.split_once(':')?
+    } else if let Some((scheme, rest)) = url.split_once("://") {
+        if !matches!(scheme, "ssh" | "https" | "http") {
+            return None;
+        }
         rest.split_once('/')?
     } else {
-        url.strip_prefix("http://")?.split_once('/')?
+        return None;
     };
+    let authority = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    let host = strip_numeric_port(authority);
+    if host.is_empty() {
+        return None;
+    }
     let repo = rest.trim_end_matches(".git").trim_matches('/');
     let mut parts = repo.split('/');
     parts.next()?;
     parts.next()?;
     Some((host.to_string(), repo.to_string()))
+}
+
+fn strip_numeric_port(authority: &str) -> &str {
+    let Some((host, port)) = authority.rsplit_once(':') else {
+        return authority;
+    };
+    if !host.is_empty() && !port.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit()) {
+        host
+    } else {
+        authority
+    }
 }
 
 fn review_remote(root: &Path, remote: Option<&str>) -> Result<ReviewRemote> {
@@ -8430,16 +8504,22 @@ fn run_app(
                         ControlTargetResolution::Reload(mode, seq) => {
                             return Ok(AppExit::Reload(mode, seq));
                         }
-                        ControlTargetResolution::NoChanges => app.notify(
-                            ToastEvent::SelectionActionFailed("Target has no changes".to_string()),
-                        ),
-                        ControlTargetResolution::Failed(error) => app.notify(
-                            ToastEvent::SelectionActionFailed(format!("Target failed: {error}")),
-                        ),
+                        ControlTargetResolution::NoChanges => {
+                            let message = "Target has no changes".to_string();
+                            session.target_failed(seq, message.clone());
+                            app.notify(ToastEvent::SelectionActionFailed(message));
+                        }
+                        ControlTargetResolution::Failed(error) => {
+                            let message = format!("Target failed: {error}");
+                            session.target_failed(seq, message.clone());
+                            app.notify(ToastEvent::SelectionActionFailed(message));
+                        }
                     },
-                    Err(error) => app.notify(ToastEvent::SelectionActionFailed(format!(
-                        "Target failed: {error}"
-                    ))),
+                    Err(error) => {
+                        let message = format!("Target failed: {error}");
+                        session.target_failed(seq, message.clone());
+                        app.notify(ToastEvent::SelectionActionFailed(message));
+                    }
                 }
                 needs_draw = true;
             }
@@ -9390,12 +9470,12 @@ mod tests {
         review_status_json_value, review_target_summary, saved_pr_revision,
         set_review_pr_target_metadata, sgr_mouse_fragment_state, should_load_saved_review_fallback,
         sync_lookup_target_in, sync_pr_number, update_mouse_scroll_block, verify_pr_revision_head,
-        Args, BlockedMouseScroll, Command, ControlTargetResolution, GhComment, GhCommentUser,
-        GhIssueComment, GhPr, GhProviderComment, GhRepo, GhReview, GhReviewThreadsResponse,
-        InputMode, MouseScrollRuns, MouseScrollTarget, PendingMouseScroll, ProviderPr,
-        ProviderUser, ReviewCommand, ReviewCommentCommand, ReviewProviderKind,
-        ReviewProviderPushOps, ReviewRemote, ReviewTargetMetadata, SgrFragmentState,
-        MAX_DISCRETE_MOUSE_SCROLL_ACTIONS_PER_FRAME, MOUSE_SCROLL_FLICK_VOLUME,
+        write_editor_snapshot, Args, BlockedMouseScroll, Command, ControlTargetResolution,
+        EditorSide, GhComment, GhCommentUser, GhIssueComment, GhPr, GhProviderComment, GhRepo,
+        GhReview, GhReviewThreadsResponse, InputMode, MouseScrollRuns, MouseScrollTarget,
+        PendingMouseScroll, ProviderPr, ProviderUser, ReviewCommand, ReviewCommentCommand,
+        ReviewProviderKind, ReviewProviderPushOps, ReviewRemote, ReviewTargetMetadata,
+        SgrFragmentState, MAX_DISCRETE_MOUSE_SCROLL_ACTIONS_PER_FRAME, MOUSE_SCROLL_FLICK_VOLUME,
         MOUSE_SCROLL_SUPPRESSION_CAP,
     };
     use crate::app::{
@@ -9583,6 +9663,18 @@ mod tests {
         assert_eq!(
             parse_remote_url("git@gitlab.com:group/subgroup/repo.git"),
             Some(("gitlab.com".to_string(), "group/subgroup/repo".to_string()))
+        );
+        assert_eq!(
+            parse_remote_url("ssh://git@github.com:22/cli/cli.git"),
+            Some(("github.com".to_string(), "cli/cli".to_string()))
+        );
+        assert_eq!(
+            parse_remote_url("https://someone@github.com/owner/repo.git"),
+            Some(("github.com".to_string(), "owner/repo".to_string()))
+        );
+        assert_eq!(
+            parse_remote_url("ssh://user@gitlab.com/group/project.git"),
+            Some(("gitlab.com".to_string(), "group/project".to_string()))
         );
     }
 
@@ -12175,5 +12267,21 @@ mod tests {
         };
         let args = render_editor_args(&config, Some(42), Path::new("src/main.rs"));
         assert_eq!(args, vec!["--goto", "src/main.rs:42"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn editor_snapshots_are_private_to_the_current_user() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (path, snapshot_dir) =
+            write_editor_snapshot(Path::new("src/main.rs"), EditorSide::New, "secret\n").unwrap();
+        let dir_mode = fs::metadata(&snapshot_dir).unwrap().permissions().mode();
+        let file_mode = fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(dir_mode & 0o077, 0);
+        assert_eq!(file_mode & 0o077, 0);
+        assert_eq!(file_mode & 0o222, 0);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "secret\n");
+        fs::remove_dir_all(snapshot_dir).unwrap();
     }
 }

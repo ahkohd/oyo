@@ -264,9 +264,38 @@ fn option_index(index: OptionIndex) -> Option<Index> {
 
 fn parse_top_level_toml(text: &str) -> Result<FlatJson, String> {
     let table = toml::from_str::<toml::Table>(text).map_err(|error| error.to_string())?;
-    let json =
-        serde_json::to_string(&toml::Value::Table(table)).map_err(|error| error.to_string())?;
+    let json = serde_json::to_string(&toml_value_to_json(toml::Value::Table(table)))
+        .map_err(|error| error.to_string())?;
     parse_top_level_json(json)
+}
+
+fn toml_value_to_json(value: toml::Value) -> serde_json::Value {
+    match value {
+        toml::Value::String(value) => serde_json::Value::String(value),
+        toml::Value::Integer(value) => serde_json::Value::Number(value.into()),
+        toml::Value::Float(value) => serde_json::Number::from_f64(value)
+            .map(serde_json::Value::Number)
+            .unwrap_or_else(|| {
+                serde_json::Value::String(if value.is_nan() {
+                    "nan".to_string()
+                } else if value.is_sign_negative() {
+                    "-inf".to_string()
+                } else {
+                    "inf".to_string()
+                })
+            }),
+        toml::Value::Boolean(value) => serde_json::Value::Bool(value),
+        toml::Value::Datetime(value) => serde_json::Value::String(value.to_string()),
+        toml::Value::Array(values) => {
+            serde_json::Value::Array(values.into_iter().map(toml_value_to_json).collect())
+        }
+        toml::Value::Table(values) => serde_json::Value::Object(
+            values
+                .into_iter()
+                .map(|(key, value)| (key, toml_value_to_json(value)))
+                .collect(),
+        ),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -619,6 +648,20 @@ mod tests {
         assert!(rendered.contains("Oyo"));
         assert!(rendered.contains("server"));
         assert!(rendered.contains("port"));
+    }
+
+    #[test]
+    fn converts_toml_datetimes_and_non_finite_floats_to_json_scalars() {
+        let table = toml::from_str::<toml::Table>(
+            "date = 2024-01-02\nnan = nan\npositive = inf\nnegative = -inf\n",
+        )
+        .unwrap();
+        let json = toml_value_to_json(toml::Value::Table(table));
+
+        assert_eq!(json["date"], "2024-01-02");
+        assert_eq!(json["nan"], "nan");
+        assert_eq!(json["positive"], "inf");
+        assert_eq!(json["negative"], "-inf");
     }
 
     #[test]

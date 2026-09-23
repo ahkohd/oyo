@@ -18,9 +18,12 @@ const WATCH_CHANGE_FLASH_DURATION: Duration = Duration::from_secs(3);
 /// Whether a URL is safe to hand to the OS opener: only http(s)/mailto, so we
 /// never launch `file://`, `javascript:`, or other schemes from preview clicks.
 fn is_openable_url(url: &str) -> bool {
-    ["http://", "https://", "mailto:"]
-        .iter()
-        .any(|s| url.len() > s.len() && url[..s.len()].eq_ignore_ascii_case(s))
+    ["http://", "https://", "mailto:"].iter().any(|s| {
+        url.len() > s.len()
+            && url
+                .get(..s.len())
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case(s))
+    })
 }
 
 fn is_image_name(name: &str) -> bool {
@@ -2642,6 +2645,7 @@ impl App {
             let repo_root = view.live_backup.repo_root().map(Path::to_path_buf);
             let refreshed = view.live_backup.refresh_all_from_git();
             if refreshed {
+                view.worker_state.valid = false;
                 if let Some(repo_root) = repo_root {
                     self.refresh_git_review_target_commits(&repo_root);
                 }
@@ -2682,6 +2686,7 @@ impl App {
                 refreshed.apply_prepared_content(refreshed.selected_index, content);
                 refreshed.ensure_full_navigator(refreshed.selected_index);
             }
+            view.worker_state.valid = false;
             view.live_backup = refreshed;
             return;
         }
@@ -2902,6 +2907,7 @@ mod link_tests {
         assert!(!is_openable_url("javascript:alert(1)"));
         assert!(!is_openable_url("./assets/logo.png"));
         assert!(!is_openable_url("ftp://example.com"));
+        assert!(!is_openable_url("résumé.md"));
         assert!(!is_openable_url(""));
         assert!(!is_openable_url("https://"));
     }

@@ -40,12 +40,13 @@ use crate::views::{
 use image::GenericImageView;
 use oyo_core::{multi::DiffStatus, multi::FileSide, ChangeKind, FileStatus, LineKind};
 use ratatui::{
+    buffer::Buffer,
     layout::{Alignment, Constraint, Direction, Layout, Margin, Rect, Size},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{
         Block, Borders, Clear, List, ListItem, ListState, Paragraph, Scrollbar,
-        ScrollbarOrientation, ScrollbarState,
+        ScrollbarOrientation, ScrollbarState, WidgetRef,
     },
     Frame,
 };
@@ -1293,7 +1294,29 @@ fn draw_toasts(frame: &mut Frame, app: &mut App) {
     }
     let area = frame.area();
     app.toast_engine.set_area(area);
-    frame.render_widget(&app.toast_engine, area);
+    const MAX_AUTO_TOAST_WIDTH: u16 = 54;
+    if area.width < MAX_AUTO_TOAST_WIDTH {
+        // Auto-sized toasts can exceed a narrow frame. Render them into a
+        // buffer wide enough for the crate's maximum auto toast, then copy
+        // only the cells that are inside the real frame.
+        let scratch_area = Rect::new(area.x, area.y, MAX_AUTO_TOAST_WIDTH, area.height);
+        let mut scratch = Buffer::empty(scratch_area);
+        app.toast_engine.render_ref(area, &mut scratch);
+        let buffer = frame.buffer_mut();
+        for y in area.top()..area.bottom() {
+            for x in area.left()..area.right() {
+                if app.toast_engine.toast_index_at(x, y).is_some() {
+                    if let (Some(source), Some(destination)) =
+                        (scratch.cell((x, y)), buffer.cell_mut((x, y)))
+                    {
+                        *destination = source.clone();
+                    }
+                }
+            }
+        }
+    } else {
+        frame.render_widget(&app.toast_engine, area);
+    }
     if !app.toast_engine.has_toast() {
         return;
     }
@@ -8019,7 +8042,10 @@ fn draw_path_popup(frame: &mut Frame, app: &App) {
     let file_path = app.current_file_path();
 
     // Calculate popup size based on path length
-    let popup_width = (file_path.len() as u16 + 6).min(area.width.saturating_sub(4));
+    let path_width = text_width(&file_path).min(u16::MAX as usize) as u16;
+    let popup_width = path_width
+        .saturating_add(6)
+        .min(area.width.saturating_sub(4));
     let popup_height = 3u16;
     let popup_x = (area.width.saturating_sub(popup_width)) / 2;
     let popup_y = (area.height.saturating_sub(popup_height)) / 2;
@@ -8030,13 +8056,10 @@ fn draw_path_popup(frame: &mut Frame, app: &App) {
 
     // Truncate path if too long for popup
     let max_path_len = (popup_width.saturating_sub(4)) as usize;
-    let display_path = if file_path.len() > max_path_len {
-        format!(
-            "…{}",
-            &file_path[file_path.len().saturating_sub(max_path_len - 1)..]
-        )
+    let display_path = if text_width(&file_path) > max_path_len {
+        truncate_text_from_start(&file_path, max_path_len)
     } else {
-        file_path
+        file_path.to_string()
     };
 
     let mut block = Block::default()
@@ -8790,7 +8813,7 @@ fn draw_comment_picker_popover(frame: &mut Frame, app: &mut App) {
 
 #[cfg(test)]
 mod tests {
-    use super::counted_binding_label;
+    use super::{counted_binding_label, draw_path_popup, draw_toasts};
     use crate::app::{
         review::ReviewTargetKind, App, FilePanelMode, FoldContextDirection, SelectionToolbarAction,
         SettingsLeaveAction, SettingsResetAction, TopbarTabContent, ViewMode,
@@ -8827,6 +8850,42 @@ mod tests {
     ) -> (Vec<Line<'static>>, Vec<PreviewLink>) {
         let mut highlight = |_lang: Option<&str>, _code: &str| None;
         render_markdown_preview_lines(md, &theme, width, None, &mut highlight, None)
+    }
+
+    #[test]
+    fn toasts_render_safely_when_the_terminal_is_narrower_than_the_toast() {
+        let diff = MultiFileDiff::from_file_pair(
+            "old.txt".into(),
+            "new.txt".into(),
+            "old\n".to_string(),
+            "new\n".to_string(),
+        );
+        let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+        app.toggle_strikethrough_deletions();
+
+        for width in [10, 20, 30, 32, 33] {
+            let backend = TestBackend::new(width, 24);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal.draw(|frame| draw_toasts(frame, &mut app)).unwrap();
+        }
+    }
+
+    #[test]
+    fn path_popup_handles_unicode_paths_on_narrow_terminals() {
+        let path = std::path::PathBuf::from("docs/日本語のドキュメント/説明書.md");
+        let diff = MultiFileDiff::from_file_pair(
+            path.clone(),
+            path,
+            "old\n".to_string(),
+            "new\n".to_string(),
+        );
+        let app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+
+        for width in 3..=79 {
+            let backend = TestBackend::new(width, 24);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal.draw(|frame| draw_path_popup(frame, &app)).unwrap();
+        }
     }
 
     /// An opaque RGB theme so background-dependent features (heading bands,
