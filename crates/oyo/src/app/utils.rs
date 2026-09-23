@@ -5,7 +5,7 @@ use ratatui::style::{Color, Modifier};
 use ratatui::text::Span;
 use regex::Regex;
 use rustc_hash::{FxHashMap, FxHashSet};
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::process::{Command, Stdio};
 
 pub(crate) fn allow_overscroll_state(
@@ -64,7 +64,13 @@ fn platform_clipboard(text: &str) -> bool {
 }
 
 fn write_to_clipboard_cmd(cmd: &str, args: &[&str], text: &str) -> bool {
-    let mut child = match Command::new(cmd).args(args).stdin(Stdio::piped()).spawn() {
+    let mut child = match Command::new(cmd)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
         Ok(child) => child,
         Err(_) => return false,
     };
@@ -77,10 +83,41 @@ fn write_to_clipboard_cmd(cmd: &str, args: &[&str], text: &str) -> bool {
 }
 
 fn write_osc52_clipboard(text: &str) -> bool {
+    let mut stdout = std::io::stdout();
+    if stdout.is_terminal() {
+        return write_osc52_to_terminal(text, true, &mut stdout, None);
+    }
+
+    #[cfg(unix)]
+    {
+        let Ok(mut tty) = std::fs::OpenOptions::new().write(true).open("/dev/tty") else {
+            return false;
+        };
+        write_osc52_to_terminal(text, false, &mut stdout, Some(&mut tty))
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+
+fn write_osc52_to_terminal(
+    text: &str,
+    stdout_is_terminal: bool,
+    stdout: &mut dyn Write,
+    tty: Option<&mut dyn Write>,
+) -> bool {
     let sequence = osc52_clipboard_sequence(text);
-    std::io::stdout()
+    if stdout_is_terminal {
+        return write_osc52_sequence(stdout, &sequence);
+    }
+    tty.is_some_and(|writer| write_osc52_sequence(writer, &sequence))
+}
+
+fn write_osc52_sequence(writer: &mut dyn Write, sequence: &str) -> bool {
+    writer
         .write_all(sequence.as_bytes())
-        .and_then(|_| std::io::stdout().flush())
+        .and_then(|_| writer.flush())
         .is_ok()
 }
 
@@ -576,6 +613,72 @@ mod tests {
         assert_eq!(base64_encode(b"fo"), "Zm8=");
         assert_eq!(base64_encode(b"foo"), "Zm9v");
         assert_eq!(base64_encode(b"hello world"), "aGVsbG8gd29ybGQ=");
+    }
+
+    #[test]
+    fn osc52_fallback_uses_the_terminal_when_stdout_is_redirected() {
+        let mut stdout = Vec::new();
+        let mut tty = Vec::new();
+
+        assert!(write_osc52_to_terminal(
+            "hello",
+            false,
+            &mut stdout,
+            Some(&mut tty),
+        ));
+        assert!(stdout.is_empty());
+        assert_eq!(tty, osc52_clipboard_sequence("hello").as_bytes());
+        assert!(!write_osc52_to_terminal("hello", false, &mut stdout, None));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn clipboard_command_does_not_leak_child_output() {
+        const SCRIPT_ENV: &str = "OYO_CLIPBOARD_TEST_SCRIPT";
+        if let Some(script) = std::env::var_os(SCRIPT_ENV) {
+            assert!(!write_to_clipboard_cmd(
+                script.to_string_lossy().as_ref(),
+                &[],
+                "payload"
+            ));
+            return;
+        }
+
+        use std::os::unix::fs::PermissionsExt;
+        let script = std::env::temp_dir().join(format!(
+            "oyo-clipboard-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(
+            &script,
+            "#!/bin/sh\ncat >/dev/null\nprintf CHILD_STDOUT_SENTINEL\nprintf CHILD_STDERR_SENTINEL >&2\nexit 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "app::utils::tests::clipboard_command_does_not_leak_child_output",
+                "--nocapture",
+            ])
+            .env(SCRIPT_ENV, &script)
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_file(script);
+
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stdout.contains("test app::utils::tests::clipboard_command_does_not_leak_child_output")
+        );
+        assert!(!stdout.contains("CHILD_STDOUT_SENTINEL"));
+        assert!(!stderr.contains("CHILD_STDERR_SENTINEL"));
     }
 
     #[test]
