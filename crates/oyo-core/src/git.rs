@@ -149,10 +149,11 @@ pub fn get_uncommitted_changes(repo_path: &Path) -> Result<Vec<ChangedFile>, Git
         .arg("diff")
         .arg("--cached")
         .arg("--name-status")
+        .arg("-z")
         .output()?;
 
     if staged.status.success() {
-        parse_name_status(&String::from_utf8_lossy(&staged.stdout), &mut changes);
+        parse_name_status(&staged.stdout, &mut changes);
     }
 
     // Get unstaged changes
@@ -161,10 +162,11 @@ pub fn get_uncommitted_changes(repo_path: &Path) -> Result<Vec<ChangedFile>, Git
         .arg(repo_path)
         .arg("diff")
         .arg("--name-status")
+        .arg("-z")
         .output()?;
 
     if unstaged.status.success() {
-        parse_name_status(&String::from_utf8_lossy(&unstaged.stdout), &mut changes);
+        parse_name_status(&unstaged.stdout, &mut changes);
     }
 
     // Get untracked files
@@ -174,14 +176,14 @@ pub fn get_uncommitted_changes(repo_path: &Path) -> Result<Vec<ChangedFile>, Git
         .arg("ls-files")
         .arg("--others")
         .arg("--exclude-standard")
+        .arg("-z")
         .output()?;
 
     if untracked.status.success() {
-        for line in String::from_utf8_lossy(&untracked.stdout).lines() {
-            let line = line.trim();
-            if !line.is_empty() {
+        for path in untracked.stdout.split(|byte| *byte == 0) {
+            if !path.is_empty() {
                 changes.push(ChangedFile {
-                    path: PathBuf::from(line),
+                    path: path_from_git_bytes(path),
                     status: FileStatus::Untracked,
                     old_path: None,
                 });
@@ -206,6 +208,7 @@ pub fn get_staged_changes(repo_path: &Path) -> Result<Vec<ChangedFile>, GitError
         .arg("diff")
         .arg("--cached")
         .arg("--name-status")
+        .arg("-z")
         .output()?;
 
     if !output.status.success() {
@@ -215,7 +218,7 @@ pub fn get_staged_changes(repo_path: &Path) -> Result<Vec<ChangedFile>, GitError
     }
 
     let mut changes = Vec::new();
-    parse_name_status(&String::from_utf8_lossy(&output.stdout), &mut changes);
+    parse_name_status(&output.stdout, &mut changes);
     drop_oyo_review_changes(&mut changes);
     Ok(changes)
 }
@@ -231,6 +234,7 @@ pub fn get_changes_between(
         .arg(repo_path)
         .arg("diff")
         .arg("--name-status")
+        .arg("-z")
         .arg(format!("{}..{}", from, to))
         .output()?;
 
@@ -241,7 +245,7 @@ pub fn get_changes_between(
     }
 
     let mut changes = Vec::new();
-    parse_name_status(&String::from_utf8_lossy(&output.stdout), &mut changes);
+    parse_name_status(&output.stdout, &mut changes);
     Ok(changes)
 }
 
@@ -257,6 +261,7 @@ pub fn get_changes_between_index(
         .arg("diff")
         .arg("--cached")
         .arg("--name-status");
+    cmd.arg("-z");
     if reverse {
         cmd.arg("-R");
     }
@@ -271,7 +276,7 @@ pub fn get_changes_between_index(
     }
 
     let mut changes = Vec::new();
-    parse_name_status(&String::from_utf8_lossy(&output.stdout), &mut changes);
+    parse_name_status(&output.stdout, &mut changes);
     drop_oyo_review_changes(&mut changes);
     Ok(changes)
 }
@@ -420,6 +425,36 @@ pub fn get_objects_batch(
     if specs.is_empty() {
         return Ok(Vec::new());
     }
+
+    // cat-file --batch reads one object spec per line. Resolve specs containing
+    // newlines first so unusual path names cannot shift subsequent requests.
+    let mut batch_specs = Vec::with_capacity(specs.len());
+    let mut batch_indices = Vec::with_capacity(specs.len());
+    let mut objects = vec![Some(Vec::new()); specs.len()];
+    for (index, spec) in specs.iter().enumerate() {
+        let batch_spec = if spec.contains('\n') {
+            let output = Command::new("git")
+                .arg("-C")
+                .arg(repo_path)
+                .arg("rev-parse")
+                .arg("--verify")
+                .arg("--end-of-options")
+                .arg(spec)
+                .output()?;
+            if !output.status.success() {
+                continue;
+            }
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        } else {
+            spec.clone()
+        };
+        batch_specs.push(batch_spec);
+        batch_indices.push(index);
+    }
+    if batch_specs.is_empty() {
+        return Ok(objects);
+    }
+
     let mut child = Command::new("git")
         .arg("-C")
         .arg(repo_path)
@@ -433,7 +468,7 @@ pub fn get_objects_batch(
         .stdin
         .take()
         .ok_or_else(|| GitError::CommandFailed("git cat-file stdin was unavailable".to_string()))?;
-    let requests = specs.to_vec();
+    let requests = batch_specs.clone();
     let writer = std::thread::spawn(move || -> std::io::Result<()> {
         for spec in requests {
             writeln!(stdin, "{spec}")?;
@@ -444,8 +479,8 @@ pub fn get_objects_batch(
         GitError::CommandFailed("git cat-file stdout was unavailable".to_string())
     })?;
     let mut reader = BufReader::new(stdout);
-    let mut objects = Vec::with_capacity(specs.len());
-    for spec in specs {
+    let mut batch_objects = Vec::with_capacity(batch_specs.len());
+    for spec in &batch_specs {
         let mut header = String::new();
         if reader.read_line(&mut header)? == 0 {
             return Err(GitError::CommandFailed(format!(
@@ -453,7 +488,7 @@ pub fn get_objects_batch(
             )));
         }
         if header.trim_end().ends_with(" missing") {
-            objects.push(Some(Vec::new()));
+            batch_objects.push(Some(Vec::new()));
             continue;
         }
         let size = header
@@ -463,11 +498,11 @@ pub fn get_objects_batch(
             .ok_or_else(|| GitError::CommandFailed(format!("Invalid cat-file header: {header}")))?;
         if size > max_bytes {
             std::io::copy(&mut reader.by_ref().take(size), &mut std::io::sink())?;
-            objects.push(None);
+            batch_objects.push(None);
         } else {
             let mut bytes = vec![0; size as usize];
             reader.read_exact(&mut bytes)?;
-            objects.push(Some(bytes));
+            batch_objects.push(Some(bytes));
         }
         let mut newline = [0u8; 1];
         reader.read_exact(&mut newline)?;
@@ -486,6 +521,9 @@ pub fn get_objects_batch(
         return Err(GitError::CommandFailed(
             String::from_utf8_lossy(&output.stderr).to_string(),
         ));
+    }
+    for (index, object) in batch_indices.into_iter().zip(batch_objects) {
+        objects[index] = object;
     }
     Ok(objects)
 }
@@ -586,42 +624,60 @@ pub fn get_head_content(repo_path: &Path, file: &Path) -> Result<String, GitErro
     get_file_at_commit(repo_path, "HEAD", file)
 }
 
-fn parse_name_status(output: &str, changes: &mut Vec<ChangedFile>) {
-    for line in output.lines() {
-        let line = line.trim();
-        if line.is_empty() {
+fn parse_name_status(output: &[u8], changes: &mut Vec<ChangedFile>) {
+    let mut fields = output.split(|byte| *byte == 0);
+    while let Some(status_field) = fields.next() {
+        if status_field.is_empty() {
             continue;
         }
 
-        let parts: Vec<&str> = line.split('\t').collect();
-        if parts.is_empty() {
+        let status_char = status_field.first().copied().unwrap_or_default();
+        let Some(first_path) = fields.next().filter(|path| !path.is_empty()) else {
             continue;
-        }
+        };
+        let second_path = if matches!(status_char, b'R' | b'C') {
+            fields.next().filter(|path| !path.is_empty())
+        } else {
+            None
+        };
 
-        let status_char = parts[0].chars().next().unwrap_or(' ');
         let status = match status_char {
-            'M' => FileStatus::Modified,
-            'A' => FileStatus::Added,
-            'D' => FileStatus::Deleted,
-            'R' => FileStatus::Renamed,
+            b'M' => FileStatus::Modified,
+            b'A' => FileStatus::Added,
+            b'D' => FileStatus::Deleted,
+            b'R' => FileStatus::Renamed,
             _ => continue,
         };
 
-        if parts.len() >= 2 {
-            let path = PathBuf::from(parts.last().unwrap());
-            let old_path = if status == FileStatus::Renamed && parts.len() >= 3 {
-                Some(PathBuf::from(parts[1]))
-            } else {
-                None
+        let (old_path, path) = if status == FileStatus::Renamed {
+            let Some(new_path) = second_path else {
+                continue;
             };
+            (
+                Some(path_from_git_bytes(first_path)),
+                path_from_git_bytes(new_path),
+            )
+        } else {
+            (None, path_from_git_bytes(first_path))
+        };
 
-            changes.push(ChangedFile {
-                path,
-                status,
-                old_path,
-            });
-        }
+        changes.push(ChangedFile {
+            path,
+            status,
+            old_path,
+        });
     }
+}
+
+#[cfg(unix)]
+fn path_from_git_bytes(path: &[u8]) -> PathBuf {
+    use std::os::unix::ffi::OsStringExt;
+    PathBuf::from(std::ffi::OsString::from_vec(path.to_vec()))
+}
+
+#[cfg(not(unix))]
+fn path_from_git_bytes(path: &[u8]) -> PathBuf {
+    PathBuf::from(String::from_utf8_lossy(path).into_owned())
 }
 
 fn parse_shortstat(line: &str) -> Option<CommitStats> {
@@ -737,14 +793,106 @@ mod tests {
 
     #[test]
     fn test_parse_name_status() {
-        let output = "M\tsrc/main.rs\nA\tsrc/new.rs\nD\tsrc/old.rs\n";
+        let output = b"T\0Modified-name.rs\0M\0src/main.rs\0A\0src/new.rs\0D\0src/old.rs\0R100\0src/old-name.rs\0src/new-name.rs\0";
         let mut changes = Vec::new();
         parse_name_status(output, &mut changes);
 
-        assert_eq!(changes.len(), 3);
+        assert_eq!(changes.len(), 4);
         assert_eq!(changes[0].status, FileStatus::Modified);
+        assert_eq!(changes[0].path, Path::new("src/main.rs"));
         assert_eq!(changes[1].status, FileStatus::Added);
         assert_eq!(changes[2].status, FileStatus::Deleted);
+        assert_eq!(changes[3].status, FileStatus::Renamed);
+        assert_eq!(
+            changes[3].old_path.as_deref(),
+            Some(Path::new("src/old-name.rs"))
+        );
+        assert_eq!(changes[3].path, Path::new("src/new-name.rs"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn uncommitted_changes_preserve_quoted_and_newline_paths() {
+        let root = std::env::temp_dir().join(format!(
+            "oyo-git-paths-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["init", "-q"])
+            .status()
+            .unwrap()
+            .success());
+        for (key, value) in [("user.name", "Test"), ("user.email", "test@example.com")] {
+            assert!(Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args(["config", key, value])
+                .status()
+                .unwrap()
+                .success());
+        }
+
+        let modified = "café\tname.txt";
+        let modified_newline = "track\nline.txt";
+        let untracked = "nouveau\né.txt";
+        std::fs::write(root.join(modified), "old\n").unwrap();
+        std::fs::write(root.join(modified_newline), "before\n").unwrap();
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["add", "--", modified])
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["add", "--", modified_newline])
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["-c", "commit.gpgsign=false", "commit", "-qm", "base"])
+            .status()
+            .unwrap()
+            .success());
+        std::fs::write(root.join(modified), "new\n").unwrap();
+        std::fs::write(root.join(modified_newline), "after\n").unwrap();
+        std::fs::write(root.join(untracked), "fresh\n").unwrap();
+
+        let changes = get_uncommitted_changes(&root).unwrap();
+        assert!(changes.iter().any(|change| {
+            change.path == Path::new(modified) && change.status == FileStatus::Modified
+        }));
+        assert!(changes.iter().any(|change| {
+            change.path == Path::new(untracked) && change.status == FileStatus::Untracked
+        }));
+        let diff = crate::multi::MultiFileDiff::from_git_changes(root.clone(), changes).unwrap();
+        let index = diff
+            .files
+            .iter()
+            .position(|file| file.path == Path::new(modified))
+            .unwrap();
+        assert_eq!(diff.file_contents(index), Some(("old\n", "new\n")));
+        let newline_index = diff
+            .files
+            .iter()
+            .position(|file| file.path == Path::new(modified_newline))
+            .unwrap();
+        assert_eq!(
+            diff.file_contents(newline_index),
+            Some(("before\n", "after\n"))
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
