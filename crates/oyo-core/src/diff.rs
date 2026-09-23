@@ -276,7 +276,7 @@ impl DiffEngine {
     }
 
     /// Compute hunks by grouping consecutive changes that are close together
-    /// Changes within PROXIMITY_THRESHOLD lines are grouped into the same hunk
+    /// Changes within PROXIMITY_THRESHOLD entries in the filtered diff are grouped into the same hunk
     fn compute_hunks(significant_changes: &[usize], changes: &[Change]) -> Vec<Hunk> {
         const PROXIMITY_THRESHOLD: usize = 3;
 
@@ -294,18 +294,18 @@ impl DiffEngine {
         let mut current_hunk_changes: Vec<usize> = Vec::new();
         let mut current_hunk_old_start: Option<usize> = None;
         let mut current_hunk_new_start: Option<usize> = None;
-        let mut last_old_line: Option<usize> = None;
-        let mut last_new_line: Option<usize> = None;
+        let mut last_change_index: Option<usize> = None;
         let mut current_insertions = 0;
         let mut current_deletions = 0;
         let mut hunk_id = 0;
 
         for &change_id in significant_changes {
-            let change = match id_to_index
-                .get(&change_id)
-                .and_then(|idx| changes.get(*idx))
-            {
-                Some(c) => c,
+            let change_index = match id_to_index.get(&change_id).copied() {
+                Some(index) => index,
+                None => continue,
+            };
+            let change = match changes.get(change_index) {
+                Some(change) => change,
                 None => continue,
             };
 
@@ -317,11 +317,9 @@ impl DiffEngine {
                 .unwrap_or((None, None));
 
             // Determine if this change is close to the previous one
-            let is_close = match (last_old_line, last_new_line, old_line, new_line) {
-                (Some(lo), _, Some(co), _) => co.saturating_sub(lo) <= PROXIMITY_THRESHOLD,
-                (_, Some(ln), _, Some(cn)) => cn.saturating_sub(ln) <= PROXIMITY_THRESHOLD,
-                _ => current_hunk_changes.is_empty(), // First change always starts a hunk
-            };
+            let is_close = last_change_index
+                .map(|last| change_index.saturating_sub(last) <= PROXIMITY_THRESHOLD)
+                .unwrap_or(true);
 
             if is_close {
                 // Add to current hunk
@@ -354,13 +352,7 @@ impl DiffEngine {
                 current_deletions = 0;
             }
 
-            // Update last line numbers
-            if old_line.is_some() {
-                last_old_line = old_line;
-            }
-            if new_line.is_some() {
-                last_new_line = new_line;
-            }
+            last_change_index = Some(change_index);
 
             // Count insertions/deletions in this change
             for span in &change.spans {
@@ -407,7 +399,13 @@ impl DiffEngine {
         }
 
         // Try to match deletes with inserts for replace operations
-        if self.word_level && pending_deletes.len() == pending_inserts.len() {
+        if self.word_level
+            && pending_deletes.len() == pending_inserts.len()
+            && pending_deletes
+                .iter()
+                .zip(pending_inserts.iter())
+                .all(|((old, _), (new, _))| !old.is_empty() && !new.is_empty())
+        {
             for ((old_text, old_line), (new_text, new_line)) in
                 pending_deletes.iter().zip(pending_inserts.iter())
             {
@@ -619,6 +617,21 @@ mod tests {
 
         // Should have a single change with word-level spans
         assert_eq!(result.significant_changes.len(), 1);
+    }
+
+    #[test]
+    fn unequal_line_replacements_stay_in_one_hunk_without_word_level_diff() {
+        for (old, new) in [("a\nb\nc\n", "a\nX\nc\n"), ("a\nb\nc\nd\n", "a\nX\nd\n")] {
+            let result = DiffEngine::new()
+                .with_word_level(false)
+                .diff_strings(old, new);
+
+            assert_eq!(result.hunks.len(), 1);
+            assert_eq!(
+                result.hunks[0].change_ids.len(),
+                result.significant_changes.len()
+            );
+        }
     }
 
     #[test]
