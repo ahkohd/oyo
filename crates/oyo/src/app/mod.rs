@@ -242,6 +242,19 @@ struct OutdatedDiffView {
     active_tab_id: Option<usize>,
     active_tab_content: Option<TopbarTabContent>,
     cache_on_restore: bool,
+    worker_state: OutdatedDiffWorkerState,
+}
+
+struct OutdatedDiffWorkerState {
+    valid: bool,
+    diff_queue: VecDeque<usize>,
+    diff_inflight: Option<usize>,
+    diff_refresh_restore_end: Option<usize>,
+    diff_worker_tx: Option<mpsc::Sender<DiffRequest>>,
+    diff_worker_rx: Option<mpsc::Receiver<DiffResponse>>,
+    content_worker_rx: Option<mpsc::Receiver<ContentResponse>>,
+    content_generation: u64,
+    content_loading: FxHashMap<usize, oyo_core::multi::PendingFileContent>,
 }
 
 /// A clickable hyperlink region in the markdown preview (screen coordinates).
