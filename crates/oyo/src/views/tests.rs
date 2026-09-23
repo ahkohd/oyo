@@ -90,6 +90,23 @@ fn render_buffer(app: &mut App, width: u16, height: u16) -> Buffer {
 }
 
 #[test]
+fn split_render_handles_line_end_scroll_after_preview() {
+    let diff = MultiFileDiff::from_file_pair(
+        PathBuf::from("old.txt"),
+        PathBuf::from("new.txt"),
+        "one\n".to_string(),
+        "one\ninserted\n".to_string(),
+    );
+    let mut app = App::new(diff, ViewMode::Preview, 0, false, None);
+    app.line_wrap = false;
+    app.split_align_lines = true;
+    app.scroll_to_line_end();
+    app.set_view_mode(ViewMode::Split);
+
+    render_buffer(&mut app, 100, 20);
+}
+
+#[test]
 fn split_search_marks_the_current_match_bold_and_wraps() {
     let old = (1..=80)
         .map(|line| {

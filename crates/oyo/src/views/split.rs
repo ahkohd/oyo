@@ -57,23 +57,19 @@ fn align_fill_span(app: &App, width: usize) -> Span<'static> {
     if width == 0 || app.split_align_fill.is_empty() {
         return Span::raw("");
     }
-    let full_len = if app.line_wrap {
-        width
+    let fill_len = app.split_align_fill.chars().count();
+    let offset = if app.line_wrap {
+        0
     } else {
-        width.saturating_add(app.horizontal_scroll)
+        app.horizontal_scroll % fill_len
     };
-    let mut out = String::with_capacity(full_len);
-    for ch in app.split_align_fill.chars().cycle().take(full_len) {
-        out.push(ch);
-    }
-    let text = if app.line_wrap {
-        out
-    } else {
-        out.chars()
-            .skip(app.horizontal_scroll)
-            .take(width)
-            .collect()
-    };
+    let text: String = app
+        .split_align_fill
+        .chars()
+        .cycle()
+        .skip(offset)
+        .take(width)
+        .collect();
     Span::styled(
         text,
         Style::default()
