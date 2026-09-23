@@ -284,8 +284,6 @@ impl App {
         }
         let start_idx = *indices.iter().min()?;
         let end_idx = *indices.iter().max()?;
-        let changes = &diff.changes[start_idx..=end_idx];
-
         let file = self.multi_diff.current_file()?;
         let (old_path, new_path) = match file.status {
             FileStatus::Added | FileStatus::Untracked => (None, Some(file.path.clone())),
@@ -303,7 +301,7 @@ impl App {
         let diff_new = file.path.clone();
 
         let (lines, old_start, new_start, old_count, new_count) =
-            self.build_unified_hunk_lines(changes)?;
+            self.build_unified_hunk_lines(&diff.changes, start_idx, end_idx)?;
 
         let mut out = String::new();
         out.push_str(&format!(
@@ -339,8 +337,11 @@ impl App {
 
     fn build_unified_hunk_lines(
         &self,
-        changes: &[oyo_core::Change],
+        all_changes: &[oyo_core::Change],
+        start_idx: usize,
+        end_idx: usize,
     ) -> Option<(Vec<String>, usize, usize, usize, usize)> {
+        let changes = all_changes.get(start_idx..=end_idx)?;
         let mut lines: Vec<String> = Vec::new();
         let mut old_start: Option<usize> = None;
         let mut new_start: Option<usize> = None;
@@ -380,13 +381,24 @@ impl App {
             }
         }
 
-        Some((
-            lines,
-            old_start.unwrap_or(0),
-            new_start.unwrap_or(0),
-            old_count,
-            new_count,
-        ))
+        let mut old_start = old_start.unwrap_or(0);
+        let mut new_start = new_start.unwrap_or(0);
+        let prior_line_delta: isize = all_changes[..start_idx]
+            .iter()
+            .map(|change| {
+                let has_old = change.spans.iter().any(|span| span.old_line.is_some());
+                let has_new = change.spans.iter().any(|span| span.new_line.is_some());
+                has_new as isize - has_old as isize
+            })
+            .sum();
+        if old_count == 0 {
+            old_start = (new_start as isize - prior_line_delta - 1).max(0) as usize;
+        }
+        if new_count == 0 {
+            new_start = (old_start as isize + prior_line_delta - 1).max(0) as usize;
+        }
+
+        Some((lines, old_start, new_start, old_count, new_count))
     }
 
     fn text_for_yank(&mut self, view_line: &ViewLine) -> Option<String> {
@@ -2756,5 +2768,103 @@ mod tests {
         app.prev_conflict();
         let state = app.multi_diff.current_navigator().state();
         assert_eq!(state.current_step, steps[0]);
+    }
+
+    #[test]
+    fn yanked_insertions_and_deletions_use_the_preceding_line_for_empty_sides() {
+        let _guard = DiffSettingsGuard::default();
+        for (old, new, expected_header) in [
+            ("a\nb\nc\nd\ne\n", "a\nb\nc\nX\nd\ne\n", "@@ -3,0 +4,1 @@"),
+            ("a\nb\nc\nX\nd\ne\n", "a\nb\nc\nd\ne\n", "@@ -4,1 +3,0 @@"),
+        ] {
+            let mut app = App::new(
+                MultiFileDiff::from_file_pair(
+                    "a.txt".into(),
+                    "a.txt".into(),
+                    old.to_string(),
+                    new.to_string(),
+                ),
+                ViewMode::UnifiedPane,
+                0,
+                false,
+                None,
+            );
+            let patch = app.patch_for_hunk(None).expect("hunk patch");
+            assert!(patch.contains(expected_header), "patch was:\n{patch}");
+        }
+    }
+
+    #[test]
+    fn yanked_insertion_accounts_for_line_changes_in_earlier_hunks() {
+        let _guard = DiffSettingsGuard::default();
+        let old = "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\n";
+        let new = "one\nfour\nfive\nsix\nseven\ninserted\neight\n";
+        let mut app = App::new(
+            MultiFileDiff::from_file_pair(
+                "a.txt".into(),
+                "a.txt".into(),
+                old.to_string(),
+                new.to_string(),
+            ),
+            ViewMode::UnifiedPane,
+            0,
+            false,
+            None,
+        );
+        let insertion_id = app
+            .multi_diff
+            .current_navigator()
+            .diff()
+            .changes
+            .iter()
+            .find(|change| {
+                change
+                    .spans
+                    .iter()
+                    .any(|span| span.kind == ChangeKind::Insert)
+            })
+            .expect("insertion change")
+            .id;
+
+        let patch = app
+            .patch_for_hunk(Some(insertion_id))
+            .expect("insertion patch");
+        assert!(patch.contains("@@ -7,0 +6,1 @@"), "patch was:\n{patch}");
+    }
+
+    #[test]
+    fn yanked_insertion_ignores_token_count_in_earlier_modification() {
+        let _guard = DiffSettingsGuard::default();
+        let old = "foo(a, b)\ntwo\nthree\nfour\nfive\nsix\nseven\neight\n";
+        let new = "foo(c)\ntwo\nthree\nfour\nfive\nsix\nseven\ninserted\neight\n";
+        let mut app = App::new(
+            MultiFileDiff::from_file_pair(
+                "a.txt".into(),
+                "a.txt".into(),
+                old.to_string(),
+                new.to_string(),
+            ),
+            ViewMode::UnifiedPane,
+            0,
+            false,
+            None,
+        );
+        let insertion_id = app
+            .multi_diff
+            .current_navigator()
+            .diff()
+            .changes
+            .iter()
+            .find(|change| {
+                change.spans.iter().any(|span| span.new_line == Some(8))
+                    && change.spans.iter().all(|span| span.old_line.is_none())
+            })
+            .expect("insertion change")
+            .id;
+
+        let patch = app
+            .patch_for_hunk(Some(insertion_id))
+            .expect("insertion patch");
+        assert!(patch.contains("@@ -7,0 +8,1 @@"), "patch was:\n{patch}");
     }
 }
