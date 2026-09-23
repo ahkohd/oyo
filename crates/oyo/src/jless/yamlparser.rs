@@ -1,7 +1,12 @@
+use std::collections::BTreeMap;
+use std::mem;
+use yaml_rust::parser::{Event, MarkedEventReceiver, Parser};
+use yaml_rust::scanner::{Marker, TScalarStyle, TokenType};
 use yaml_rust::yaml::{Array, Hash, Yaml};
-use yaml_rust::YamlLoader;
 
 use crate::jless::flatjson::{ContainerType, Index, OptionIndex, Row, Value};
+
+const MAX_EXPANDED_YAML_NODES: usize = 100_000;
 
 struct YamlParser {
     parents: Vec<Index>,
@@ -11,6 +16,14 @@ struct YamlParser {
 }
 
 pub fn parse(yaml: String) -> Result<(Vec<Row>, String, usize), String> {
+    let mut event_parser = Parser::new(yaml.chars());
+    let mut loader = BudgetedYamlLoader::default();
+    let load_result = event_parser.load(&mut loader, true);
+    if let Some(error) = loader.error {
+        return Err(error);
+    }
+    load_result.map_err(|error| error.to_string())?;
+
     let mut parser = YamlParser {
         parents: vec![],
         rows: vec![],
@@ -18,14 +31,9 @@ pub fn parse(yaml: String) -> Result<(Vec<Row>, String, usize), String> {
         max_depth: 0,
     };
 
-    let docs = match YamlLoader::load_from_str(&yaml) {
-        Ok(yaml_docs) => yaml_docs,
-        Err(err) => return Err(format!("{err}")),
-    };
-
     let mut prev_sibling = OptionIndex::Nil;
 
-    for (i, doc) in docs.into_iter().enumerate() {
+    for (i, doc) in loader.docs.into_iter().enumerate() {
         if i != 0 {
             parser.pretty_printed.push('\n');
         }
@@ -41,6 +49,165 @@ pub fn parse(yaml: String) -> Result<(Vec<Row>, String, usize), String> {
     }
 
     Ok((parser.rows, parser.pretty_printed, parser.max_depth))
+}
+
+#[derive(Default)]
+struct BudgetedYamlLoader {
+    docs: Vec<Yaml>,
+    doc_stack: Vec<(Yaml, usize, usize)>,
+    key_stack: Vec<Yaml>,
+    anchor_map: BTreeMap<usize, (Yaml, usize)>,
+    expanded_nodes: usize,
+    error: Option<String>,
+}
+
+impl BudgetedYamlLoader {
+    fn count_nodes(&mut self, count: usize) -> bool {
+        if self.expanded_nodes.saturating_add(count) > MAX_EXPANDED_YAML_NODES {
+            self.error = Some(format!(
+                "YAML preview exceeds the {MAX_EXPANDED_YAML_NODES} expanded node limit"
+            ));
+            return false;
+        }
+        self.expanded_nodes += count;
+        true
+    }
+
+    fn insert_new_node(&mut self, node: Yaml, anchor_id: usize, expanded_size: usize) {
+        if anchor_id > 0 {
+            self.anchor_map
+                .insert(anchor_id, (node.clone(), expanded_size));
+        }
+
+        if self.doc_stack.is_empty() {
+            self.doc_stack.push((node, anchor_id, expanded_size));
+            return;
+        }
+
+        let parent = self.doc_stack.last_mut().unwrap();
+        match parent.0 {
+            Yaml::Array(ref mut array) => array.push(node),
+            Yaml::Hash(ref mut hash) => {
+                let current_key = self.key_stack.last_mut().unwrap();
+                if current_key.is_badvalue() {
+                    *current_key = node;
+                } else {
+                    let mut key = Yaml::BadValue;
+                    mem::swap(&mut key, current_key);
+                    hash.insert(key, node);
+                }
+            }
+            _ => unreachable!(),
+        }
+        parent.2 += expanded_size;
+    }
+
+    fn finish_collection(&mut self) {
+        if let Some((node, anchor_id, expanded_size)) = self.doc_stack.pop() {
+            self.insert_new_node(node, anchor_id, expanded_size);
+        }
+    }
+}
+
+impl MarkedEventReceiver for BudgetedYamlLoader {
+    fn on_event(&mut self, event: Event, _: Marker) {
+        if self.error.is_some() {
+            return;
+        }
+
+        match event {
+            Event::DocumentStart => self.anchor_map.clear(),
+            Event::DocumentEnd => match self.doc_stack.len() {
+                0 => self.docs.push(Yaml::BadValue),
+                1 => self.docs.push(self.doc_stack.pop().unwrap().0),
+                _ => unreachable!("YAML document ended with open collections"),
+            },
+            Event::SequenceStart(anchor_id) => {
+                if self.count_nodes(1) {
+                    self.doc_stack
+                        .push((Yaml::Array(Array::new()), anchor_id, 1));
+                }
+            }
+            Event::SequenceEnd => self.finish_collection(),
+            Event::MappingStart(anchor_id) => {
+                if self.count_nodes(1) {
+                    self.doc_stack.push((Yaml::Hash(Hash::new()), anchor_id, 1));
+                    self.key_stack.push(Yaml::BadValue);
+                }
+            }
+            Event::MappingEnd => {
+                self.key_stack.pop();
+                self.finish_collection();
+            }
+            Event::Scalar(value, style, anchor_id, tag) => {
+                if self.count_nodes(1) {
+                    self.insert_new_node(scalar_to_yaml(value, style, tag), anchor_id, 1);
+                }
+            }
+            Event::Alias(anchor_id) => {
+                if let Some(expanded_size) = self
+                    .anchor_map
+                    .get(&anchor_id)
+                    .map(|(_, expanded_size)| *expanded_size)
+                {
+                    if self.count_nodes(expanded_size) {
+                        let node = self.anchor_map.get(&anchor_id).unwrap().0.clone();
+                        self.insert_new_node(node, 0, expanded_size);
+                    }
+                } else if self.count_nodes(1) {
+                    self.insert_new_node(Yaml::BadValue, 0, 1);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn scalar_to_yaml(value: String, style: TScalarStyle, tag: Option<TokenType>) -> Yaml {
+    if style != TScalarStyle::Plain {
+        return Yaml::String(value);
+    }
+
+    if let Some(TokenType::Tag(ref handle, ref suffix)) = tag {
+        if handle == "!!" {
+            return match suffix.as_ref() {
+                "bool" => value
+                    .parse::<bool>()
+                    .map(Yaml::Boolean)
+                    .unwrap_or(Yaml::BadValue),
+                "int" => value
+                    .parse::<i64>()
+                    .map(Yaml::Integer)
+                    .unwrap_or(Yaml::BadValue),
+                "float" if is_yaml_float(&value) => Yaml::Real(value),
+                "float" => Yaml::BadValue,
+                "null" if matches!(value.as_str(), "~" | "null") => Yaml::Null,
+                "null" => Yaml::BadValue,
+                _ => Yaml::String(value),
+            };
+        }
+        return Yaml::String(value);
+    }
+
+    Yaml::from_str(&value)
+}
+
+fn is_yaml_float(value: &str) -> bool {
+    matches!(
+        value,
+        ".inf"
+            | ".Inf"
+            | ".INF"
+            | "+.inf"
+            | "+.Inf"
+            | "+.INF"
+            | "-.inf"
+            | "-.Inf"
+            | "-.INF"
+            | ".nan"
+            | "NaN"
+            | ".NAN"
+    ) || value.parse::<f64>().is_ok()
 }
 
 impl YamlParser {

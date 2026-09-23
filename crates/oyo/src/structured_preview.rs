@@ -85,6 +85,9 @@ impl StructuredPreviewState {
             StructuredPreviewKind::Yaml => parse_top_level_yaml(text.to_string()),
             StructuredPreviewKind::Toml => parse_top_level_toml(text),
         }?;
+        if signature.kind == StructuredPreviewKind::Yaml && flatjson.0.is_empty() {
+            return Err("Empty document".to_owned());
+        }
         let viewer = JsonViewer::new(flatjson, Mode::Data);
         Ok(Self {
             signature,
@@ -561,6 +564,48 @@ mod tests {
         let rendered = flatten(&state.lines(&ResolvedTheme::default(), 80, None));
         assert!(rendered.contains("name"));
         assert!(rendered.contains("Oyo"));
+    }
+
+    #[test]
+    fn rejects_empty_yaml_preview() {
+        let text = "# only a comment\n";
+        let sig = StructuredPreviewSignature::new(StructuredPreviewKind::Yaml, "empty.yaml", text);
+        assert!(matches!(
+            StructuredPreviewState::new(sig, text),
+            Err(error) if error == "Empty document"
+        ));
+    }
+
+    #[test]
+    fn renders_yaml_anchors_and_aliases_within_budget() {
+        let text = "defaults: &defaults\n  retries: 3\njob:\n  <<: *defaults\n  image: app\n";
+        let sig =
+            StructuredPreviewSignature::new(StructuredPreviewKind::Yaml, "aliases.yaml", text);
+        let mut state = StructuredPreviewState::new(sig, text).unwrap();
+        state.set_dimensions(80, 20);
+        let rendered = flatten(&state.lines(&ResolvedTheme::default(), 80, None));
+
+        assert!(rendered.contains("defaults"));
+        assert!(rendered.contains("retries"));
+        assert!(rendered.contains("image"));
+        assert!(rendered.contains("app"));
+    }
+
+    #[test]
+    fn rejects_yaml_alias_expansion_over_budget() {
+        let mut text = String::from("a0: &a0 [value]\n");
+        for level in 1..20 {
+            let previous = level - 1;
+            text.push_str(&format!(
+                "a{level}: &a{level} [*a{previous}, *a{previous}]\n"
+            ));
+        }
+        let sig =
+            StructuredPreviewSignature::new(StructuredPreviewKind::Yaml, "aliases.yaml", &text);
+        assert!(matches!(
+            StructuredPreviewState::new(sig, &text),
+            Err(error) if error.contains("expanded node limit")
+        ));
     }
 
     #[test]
