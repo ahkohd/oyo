@@ -334,8 +334,6 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
         prefer_cursor = true;
     }
 
-    let query = app.search_query().trim().to_ascii_lowercase();
-    let has_query = !query.is_empty();
     let mut review_preview_rows: Vec<(u64, usize, usize, String)> = Vec::new();
     let mut review_preview_before_idx: std::collections::HashMap<
         usize,
@@ -666,9 +664,7 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
         // Evolution view ignores diff background modes to keep the morph view clean.
 
         let line_text = spans_to_text(&content_spans);
-        let is_active_match = app.search_target() == Some(display_idx)
-            && has_query
-            && line_text.to_ascii_lowercase().contains(&query);
+        let is_active_match = app.is_active_search_match(display_idx);
         content_spans = app.highlight_search_spans(content_spans, &line_text, is_active_match);
         if is_conflict_marker(view_line) {
             content_spans = content_spans

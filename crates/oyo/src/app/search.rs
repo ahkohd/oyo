@@ -238,6 +238,10 @@ impl App {
         self.search_target
     }
 
+    pub(crate) fn is_active_search_match(&self, display_idx: usize) -> bool {
+        self.search_target == Some(display_idx)
+    }
+
     pub(crate) fn set_preview_search_lines(&mut self, lines: Vec<String>) {
         if self.preview_search_lines != lines {
             self.preview_search_lines = lines;
@@ -718,6 +722,42 @@ mod tests {
             );
             assert_ne!(style.fg, Some(syntax_fg));
         }
+    }
+
+    #[test]
+    fn active_search_match_follows_the_regex_target() {
+        let diff = MultiFileDiff::from_file_pair(
+            "test.rs".into(),
+            "test.rs".into(),
+            "old\n".to_string(),
+            "line and é\n".to_string(),
+        );
+        let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+        for ch in "l.ne".chars() {
+            app.push_search_char(ch);
+        }
+        app.search_target = Some(4);
+        assert!(app.is_active_search_match(4));
+        assert!(!app.is_active_search_match(3));
+        let active_regex = app.highlight_search_spans(
+            vec![Span::raw("line")],
+            "line",
+            app.is_active_search_match(4),
+        );
+        assert!(active_regex[0].style.add_modifier.contains(Modifier::BOLD));
+
+        app.clear_search_text();
+        for ch in "É".chars() {
+            app.push_search_char(ch);
+        }
+        app.search_target = Some(7);
+        assert!(app.is_active_search_match(7));
+        let active_unicode =
+            app.highlight_search_spans(vec![Span::raw("é")], "é", app.is_active_search_match(7));
+        assert!(active_unicode[0]
+            .style
+            .add_modifier
+            .contains(Modifier::BOLD));
     }
 
     #[test]
