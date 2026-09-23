@@ -207,8 +207,8 @@ struct Args {
     paths: Vec<PathBuf>,
 
     /// View mode: unified, split, or evolution
-    #[arg(short, long, default_value = "unified")]
-    view: CliViewMode,
+    #[arg(short, long)]
+    view: Option<CliViewMode>,
 
     /// Animation speed in milliseconds
     #[arg(short, long, default_value = "200")]
@@ -916,6 +916,41 @@ enum AppExit {
     Reload(InputMode, u64),
 }
 
+enum ControlTargetResolution {
+    Reload(InputMode, u64),
+    NoChanges,
+    Failed(String),
+}
+
+fn resolve_control_target(
+    mode: InputMode,
+    seq: u64,
+    config: &config::Config,
+    args: &Args,
+) -> ControlTargetResolution {
+    match build_diff_from_input_mode(&mode, config, args) {
+        Ok(Some(_)) => ControlTargetResolution::Reload(mode, seq),
+        Ok(None) => ControlTargetResolution::NoChanges,
+        Err(error) => ControlTargetResolution::Failed(error.to_string()),
+    }
+}
+
+fn resolve_view_mode(cli_view: Option<CliViewMode>, config: &config::Config) -> ViewMode {
+    cli_view
+        .map(Into::into)
+        .or_else(|| config.parse_view_mode())
+        .unwrap_or_default()
+}
+
+fn carry_control_session_name(
+    name: &mut Option<String>,
+    session: Option<&control::ControlSession>,
+) {
+    if let Some(session) = session {
+        *name = Some(session.name().to_string());
+    }
+}
+
 struct BuiltDiff {
     multi_diff: MultiFileDiff,
     branch: Option<String>,
@@ -929,9 +964,13 @@ fn detect_input_mode(paths: &[PathBuf]) -> InputMode {
 }
 
 fn detect_input_mode_in(paths: &[PathBuf], cwd: &Path) -> InputMode {
-    if paths.len() == 7 {
+    if paths.len() == 7 || paths.len() == 9 {
         // Git external diff format
-        let display_path = paths[0].clone();
+        let display_path = if paths.len() == 9 {
+            paths[7].clone()
+        } else {
+            paths[0].clone()
+        };
         let old_file = paths[1].clone();
         let new_file = paths[4].clone();
         InputMode::GitExternal {
@@ -7430,6 +7469,7 @@ fn run() -> Result<()> {
         let mut review_hook_warnings = Vec::new();
         let mut runtime_theme: Option<(config::ResolvedTheme, Option<String>)> = None;
         let mut control_last_applied_seq = 0;
+        let mut control_session_name = args.session.clone();
         loop {
             let empty_message = match &input_mode {
                 InputMode::GitUncommitted => Some("No uncommitted changes found.".to_string()),
@@ -7451,8 +7491,7 @@ fn run() -> Result<()> {
                 }
             };
 
-            let view_mode: ViewMode = args.view.into();
-            let view_mode = config.parse_view_mode().unwrap_or(view_mode);
+            let view_mode = resolve_view_mode(args.view, &config);
             let speed = if args.speed != 200 {
                 args.speed
             } else {
@@ -7493,6 +7532,7 @@ fn run() -> Result<()> {
                 &config,
                 &args,
                 control_last_applied_seq,
+                &mut control_session_name,
             )?;
             review_hook_warnings.extend(app.take_review_hook_warnings());
             runtime_theme = Some((app.theme.clone(), app.ui_theme_name.clone()));
@@ -7579,6 +7619,7 @@ fn run() -> Result<()> {
     let mut runtime_theme: Option<(config::ResolvedTheme, Option<String>)> = None;
     let mut pending_diff = Some(prefetched);
     let mut control_last_applied_seq = 0;
+    let mut control_session_name = args.session.clone();
     loop {
         let empty_message = match &input_mode {
             InputMode::GitUncommitted => Some("No uncommitted changes found.".to_string()),
@@ -7604,8 +7645,7 @@ fn run() -> Result<()> {
             }
         };
 
-        let view_mode: ViewMode = args.view.into();
-        let view_mode = config.parse_view_mode().unwrap_or(view_mode);
+        let view_mode = resolve_view_mode(args.view, &config);
         let speed = if args.speed != 200 {
             args.speed
         } else {
@@ -7646,6 +7686,7 @@ fn run() -> Result<()> {
             &config,
             &args,
             control_last_applied_seq,
+            &mut control_session_name,
         )?;
         review_hook_warnings.extend(app.take_review_hook_warnings());
         runtime_theme = Some((app.theme.clone(), app.ui_theme_name.clone()));
@@ -7691,6 +7732,7 @@ fn run_app(
     config: &config::Config,
     args: &Args,
     control_last_applied_seq: u64,
+    control_session_name: &mut Option<String>,
 ) -> Result<AppExit> {
     let editor_config = &config.editor;
     let mut pending_event: Option<Event> = None;
@@ -7714,7 +7756,7 @@ fn run_app(
     let mut control_session = match control::ControlSession::start(
         &workspace,
         &app.control_target_label(),
-        args.session.as_deref(),
+        control_session_name.as_deref(),
         control_last_applied_seq,
     ) {
         Ok(session) => Some(session),
@@ -7730,6 +7772,7 @@ fn run_app(
             .as_ref()
             .map(|session| session.name().to_string()),
     );
+    carry_control_session_name(control_session_name, control_session.as_ref());
 
     loop {
         if scroll_draw_pending && last_scroll_draw.elapsed() >= MOUSE_SCROLL_FRAME {
@@ -8366,6 +8409,7 @@ fn run_app(
             if let Some(session) = control_session.as_mut() {
                 match session.rename(&name) {
                     Ok(info) => {
+                        *control_session_name = Some(info.name.clone());
                         app.set_control_session_name(Some(info.name));
                         app.notify(ToastEvent::SessionRenamed);
                     }
@@ -8376,16 +8420,22 @@ fn run_app(
         }
         if let Some(session) = control_session.as_mut() {
             let poll = session.poll(app);
+            carry_control_session_name(control_session_name, Some(session));
             if poll.redraw {
                 needs_draw = true;
             }
             if let Some((target, seq)) = poll.target {
                 match input_mode_for_control_target(target, args) {
-                    Ok(mode) => match build_diff_from_input_mode(&mode, config, args)? {
-                        Some(_) => return Ok(AppExit::Reload(mode, seq)),
-                        None => app.notify(ToastEvent::SelectionActionFailed(
-                            "Target has no changes".to_string(),
-                        )),
+                    Ok(mode) => match resolve_control_target(mode, seq, config, args) {
+                        ControlTargetResolution::Reload(mode, seq) => {
+                            return Ok(AppExit::Reload(mode, seq));
+                        }
+                        ControlTargetResolution::NoChanges => app.notify(
+                            ToastEvent::SelectionActionFailed("Target has no changes".to_string()),
+                        ),
+                        ControlTargetResolution::Failed(error) => app.notify(
+                            ToastEvent::SelectionActionFailed(format!("Target failed: {error}")),
+                        ),
                     },
                     Err(error) => app.notify(ToastEvent::SelectionActionFailed(format!(
                         "Target failed: {error}"
@@ -9324,27 +9374,29 @@ fn run_commit_picker<B: Backend>(
 mod tests {
     use super::{
         basic_review_target_metadata, blocks_mouse_scroll, build_jj_diff, cancels_momentum_scroll,
-        canonical_review_target, clean_issue_provider_link, clean_provider_link,
-        combine_review_targets, config, dedupe_review_log_entries, default_review_remote,
-        detect_input_mode, detect_input_mode_in, gh_pr_with, git_output, git_ref_input_mode,
-        github_canonical_repo_with, github_comment_to_review_comment, github_repo_endpoint,
-        github_review_to_review_comment, gitlab, ignore_github_delete_not_found,
-        insert_review_thread_states, jj_bookmark_revset, jj_bookmarks_for_rev_in, jj_summary_paths,
-        jj_target_metadata_in, local_pr_review_metadata, metadata_matches_target,
-        mouse_horizontal_scroll_delta, normalize_jj_revision, parse_jj_git_remotes, parse_range,
-        parse_remote_url, parse_sync_args, provider_revision, push_pending_mouse_scroll,
-        push_review_comments_to_provider_with, push_review_comments_to_provider_with_ops,
-        render_editor_args, review_author_from_cli, review_comments_json_value,
+        canonical_review_target, carry_control_session_name, clean_issue_provider_link,
+        clean_provider_link, combine_review_targets, config, dedupe_review_log_entries,
+        default_review_remote, detect_input_mode, detect_input_mode_in, gh_pr_with, git_output,
+        git_ref_input_mode, github_canonical_repo_with, github_comment_to_review_comment,
+        github_repo_endpoint, github_review_to_review_comment, gitlab,
+        ignore_github_delete_not_found, insert_review_thread_states, jj_bookmark_revset,
+        jj_bookmarks_for_rev_in, jj_summary_paths, jj_target_metadata_in, local_pr_review_metadata,
+        metadata_matches_target, mouse_horizontal_scroll_delta, normalize_jj_revision,
+        parse_jj_git_remotes, parse_range, parse_remote_url, parse_sync_args, provider_revision,
+        push_pending_mouse_scroll, push_review_comments_to_provider_with,
+        push_review_comments_to_provider_with_ops, render_editor_args, resolve_control_target,
+        resolve_view_mode, review_author_from_cli, review_comments_json_value,
         review_pr_target_metadata, review_provider_for_configured_host, review_remote,
         review_status_json_value, review_target_summary, saved_pr_revision,
         set_review_pr_target_metadata, sgr_mouse_fragment_state, should_load_saved_review_fallback,
         sync_lookup_target_in, sync_pr_number, update_mouse_scroll_block, verify_pr_revision_head,
-        Args, BlockedMouseScroll, Command, GhComment, GhCommentUser, GhIssueComment, GhPr,
-        GhProviderComment, GhRepo, GhReview, GhReviewThreadsResponse, InputMode, MouseScrollRuns,
-        MouseScrollTarget, PendingMouseScroll, ProviderPr, ProviderUser, ReviewCommand,
-        ReviewCommentCommand, ReviewProviderKind, ReviewProviderPushOps, ReviewRemote,
-        ReviewTargetMetadata, SgrFragmentState, MAX_DISCRETE_MOUSE_SCROLL_ACTIONS_PER_FRAME,
-        MOUSE_SCROLL_FLICK_VOLUME, MOUSE_SCROLL_SUPPRESSION_CAP,
+        Args, BlockedMouseScroll, Command, ControlTargetResolution, GhComment, GhCommentUser,
+        GhIssueComment, GhPr, GhProviderComment, GhRepo, GhReview, GhReviewThreadsResponse,
+        InputMode, MouseScrollRuns, MouseScrollTarget, PendingMouseScroll, ProviderPr,
+        ProviderUser, ReviewCommand, ReviewCommentCommand, ReviewProviderKind,
+        ReviewProviderPushOps, ReviewRemote, ReviewTargetMetadata, SgrFragmentState,
+        MAX_DISCRETE_MOUSE_SCROLL_ACTIONS_PER_FRAME, MOUSE_SCROLL_FLICK_VOLUME,
+        MOUSE_SCROLL_SUPPRESSION_CAP,
     };
     use crate::app::{
         review::{
@@ -11416,6 +11468,91 @@ mod tests {
             InputMode::GitFile { path } => assert_eq!(path, PathBuf::from("main.rs")),
             _ => panic!("unexpected input mode"),
         }
+    }
+
+    #[test]
+    fn detects_git_external_rename_argument_form() {
+        let paths = [
+            "a.txt",
+            "/tmp/old-file",
+            "old-hex",
+            "100644",
+            "/tmp/new-file",
+            "new-hex",
+            "100644",
+            "b.txt",
+            "R100",
+        ]
+        .into_iter()
+        .map(PathBuf::from)
+        .collect::<Vec<_>>();
+
+        assert!(matches!(
+            detect_input_mode_in(&paths, Path::new("/tmp")),
+            InputMode::GitExternal { display_path, old_file, new_file }
+                if display_path == Path::new("b.txt")
+                    && old_file == Path::new("/tmp/old-file")
+                    && new_file == Path::new("/tmp/new-file")
+        ));
+    }
+
+    #[test]
+    fn bad_control_target_is_reported_as_a_failure_outcome() {
+        let args = Args::try_parse_from(["oy"]).unwrap();
+        let missing_file = temp_path("missing-external-diff");
+        let outcome = resolve_control_target(
+            InputMode::GitExternal {
+                display_path: PathBuf::from("file.txt"),
+                old_file: missing_file,
+                new_file: PathBuf::from("/dev/null"),
+            },
+            1,
+            &config::Config::default(),
+            &args,
+        );
+        assert!(matches!(
+            outcome,
+            ControlTargetResolution::Failed(message) if message.contains("Failed to read old file")
+        ));
+    }
+
+    #[test]
+    fn explicit_view_mode_overrides_configured_mode() {
+        let explicit = Args::try_parse_from(["oy", "--view", "split"]).unwrap();
+        let default = Args::try_parse_from(["oy"]).unwrap();
+        let mut config = config::Config::default();
+        config.ui.view_mode = Some("evolution".to_string());
+
+        assert_eq!(resolve_view_mode(explicit.view, &config), ViewMode::Split);
+        assert_eq!(default.view, None);
+        assert_eq!(
+            resolve_view_mode(default.view, &config),
+            ViewMode::Evolution
+        );
+    }
+
+    #[test]
+    fn renamed_control_session_name_survives_a_new_session() {
+        let workspace = temp_path("renamed-control-session");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let mut session =
+            crate::control::ControlSession::start(&workspace, "target", None, 0).unwrap();
+        let renamed = format!("mysess-{}", std::process::id());
+        session.rename(&renamed).unwrap();
+        let mut session_name = None;
+        carry_control_session_name(&mut session_name, Some(&session));
+        drop(session);
+
+        let next = crate::control::ControlSession::start(
+            &workspace,
+            "new-target",
+            session_name.as_deref(),
+            1,
+        )
+        .unwrap();
+        assert_eq!(next.name(), renamed);
+        drop(next);
+        let _ = std::fs::remove_dir_all(workspace);
     }
 
     #[test]
