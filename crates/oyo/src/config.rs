@@ -608,6 +608,23 @@ fn theme_search_dirs() -> Vec<PathBuf> {
     dirs
 }
 
+fn find_theme_candidate(dir: &Path, candidate: &str) -> Option<PathBuf> {
+    let path = dir.join(candidate);
+    if path.exists() {
+        return Some(path);
+    }
+    fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .find(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .eq_ignore_ascii_case(candidate)
+        })
+        .map(|entry| entry.path())
+}
+
 fn resolve_theme_json_path(name: &str, light_mode: bool) -> Option<PathBuf> {
     let path = Path::new(name);
     let has_ext = path
@@ -658,8 +675,7 @@ fn resolve_theme_json_path(name: &str, light_mode: bool) -> Option<PathBuf> {
 
     for dir in theme_search_dirs() {
         for candidate in &candidates {
-            let path = dir.join(candidate);
-            if path.exists() {
+            if let Some(path) = find_theme_candidate(&dir, candidate) {
                 return Some(path);
             }
         }
@@ -1959,20 +1975,31 @@ impl Config {
             set_document_value(&mut document, keys, value.clone())?;
         }
 
-        let parent = path
+        let target = match fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                fs::canonicalize(path).map_err(|error| {
+                    format!(
+                        "Failed to resolve config symlink {}: {error}",
+                        path.display()
+                    )
+                })?
+            }
+            _ => path.to_path_buf(),
+        };
+        let parent = target
             .parent()
-            .ok_or_else(|| format!("Config path has no parent: {}", path.display()))?;
+            .ok_or_else(|| format!("Config path has no parent: {}", target.display()))?;
         fs::create_dir_all(parent)
             .map_err(|error| format!("Failed to create {}: {error}", parent.display()))?;
         let temporary = parent.join(format!(".config.toml.{}.tmp", std::process::id()));
         fs::write(&temporary, document.to_string())
             .map_err(|error| format!("Failed to write config {}: {error}", temporary.display()))?;
-        if let Ok(metadata) = fs::metadata(path) {
+        if let Ok(metadata) = fs::metadata(&target) {
             let _ = fs::set_permissions(&temporary, metadata.permissions());
         }
-        fs::rename(&temporary, path).map_err(|error| {
+        fs::rename(&temporary, &target).map_err(|error| {
             let _ = fs::remove_file(&temporary);
-            format!("Failed to replace config {}: {error}", path.display())
+            format!("Failed to replace config {}: {error}", target.display())
         })
     }
 
@@ -2100,6 +2127,45 @@ mod tests {
             fs::read_to_string(&path).unwrap(),
             "[ui.diff]\n# keep background choice\nbg = false # full line\n\n[files]\n# keep count choice\ncounts = \"focused\" # sidebar\n"
         );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn settings_write_updates_symlink_target_without_replacing_link() {
+        use std::os::unix::fs::symlink;
+
+        let dir = std::env::temp_dir().join(format!("oyo-settings-symlink-{}", std::process::id()));
+        let target_dir = dir.join("dotfiles");
+        let path = dir.join("config.toml");
+        let target = target_dir.join("oyo.toml");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&target_dir).unwrap();
+        fs::write(&target, "[ui]\nline_wrap = false\n").unwrap();
+        symlink(&target, &path).unwrap();
+
+        Config::write_config_value(&path, &["ui", "line_wrap"], true.into()).unwrap();
+
+        assert!(fs::symlink_metadata(&path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            fs::read_to_string(&target).unwrap(),
+            "[ui]\nline_wrap = true\n"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn custom_theme_lookup_ignores_filename_case() {
+        let dir = std::env::temp_dir().join(format!("oyo-theme-case-{}", std::process::id()));
+        let path = dir.join("MyTheme.json");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(&path, "{}").unwrap();
+
+        assert_eq!(find_theme_candidate(&dir, "mytheme.json"), Some(path));
         let _ = fs::remove_dir_all(dir);
     }
 
