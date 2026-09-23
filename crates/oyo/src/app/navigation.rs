@@ -2406,8 +2406,16 @@ impl App {
     }
 
     pub(super) fn goto_line_number(&mut self, line_number: usize) {
+        self.goto_line_number_for_side(line_number, None);
+    }
+
+    pub(crate) fn goto_line_on_side(&mut self, new_side: bool, line_number: usize) -> bool {
+        self.goto_line_number_for_side(line_number, Some(new_side))
+    }
+
+    fn goto_line_number_for_side(&mut self, line_number: usize, side: Option<bool>) -> bool {
         if self.stepping && !self.current_file_diff_ready() {
-            return;
+            return false;
         }
         if self.stepping {
             self.multi_diff
@@ -2450,7 +2458,13 @@ impl App {
                         new_last = Some(new_idx - 1);
                     }
                 }
-                if line_number == 0 {
+                if let Some(new_side) = side {
+                    if new_side {
+                        new_match
+                    } else {
+                        old_match
+                    }
+                } else if line_number == 0 {
                     let first_old = if old_idx > 0 { Some(0) } else { None };
                     let first_new = if new_idx > 0 { Some(0) } else { None };
                     self.pick_split_index(first_old, first_new)
@@ -2480,7 +2494,11 @@ impl App {
                     })
                     .enumerate()
                 {
-                    let line_num = line.new_line.or(line.old_line);
+                    let line_num = match side {
+                        Some(true) => line.new_line,
+                        Some(false) => line.old_line,
+                        None => line.new_line.or(line.old_line),
+                    };
                     if let Some(num) = line_num {
                         max_line = max_line.max(num);
                     }
@@ -2490,7 +2508,9 @@ impl App {
                     }
                     last_idx = Some(display_idx);
                 }
-                if line_number == 0 {
+                if side.is_some() {
+                    target
+                } else if line_number == 0 {
                     last_idx.map(|_| 0)
                 } else if max_line > 0 && line_number > max_line {
                     last_idx
@@ -2503,7 +2523,11 @@ impl App {
                 let mut last_idx = None;
                 let mut max_line = 0usize;
                 for (display_idx, line) in view.iter().enumerate() {
-                    let line_num = line.old_line.or(line.new_line);
+                    let line_num = match side {
+                        Some(true) => line.new_line,
+                        Some(false) => line.old_line,
+                        None => line.old_line.or(line.new_line),
+                    };
                     if let Some(num) = line_num {
                         max_line = max_line.max(num);
                     }
@@ -2513,7 +2537,9 @@ impl App {
                     }
                     last_idx = Some(display_idx);
                 }
-                if line_number == 0 {
+                if side.is_some() {
+                    target
+                } else if line_number == 0 {
                     last_idx.map(|_| 0)
                 } else if max_line > 0 && line_number > max_line {
                     last_idx
@@ -2549,6 +2575,9 @@ impl App {
                     None => self.multi_diff.current_navigator().clear_cursor_change(),
                 }
             }
+            true
+        } else {
+            false
         }
     }
 

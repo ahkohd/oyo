@@ -121,7 +121,12 @@ A navigation command may be queued. When Oyo returns a sequence number, poll:
 oy control where --session SESSION --json
 ```
 
-Continue only when `lastAppliedSeq` is at least the queued sequence number.
+Stop polling when either condition is true:
+
+- `lastAppliedSeq` is at least the queued sequence number: navigation succeeded
+- `lastError.seq` is at least the queued sequence number: navigation failed; read `lastError.message`
+
+A failed command does not advance `lastAppliedSeq`.
 
 For each file, explain these points in order:
 

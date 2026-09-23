@@ -1099,6 +1099,33 @@ fn goto_line_keeps_cursor_on_target_when_centered() {
     assert_eq!(cursor_line.and_then(|line| line.new_line), Some(61));
 }
 
+#[test]
+fn goto_line_on_side_uses_requested_old_or_new_line() {
+    for mode in [ViewMode::UnifiedPane, ViewMode::Split] {
+        let diff = MultiFileDiff::from_file_pair(
+            "a.txt".into(),
+            "a.txt".into(),
+            "a\nb\nc\n".to_string(),
+            "a\ninserted\nb\nc\n".to_string(),
+        );
+        let mut app = App::new(diff, mode, 0, false, None);
+        app.stepping = false;
+        app.no_step_auto_jump_on_enter = false;
+        app.enter_no_step_mode();
+        app.auto_center = false;
+
+        assert!(app.goto_line_on_side(true, 2));
+        let view = app.current_view_with_frame(AnimationFrame::Idle);
+        assert_eq!(view[app.scroll_offset].new_line, Some(2));
+        assert_eq!(view[app.scroll_offset].old_line, None);
+
+        assert!(app.goto_line_on_side(false, 2));
+        let view = app.current_view_with_frame(AnimationFrame::Idle);
+        assert_eq!(view[app.scroll_offset].old_line, Some(2));
+        assert_eq!(view[app.scroll_offset].new_line, Some(3));
+    }
+}
+
 fn make_large_step_app(lines: usize, change_lines: &[usize]) -> App {
     let old_lines: Vec<String> = (0..lines).map(|i| format!("line{}", i)).collect();
     let mut new_lines = old_lines.clone();

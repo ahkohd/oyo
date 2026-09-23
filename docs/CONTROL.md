@@ -62,7 +62,7 @@ oy control where --session review-a
 oy control where --session review-a --json
 ```
 
-JSON output also includes `lastAppliedSeq`. Use this field to check whether queued work has finished.
+JSON output also includes `lastAppliedSeq` and `lastError`. A failure has the form `{"seq": N, "message": "..."}`. Text output shows `Last error: none` or `Last error: seq N: message`.
 
 Use `diff` to show the loaded files and hunks:
 
@@ -149,7 +149,7 @@ oy control target --session review-a --staged
 
 Pass the same commit, branch, bookmark, change ID, revset or range that you would pass to `oy`.
 
-Target changes are queued. Check `lastAppliedSeq` before sending work that depends on the new target.
+Target changes are queued. Check whether they succeeded or failed before sending work that depends on the new target.
 
 ## Set the view
 
@@ -262,7 +262,12 @@ A queued JSON response includes `queued: true` and a `seq` value. Poll the sessi
 oy control where --session review-a --json
 ```
 
-Continue when `lastAppliedSeq` is greater than or equal to the returned `seq`.
+Stop polling when either condition is true:
+
+- `lastAppliedSeq` is greater than or equal to `seq`: the command succeeded
+- `lastError.seq` is greater than or equal to `seq`: the command failed; read `lastError.message`
+
+A failed command does not advance `lastAppliedSeq`.
 
 Cancel queued work and stop motion:
 
@@ -302,7 +307,7 @@ The running TUI reloads external review database changes. See [Review commands](
 | `More than one visible diff file matches PATH.` | Pass the full path |
 | `Specify exactly one navigation target` | Use one of `--new-line`, `--old-line`, `--hunk`, `--step-number`, `--start` or `--end` |
 | `Pass a target, --worktree or --staged` | Add one target to `oy control target` |
-| `Control queue full. Cancel or wait.` | Run `oy control cancel` or wait for `lastAppliedSeq` |
+| `Control queue full. Cancel or wait.` | Run `oy control cancel`, or poll `where --json` for `lastAppliedSeq` or `lastError.seq` |
 | `Use on, off or toggle` | Pass one of those values to the mode command |
 | `Unknown view mode: MODE` | Use `unified`, `split`, `evolution`, `blame`, `preview`, `next` or `prev` |
 | `Unsupported control action: ID` | Use a supported action ID or a named control command |
