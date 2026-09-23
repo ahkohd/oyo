@@ -1,6 +1,7 @@
 use super::{
     AnimationFrame, AnimationPhase, App, FileDiskStamp, FilePanelMode, ImagePreviewCache,
-    ImagePreviewSignature, PreviewLinkBox, StatusModeMenu, TopbarTab, TopbarTabContent, ViewMode,
+    ImagePreviewSignature, PreviewLinkBox, StatusModeMenu, TopbarTab, TopbarTabContent,
+    ViewHistoryRecipe, ViewMode,
 };
 use crate::csv_preview::{CsvPreviewSignature, CsvPreviewState};
 use crate::structured_preview::{StructuredPreviewSignature, StructuredPreviewState};
@@ -2554,6 +2555,7 @@ impl App {
         };
 
         self.multi_diff.refresh_current_file();
+        self.invalidate_blame_cache();
         self.mark_diff_changed();
         let idx = self.multi_diff.selected_index;
         if self.queue_refreshed_current_file_diff() {
@@ -2646,7 +2648,14 @@ impl App {
             }
         } else {
             let repo_root = self.multi_diff.repo_root().map(Path::to_path_buf);
+            let old_paths: Vec<PathBuf> = self
+                .multi_diff
+                .files
+                .iter()
+                .map(|file| file.path.clone())
+                .collect();
             if self.multi_diff.refresh_all_from_git() {
+                self.remap_file_indices_after_refresh(&old_paths);
                 if let Some(repo_root) = repo_root {
                     self.refresh_git_review_target_commits(&repo_root);
                 }
@@ -2683,6 +2692,12 @@ impl App {
             .zip(&self.file_recently_changed_until)
             .map(|(file, until)| (file.path.clone(), *until))
             .collect();
+        let old_paths: Vec<PathBuf> = self
+            .multi_diff
+            .files
+            .iter()
+            .map(|file| file.path.clone())
+            .collect();
         let selected_path = self.multi_diff.current_file().map(|file| file.path.clone());
         let selected_index = selected_path
             .and_then(|path| refreshed.files.iter().position(|file| file.path == path));
@@ -2692,6 +2707,7 @@ impl App {
         let scroll_offset = self.scroll_offset;
         let horizontal_scroll = self.horizontal_scroll;
         self.multi_diff = refreshed;
+        self.remap_file_indices_after_refresh(&old_paths);
         if let Some(request) = self
             .multi_diff
             .take_pending_content_for(self.multi_diff.selected_index)
@@ -2723,10 +2739,78 @@ impl App {
         }
     }
 
+    fn remap_file_indices_after_refresh(&mut self, old_paths: &[PathBuf]) {
+        let new_indices: HashMap<PathBuf, usize> = self
+            .multi_diff
+            .files
+            .iter()
+            .enumerate()
+            .map(|(index, file)| (file.path.clone(), index))
+            .collect();
+        let remap_index = |old_index: usize| {
+            old_paths
+                .get(old_index)
+                .and_then(|path| new_indices.get(path).copied())
+        };
+
+        self.topbar_tabs.retain_mut(|tab| match tab.content {
+            TopbarTabContent::File(old_index) => {
+                if let Some(index) = remap_index(old_index) {
+                    tab.content = TopbarTabContent::File(index);
+                    true
+                } else {
+                    false
+                }
+            }
+            _ => true,
+        });
+
+        let old_cursor = self.view_history_cursor;
+        let mut cursor_map = vec![None; self.view_history.len()];
+        let mut history = Vec::with_capacity(self.view_history.len());
+        for (old_index, recipe) in self.view_history.iter().copied().enumerate() {
+            let recipe = match recipe {
+                ViewHistoryRecipe::File {
+                    tab_id,
+                    file_index,
+                    scroll_offset,
+                } => {
+                    let Some(file_index) = remap_index(file_index) else {
+                        continue;
+                    };
+                    ViewHistoryRecipe::File {
+                        tab_id,
+                        file_index,
+                        scroll_offset,
+                    }
+                }
+                other => other,
+            };
+            cursor_map[old_index] = Some(history.len());
+            history.push(recipe);
+        }
+        self.view_history_cursor = cursor_map
+            .get(old_cursor)
+            .copied()
+            .flatten()
+            .or_else(|| {
+                cursor_map
+                    .iter()
+                    .take(old_cursor)
+                    .rev()
+                    .find_map(|index| *index)
+            })
+            .or_else(|| cursor_map.iter().find_map(|index| *index))
+            .unwrap_or(0);
+        self.view_history = history;
+        self.ensure_topbar_tabs();
+    }
+
     pub(crate) fn reset_after_file_list_refresh(&mut self, repair_comments: bool) {
         if repair_comments {
             self.clear_outdated_reconstruction_cache();
         }
+        self.invalidate_blame_cache();
         self.mark_diff_changed();
         self.diff_worker_tx = None;
         self.diff_worker_rx = None;
@@ -2803,6 +2887,9 @@ impl App {
 #[cfg(test)]
 mod link_tests {
     use super::is_openable_url;
+    use crate::app::{App, TopbarTabContent, ViewHistoryRecipe, ViewMode};
+    use oyo_core::MultiFileDiff;
+    use std::path::PathBuf;
 
     #[test]
     fn only_web_and_mailto_urls_open() {
@@ -2817,5 +2904,68 @@ mod link_tests {
         assert!(!is_openable_url("ftp://example.com"));
         assert!(!is_openable_url(""));
         assert!(!is_openable_url("https://"));
+    }
+
+    #[test]
+    fn refreshed_file_order_remaps_tabs_and_view_history_by_path() {
+        let mut app = App::new(
+            MultiFileDiff::from_file_pairs(vec![
+                (PathBuf::from("b.txt"), "old\n".into(), "b\n".into()),
+                (PathBuf::from("c.txt"), "old\n".into(), "c\n".into()),
+            ]),
+            ViewMode::UnifiedPane,
+            0,
+            false,
+            None,
+        );
+        app.topbar_tabs[0].content = TopbarTabContent::File(1);
+        let second_tab_id = app.next_topbar_tab_id;
+        app.next_topbar_tab_id += 1;
+        let mut second_tab = app.topbar_tabs[0].clone();
+        second_tab.id = second_tab_id;
+        second_tab.content = TopbarTabContent::File(0);
+        app.topbar_tabs.push(second_tab);
+        app.active_topbar_tab = Some(second_tab_id);
+        app.view_history = vec![
+            ViewHistoryRecipe::File {
+                tab_id: Some(1),
+                file_index: 1,
+                scroll_offset: 0,
+            },
+            ViewHistoryRecipe::File {
+                tab_id: Some(second_tab_id),
+                file_index: 0,
+                scroll_offset: 0,
+            },
+        ];
+        app.view_history_cursor = 1;
+
+        app.replace_multi_diff(MultiFileDiff::from_file_pairs(vec![
+            (PathBuf::from("a.txt"), "old\n".into(), "a\n".into()),
+            (PathBuf::from("b.txt"), "old\n".into(), "b\n".into()),
+            (PathBuf::from("c.txt"), "old\n".into(), "c\n".into()),
+        ]));
+
+        assert_eq!(app.current_file_path(), "b.txt");
+        assert_eq!(app.multi_diff.selected_index, 1);
+        assert_eq!(app.topbar_tabs[0].content, TopbarTabContent::File(2));
+        assert_eq!(app.topbar_tabs[1].content, TopbarTabContent::File(1));
+        assert_eq!(app.active_topbar_tab, Some(second_tab_id));
+        assert_eq!(
+            app.view_history,
+            vec![
+                ViewHistoryRecipe::File {
+                    tab_id: Some(1),
+                    file_index: 2,
+                    scroll_offset: 0,
+                },
+                ViewHistoryRecipe::File {
+                    tab_id: Some(second_tab_id),
+                    file_index: 1,
+                    scroll_offset: 0,
+                },
+            ]
+        );
+        assert_eq!(app.view_history_cursor, 1);
     }
 }

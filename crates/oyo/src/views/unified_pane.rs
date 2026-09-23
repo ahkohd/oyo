@@ -461,8 +461,6 @@ fn build_unified_render_model(
         display_len = display_len.saturating_add(trailing_rows);
     }
 
-    let query = app.search_query().trim().to_ascii_lowercase();
-    let has_query = !query.is_empty();
     let (preview_mode, preview_hunk) = {
         let state = app.multi_diff.current_navigator().state();
         (state.hunk_preview_mode, state.current_hunk)
@@ -1191,9 +1189,7 @@ fn build_unified_render_model(
         }
 
         let line_text = spans_to_text(&content_spans);
-        let is_active_match = app.search_target() == Some(idx)
-            && has_query
-            && line_text.to_ascii_lowercase().contains(&query);
+        let is_active_match = app.is_active_search_match(idx);
         content_spans = app.highlight_search_spans(content_spans, &line_text, is_active_match);
         if italic_line {
             content_spans = super::apply_italic_spans(content_spans);

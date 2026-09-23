@@ -18,6 +18,21 @@ use std::time::{Duration, Instant};
 use time::OffsetDateTime;
 
 impl App {
+    pub(super) fn invalidate_blame_cache(&mut self) {
+        self.blame_cache.clear();
+        self.blame_prefetch.clear();
+        self.blame_time_ranges.clear();
+        self.blame_pending.clear();
+        self.blame_prefetch_at = None;
+        self.blame_cache_revision = self.blame_cache_revision.wrapping_add(1);
+        self.blame_render_cache = None;
+
+        // Dropping both ends prevents responses from the old content from being
+        // accepted after the next blame worker is created.
+        self.blame_worker_tx = None;
+        self.blame_worker_rx = None;
+    }
+
     pub(super) fn clear_blame_step_hint(&mut self) {
         self.blame_step_hint = None;
     }
@@ -684,5 +699,69 @@ impl App {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::ViewMode;
+    use oyo_core::MultiFileDiff;
+
+    #[test]
+    fn invalidating_blame_discards_cached_and_in_flight_data() {
+        let mut app = App::new(
+            MultiFileDiff::from_file_pair(
+                "a.txt".into(),
+                "a.txt".into(),
+                "old\n".to_string(),
+                "new\n".to_string(),
+            ),
+            ViewMode::UnifiedPane,
+            0,
+            false,
+            None,
+        );
+        let key = BlameCacheKey {
+            path: "a.txt".into(),
+            line: 1,
+            source: BlameSource::Worktree,
+        };
+        let prefetch_key = BlamePrefetchKey {
+            path: key.path.clone(),
+            source: key.source.clone(),
+        };
+        app.blame_cache.insert(
+            key,
+            BlameInfo {
+                author: "author".to_string(),
+                commit: "commit".to_string(),
+                uncommitted: false,
+                author_time: Some(1),
+                summary: "summary".to_string(),
+            },
+        );
+        app.blame_prefetch.insert(
+            prefetch_key.clone(),
+            BlamePrefetchRange { start: 1, end: 2 },
+        );
+        app.blame_time_ranges.insert(prefetch_key.clone(), (1, 2));
+        app.blame_pending
+            .insert(prefetch_key, BlamePrefetchRange { start: 1, end: 2 });
+        let (tx, _request_rx) = mpsc::channel::<BlameRequest>();
+        let (_response_tx, rx) = mpsc::channel::<BlameResponse>();
+        app.blame_worker_tx = Some(tx);
+        app.blame_worker_rx = Some(rx);
+        let revision = app.blame_cache_revision;
+
+        app.invalidate_blame_cache();
+
+        assert!(app.blame_cache.is_empty());
+        assert!(app.blame_prefetch.is_empty());
+        assert!(app.blame_time_ranges.is_empty());
+        assert!(app.blame_pending.is_empty());
+        assert!(app.blame_worker_tx.is_none());
+        assert!(app.blame_worker_rx.is_none());
+        assert_eq!(app.blame_cache_revision, revision.wrapping_add(1));
     }
 }

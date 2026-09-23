@@ -94,6 +94,18 @@ fn measure_hunk_index_for_change_id(inputs: &Inputs) -> Duration {
     start.elapsed()
 }
 
+fn measure_goto_end(inputs: &Inputs) -> Duration {
+    let mut nav = DiffNavigator::new(
+        inputs.diff.clone(),
+        inputs.old.clone(),
+        inputs.new.clone(),
+        false,
+    );
+    let start = Instant::now();
+    nav.goto_end();
+    start.elapsed()
+}
+
 #[test]
 fn perf_is_applied_scaling() {
     if !perf_tests_enabled() {
@@ -123,6 +135,23 @@ fn perf_hunk_index_for_change_id_scaling() {
     assert!(
         large_time.as_nanos() <= small_time.as_nanos() * 20,
         "hunk_index_for_change_id scaled poorly: small={:?} large={:?}",
+        small_time,
+        large_time
+    );
+}
+
+#[test]
+fn perf_goto_end_scaling() {
+    if !perf_tests_enabled() {
+        return;
+    }
+    let small = build_inputs(20, 50, 3);
+    let large = build_inputs(200, 50, 3);
+    let small_time = measure_goto_end(&small);
+    let large_time = measure_goto_end(&large);
+    assert!(
+        large_time.as_nanos() <= small_time.as_nanos() * 20,
+        "goto_end scaled poorly: small={:?} large={:?}",
         small_time,
         large_time
     );

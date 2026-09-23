@@ -5928,27 +5928,33 @@ fn capture_diff_selection_cells(frame: &mut Frame, app: &mut App) {
         let buffer = frame.buffer_mut();
         (y..max_y)
             .map(|row| {
+                let mut wide_cells_remaining = 0usize;
                 let mut cells = (x..max_x)
                     .map(|col| {
+                        if wide_cells_remaining > 0 {
+                            wide_cells_remaining -= 1;
+                            return String::new();
+                        }
                         let local_col = col.saturating_sub(x);
-                        if excluded_rows.contains(&row.saturating_sub(y))
-                            || excluded
-                                .iter()
-                                .any(|(start, end)| local_col >= *start && local_col < *end)
-                        {
+                        if excluded_rows.contains(&row.saturating_sub(y)) {
                             String::new()
                         } else {
                             buffer
                                 .cell((col, row))
                                 .map(|cell| {
                                     let symbol = cell.symbol();
+                                    wide_cells_remaining =
+                                        UnicodeWidthStr::width(symbol).saturating_sub(1);
+                                    let excluded_cell = excluded.iter().any(|(start, end)| {
+                                        local_col >= *start && local_col < *end
+                                    });
                                     let align_fill = app.view_mode == ViewMode::Split
                                         && !app.split_align_fill.is_empty()
                                         && cell.style().add_modifier.contains(Modifier::DIM)
                                         && symbol
                                             .chars()
                                             .all(|ch| app.split_align_fill.contains(ch));
-                                    if align_fill {
+                                    if excluded_cell || align_fill {
                                         String::new()
                                     } else {
                                         symbol.to_string()
@@ -9974,6 +9980,40 @@ mod tests {
                 crate::views::fold_context_background(&app)
             );
         }
+    }
+
+    #[test]
+    fn visual_selection_does_not_copy_wide_character_placeholders() {
+        let diff = MultiFileDiff::from_file_pair(
+            "wide.txt".into(),
+            "wide.txt".into(),
+            "old\n".to_string(),
+            "中文字\n".to_string(),
+        );
+        let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+        app.file_panel_visible = false;
+        app.scrollbar_visible = false;
+        app.diff_view_area = Some((0, 0, 14, 1));
+
+        let backend = TestBackend::new(14, 1);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                frame.render_widget(
+                    ratatui::widgets::Paragraph::new("中文字"),
+                    Rect::new(8, 0, 6, 1),
+                );
+                super::capture_diff_selection_cells(frame, &mut app);
+            })
+            .unwrap();
+        let copied = app.diff_selection_cells[0]
+            .iter()
+            .skip(8)
+            .take(6)
+            .cloned()
+            .collect::<String>();
+
+        assert_eq!(copied, "中文字");
     }
 
     #[test]

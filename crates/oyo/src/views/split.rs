@@ -830,8 +830,6 @@ fn render_old_pane(
     let mut visible_fold_index = 0;
     let mut line_idx = 0;
     let mut display_row = 0usize;
-    let query = app.search_query().trim().to_ascii_lowercase();
-    let has_query = !query.is_empty();
     let mut max_line_width: usize = 0;
 
     let mut review_preview_before_idx: std::collections::HashMap<
@@ -1347,9 +1345,7 @@ fn render_old_pane(
             }
 
             let line_text = spans_to_text(&content_spans);
-            let is_active_match = app.search_target() == Some(display_idx)
-                && has_query
-                && line_text.to_ascii_lowercase().contains(&query);
+            let is_active_match = app.is_active_search_match(display_idx);
             content_spans = app.highlight_search_spans(content_spans, &line_text, is_active_match);
             if italic_line {
                 content_spans = super::apply_italic_spans(content_spans);
@@ -1880,8 +1876,6 @@ fn render_new_pane(
     let mut visible_fold_index = 0;
     let mut line_idx = 0;
     let mut display_row = 0usize;
-    let query = app.search_query().trim().to_ascii_lowercase();
-    let has_query = !query.is_empty();
     let mut max_line_width: usize = 0;
 
     let mut review_preview_before_idx: std::collections::HashMap<
@@ -2403,9 +2397,7 @@ fn render_new_pane(
             }
 
             let line_text = spans_to_text(&content_spans);
-            let is_active_match = app.search_target() == Some(display_idx)
-                && has_query
-                && line_text.to_ascii_lowercase().contains(&query);
+            let is_active_match = app.is_active_search_match(display_idx);
             content_spans = app.highlight_search_spans(content_spans, &line_text, is_active_match);
             if italic_line {
                 content_spans = super::apply_italic_spans(content_spans);

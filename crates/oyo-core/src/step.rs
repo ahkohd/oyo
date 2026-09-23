@@ -568,8 +568,8 @@ impl DiffNavigator {
             self.state.active_change = Some(change_id);
 
             // Update current hunk
-            if let Some(hunk) = self.diff.hunk_for_change(change_id) {
-                self.state.current_hunk = hunk.id;
+            if let Some(hunk_idx) = self.hunk_index_for_change_exact(change_id) {
+                self.state.current_hunk = hunk_idx;
             }
         }
 
@@ -2390,6 +2390,38 @@ mod tests {
             !line_hunk_0.show_hunk_extent,
             "change line outside scope hunk should not show extent"
         );
+    }
+
+    #[test]
+    fn word_level_changes_to_and_from_empty_lines_remain_visible() {
+        let engine = crate::diff::DiffEngine::new();
+
+        let old = "a\nfoo bar\nc";
+        let new = "a\n\nc";
+        let mut nav = DiffNavigator::new(
+            engine.diff_strings(old, new),
+            Arc::from(old),
+            Arc::from(new),
+            false,
+        );
+        nav.goto_end();
+        assert!(nav
+            .current_view_with_frame(AnimationFrame::Idle)
+            .iter()
+            .any(|line| line.content.is_empty()));
+
+        let old = "a\n\nc";
+        let new = "a\nfoo bar\nc";
+        let nav = DiffNavigator::new(
+            engine.diff_strings(old, new),
+            Arc::from(old),
+            Arc::from(new),
+            false,
+        );
+        assert!(nav
+            .current_view_with_frame(AnimationFrame::Idle)
+            .iter()
+            .any(|line| line.content.is_empty()));
     }
 
     #[test]

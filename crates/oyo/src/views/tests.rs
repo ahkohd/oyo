@@ -11,7 +11,7 @@ use crate::config::{
 use crate::test_utils::TestApp;
 use crate::views::{
     extent_marker_text, fold_context_band, render_blame, render_diff_scrollbar, render_evolution,
-    render_split, render_unified_pane, review_note_block, show_extent_marker,
+    render_split, render_unified_pane, review_note_block, show_extent_marker, slice_spans,
     unified_pane::TRAILING_REVIEW_SPACER_ROWS, wrap_review_card_spans,
 };
 use oyo_core::{AnimationFrame, LineKind, MultiFileDiff, ViewLine};
@@ -1492,6 +1492,27 @@ fn test_extent_markers_clear_at_start() {
         !column_contains(&after_buf, 0, "E"),
         "extent markers should clear after hunk-out"
     );
+}
+
+#[test]
+fn horizontal_slice_preserves_columns_at_wide_grapheme_edges() {
+    let spans = vec![Span::raw("中文字")];
+    let sliced = slice_spans(&spans, 1, 3);
+    let text = sliced
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+
+    assert_eq!(text, " 文");
+    assert_eq!(UnicodeWidthStr::width(text.as_str()), 3);
+
+    let clipped_end = slice_spans(&spans, 0, 3);
+    let clipped_text = clipped_end
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+    assert_eq!(clipped_text, "中 ");
+    assert_eq!(UnicodeWidthStr::width(clipped_text.as_str()), 3);
 }
 
 #[test]

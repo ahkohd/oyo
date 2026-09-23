@@ -1410,6 +1410,12 @@ pub(crate) fn slice_spans(
                 continue;
             }
             let g_width = UnicodeWidthStr::width(g);
+            if g_width == 0 {
+                if col >= start_col && col < end_col {
+                    buf.push_str(g);
+                }
+                continue;
+            }
             let next_col = col.saturating_add(g_width);
             if next_col <= start_col {
                 col = next_col;
@@ -1418,9 +1424,15 @@ pub(crate) fn slice_spans(
             if col >= end_col {
                 break;
             }
-            buf.push_str(g);
+            let visible_start = col.max(start_col);
+            let visible_end = next_col.min(end_col);
+            if col >= start_col && next_col <= end_col {
+                buf.push_str(g);
+            } else {
+                buf.push_str(&" ".repeat(visible_end.saturating_sub(visible_start)));
+            }
             col = next_col;
-            if col >= end_col {
+            if next_col >= end_col {
                 break;
             }
         }

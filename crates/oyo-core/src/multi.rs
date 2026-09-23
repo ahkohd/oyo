@@ -6,6 +6,8 @@ use crate::git::{ChangedFile, FileStatus};
 use crate::step::{DiffNavigator, StepDirection};
 use ignore::overrides::OverrideBuilder;
 use ignore::WalkBuilder;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -354,8 +356,12 @@ impl MultiFileDiff {
                     .nth(Self::MAX_LINE_CHARS)
                     .map(|(idx, _)| idx)
                     .unwrap_or_else(|| line.len());
+                let mut hasher = DefaultHasher::new();
+                line.hash(&mut hasher);
                 out.push_str(&line[..cutoff]);
                 out.push('…');
+                // Preserve tail differences without feeding huge lines to the diff view.
+                out.push_str(&format!("{:016x}", hasher.finish()));
             } else {
                 out.push_str(line);
             }
@@ -2113,7 +2119,12 @@ fn format_ref(reference: &str) -> String {
     match reference {
         "HEAD" => "HEAD".to_string(),
         "INDEX" => "STAGED".to_string(),
-        _ => shorten_hash(reference),
+        _ if (7..=64).contains(&reference.len())
+            && reference.bytes().all(|byte| byte.is_ascii_hexdigit()) =>
+        {
+            shorten_hash(reference)
+        }
+        _ => reference.to_string(),
     }
 }
 
@@ -2159,6 +2170,27 @@ mod tests {
             .iter()
             .map(|file| file.display_name.clone())
             .collect()
+    }
+
+    #[test]
+    fn long_line_changes_after_display_limit_remain_diffable() {
+        let old = format!("{}A\n", "x".repeat(20_000));
+        let new = format!("{}B\n", "x".repeat(20_000));
+        let mut diff = MultiFileDiff::from_file_pairs(vec![(PathBuf::from("long.txt"), old, new)]);
+
+        assert!(!diff
+            .current_navigator()
+            .diff()
+            .significant_changes
+            .is_empty());
+    }
+
+    #[test]
+    fn git_range_labels_preserve_ref_names_and_shorten_object_ids() {
+        assert_eq!(format_ref("main"), "main");
+        assert_eq!(format_ref("feature/login"), "feature/login");
+        assert_eq!(format_ref("release/1.0"), "release/1.0");
+        assert_eq!(format_ref("0123456789abcdef"), "0123456");
     }
 
     #[test]
