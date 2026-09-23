@@ -648,6 +648,12 @@ fn handle_fold_context_action_key(app: &mut App, key: KeyEvent) -> bool {
         _ => None,
     };
     if let Some(direction) = direction.filter(|_| app.has_visible_context_folds()) {
+        app.pr_reply_prefix = false;
+        app.review_edit_prefix = false;
+        app.review_reply_prefix = false;
+        app.review_resolve_prefix = false;
+        app.review_delete_prefix = false;
+        app.review_overflow_prefix = false;
         app.fold_context_prefix = Some(direction);
         app.keybindings.clear_sequence();
         app.reset_count();
@@ -663,7 +669,15 @@ fn handle_normal_key(
     terminal: &mut TuiTerminal,
     editor_config: &config::EditorConfig,
 ) -> Result<()> {
-    if handle_fold_context_action_key(app, key) {
+    let review_prefix_pending = app.review_mode()
+        && key.modifiers.is_empty()
+        && (app.pr_reply_prefix
+            || app.review_edit_prefix
+            || app.review_reply_prefix
+            || app.review_resolve_prefix
+            || app.review_delete_prefix
+            || app.review_overflow_prefix);
+    if !review_prefix_pending && handle_fold_context_action_key(app, key) {
         return Ok(());
     }
     if app.review_mode() && key.modifiers.is_empty() {
@@ -1417,7 +1431,8 @@ fn dispatch_normal_action(
 mod tests {
     use super::*;
     use crate::app::{
-        FileContextMenuAction, ReviewCommentContextMenuAction, SettingItem, SettingsTarget,
+        FileContextMenuAction, FoldContextHit, FoldContextKey, ReviewCommentContextMenuAction,
+        SettingItem, SettingsTarget,
     };
     use crate::{ReviewRange, ReviewSide, ReviewTargetKind};
     use oyo_core::MultiFileDiff;
@@ -2105,5 +2120,70 @@ mod tests {
             .current_view_with_frame(oyo_core::AnimationFrame::Idle)
             .iter()
             .all(|line| !crate::app::is_fold_line(line)));
+    }
+
+    #[test]
+    fn review_action_prefix_takes_precedence_over_visible_fold_shortcut() {
+        let content = (1..=40)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let diff = MultiFileDiff::from_file_pair(
+            "fold.txt".into(),
+            "fold.txt".into(),
+            content.clone(),
+            content,
+        );
+        let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+        app.set_review_persist_enabled(false);
+        app.enable_review_mode();
+        app.add_review_comment_from_cli(
+            "fold.txt",
+            ReviewTargetKind::Line,
+            Some(ReviewSide::New),
+            None,
+            Some(ReviewRange { start: 1, end: 1 }),
+            "comment".to_string(),
+        )
+        .unwrap();
+        app.fold_context_hits = vec![FoldContextHit {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+            key: FoldContextKey {
+                file_index: 0,
+                start_change_id: 0,
+                end_change_id: 0,
+            },
+            direction: FoldContextDirection::Bottom,
+        }];
+        let mut terminal = test_terminal();
+        let mut pending_event = None;
+        let editor_config = config::EditorConfig::default();
+
+        handle_normal_key(
+            &mut app,
+            key('x'),
+            &mut pending_event,
+            &mut terminal,
+            &editor_config,
+        )
+        .unwrap();
+        assert!(app.review_delete_prefix);
+
+        handle_normal_key(
+            &mut app,
+            key('d'),
+            &mut pending_event,
+            &mut terminal,
+            &editor_config,
+        )
+        .unwrap();
+        assert!(!app.review_delete_prefix);
+        assert_eq!(app.fold_context_prefix, None);
+
+        assert!(!handle_fold_context_action_key(&mut app, key('j')));
+        assert_eq!(app.fold_context_prefix, None);
     }
 }
