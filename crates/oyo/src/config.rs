@@ -68,6 +68,7 @@
 //! # command = "nvim"
 //! # args = ["+{line}", "{file}"]
 //! open_at_line = true
+//! wait = true
 //!
 //! [keybindings.global]
 //! open_command_palette = ["ctrl-p"]
@@ -1506,6 +1507,7 @@ pub struct EditorConfig {
     pub args: Option<Vec<String>>,
     /// Used only when args is omitted. Passes +<line> before the file path.
     pub open_at_line: bool,
+    pub wait: bool,
 }
 
 impl Default for EditorConfig {
@@ -1514,6 +1516,7 @@ impl Default for EditorConfig {
             command: None,
             args: None,
             open_at_line: true,
+            wait: true,
         }
     }
 }

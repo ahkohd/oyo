@@ -348,13 +348,27 @@ Use `[editor]` for the open-in-editor action.
 | `command` | string | `$VISUAL`, then `$EDITOR`, then `vi` | Sets the editor command |
 | `args` | array of strings | unset | Sets argument templates. Supports `{file}` and `{line}` |
 | `open_at_line` | `true`, `false` | `true` | Passes `+line` before the file path when `args` is unset |
+| `wait` | `true`, `false` | `true` | Suspends Oyo until the editor exits. Set to `false` for a detached GUI editor |
 
 ```toml
 [editor]
 command = "nvim"
 args = ["+{line}", "{file}"]
 open_at_line = true
+wait = true
 ```
+
+A detached editor keeps Oyo active:
+
+```toml
+[editor]
+command = "zed"
+args = ["{file}:{line}"]
+open_at_line = true
+wait = false
+```
+
+With `wait = false`, use watch mode or press `R` after saving to refresh the diff.
 
 ## Comments and mentions
 
