@@ -65,7 +65,7 @@ use std::fs::{self, OpenOptions};
 use std::hash::{Hash, Hasher};
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Component, Path, PathBuf};
-use std::process::Command as ProcessCommand;
+use std::process::{Command as ProcessCommand, Stdio};
 use std::time::{Duration, Instant};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
@@ -1617,11 +1617,7 @@ fn resume_terminal_after_child(terminal: &mut TuiTerminal) -> Result<()> {
     Ok(())
 }
 
-fn run_editor_command(
-    command: &str,
-    args: &[String],
-    cwd: Option<&Path>,
-) -> std::io::Result<std::process::ExitStatus> {
+fn editor_process(command: &str, args: &[String], cwd: Option<&Path>) -> ProcessCommand {
     #[cfg(windows)]
     let mut child = {
         let mut parts = command.split_whitespace();
@@ -1644,7 +1640,29 @@ fn run_editor_command(
     if let Some(cwd) = cwd {
         child.current_dir(cwd);
     }
-    child.status()
+    child
+}
+
+fn run_editor_command(
+    command: &str,
+    args: &[String],
+    cwd: Option<&Path>,
+    wait: bool,
+) -> std::io::Result<Option<std::process::ExitStatus>> {
+    let mut child = editor_process(command, args, cwd);
+    if wait {
+        return child.status().map(Some);
+    }
+
+    child
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut child = child.spawn()?;
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(None)
 }
 
 fn open_current_file_in_editor(
@@ -1658,13 +1676,18 @@ fn open_current_file_in_editor(
     let command = resolve_editor_command(config);
     let args = render_editor_args(config, target.line, &target.path);
 
+    if !config.wait {
+        run_editor_command(&command, &args, target.cwd.as_deref(), false)?;
+        return Ok(());
+    }
+
     if let Err(error) = suspend_terminal_for_child(terminal) {
         if let Some(snapshot_dir) = target.snapshot_dir.as_deref() {
             let _ = fs::remove_dir_all(snapshot_dir);
         }
         return Err(error);
     }
-    let editor_result = run_editor_command(&command, &args, target.cwd.as_deref());
+    let editor_result = run_editor_command(&command, &args, target.cwd.as_deref(), true);
     let resume_result = resume_terminal_after_child(terminal);
     resume_result?;
 
@@ -9467,7 +9490,7 @@ mod tests {
         push_review_comments_to_provider_with_ops, render_editor_args, resolve_control_target,
         resolve_view_mode, review_author_from_cli, review_comments_json_value,
         review_pr_target_metadata, review_provider_for_configured_host, review_remote,
-        review_status_json_value, review_target_summary, saved_pr_revision,
+        review_status_json_value, review_target_summary, run_editor_command, saved_pr_revision,
         set_review_pr_target_metadata, sgr_mouse_fragment_state, should_load_saved_review_fallback,
         sync_lookup_target_in, sync_pr_number, update_mouse_scroll_block, verify_pr_revision_head,
         write_editor_snapshot, Args, BlockedMouseScroll, Command, ControlTargetResolution,
@@ -12256,6 +12279,7 @@ mod tests {
         let config = config::EditorConfig::default();
         let args = render_editor_args(&config, Some(42), Path::new("src/main.rs"));
         assert_eq!(args, vec!["+42", "src/main.rs"]);
+        assert!(config.wait);
     }
 
     #[test]
@@ -12264,9 +12288,36 @@ mod tests {
             command: Some("code".to_string()),
             args: Some(vec!["--goto".to_string(), "{file}:{line}".to_string()]),
             open_at_line: true,
+            wait: false,
         };
         let args = render_editor_args(&config, Some(42), Path::new("src/main.rs"));
         assert_eq!(args, vec!["--goto", "src/main.rs:42"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn editor_command_can_launch_without_waiting() {
+        let dir = temp_path("detached-editor");
+        fs::create_dir_all(&dir).unwrap();
+        let marker = dir.join("done");
+        let args = vec![
+            "-c".to_string(),
+            "sleep 0.2; printf done > \"$1\"".to_string(),
+            "sh".to_string(),
+            marker.to_string_lossy().into_owned(),
+        ];
+
+        assert!(run_editor_command("sh", &args, None, false)
+            .unwrap()
+            .is_none());
+        assert!(!marker.exists());
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !marker.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(fs::read_to_string(&marker).unwrap(), "done");
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[cfg(unix)]
