@@ -389,7 +389,7 @@ pub struct SyntaxEngine {
 
 impl SyntaxEngine {
     pub fn new(syntax_theme: &str, light_mode: bool) -> Self {
-        let syntax_set = std::sync::Arc::new(two_face::syntax::extra_newlines());
+        let syntax_set = std::sync::Arc::new(syntax_set_with_dirs(config_syntax_dirs()));
         let (syntax_theme, plain) = resolve_syntax_theme(syntax_theme, light_mode);
         Self {
             syntax_set,
@@ -973,6 +973,32 @@ fn config_theme_dirs() -> Vec<PathBuf> {
         }
     }
     dirs
+}
+
+fn config_syntax_dirs() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(config_path) = Config::config_path() {
+        if let Some(parent) = config_path.parent() {
+            paths.push(parent.join("syntaxes"));
+        }
+    }
+    if let Some(config_dir) = dirs::config_dir() {
+        let path = config_dir.join("oyo").join("syntaxes");
+        if !paths.contains(&path) {
+            paths.push(path);
+        }
+    }
+    paths
+}
+
+fn syntax_set_with_dirs(paths: Vec<PathBuf>) -> SyntaxSet {
+    let mut builder = two_face::syntax::extra_newlines().into_builder();
+    for path in paths {
+        if path.is_dir() {
+            let _ = builder.add_from_folder(path, true);
+        }
+    }
+    builder.build()
 }
 
 pub fn list_syntax_themes() -> Vec<String> {
@@ -1855,6 +1881,32 @@ fn to_tui(color: Color) -> TuiColor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn custom_sublime_syntax_overrides_builtin_extension() {
+        let dir = std::env::temp_dir().join(format!(
+            "oyo-custom-syntax-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("custom-rust.sublime-syntax"),
+            "%YAML 1.2\n---\nname: Custom Rust\nfile_extensions: [rs]\nscope: source.custom-rust\ncontexts:\n  main:\n    - match: '\\bTODO\\b'\n      scope: keyword.control.custom-rust\n",
+        )
+        .unwrap();
+
+        let syntax_set = syntax_set_with_dirs(vec![dir.clone()]);
+        assert_eq!(
+            syntax_set.find_syntax_by_extension("rs").unwrap().name,
+            "Custom Rust"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn enclosing_scope_ranges_choose_innermost_definition() {

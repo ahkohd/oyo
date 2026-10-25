@@ -165,6 +165,8 @@ Use `[ui.syntax]` to turn syntax highlighting on or off and choose a syntax them
 | `mode` | `on`, `off` | `on` | Enables syntax highlighting |
 | `theme` | theme name or path | empty | Uses `ui.theme.name`, then falls back to `ansi` |
 
+Oyo also loads custom Sublime Text grammars from the `syntaxes` directory beside `config.toml`. On Linux, this is normally `~/.config/oyo/syntaxes`. On macOS, Oyo also checks `~/Library/Application Support/oyo/syntaxes`. Add `.sublime-syntax` files there and restart Oyo. Custom grammars take precedence over built-in grammars with the same file extension.
+
 Use `[ui.syntax.warmup]` to control background syntax preparation.
 
 | Key | Default | What it does |
