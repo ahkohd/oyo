@@ -1076,6 +1076,10 @@ fn dispatch_normal_action(
             app.reset_count();
             open_current_file_in_editor(terminal, app, editor_config)?;
         }
+        NormalAction::ToggleFileReviewed => {
+            app.reset_count();
+            app.toggle_current_file_reviewed();
+        }
         NormalAction::GotoStart => {
             app.reset_count();
             if app.csv_preview_focus_top() || app.structured_preview_focus_top() {

@@ -16,6 +16,7 @@ pub(crate) enum PaletteAction {
     OpenSettings,
     ToggleZen,
     ToggleFilePanel,
+    ToggleFileReviewed,
     ToggleAutoplay,
     ToggleAutoplayReverse,
     OpenDashboard,
@@ -492,7 +493,15 @@ impl App {
             });
         }
 
-        if self.review_mode {
+        if self.review_mode && self.multi_diff.file_count() > 0 {
+            entries.push(PaletteEntry {
+                label: if self.file_is_reviewed(self.multi_diff.selected_index) {
+                    "Mark file as unreviewed".to_string()
+                } else {
+                    "Mark file as reviewed".to_string()
+                },
+                action: PaletteAction::ToggleFileReviewed,
+            });
             entries.push(PaletteEntry {
                 label: "Comments...".to_string(),
                 action: PaletteAction::OpenCommentPicker,
@@ -567,6 +576,9 @@ impl App {
             PaletteAction::OpenSettings => self.open_settings_tab(),
             PaletteAction::ToggleZen => self.toggle_zen(),
             PaletteAction::ToggleFilePanel => self.toggle_file_panel(),
+            PaletteAction::ToggleFileReviewed => {
+                self.toggle_current_file_reviewed();
+            }
             PaletteAction::ToggleAutoplay => self.toggle_autoplay(),
             PaletteAction::ToggleAutoplayReverse => self.toggle_autoplay_reverse(),
             PaletteAction::OpenDashboard => self.open_dashboard = true,
@@ -1078,6 +1090,24 @@ mod tests {
         app.set_review_workspace_root(Some(PathBuf::from("/tmp/oyo-palette")));
         app.handle_file_enter();
         app
+    }
+
+    #[test]
+    fn palette_toggles_current_file_reviewed() {
+        let mut app = app();
+        app.set_review_persist_enabled(false);
+        app.enable_review_mode();
+
+        assert!(app.command_palette_entries().iter().any(|entry| {
+            entry.label == "Mark file as reviewed"
+                && matches!(entry.action, PaletteAction::ToggleFileReviewed)
+        }));
+        app.execute_palette_action(PaletteAction::ToggleFileReviewed);
+        assert!(app.file_is_reviewed(0));
+        assert!(app
+            .command_palette_entries()
+            .iter()
+            .any(|entry| entry.label == "Mark file as unreviewed"));
     }
 
     #[test]
