@@ -204,6 +204,8 @@ oy 'trunk()..@'
 
 When you pass a target, the TUI uses the same target rules as the CLI. Saved comments load from the stable review key, even when the current diff fingerprint has changed.
 
+Press `g r` to mark the current file as reviewed or unreviewed. Reviewed files show a green `✓` in the file sidebar. The mark persists across restarts and clears when that file's diff changes.
+
 Review cards in unified and split mode show `ia edit`, `ra reply`, `xa delete` and so on. Thread roots also show `va resolve`; reply cards do not because resolved state belongs to the thread. Every inline comment can have replies. Local replies stay in Oyo; replies to pulled provider comments sync to their provider thread. Replies render as a flat chronological thread, linked by a connector between cards. Resolved root cards show `unresolve` instead of `resolve`. Pull request conversation cards do not show resolve actions.
 
 Use the comments sidebar to read and move through comments. Use the comment picker to search comments and jump to one:

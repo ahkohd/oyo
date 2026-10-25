@@ -3057,14 +3057,25 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
             name_style = name_style.bg(bg);
         }
 
-        let marker_style = if is_selected || is_hovered {
+        let is_reviewed = app.file_is_reviewed(file_idx);
+        let marker_style = if is_reviewed {
+            Style::default()
+                .fg(app.theme.success)
+                .add_modifier(Modifier::BOLD)
+        } else if is_selected || is_hovered {
             Style::default()
                 .fg(app.theme.accent)
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(app.theme.text_muted)
         };
-        let marker = if is_selected { "•" } else { " " };
+        let marker = if is_reviewed {
+            "✓"
+        } else if is_selected {
+            "•"
+        } else {
+            " "
+        };
 
         let match_indices = if has_query && name == file.display_name {
             fuzzy_matches

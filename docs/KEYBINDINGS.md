@@ -172,6 +172,7 @@ Use each mode as `[keybindings.<mode>]`.
 | `start_block_selection` | `ctrl-v` | Start block selection |
 | `toggle_path_popup` | `ctrl-g` | Show the full file path |
 | `open_editor` | `o`, `ctrl-e` | Open the file in your editor |
+| `toggle_file_reviewed` | `g r` | Mark the current file as reviewed or unreviewed |
 | `goto_start` | `g g`, `home` | Go to the start |
 | `goto_end` | `G`, `end` | Go to the end |
 | `first_step` | `<` | Go to the first step, or first hunk in no-step mode |

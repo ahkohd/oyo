@@ -13,7 +13,7 @@ use crossterm::event::KeyEvent;
 use keymap::{parser::parse_seq, ToKeyMap};
 use oyo_core::{ChangeKind, LineKind, ViewLine};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use std::collections::{hash_map::DefaultHasher, BTreeMap, BTreeSet};
 use std::fs;
@@ -1790,6 +1790,89 @@ fn nearest_hunk_line_index(visible: &[(usize, ViewLine)], focus_pos: usize) -> O
 impl App {
     pub fn review_mode(&self) -> bool {
         self.review_mode
+    }
+
+    fn review_file_fingerprint(&self, file_index: usize) -> Option<String> {
+        let file = self.multi_diff.files.get(file_index)?;
+        let (old_content, new_content) = self.multi_diff.file_contents(file_index)?;
+        let mut hasher = DefaultHasher::new();
+        file.display_name.hash(&mut hasher);
+        file.path.hash(&mut hasher);
+        file.old_path.hash(&mut hasher);
+        format!("{:?}", file.status).hash(&mut hasher);
+        file.binary.hash(&mut hasher);
+        old_content.hash(&mut hasher);
+        new_content.hash(&mut hasher);
+        Some(format!("{:016x}", hasher.finish()))
+    }
+
+    pub(crate) fn file_is_reviewed(&self, file_index: usize) -> bool {
+        let Some(file) = self.multi_diff.files.get(file_index) else {
+            return false;
+        };
+        let Some(stored_fingerprint) = self.reviewed_files.get(&file.display_name) else {
+            return false;
+        };
+        self.review_file_fingerprint(file_index).as_ref() == Some(stored_fingerprint)
+    }
+
+    pub(crate) fn toggle_current_file_reviewed(&mut self) -> bool {
+        if !self.review_mode {
+            return false;
+        }
+        let file_index = self.multi_diff.selected_index;
+        let Some(file_path) = self
+            .multi_diff
+            .files
+            .get(file_index)
+            .map(|file| file.display_name.clone())
+        else {
+            return false;
+        };
+        let Some(fingerprint) = self.review_file_fingerprint(file_index) else {
+            return false;
+        };
+        if self.reviewed_files.get(&file_path) == Some(&fingerprint) {
+            self.reviewed_files.remove(&file_path);
+            self.persist_reviewed_file(&file_path, None);
+        } else {
+            self.reviewed_files
+                .insert(file_path.clone(), fingerprint.clone());
+            self.persist_reviewed_file(&file_path, Some(&fingerprint));
+        }
+        true
+    }
+
+    fn persist_reviewed_file(&mut self, file_path: &str, fingerprint: Option<&str>) {
+        if !self.review_mode || !self.review_persist_enabled {
+            return;
+        }
+        self.persist_review_session();
+        let Some(path) = self.review_db_path.clone() else {
+            return;
+        };
+        let Ok(conn) = Self::review_db(&path) else {
+            return;
+        };
+        let review_key = self.review_db_key().to_string();
+        let result = if let Some(fingerprint) = fingerprint {
+            conn.execute(
+                "INSERT INTO reviewed_files (review_key, file_path, diff_fingerprint)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(review_key, file_path) DO UPDATE SET
+                    diff_fingerprint = excluded.diff_fingerprint",
+                params![&review_key, file_path, fingerprint],
+            )
+        } else {
+            conn.execute(
+                "DELETE FROM reviewed_files WHERE review_key = ?1 AND file_path = ?2",
+                params![&review_key, file_path],
+            )
+        };
+        if result.is_ok() {
+            self.review_db_stamp = review_db_stamp(&path);
+            self.last_review_db_check = Instant::now();
+        }
     }
 
     pub fn set_review_persist_enabled(&mut self, enabled: bool) {
@@ -5076,6 +5159,7 @@ impl App {
             self.review_db_path = None;
             self.review_db_stamp = FileDiskStamp::default();
             self.review_comments.clear();
+            self.reviewed_files.clear();
             self.review_session_baseline.clear();
             self.review_editor = None;
             self.review_mention_picker = None;
@@ -5116,6 +5200,7 @@ impl App {
         }
 
         self.review_comments.clear();
+        self.reviewed_files.clear();
         self.review_session_baseline.clear();
         self.review_editor = None;
         self.review_mention_picker = None;
@@ -7219,6 +7304,12 @@ impl App {
                 comment_json TEXT NOT NULL,
                 updated_at INTEGER NOT NULL,
                 PRIMARY KEY (review_key, id)
+            );
+            CREATE TABLE IF NOT EXISTS reviewed_files (
+                review_key TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                diff_fingerprint TEXT NOT NULL,
+                PRIMARY KEY (review_key, file_path)
             );",
         )?;
         Ok(conn)
@@ -7631,6 +7722,7 @@ impl App {
         let current_fingerprint = self.review_diff_fingerprint.clone();
         let current_storage_key = self.review_storage_key.clone();
         let current_metadata = self.review_target_metadata.clone();
+        let current_reviewed_files = self.reviewed_files.clone();
         let mut comments = Vec::new();
         let mut seen = BTreeMap::new();
         let mut next_id = 1u64;
@@ -7678,6 +7770,7 @@ impl App {
         self.review_diff_fingerprint = current_fingerprint;
         self.review_storage_key = current_storage_key;
         self.review_target_metadata = current_metadata;
+        self.reviewed_files = current_reviewed_files;
         if comments.is_empty() {
             return false;
         }
@@ -7742,10 +7835,30 @@ impl App {
             };
             comments.push(comment);
         }
+        let mut reviewed_files = FxHashMap::default();
+        let mut reviewed_stmt = match conn
+            .prepare("SELECT file_path, diff_fingerprint FROM reviewed_files WHERE review_key = ?1")
+        {
+            Ok(stmt) => stmt,
+            Err(_) => return false,
+        };
+        let reviewed_rows = match reviewed_stmt.query_map(params![&review_key], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        }) {
+            Ok(rows) => rows,
+            Err(_) => return false,
+        };
+        for row in reviewed_rows {
+            let Ok((file_path, fingerprint)) = row else {
+                return false;
+            };
+            reviewed_files.insert(file_path, fingerprint);
+        }
         self.review_session_created_at = created_at.max(0) as u64;
         self.review_editor = editor_json.and_then(|json| serde_json::from_str(&json).ok());
         self.review_target_metadata = target_json.and_then(|json| serde_json::from_str(&json).ok());
         self.review_comments = comments;
+        self.reviewed_files = reviewed_files;
         if self.review_filter_to_current_diff {
             self.filter_review_comments_to_current_diff();
         }
@@ -8345,16 +8458,23 @@ impl App {
                         params![&review_key],
                     )
                     .unwrap_or(0);
+                let reviewed_files = conn
+                    .execute(
+                        "DELETE FROM reviewed_files WHERE review_key = ?1",
+                        params![&review_key],
+                    )
+                    .unwrap_or(0);
                 let reviews = conn
                     .execute(
                         "DELETE FROM reviews WHERE review_key = ?1",
                         params![&review_key],
                     )
                     .unwrap_or(0);
-                comments > 0 || reviews > 0
+                comments > 0 || reviewed_files > 0 || reviews > 0
             })
             .unwrap_or(false);
         self.review_comments.clear();
+        self.reviewed_files.clear();
         self.review_editor = None;
         self.review_mention_picker = None;
         self.review_next_comment_id = 1;
@@ -11564,6 +11684,43 @@ mod tests {
         let json = app.review_export_json(ReviewHookEvent::ReviewReady, None);
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(value["review"]["comments"][0]["kind"], "file");
+    }
+
+    #[test]
+    fn reviewed_file_persists_until_its_diff_changes() {
+        let base = temp_path("reviewed-file");
+        let mut writer = persistent_test_app(&base);
+        writer.enable_review_mode();
+        assert!(writer.toggle_current_file_reviewed());
+        assert!(writer.file_is_reviewed(0));
+
+        let mut reopened = persistent_test_app(&base);
+        reopened.enable_review_mode();
+        assert!(reopened.file_is_reviewed(0));
+
+        let changed_diff = MultiFileDiff::from_file_pair(
+            "old.txt".into(),
+            "new.txt".into(),
+            "old\n".to_string(),
+            "else\n".to_string(),
+        );
+        let mut changed = App::new(
+            changed_diff,
+            ViewMode::UnifiedPane,
+            0,
+            false,
+            Some("branch".to_string()),
+        );
+        changed.set_review_base_dir(Some(base.clone()));
+        changed.enable_review_mode();
+        assert!(!changed.file_is_reviewed(0));
+
+        assert!(reopened.toggle_current_file_reviewed());
+        let mut unreviewed = persistent_test_app(&base);
+        unreviewed.enable_review_mode();
+        assert!(!unreviewed.file_is_reviewed(0));
+
+        let _ = std::fs::remove_dir_all(base);
     }
 
     #[test]

@@ -897,6 +897,7 @@ pub struct App {
     review_mode: bool,
     /// Collected review comments for current session
     review_comments: Vec<review::ReviewComment>,
+    reviewed_files: FxHashMap<String, String>,
     /// Review comments as loaded at session start.
     review_session_baseline: Vec<review::ReviewComment>,
     /// Comment selected from the comments sidebar.
@@ -1516,6 +1517,7 @@ impl App {
             pending_session_rename: None,
             review_mode: false,
             review_comments: Vec::new(),
+            reviewed_files: FxHashMap::default(),
             review_session_baseline: Vec::new(),
             active_review_comment_id: None,
             outdated_reconstruction_cache: FxHashMap::default(),
