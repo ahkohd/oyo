@@ -1709,6 +1709,7 @@ fn apply_config_to_app(app: &mut App, config: &config::Config, args: &Args, ligh
     app.animation_enabled = config.playback.animation;
     app.animation_duration = config.playback.animation_duration;
     app.file_panel_visible = config.files.panel_visible;
+    app.set_incremental_review_enabled(config.experimental.incremental_review);
     app.file_panel_width = config.files.panel_width;
     app.file_panel_position = config.files.panel_position;
     app.file_count_mode = config.files.counts;
@@ -8243,6 +8244,9 @@ fn run_app(
                                 continue;
                             }
                             if app.handle_no_changes_dashboard_click(me.column, me.row) {
+                                continue;
+                            }
+                            if app.handle_all_reviewed_show_click(me.column, me.row) {
                                 continue;
                             }
                             if app.handle_no_changes_quit_click(me.column, me.row) {

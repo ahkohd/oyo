@@ -1837,6 +1837,13 @@ pub struct Config {
     pub selection: SelectionConfig,
     pub editor: EditorConfig,
     pub keybindings: KeybindingsConfig,
+    pub experimental: ExperimentalConfig,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
+pub struct ExperimentalConfig {
+    pub incremental_review: bool,
 }
 
 fn append_config_array(path: &[String]) -> bool {

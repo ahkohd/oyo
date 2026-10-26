@@ -206,6 +206,35 @@ When you pass a target, the TUI uses the same target rules as the CLI. Saved com
 
 Press `g r` to mark the current file as reviewed or unreviewed. Reviewed files show a green `✓` in the file sidebar. The mark persists across restarts and clears when that file's diff changes.
 
+### Hide reviewed files
+
+This feature is experimental. Turn it on in your config:
+
+```toml
+[experimental]
+incremental_review = true
+```
+
+It works in saved reviews. It does nothing with `--no-review-persist`.
+
+When it is on:
+
+- `g r` marks the current file as reviewed, hides it and opens the next file you have not reviewed
+- the file sidebar, file filter, quick file search, next and previous file, and hunk navigation skip reviewed files
+- a reviewed file comes back when Oyo reloads it and its diff has changed
+- when you have reviewed every file, Oyo shows `All files reviewed.`
+
+To see reviewed files again, open the command palette with `ctrl-p` and select `Show reviewed files`. You can also click `Show reviewed files` on the `All files reviewed.` screen. Select `Hide reviewed files` to hide them again. Press `g r` on a reviewed file to unmark it.
+
+Hiding a file does not change its comments, its export or its saved review mark.
+
+Known limitations:
+
+- Oyo shows a file until its content has loaded and it can check the review mark. When a large review opens or refreshes, reviewed files can appear for a moment. If you select one before its content loads, Oyo may move you to the next file when the content arrives.
+- With `ui.watch = false`, a reviewed file that changes on disk stays hidden until you press `R` to refresh.
+- The `All files reviewed.` screen still has a file behind it, the one named in its `g r unmark` hint. Keys that act on the current file act on that file, including adding a comment, opening it in your editor with `o` and moving between steps or hunks.
+- Oyo checks the full content of every reviewed file each time it builds the file list, and does not cache the result. Very large reviews may draw more slowly.
+
 Review cards in unified and split mode show `ia edit`, `ra reply`, `xa delete` and so on. Thread roots also show `va resolve`; reply cards do not because resolved state belongs to the thread. Every inline comment can have replies. Local replies stay in Oyo; replies to pulled provider comments sync to their provider thread. Replies render as a flat chronological thread, linked by a connector between cards. Resolved root cards show `unresolve` instead of `resolve`. Pull request conversation cards do not show resolve actions.
 
 Use the comments sidebar to read and move through comments. Use the comment picker to search comments and jump to one:

@@ -9,10 +9,10 @@ use crate::app::{
     },
     App, FileContextMenuAction, FileContextMenuHit, FilePanelMode, FilePanelScrollbarState,
     ReviewCommentContextMenuHit, ReviewEditorToolbarAction, ReviewEditorToolbarHit,
-    ReviewLineAddHit, SelectionToolbarAction, SelectionToolbarHit, SettingHit, SettingsLeaveAction,
-    SettingsLeaveHit, SettingsResetAction, SettingsResetHit, SettingsRow, SettingsTarget,
-    StatusModeMenuHit, TopbarTabContent, TopbarTabHit, ViewMode, DIFF_VIEW_MIN_WIDTH,
-    FILE_PANEL_MIN_WIDTH,
+    ReviewLineAddHit, ReviewedFilesExhausted, SelectionToolbarAction, SelectionToolbarHit,
+    SettingHit, SettingsLeaveAction, SettingsLeaveHit, SettingsResetAction, SettingsResetHit,
+    SettingsRow, SettingsTarget, StatusModeMenuHit, TopbarTabContent, TopbarTabHit, ViewMode,
+    DIFF_VIEW_MIN_WIDTH, FILE_PANEL_MIN_WIDTH,
 };
 use crate::color;
 use crate::config::FilePanelPosition;
@@ -744,6 +744,72 @@ fn draw_empty_file_tab(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
+fn shows_selected_file_content(app: &App) -> bool {
+    app.multi_diff.file_count() > 0 && app.reviewed_files_exhausted().is_none()
+}
+
+fn draw_all_reviewed_tab(
+    frame: &mut Frame,
+    app: &mut App,
+    area: Rect,
+    exhausted: ReviewedFilesExhausted,
+) {
+    if let Some(bg) = app.theme.background {
+        frame.render_widget(Block::default().style(Style::default().bg(bg)), area);
+    }
+    let height = 3.min(area.height);
+    let y = area.y + area.height.saturating_sub(height) / 2;
+    let hint_y = y.saturating_add(2);
+    let message_text = match exhausted {
+        ReviewedFilesExhausted::EveryFile => "All files reviewed.",
+        ReviewedFilesExhausted::FilterMatches => "All files matching the filter are reviewed.",
+        ReviewedFilesExhausted::NoFilterMatches => "No files match the filter.",
+    };
+    let text_style = Style::default().fg(app.theme.text_muted);
+    let key_style = Style::default()
+        .fg(app.theme.accent)
+        .add_modifier(Modifier::BOLD);
+    let palette_keys = app
+        .keybindings
+        .global_keys(GlobalAction::OpenCommandPalette);
+    let unmark_keys = app
+        .keybindings
+        .normal_keys(NormalAction::ToggleFileReviewed);
+    let selected_name = truncate_path(&app.current_file_path(), 40);
+    let hint_line = Line::from(vec![
+        Span::styled("Show reviewed files", key_style),
+        Span::styled(format!(" (palette: {palette_keys})"), text_style),
+        Span::styled("  ", text_style),
+        Span::styled(unmark_keys, key_style),
+        Span::styled(format!(" unmark {selected_name}"), text_style),
+    ]);
+    let line_width = spans_width(&hint_line.spans) as u16;
+    let line_x = area
+        .x
+        .saturating_add(area.width.saturating_sub(line_width) / 2);
+    let show_width = spans_width(&hint_line.spans[..1]) as u16;
+    if height > 2 {
+        app.all_reviewed_show_hit = Some((line_x, hint_y, show_width, 1));
+    }
+    let mut message = Paragraph::new(Line::from(Span::styled(
+        message_text,
+        Style::default()
+            .fg(app.theme.text)
+            .add_modifier(Modifier::BOLD),
+    )))
+    .alignment(Alignment::Center);
+    let mut hint = Paragraph::new(hint_line).alignment(Alignment::Center);
+    if let Some(bg) = app.theme.background {
+        let style = Style::default().bg(bg);
+        message = message.style(style);
+        hint = hint.style(style);
+    }
+    frame.render_widget(message, Rect::new(area.x, y, area.width, 1));
+    if height > 2 {
+        frame.render_widget(hint, Rect::new(area.x, hint_y, area.width, 1));
+    }
+}
+
 /// Main drawing function
 pub fn draw(frame: &mut Frame, app: &mut App) {
     app.clear_review_preview_boxes();
@@ -761,6 +827,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     app.file_panel_root_hit = None;
     app.no_changes_dashboard_hit = None;
     app.no_changes_quit_hit = None;
+    app.all_reviewed_show_hit = None;
     app.topbar_area = None;
 
     if app.zen_mode {
@@ -2157,6 +2224,7 @@ fn topbar_tab_spans(app: &mut App, area: Rect, max_width: usize) -> Vec<Span<'st
         col = 2;
     }
     let mut rendered_until = app.topbar_tab_scroll;
+    let all_reviewed_shown = app.reviewed_files_exhausted().is_some();
     for (tab_pos, tab) in app
         .topbar_tabs
         .clone()
@@ -2189,6 +2257,9 @@ fn topbar_tab_spans(app: &mut App, area: Rect, max_width: usize) -> Vec<Span<'st
                     .and_then(|files| files.get(file_index))
                     .or_else(|| app.multi_diff.files.get(file_index))
                 {
+                    Some(_) if Some(tab.id) == active && all_reviewed_shown => {
+                        ("All reviewed".to_string(), "")
+                    }
                     Some(file) => {
                         let file_name = file
                             .display_name
@@ -3180,10 +3251,13 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
     );
 
     if filtered_indices.is_empty() {
-        let text = if has_query {
-            "No Filter Results"
-        } else {
-            "No changes"
+        let hidden_by_review =
+            app.hides_reviewed_files() && !app.file_order_for_query(&app.file_filter).is_empty();
+        let text = match (has_query, hidden_by_review) {
+            (true, true) => "All matches reviewed",
+            (true, false) => "No Filter Results",
+            (false, true) => "All files reviewed",
+            (false, false) => "No changes",
         };
         let mut empty = Paragraph::new(Line::from(Span::styled(
             text,
@@ -5934,6 +6008,17 @@ fn draw_diff_view(frame: &mut Frame, app: &mut App, area: Rect) {
         render_settings_view(frame, app, area);
         return;
     }
+    if matches!(
+        app.active_topbar_content(),
+        Some(TopbarTabContent::File(_)) | None
+    ) {
+        if let Some(exhausted) = app.reviewed_files_exhausted() {
+            app.clear_diff_selection();
+            app.set_diff_selection_cells(Vec::new());
+            draw_all_reviewed_tab(frame, app, area, exhausted);
+            return;
+        }
+    }
     match app.view_mode {
         ViewMode::UnifiedPane => render_unified_pane(frame, app, area),
         ViewMode::Split => render_split(frame, app, area),
@@ -6058,7 +6143,7 @@ fn draw_diff_selection(frame: &mut Frame, app: &App) {
 
 fn draw_review_line_add_button(frame: &mut Frame, app: &mut App) {
     app.clear_review_line_add_hit();
-    if app.multi_diff.file_count() == 0 {
+    if !shows_selected_file_content(app) {
         app.review_line_add_row = None;
         app.review_line_add_hover = false;
         return;
@@ -6900,7 +6985,7 @@ fn draw_review_editor_overlay(frame: &mut Frame, app: &mut App) {
 }
 
 fn draw_zen_progress(frame: &mut Frame, app: &mut App) {
-    if app.multi_diff.file_count() == 0 {
+    if !shows_selected_file_content(app) {
         return;
     }
     let state = app.state();

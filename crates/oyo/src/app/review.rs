@@ -1792,9 +1792,16 @@ impl App {
         self.review_mode
     }
 
+    pub(crate) fn review_live_diff(&self) -> &oyo_core::MultiFileDiff {
+        self.outdated_diff_view
+            .as_ref()
+            .map_or(&self.multi_diff, |view| &view.live_backup)
+    }
+
     fn review_file_fingerprint(&self, file_index: usize) -> Option<String> {
-        let file = self.multi_diff.files.get(file_index)?;
-        let (old_content, new_content) = self.multi_diff.file_contents(file_index)?;
+        let live_diff = self.review_live_diff();
+        let file = live_diff.files.get(file_index)?;
+        let (old_content, new_content) = live_diff.file_contents(file_index)?;
         let mut hasher = DefaultHasher::new();
         file.display_name.hash(&mut hasher);
         file.path.hash(&mut hasher);
@@ -1807,7 +1814,7 @@ impl App {
     }
 
     pub(crate) fn file_is_reviewed(&self, file_index: usize) -> bool {
-        let Some(file) = self.multi_diff.files.get(file_index) else {
+        let Some(file) = self.review_live_diff().files.get(file_index) else {
             return false;
         };
         let Some(stored_fingerprint) = self.reviewed_files.get(&file.display_name) else {
@@ -1820,9 +1827,9 @@ impl App {
         if !self.review_mode {
             return false;
         }
-        let file_index = self.multi_diff.selected_index;
+        let file_index = self.review_live_diff().selected_index;
         let Some(file_path) = self
-            .multi_diff
+            .review_live_diff()
             .files
             .get(file_index)
             .map(|file| file.display_name.clone())
@@ -1839,6 +1846,8 @@ impl App {
             self.reviewed_files
                 .insert(file_path.clone(), fingerprint.clone());
             self.persist_reviewed_file(&file_path, Some(&fingerprint));
+            self.forget_selection_opened_on_purpose();
+            self.move_selection_off_hidden_reviewed_file();
         }
         true
     }
@@ -2670,6 +2679,7 @@ impl App {
         let Some(view) = self.outdated_diff_view.take() else {
             return cancelled_pending;
         };
+        self.outdated_view_closed_since_tick = true;
         let super::OutdatedDiffView {
             comment_id,
             live_backup,
@@ -5130,10 +5140,12 @@ impl App {
 
     pub fn enable_review_mode(&mut self) {
         self.configure_review_mode(true);
+        self.move_selection_off_hidden_reviewed_file();
     }
 
     pub fn load_review_mode(&mut self) {
         self.configure_review_mode(false);
+        self.move_selection_off_hidden_reviewed_file();
     }
 
     fn configure_review_mode(&mut self, create_missing: bool) {
@@ -9301,6 +9313,103 @@ mod tests {
             app.multi_diff.diff_status(0),
             oyo_core::multi::DiffStatus::Ready
         );
+    }
+
+    fn incremental_outdated_app(base: &Path, incremental: bool) -> App {
+        let diff = MultiFileDiff::from_file_pairs(
+            ["a.txt", "b.txt", "c.txt", "d.txt"]
+                .iter()
+                .map(|name| {
+                    (
+                        PathBuf::from(name),
+                        format!("{name} old\n"),
+                        format!("{name} new\n"),
+                    )
+                })
+                .collect(),
+        );
+        let mut app = App::new(
+            diff,
+            ViewMode::UnifiedPane,
+            0,
+            false,
+            Some("branch".to_string()),
+        );
+        app.set_review_base_dir(Some(base.to_path_buf()));
+        app.set_incremental_review_enabled(incremental);
+        app.enable_review_mode();
+        app
+    }
+
+    fn open_outdated_snapshot(app: &mut App) {
+        let reconstructed = MultiFileDiff::from_file_pair(
+            PathBuf::from("new.txt"),
+            PathBuf::from("new.txt"),
+            "old\n".to_string(),
+            "new\n".to_string(),
+        );
+        app.show_reconstructed_outdated_diff(&line_comment(), reconstructed);
+    }
+
+    #[test]
+    fn hunk_wrap_from_an_outdated_snapshot_follows_the_live_selection() {
+        for incremental in [false, true] {
+            let base = temp_path("outdated-hunk-wrap");
+            let mut app = incremental_outdated_app(&base, incremental);
+            app.hunk_wrap = crate::config::HunkWrapMode::File;
+            app.toggle_stepping();
+            app.select_file(2);
+            open_outdated_snapshot(&mut app);
+            for _ in 0..4 {
+                if app.outdated_diff_view.is_none() {
+                    break;
+                }
+                app.next_hunk();
+            }
+            if incremental {
+                assert!(app.outdated_diff_view.is_none());
+                assert_eq!(app.multi_diff.selected_index, 3);
+            } else {
+                assert!(app.outdated_diff_view.is_some());
+                assert_eq!(app.review_live_diff().selected_index, 2);
+            }
+            let _ = std::fs::remove_dir_all(base);
+        }
+    }
+
+    #[test]
+    fn a_file_marked_in_an_outdated_snapshot_is_left_once_the_snapshot_closes() {
+        let base = temp_path("outdated-mark");
+        let mut app = incremental_outdated_app(&base, true);
+        app.select_file(1);
+        open_outdated_snapshot(&mut app);
+        assert!(app.toggle_current_file_reviewed());
+        assert!(app.outdated_diff_view.is_some());
+        assert!(app.file_is_reviewed(1));
+
+        assert!(app.restore_live_diff_after_outdated_view());
+        app.tick();
+        assert_eq!(app.multi_diff.selected_index, 2);
+        assert_eq!(app.filtered_file_indices(), vec![0, 2, 3]);
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn closing_an_outdated_snapshot_keeps_a_file_opened_on_purpose_or_with_hiding_off() {
+        for incremental in [false, true] {
+            let base = temp_path("outdated-keep");
+            let mut app = incremental_outdated_app(&base, incremental);
+            app.select_file(1);
+            assert!(app.toggle_current_file_reviewed());
+            app.select_file(1);
+            open_outdated_snapshot(&mut app);
+
+            assert!(app.restore_live_diff_after_outdated_view());
+            app.tick();
+            assert_eq!(app.multi_diff.selected_index, 1);
+            assert!(app.file_is_reviewed(1));
+            let _ = std::fs::remove_dir_all(base);
+        }
     }
 
     #[test]
