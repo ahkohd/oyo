@@ -1,4 +1,5 @@
 use super::{App, TopbarTabContent};
+use crate::toasts::ToastEvent;
 use rustc_hash::FxHashSet;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -6,6 +7,23 @@ pub(crate) enum IncrementalReview {
     #[default]
     Off,
     On(ReviewedFileVisibility),
+}
+
+impl IncrementalReview {
+    fn from_enabled(enabled: bool) -> Self {
+        if enabled {
+            Self::On(ReviewedFileVisibility::Hidden)
+        } else {
+            Self::Off
+        }
+    }
+
+    fn toggled(self) -> Self {
+        match self {
+            Self::Off => Self::On(ReviewedFileVisibility::Hidden),
+            Self::On(_) => Self::Off,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -70,19 +88,40 @@ pub(crate) fn neighbour_file_index(
 }
 
 impl App {
-    pub(crate) fn set_incremental_review_enabled(&mut self, enabled: bool) {
-        self.incremental_review = if enabled {
-            IncrementalReview::On(ReviewedFileVisibility::Hidden)
-        } else {
-            IncrementalReview::Off
-        };
+    pub(crate) fn set_incremental_review_default(&mut self, enabled: bool) {
+        self.incremental_review = IncrementalReview::from_enabled(enabled);
+    }
+
+    fn incremental_review_available(&self) -> bool {
+        self.review_mode && self.review_persist_enabled
     }
 
     fn reviewed_file_visibility(&self) -> Option<ReviewedFileVisibility> {
         let IncrementalReview::On(visibility) = self.incremental_review else {
             return None;
         };
-        (self.review_mode && self.review_persist_enabled).then_some(visibility)
+        self.incremental_review_available().then_some(visibility)
+    }
+
+    pub(crate) fn incremental_review_toggle_label(&self) -> Option<&'static str> {
+        self.incremental_review_available()
+            .then_some(match self.incremental_review {
+                IncrementalReview::Off => "Enable incremental review (experimental)",
+                IncrementalReview::On(_) => "Disable incremental review (experimental)",
+            })
+    }
+
+    pub(crate) fn toggle_incremental_review(&mut self) -> bool {
+        if !self.incremental_review_available() {
+            self.notify(ToastEvent::IncrementalReviewUnavailable);
+            return false;
+        }
+        self.incremental_review = self.incremental_review.toggled();
+        self.apply_reviewed_files_visibility_change();
+        self.notify(ToastEvent::IncrementalReview(
+            self.incremental_review != IncrementalReview::Off,
+        ));
+        true
     }
 
     pub(crate) fn hides_reviewed_files(&self) -> bool {
@@ -120,11 +159,15 @@ impl App {
             ReviewedFileVisibility::Hidden => ReviewedFileVisibility::Shown,
             ReviewedFileVisibility::Shown => ReviewedFileVisibility::Hidden,
         });
+        self.apply_reviewed_files_visibility_change();
+        true
+    }
+
+    fn apply_reviewed_files_visibility_change(&mut self) {
         self.reviewed_file_opened_on_purpose = None;
         self.file_list_scroll = 0;
         self.move_selection_off_hidden_reviewed_file();
         self.update_file_list_scroll();
-        true
     }
 
     pub(crate) fn navigable_file_indices(&self) -> Vec<usize> {
@@ -255,7 +298,7 @@ mod tests {
             Some("branch".to_string()),
         );
         app.set_review_base_dir(Some(base.to_path_buf()));
-        app.set_incremental_review_enabled(incremental);
+        app.set_incremental_review_default(incremental);
         app.enable_review_mode();
         app
     }
@@ -299,7 +342,7 @@ mod tests {
             false,
             Some("branch".to_string()),
         );
-        app.set_incremental_review_enabled(true);
+        app.set_incremental_review_default(true);
         app.set_review_persist_enabled(false);
         app.enable_review_mode();
         assert!(app.toggle_current_file_reviewed());
@@ -576,6 +619,185 @@ mod tests {
         let _ = std::fs::remove_dir_all(base);
     }
 
+    const ENABLE_LABEL: &str = "Enable incremental review (experimental)";
+    const DISABLE_LABEL: &str = "Disable incremental review (experimental)";
+
+    fn toggle_from_palette(app: &mut App) {
+        app.execute_palette_action(PaletteAction::ToggleIncrementalReview);
+    }
+
+    #[test]
+    fn palette_enables_incremental_review_when_the_config_default_is_off() {
+        let base = review_base("palette-enable");
+        let mut app = review_app(&base, &FILES, false);
+        mark_file(&mut app, 1);
+        assert!(palette_labels(&app).contains(&ENABLE_LABEL.to_string()));
+        assert!(!palette_labels(&app).contains(&DISABLE_LABEL.to_string()));
+
+        app.select_file(0);
+        toggle_from_palette(&mut app);
+        assert!(app.hides_reviewed_files());
+        assert_eq!(app.filtered_file_indices(), vec![0, 2, 3]);
+        assert_eq!(app.multi_diff.selected_index, 0);
+        assert!(palette_labels(&app).contains(&DISABLE_LABEL.to_string()));
+        assert!(palette_labels(&app).contains(&"Show reviewed files (1 hidden)".to_string()));
+
+        mark_file(&mut app, 2);
+        assert_eq!(app.multi_diff.selected_index, 3);
+        assert_eq!(app.filtered_file_indices(), vec![0, 3]);
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn disabling_keeps_the_selected_file_and_brings_back_reviewed_files() {
+        let base = review_base("disable-hidden");
+        let mut app = review_app(&base, &FILES, true);
+        mark_file(&mut app, 0);
+        mark_file(&mut app, 2);
+        assert_eq!(app.multi_diff.selected_index, 3);
+
+        toggle_from_palette(&mut app);
+        assert!(!app.hides_reviewed_files());
+        assert_eq!(app.multi_diff.selected_index, 3);
+        assert_eq!(app.filtered_file_indices(), vec![0, 1, 2, 3]);
+        assert!(app.file_is_reviewed(0) && app.file_is_reviewed(2));
+        assert!(palette_labels(&app).contains(&ENABLE_LABEL.to_string()));
+        assert!(!palette_labels(&app)
+            .iter()
+            .any(|label| label.contains("reviewed files")));
+
+        app.select_file(2);
+        app.outdated_view_closed_since_tick = true;
+        app.tick();
+        assert_eq!(app.multi_diff.selected_index, 2);
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn disabling_while_reviewed_files_are_shown_keeps_the_selected_reviewed_file() {
+        let base = review_base("disable-shown");
+        let mut app = review_app(&base, &FILES, true);
+        mark_file(&mut app, 1);
+        app.execute_palette_action(PaletteAction::ToggleReviewedFilesVisibility);
+        app.select_file(1);
+        assert!(palette_labels(&app).contains(&"Hide reviewed files".to_string()));
+
+        toggle_from_palette(&mut app);
+        assert_eq!(app.multi_diff.selected_index, 1);
+        assert_eq!(app.filtered_file_indices(), vec![0, 1, 2, 3]);
+        assert!(app.file_is_reviewed(1));
+
+        toggle_from_palette(&mut app);
+        assert!(app.hides_reviewed_files());
+        assert_eq!(app.multi_diff.selected_index, 2);
+        assert_eq!(app.filtered_file_indices(), vec![0, 2, 3]);
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn disabling_keeps_a_reviewed_file_opened_on_purpose_and_the_text_filter() {
+        let base = review_base("disable-filter");
+        let mut app = review_app(&base, &FILES, true);
+        for ch in "src".chars() {
+            app.push_file_filter_char(ch);
+        }
+        mark_file(&mut app, 1);
+        app.select_file(1);
+        assert_eq!(app.multi_diff.selected_index, 1);
+        assert_eq!(app.filtered_file_indices(), vec![0, 2]);
+
+        toggle_from_palette(&mut app);
+        assert_eq!(app.multi_diff.selected_index, 1);
+        assert_eq!(app.file_filter, "src");
+        assert_eq!(app.filtered_file_indices(), vec![0, 1, 2]);
+        app.outdated_view_closed_since_tick = true;
+        app.tick();
+        assert_eq!(app.multi_diff.selected_index, 1);
+
+        toggle_from_palette(&mut app);
+        assert_eq!(app.multi_diff.selected_index, 2);
+        assert_eq!(app.file_filter, "src");
+        assert_eq!(app.filtered_file_indices(), vec![0, 2]);
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn toggling_from_the_all_reviewed_screen_keeps_the_file_behind_it() {
+        let base = review_base("toggle-all");
+        let mut app = review_app(&base, &FILES[..2], true);
+        assert!(app.toggle_current_file_reviewed());
+        assert!(app.toggle_current_file_reviewed());
+        assert_eq!(
+            app.reviewed_files_exhausted(),
+            Some(ReviewedFilesExhausted::EveryFile)
+        );
+        let selected = app.multi_diff.selected_index;
+
+        toggle_from_palette(&mut app);
+        assert_eq!(app.reviewed_files_exhausted(), None);
+        assert_eq!(app.multi_diff.selected_index, selected);
+        assert_eq!(app.filtered_file_indices(), vec![0, 1]);
+
+        toggle_from_palette(&mut app);
+        assert_eq!(
+            app.reviewed_files_exhausted(),
+            Some(ReviewedFilesExhausted::EveryFile)
+        );
+        assert_eq!(app.multi_diff.selected_index, selected);
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn session_toggle_lasts_until_restart_and_keeps_saved_marks() {
+        let base = review_base("toggle-restart");
+        let mut first = review_app(&base, &FILES, false);
+        toggle_from_palette(&mut first);
+        mark_file(&mut first, 0);
+        assert_eq!(first.filtered_file_indices(), vec![1, 2, 3]);
+
+        let reopened_off = review_app(&base, &FILES, false);
+        assert!(!reopened_off.hides_reviewed_files());
+        assert!(reopened_off.file_is_reviewed(0));
+        assert_eq!(reopened_off.filtered_file_indices(), vec![0, 1, 2, 3]);
+
+        let mut reopened_on = review_app(&base, &FILES, true);
+        assert_eq!(reopened_on.filtered_file_indices(), vec![1, 2, 3]);
+        toggle_from_palette(&mut reopened_on);
+        assert!(!reopened_on.hides_reviewed_files());
+        assert!(reopened_on.file_is_reviewed(0));
+        assert_eq!(reopened_on.filtered_file_indices(), vec![0, 1, 2, 3]);
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn toggle_is_unavailable_without_review_persistence() {
+        let mut app = App::new(
+            diff_of(&FILES),
+            ViewMode::UnifiedPane,
+            0,
+            false,
+            Some("branch".to_string()),
+        );
+        app.set_review_persist_enabled(false);
+        app.enable_review_mode();
+        assert!(app.toggle_current_file_reviewed());
+        assert!(!palette_labels(&app)
+            .iter()
+            .any(|label| label.contains("incremental review")));
+
+        assert!(!app.toggle_incremental_review());
+        assert!(!app.hides_reviewed_files());
+        assert_eq!(app.filtered_file_indices(), vec![0, 1, 2, 3]);
+        assert_eq!(app.multi_diff.selected_index, 0);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 24)).unwrap();
+        terminal
+            .draw(|frame| crate::ui::draw(frame, &mut app))
+            .unwrap();
+        let screen = format!("{:?}", terminal.backend().buffer());
+        assert!(screen.contains("Incremental review needs a saved review"));
+    }
+
     #[test]
     fn neighbour_matches_plain_navigation_when_every_file_is_navigable() {
         let all = [0, 1, 2];
@@ -701,7 +923,7 @@ mod tests {
             Some("branch".to_string()),
         );
         app.set_review_base_dir(Some(base.to_path_buf()));
-        app.set_incremental_review_enabled(true);
+        app.set_incremental_review_default(true);
         app.enable_review_mode();
         assert!(app.start_content_loading());
         app

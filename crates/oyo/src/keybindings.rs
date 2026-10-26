@@ -77,6 +77,7 @@ pub(crate) enum NormalAction {
     TogglePathPopup,
     OpenEditor,
     ToggleFileReviewed,
+    ToggleIncrementalReview,
     GotoStart,
     GotoEnd,
     FirstStep,
@@ -316,6 +317,7 @@ binding_action!(NormalAction, [
     TogglePathPopup => ("toggle_path_popup", "Show full file path", ["ctrl-g"]),
     OpenEditor => ("open_editor", "Open file in editor", ["o", "ctrl-e"]),
     ToggleFileReviewed => ("toggle_file_reviewed", "Toggle file reviewed", ["g r"]),
+    ToggleIncrementalReview => ("toggle_incremental_review", "Toggle incremental review (experimental)", []),
     GotoStart => ("goto_start", "Go to start", ["g g", "home"]),
     GotoEnd => ("goto_end", "Go to end", ["G", "end"]),
     FirstStep => ("first_step", "First step (or hunk in no-step)", ["<"]),
@@ -1073,6 +1075,38 @@ mod tests {
             bindings.normal(key('q')),
             Dispatch::Matched(NormalAction::Quit),
             "omitted actions should keep their default bindings"
+        );
+    }
+
+    #[test]
+    fn incremental_review_toggle_is_unbound_until_configured() {
+        let defaults = Keybindings::default();
+        assert_eq!(
+            defaults.normal_keys(NormalAction::ToggleIncrementalReview),
+            ""
+        );
+
+        let config: crate::config::Config = toml::from_str(
+            r#"
+            [keybindings.normal]
+            toggle_incremental_review = ["g i"]
+            "#,
+        )
+        .unwrap();
+        let mut warnings = Vec::new();
+        let mut bindings =
+            Keybindings::from_config_with_warnings(&config.keybindings, &mut warnings);
+
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(bindings.normal(key('g')), Dispatch::Pending);
+        assert_eq!(
+            bindings.normal(key('i')),
+            Dispatch::Matched(NormalAction::ToggleIncrementalReview)
+        );
+        assert_eq!(bindings.normal(key('g')), Dispatch::Pending);
+        assert_eq!(
+            bindings.normal(key('r')),
+            Dispatch::Matched(NormalAction::ToggleFileReviewed)
         );
     }
 

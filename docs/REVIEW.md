@@ -208,14 +208,25 @@ Press `g r` to mark the current file as reviewed or unreviewed. Reviewed files s
 
 ### Hide reviewed files
 
-This feature is experimental. Turn it on in your config:
+This feature is experimental. To turn it on for one session, open the command palette with `ctrl-p` and select `Enable incremental review (experimental)`. Select `Disable incremental review (experimental)` to turn it off. Turning it off shows every file again and keeps the file you have open, your file filter and your review marks.
+
+To start every saved review with it on, set it in your config:
 
 ```toml
 [experimental]
 incremental_review = true
 ```
 
-It works in saved reviews. It does nothing with `--no-review-persist`.
+The command palette changes it for the current session only. It does not change your config, so Oyo goes back to your config setting next time it starts, or when you open another diff from history or `oy ctl`.
+
+The action has no default key. To add one, bind `toggle_incremental_review`:
+
+```toml
+[keybindings.normal]
+toggle_incremental_review = ["g i"]
+```
+
+It works in saved reviews. It does nothing with `--no-review-persist`, and the key shows a warning instead.
 
 When it is on:
 

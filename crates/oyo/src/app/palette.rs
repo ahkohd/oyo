@@ -18,6 +18,7 @@ pub(crate) enum PaletteAction {
     ToggleFilePanel,
     ToggleFileReviewed,
     ToggleReviewedFilesVisibility,
+    ToggleIncrementalReview,
     ToggleAutoplay,
     ToggleAutoplayReverse,
     OpenDashboard,
@@ -503,6 +504,12 @@ impl App {
                 },
                 action: PaletteAction::ToggleFileReviewed,
             });
+            if let Some(label) = self.incremental_review_toggle_label() {
+                entries.push(PaletteEntry {
+                    label: label.to_string(),
+                    action: PaletteAction::ToggleIncrementalReview,
+                });
+            }
             if let Some(label) = self.reviewed_files_visibility_label() {
                 entries.push(PaletteEntry {
                     label,
@@ -588,6 +595,9 @@ impl App {
             }
             PaletteAction::ToggleReviewedFilesVisibility => {
                 self.toggle_reviewed_files_visibility();
+            }
+            PaletteAction::ToggleIncrementalReview => {
+                self.toggle_incremental_review();
             }
             PaletteAction::ToggleAutoplay => self.toggle_autoplay(),
             PaletteAction::ToggleAutoplayReverse => self.toggle_autoplay_reverse(),

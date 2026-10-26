@@ -5938,10 +5938,14 @@ where
 {
     let mut out = format!("## {title}\n\n| Action | Keys | What it does |\n| --- | --- | --- |\n");
     for action in A::all().iter().copied() {
+        let keys = match keys(action) {
+            keys if keys.is_empty() => "unbound".to_string(),
+            keys => format!("`{}`", markdown_table_escape(&keys)),
+        };
         out.push_str(&format!(
-            "| `{}` | `{}` | {} |\n",
+            "| `{}` | {} | {} |\n",
             markdown_table_escape(action.id()),
-            markdown_table_escape(&keys(action)),
+            keys,
             markdown_table_escape(action.description()),
         ));
     }
@@ -8909,7 +8913,7 @@ fn draw_comment_picker_popover(frame: &mut Frame, app: &mut App) {
 
 #[cfg(test)]
 mod tests {
-    use super::{counted_binding_label, draw_path_popup, draw_toasts};
+    use super::{counted_binding_label, draw_path_popup, draw_toasts, help_markdown};
     use crate::app::{
         review::ReviewTargetKind, App, FilePanelMode, FoldContextDirection, SelectionToolbarAction,
         SettingsLeaveAction, SettingsResetAction, TopbarTabContent, ViewMode,
@@ -8928,6 +8932,20 @@ mod tests {
     use ratatui::text::Line;
     use ratatui::Terminal;
     use std::collections::HashMap;
+
+    #[test]
+    fn help_lists_an_action_without_keys_as_unbound() {
+        let app = App::new(
+            MultiFileDiff::from_file_pair("a".into(), "a".into(), "a\n".into(), "b\n".into()),
+            ViewMode::UnifiedPane,
+            0,
+            false,
+            None,
+        );
+        assert!(help_markdown(&app).contains(
+            "| `toggle_incremental_review` | unbound | Toggle incremental review (experimental) |"
+        ));
+    }
 
     /// Render Markdown through the real preview renderer without needing an
     /// `App`, using the default theme and no syntax highlighting.

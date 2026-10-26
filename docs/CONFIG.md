@@ -534,7 +534,7 @@ Use `[experimental]` to try features that may change or be removed.
 
 | Key | Values | Default | What it does |
 | --- | --- | --- | --- |
-| `incremental_review` | `true`, `false` | `false` | Hides files you mark as reviewed during a saved review |
+| `incremental_review` | `true`, `false` | `false` | Starts saved reviews with files you mark as reviewed hidden. You can turn it on or off for a session from the command palette |
 
 ```toml
 [experimental]
