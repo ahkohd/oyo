@@ -576,6 +576,21 @@ impl ReviewGrepState {
 
 impl App {
     pub(crate) fn fuzzy_file_matches_for_query(&self, query: &str) -> Vec<FuzzyFileMatch> {
+        let mut matches = self.all_fuzzy_file_matches_for_query(query);
+        if self.hides_reviewed_files() {
+            matches.retain(|matched| !self.file_is_reviewed(matched.file_index));
+        }
+        matches
+    }
+
+    pub(crate) fn file_order_for_query(&self, query: &str) -> Vec<usize> {
+        self.all_fuzzy_file_matches_for_query(query)
+            .into_iter()
+            .map(|matched| matched.file_index)
+            .collect()
+    }
+
+    fn all_fuzzy_file_matches_for_query(&self, query: &str) -> Vec<FuzzyFileMatch> {
         let files = self
             .outdated_live_files()
             .unwrap_or(self.multi_diff.files.as_slice());

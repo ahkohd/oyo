@@ -1,3 +1,4 @@
+use super::review_queue::FileStep;
 use super::{
     AnimationFrame, AnimationPhase, App, FileDiskStamp, FilePanelMode, ImagePreviewCache,
     ImagePreviewSignature, PreviewLinkBox, StatusModeMenu, TopbarTab, TopbarTabContent,
@@ -89,54 +90,12 @@ impl App {
         }
     }
 
-    // File navigation methods
     pub fn next_file(&mut self) {
-        self.restore_live_diff_after_outdated_view();
-        if !self.file_filter.is_empty() {
-            let indices = self.filtered_file_indices();
-            if indices.is_empty() {
-                return;
-            }
-            let current = self.multi_diff.selected_index;
-            let pos = indices.iter().position(|&i| i == current);
-            let next_index = match pos {
-                Some(p) if p + 1 < indices.len() => indices[p + 1],
-                None => indices[0],
-                _ => return,
-            };
-            self.select_file(next_index);
-            return;
-        }
-
-        let current = self.multi_diff.selected_index;
-        let next_index = current.saturating_add(1);
-        if next_index < self.multi_diff.file_count() {
-            self.select_file(next_index);
-        }
+        self.step_file(FileStep::Next);
     }
 
     pub fn prev_file(&mut self) {
-        self.restore_live_diff_after_outdated_view();
-        if !self.file_filter.is_empty() {
-            let indices = self.filtered_file_indices();
-            if indices.is_empty() {
-                return;
-            }
-            let current = self.multi_diff.selected_index;
-            let pos = indices.iter().position(|&i| i == current);
-            let prev_index = match pos {
-                Some(p) if p > 0 => indices[p - 1],
-                None => indices[indices.len().saturating_sub(1)],
-                _ => return,
-            };
-            self.select_file(prev_index);
-            return;
-        }
-
-        let current = self.multi_diff.selected_index;
-        if current > 0 {
-            self.select_file(current - 1);
-        }
+        self.step_file(FileStep::Prev);
     }
 
     pub fn scroll_file_panel_up(&mut self) {
@@ -155,70 +114,19 @@ impl App {
     }
 
     pub(crate) fn next_file_wrapped(&mut self) -> bool {
-        self.restore_live_diff_after_outdated_view();
-        if !self.file_filter.is_empty() {
-            let indices = self.filtered_file_indices();
-            if indices.is_empty() {
-                return false;
-            }
-            let current = self.multi_diff.selected_index;
-            let pos = indices.iter().position(|&i| i == current).unwrap_or(0);
-            let next_index = if pos + 1 < indices.len() {
-                indices[pos + 1]
-            } else {
-                indices[0]
-            };
-            if next_index == current {
-                return false;
-            }
-            self.select_file(next_index);
-            return true;
-        }
-
-        let count = self.multi_diff.file_count();
-        if count == 0 {
-            return false;
-        }
-        let current = self.multi_diff.selected_index;
-        let next_index = if current + 1 < count { current + 1 } else { 0 };
-        if next_index == current {
-            return false;
-        }
-        self.select_file(next_index);
-        true
+        self.step_file(FileStep::NextWrapping)
     }
 
     pub(crate) fn prev_file_wrapped(&mut self) -> bool {
-        self.restore_live_diff_after_outdated_view();
-        if !self.file_filter.is_empty() {
-            let indices = self.filtered_file_indices();
-            if indices.is_empty() {
-                return false;
-            }
-            let current = self.multi_diff.selected_index;
-            let pos = indices.iter().position(|&i| i == current).unwrap_or(0);
-            let prev_index = if pos > 0 {
-                indices[pos - 1]
-            } else {
-                indices[indices.len().saturating_sub(1)]
-            };
-            if prev_index == current {
-                return false;
-            }
-            self.select_file(prev_index);
-            return true;
-        }
+        self.step_file(FileStep::PrevWrapping)
+    }
 
-        let count = self.multi_diff.file_count();
-        if count == 0 {
+    fn step_file(&mut self, step: FileStep) -> bool {
+        self.restore_live_diff_after_outdated_view();
+        let Some(target) = self.file_step_target(step) else {
             return false;
-        }
-        let current = self.multi_diff.selected_index;
-        if current == 0 {
-            self.select_file(count - 1);
-            return count > 1;
-        }
-        self.select_file(current - 1);
+        };
+        self.select_file(target);
         true
     }
 
@@ -317,6 +225,7 @@ impl App {
         }
         self.save_scroll_position_for(old_index);
         self.multi_diff.select_file(index);
+        self.remember_selection_opened_on_purpose();
         self.apply_content_view_mode();
         self.restore_scroll_position_for(self.multi_diff.selected_index);
         self.animation_phase = AnimationPhase::Idle;
@@ -683,6 +592,7 @@ impl App {
         match tab.content {
             TopbarTabContent::File(index) if file_count > 0 => {
                 self.multi_diff.select_file(index);
+                self.remember_selection_opened_on_purpose();
                 self.apply_content_view_mode();
                 self.update_file_list_scroll();
                 let restored = tab
@@ -2094,7 +2004,7 @@ impl App {
         true
     }
 
-    fn update_file_list_scroll(&mut self) {
+    pub(super) fn update_file_list_scroll(&mut self) {
         let indices = self.filtered_file_indices();
         if indices.is_empty() {
             self.file_list_scroll = 0;
@@ -2182,6 +2092,9 @@ impl App {
     fn on_filter_changed(&mut self) {
         self.file_list_scroll = 0;
         self.ensure_selection_matches_filter();
+        if self.file_panel_mode == FilePanelMode::Files {
+            self.move_selection_off_hidden_reviewed_file();
+        }
         self.update_file_list_scroll();
     }
 
@@ -2666,6 +2579,7 @@ impl App {
                 self.reset_after_file_list_refresh(true);
             }
         }
+        self.move_selection_off_hidden_reviewed_file();
     }
 
     pub(crate) fn replace_multi_diff(&mut self, mut refreshed: oyo_core::MultiFileDiff) {

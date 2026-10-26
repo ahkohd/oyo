@@ -39,6 +39,8 @@ mod navigation;
 mod palette;
 mod playback;
 pub(crate) mod review;
+mod review_queue;
+pub(crate) use review_queue::ReviewedFilesExhausted;
 mod search;
 mod selection;
 mod settings;
@@ -534,6 +536,7 @@ pub struct App {
     /// Message shown when a git diff currently has no files
     pub no_changes_message: Option<String>,
     pub(crate) no_changes_dashboard_hit: Option<(u16, u16, u16, u16)>,
+    pub(crate) all_reviewed_show_hit: Option<(u16, u16, u16, u16)>,
     pub(crate) no_changes_dashboard_hover: bool,
     pub(crate) no_changes_quit_hit: Option<(u16, u16, u16, u16)>,
     pub(crate) no_changes_quit_hover: bool,
@@ -898,6 +901,9 @@ pub struct App {
     /// Collected review comments for current session
     review_comments: Vec<review::ReviewComment>,
     reviewed_files: FxHashMap<String, String>,
+    incremental_review: review_queue::IncrementalReview,
+    reviewed_file_opened_on_purpose: Option<String>,
+    outdated_view_closed_since_tick: bool,
     /// Review comments as loaded at session start.
     review_session_baseline: Vec<review::ReviewComment>,
     /// Comment selected from the comments sidebar.
@@ -1299,6 +1305,7 @@ impl App {
             git_index_baseline: FileDiskStamp::default(),
             no_changes_message: None,
             no_changes_dashboard_hit: None,
+            all_reviewed_show_hit: None,
             no_changes_dashboard_hover: false,
             no_changes_quit_hit: None,
             no_changes_quit_hover: false,
@@ -1518,6 +1525,9 @@ impl App {
             review_mode: false,
             review_comments: Vec::new(),
             reviewed_files: FxHashMap::default(),
+            incremental_review: review_queue::IncrementalReview::Off,
+            reviewed_file_opened_on_purpose: None,
+            outdated_view_closed_since_tick: false,
             review_session_baseline: Vec::new(),
             active_review_comment_id: None,
             outdated_reconstruction_cache: FxHashMap::default(),
@@ -2361,26 +2371,36 @@ impl App {
     }
 
     fn wrap_to_file_hunk(&mut self, forward: bool, stepping: bool) -> bool {
-        let indices = if !self.file_filter.is_empty() {
-            self.filtered_file_indices()
-        } else {
-            (0..self.multi_diff.file_count()).collect()
-        };
-        if indices.is_empty() {
-            return false;
-        }
-        let current = self.multi_diff.selected_index;
-        let start_pos = indices.iter().position(|&i| i == current).unwrap_or(0);
-        for offset in 1..=indices.len() {
-            let pos = if forward {
-                (start_pos + offset) % indices.len()
+        let (order, navigable, current) =
+            if self.file_filter.is_empty() && !self.hides_reviewed_files() {
+                let every_file: Vec<usize> = (0..self.multi_diff.file_count()).collect();
+                (
+                    every_file.clone(),
+                    every_file,
+                    self.multi_diff.selected_index,
+                )
             } else {
-                (start_pos + indices.len().saturating_sub(offset)) % indices.len()
+                (
+                    self.file_order_for_query(&self.file_filter),
+                    self.navigable_file_indices(),
+                    self.review_live_diff().selected_index,
+                )
             };
-            let index = indices[pos];
+        let step = if forward {
+            review_queue::FileStep::NextWrapping
+        } else {
+            review_queue::FileStep::PrevWrapping
+        };
+        let mut cursor = current;
+        for _ in 0..navigable.len() {
+            let Some(index) = review_queue::neighbour_file_index(&order, &navigable, cursor, step)
+            else {
+                break;
+            };
             if index == current {
                 break;
             }
+            cursor = index;
             self.select_file(index);
             let total = self.multi_diff.current_navigator().state().total_hunks;
             if total == 0 {
@@ -3168,7 +3188,8 @@ impl App {
 
         dirty |= self.expire_recent_file_changes(now);
         dirty |= self.toast_tick();
-        dirty |= self.poll_content_responses();
+        let mut reviewed_state_inputs_changed = self.poll_content_responses();
+        dirty |= reviewed_state_inputs_changed;
         dirty |= self.poll_review_grep();
         dirty |= self.poll_diff_responses();
         dirty |= self.poll_review_grep_jump();
@@ -3176,10 +3197,15 @@ impl App {
         dirty |= self.outdated_reconstruction_pending();
         dirty |= self.maybe_queue_idle_diff();
         dirty |= self.maybe_check_file_changes();
-        dirty |= self.maybe_watch_refresh_git_files();
-        dirty |= self.maybe_watch_refresh_jj_files();
-        dirty |= self.maybe_watch_refresh_changed_files();
-        dirty |= self.maybe_watch_reload_review_state();
+        reviewed_state_inputs_changed |= self.maybe_watch_refresh_git_files();
+        reviewed_state_inputs_changed |= self.maybe_watch_refresh_jj_files();
+        reviewed_state_inputs_changed |= self.maybe_watch_refresh_changed_files();
+        reviewed_state_inputs_changed |= self.maybe_watch_reload_review_state();
+        reviewed_state_inputs_changed |= std::mem::take(&mut self.outdated_view_closed_since_tick);
+        dirty |= reviewed_state_inputs_changed;
+        if reviewed_state_inputs_changed {
+            self.move_selection_off_hidden_reviewed_file();
+        }
 
         if self.multi_diff.file_count() == 0 {
             return dirty;

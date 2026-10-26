@@ -528,6 +528,21 @@ Oyo sends JSON on standard input by default. The payload includes the selected t
 
 If you omit `message` or `failure_message`, Oyo uses `<label> started` and `<label> failed`.
 
+## Experimental
+
+Use `[experimental]` to try features that may change or be removed.
+
+| Key | Values | Default | What it does |
+| --- | --- | --- | --- |
+| `incremental_review` | `true`, `false` | `false` | Hides files you mark as reviewed during a saved review |
+
+```toml
+[experimental]
+incremental_review = true
+```
+
+See [incremental review](./REVIEW.md#hide-reviewed-files) for how it works.
+
 ## Keybindings
 
 Use `[keybindings.<mode>]` tables to override keys.

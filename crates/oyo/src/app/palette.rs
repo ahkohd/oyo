@@ -17,6 +17,7 @@ pub(crate) enum PaletteAction {
     ToggleZen,
     ToggleFilePanel,
     ToggleFileReviewed,
+    ToggleReviewedFilesVisibility,
     ToggleAutoplay,
     ToggleAutoplayReverse,
     OpenDashboard,
@@ -325,7 +326,7 @@ impl App {
         entries
     }
 
-    fn command_palette_entries(&self) -> Vec<PaletteEntry> {
+    pub(super) fn command_palette_entries(&self) -> Vec<PaletteEntry> {
         let mut entries = vec![
             PaletteEntry {
                 label: "Toggle step mode".to_string(),
@@ -495,13 +496,19 @@ impl App {
 
         if self.review_mode && self.multi_diff.file_count() > 0 {
             entries.push(PaletteEntry {
-                label: if self.file_is_reviewed(self.multi_diff.selected_index) {
+                label: if self.file_is_reviewed(self.review_live_diff().selected_index) {
                     "Mark file as unreviewed".to_string()
                 } else {
                     "Mark file as reviewed".to_string()
                 },
                 action: PaletteAction::ToggleFileReviewed,
             });
+            if let Some(label) = self.reviewed_files_visibility_label() {
+                entries.push(PaletteEntry {
+                    label,
+                    action: PaletteAction::ToggleReviewedFilesVisibility,
+                });
+            }
             entries.push(PaletteEntry {
                 label: "Comments...".to_string(),
                 action: PaletteAction::OpenCommentPicker,
@@ -544,7 +551,7 @@ impl App {
         entries
     }
 
-    fn execute_palette_action(&mut self, action: PaletteAction) {
+    pub(super) fn execute_palette_action(&mut self, action: PaletteAction) {
         if self.multi_diff.file_count() == 0
             && !matches!(
                 action,
@@ -578,6 +585,9 @@ impl App {
             PaletteAction::ToggleFilePanel => self.toggle_file_panel(),
             PaletteAction::ToggleFileReviewed => {
                 self.toggle_current_file_reviewed();
+            }
+            PaletteAction::ToggleReviewedFilesVisibility => {
+                self.toggle_reviewed_files_visibility();
             }
             PaletteAction::ToggleAutoplay => self.toggle_autoplay(),
             PaletteAction::ToggleAutoplayReverse => self.toggle_autoplay_reverse(),
