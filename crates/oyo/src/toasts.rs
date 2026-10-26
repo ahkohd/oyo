@@ -16,6 +16,8 @@ pub(crate) enum ToastEvent {
     LineWrap(bool),
     Syntax(bool),
     Zen(bool),
+    IncrementalReview(bool),
+    IncrementalReviewUnavailable,
     Animation(bool),
     Stepping(bool),
     Strikethrough(bool),
@@ -50,6 +52,11 @@ impl ToastEvent {
             Self::Syntax(false) => "Syntax highlighting off".to_string(),
             Self::Zen(true) => "Zen mode on".to_string(),
             Self::Zen(false) => "Zen mode off".to_string(),
+            Self::IncrementalReview(true) => "Incremental review on".to_string(),
+            Self::IncrementalReview(false) => "Incremental review off".to_string(),
+            Self::IncrementalReviewUnavailable => {
+                "Incremental review needs a saved review".to_string()
+            }
             Self::Animation(true) => "Animation on".to_string(),
             Self::Animation(false) => "Animation off".to_string(),
             Self::Stepping(true) => "Step mode on".to_string(),
@@ -85,7 +92,9 @@ impl ToastEvent {
     fn toast_type(&self) -> ToastType {
         match self {
             Self::CopyFailed | Self::SelectionActionFailed(_) => ToastType::Error,
-            Self::CommentDeleted | Self::CommentsCleared => ToastType::Warning,
+            Self::CommentDeleted | Self::CommentsCleared | Self::IncrementalReviewUnavailable => {
+                ToastType::Warning
+            }
             Self::CopiedSelection
             | Self::CopiedLine
             | Self::CopiedHunk

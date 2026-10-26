@@ -9336,7 +9336,7 @@ mod tests {
             Some("branch".to_string()),
         );
         app.set_review_base_dir(Some(base.to_path_buf()));
-        app.set_incremental_review_enabled(incremental);
+        app.set_incremental_review_default(incremental);
         app.enable_review_mode();
         app
     }

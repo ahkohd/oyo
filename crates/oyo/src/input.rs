@@ -1080,6 +1080,10 @@ fn dispatch_normal_action(
             app.reset_count();
             app.toggle_current_file_reviewed();
         }
+        NormalAction::ToggleIncrementalReview => {
+            app.reset_count();
+            app.toggle_incremental_review();
+        }
         NormalAction::GotoStart => {
             app.reset_count();
             if app.csv_preview_focus_top() || app.structured_preview_focus_top() {
@@ -1471,6 +1475,88 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    fn incremental_review_app(name: &str, keybindings: &str) -> (App, std::path::PathBuf) {
+        let base = std::env::temp_dir().join(format!(
+            "oyo-input-incremental-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let diff = MultiFileDiff::from_file_pairs(vec![
+            ("a.txt".into(), "a\n".to_string(), "a2\n".to_string()),
+            ("b.txt".into(), "b\n".to_string(), "b2\n".to_string()),
+        ]);
+        let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+        let config: config::Config = toml::from_str(keybindings).unwrap();
+        app.keybindings = crate::keybindings::Keybindings::from_config(&config.keybindings);
+        app.set_review_base_dir(Some(base.clone()));
+        app.set_incremental_review_default(false);
+        app.enable_review_mode();
+        (app, base)
+    }
+
+    fn press(app: &mut App, terminal: &mut TuiTerminal, keys: &[KeyEvent]) {
+        let mut pending_event = None;
+        for key in keys {
+            handle_app_key(
+                app,
+                *key,
+                &mut pending_event,
+                terminal,
+                &config::EditorConfig::default(),
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn configured_key_toggles_incremental_review() {
+        let (mut app, base) = incremental_review_app(
+            "configured",
+            "[keybindings.normal]\ntoggle_incremental_review = [\"g i\"]\n",
+        );
+        let mut terminal = test_terminal();
+        press(&mut app, &mut terminal, &[key('g'), key('r')]);
+        assert_eq!(app.multi_diff.selected_index, 0);
+        assert_eq!(app.filtered_file_indices(), vec![0, 1]);
+
+        press(&mut app, &mut terminal, &[key('g'), key('i')]);
+        assert!(app.hides_reviewed_files());
+        assert_eq!(app.multi_diff.selected_index, 1);
+        assert_eq!(app.filtered_file_indices(), vec![1]);
+
+        press(&mut app, &mut terminal, &[key('g'), key('i')]);
+        assert!(!app.hides_reviewed_files());
+        assert_eq!(app.multi_diff.selected_index, 1);
+        assert_eq!(app.filtered_file_indices(), vec![0, 1]);
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn incremental_review_has_no_default_key_but_the_palette_toggles_it() {
+        let (mut app, base) = incremental_review_app("palette", "");
+        assert_eq!(
+            app.keybindings
+                .normal_keys(NormalAction::ToggleIncrementalReview),
+            ""
+        );
+        let mut terminal = test_terminal();
+        press(&mut app, &mut terminal, &[key('g'), key('r')]);
+        press(&mut app, &mut terminal, &[key('g'), key('i')]);
+        assert!(!app.hides_reviewed_files());
+
+        let mut palette_keys = vec![ctrl('p')];
+        palette_keys.extend("enable incremental review".chars().map(key));
+        palette_keys.push(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+        press(&mut app, &mut terminal, &palette_keys);
+        assert!(!app.command_palette_active());
+        assert!(app.hides_reviewed_files());
+        assert_eq!(app.filtered_file_indices(), vec![1]);
+        let _ = std::fs::remove_dir_all(base);
     }
 
     #[test]

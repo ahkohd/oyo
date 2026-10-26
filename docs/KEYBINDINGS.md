@@ -173,6 +173,7 @@ Use each mode as `[keybindings.<mode>]`.
 | `toggle_path_popup` | `ctrl-g` | Show the full file path |
 | `open_editor` | `o`, `ctrl-e` | Open the file in your editor |
 | `toggle_file_reviewed` | `g r` | Mark the current file as reviewed or unreviewed. With `incremental_review`, also hides it and opens the next file |
+| `toggle_incremental_review` | unbound | Turn experimental incremental review on or off for this session |
 | `goto_start` | `g g`, `home` | Go to the start |
 | `goto_end` | `G`, `end` | Go to the end |
 | `first_step` | `<` | Go to the first step, or first hunk in no-step mode |
