@@ -4844,6 +4844,9 @@ fn render_preview(frame: &mut Frame, app: &mut App, area: Rect) {
         let header_lines = lines;
         let body_total = body.len();
         let body_h = visible_lines.saturating_sub(sticky_rows).max(1);
+        app.scroll_offset += sticky_rows;
+        app.handle_search_scroll_if_needed(body_h, content_area.width as usize);
+        app.scroll_offset = app.scroll_offset.saturating_sub(sticky_rows);
         app.clamp_scroll(body_total, body_h, false);
         let scroll = app.scroll_offset.min(body_total.saturating_sub(1));
         let header_area = Rect {
@@ -4880,6 +4883,7 @@ fn render_preview(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 
     let total_lines = lines.len().max(1);
+    app.handle_search_scroll_if_needed(visible_lines, content_area.width as usize);
     app.clamp_scroll(total_lines, visible_lines, false);
     let scroll = app.scroll_offset.min(total_lines.saturating_sub(1));
 
@@ -11219,6 +11223,70 @@ mod tests {
         }
         app.search_next();
         assert_eq!(app.search_target(), Some(1));
+    }
+
+    #[test]
+    fn search_next_scrolls_help_tab_to_active_match() {
+        let multi = MultiFileDiff::from_file_pair(
+            std::path::PathBuf::from("a.rs"),
+            std::path::PathBuf::from("a.rs"),
+            "old\n".to_string(),
+            "new\n".to_string(),
+        );
+        let mut app = App::new(multi, ViewMode::UnifiedPane, 0, false, None);
+        app.open_help_tab();
+        let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+        terminal.draw(|frame| super::draw(frame, &mut app)).unwrap();
+        app.start_search();
+        for ch in "theme reference".chars() {
+            app.push_search_char(ch);
+        }
+        app.search_next();
+        app.search_next();
+        terminal.draw(|frame| super::draw(frame, &mut app)).unwrap();
+
+        let target = app.search_target().expect("active match");
+        let (_, _, _, height) = app.diff_view_area.expect("diff area");
+        assert!(
+            target >= height as usize,
+            "match {target} starts off screen"
+        );
+        assert!(
+            (app.scroll_offset..app.scroll_offset + height as usize).contains(&target),
+            "match {target} not visible at scroll {}",
+            app.scroll_offset
+        );
+    }
+
+    #[test]
+    fn search_next_scrolls_csv_preview_body_to_active_match() {
+        let rows = (0..200)
+            .map(|n| format!("row{n},value{n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let csv = format!("name,value\n{rows}\n");
+        let multi = MultiFileDiff::from_file_pair(
+            std::path::PathBuf::from("data.csv"),
+            std::path::PathBuf::from("data.csv"),
+            csv.clone(),
+            format!("{csv}extra,needle\n"),
+        );
+        let mut app = App::new(multi, ViewMode::Preview, 0, false, None);
+        app.open_file_in_new_topbar_tab(0);
+        app.set_view_mode(ViewMode::Preview);
+        let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+        terminal.draw(|frame| super::draw(frame, &mut app)).unwrap();
+        assert!(super::preview_can_render_csv(&app));
+        app.start_search();
+        for ch in "needle".chars() {
+            app.push_search_char(ch);
+        }
+        app.search_next();
+        terminal.draw(|frame| super::draw(frame, &mut app)).unwrap();
+
+        let screen = ascii_buffer_lines(&terminal).join("\n");
+        assert!(screen.contains("extra"), "screen: {screen}");
+        assert!(screen.contains("name"), "header stays pinned: {screen}");
     }
 
     #[test]
