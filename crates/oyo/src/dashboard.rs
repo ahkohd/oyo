@@ -304,7 +304,10 @@ impl Dashboard {
         self.selected = selected;
         self.scroll = 0;
         self.pinned_from = match selection {
-            DashboardSelection::Range { from, .. } => Some(from.clone()),
+            DashboardSelection::Range { from, .. } => match self.current_entry().map(|e| &e.kind) {
+                Some(EntryKind::Commit(commit)) if *from == default_range_from(commit) => None,
+                _ => Some(from.clone()),
+            },
             _ => None,
         };
     }
@@ -448,8 +451,7 @@ impl Dashboard {
                 let from = self
                     .pinned_from
                     .clone()
-                    .or_else(|| commit.parents.first().cloned())
-                    .unwrap_or_else(|| EMPTY_TREE_HASH.to_string());
+                    .unwrap_or_else(|| default_range_from(commit));
                 Some(DashboardSelection::Range { from, to })
             }
         }
@@ -1409,6 +1411,14 @@ fn truncate_text_from_start(text: &str, max_width: usize) -> String {
     format!("...{suffix}")
 }
 
+fn default_range_from(commit: &CommitEntry) -> String {
+    commit
+        .parents
+        .first()
+        .cloned()
+        .unwrap_or_else(|| EMPTY_TREE_HASH.to_string())
+}
+
 fn shorten_hash(hash: &str) -> String {
     hash.chars().take(8).collect()
 }
@@ -1593,13 +1603,17 @@ mod tests {
     }
 
     fn dashboard() -> Dashboard {
+        dashboard_with(vec![
+            commit("bbbbbbbb", "aaaaaaaa"),
+            commit("aaaaaaaa", EMPTY_TREE_HASH),
+        ])
+    }
+
+    fn dashboard_with(commits: Vec<CommitEntry>) -> Dashboard {
         Dashboard::new(DashboardConfig {
             repo_root: PathBuf::from("/tmp/oyo"),
             branch: Some("main".to_string()),
-            commits: vec![
-                commit("bbbbbbbb", "aaaaaaaa"),
-                commit("aaaaaaaa", EMPTY_TREE_HASH),
-            ],
+            commits,
             working_files: 1,
             staged_files: 1,
             theme: ResolvedTheme::default(),
@@ -1621,6 +1635,49 @@ mod tests {
         dashboard.select_selection(&selection);
 
         assert_eq!(dashboard.selection(), Some(selection));
+    }
+
+    #[test]
+    fn select_selection_restores_pinned_range_start() {
+        let mut dashboard = dashboard();
+        dashboard.select_selection(&DashboardSelection::Range {
+            from: EMPTY_TREE_HASH.to_string(),
+            to: "bbbbbbbb".to_string(),
+        });
+
+        assert_eq!(dashboard.pinned_from.as_deref(), Some(EMPTY_TREE_HASH));
+    }
+
+    #[test]
+    fn select_selection_does_not_pin_single_commit_base() {
+        let mut root = commit("aaaaaaaa", "");
+        root.parents.clear();
+        let mut dashboard = dashboard_with(vec![
+            commit("cccccccc", "bbbbbbbb"),
+            commit("bbbbbbbb", "aaaaaaaa"),
+            root,
+        ]);
+
+        dashboard.select_selection(&DashboardSelection::Range {
+            from: EMPTY_TREE_HASH.to_string(),
+            to: "aaaaaaaa".to_string(),
+        });
+        assert_eq!(dashboard.pinned_from, None);
+
+        dashboard.move_selection(-2, 10);
+        assert_eq!(
+            dashboard.selection(),
+            Some(DashboardSelection::Range {
+                from: "bbbbbbbb".to_string(),
+                to: "cccccccc".to_string(),
+            })
+        );
+
+        dashboard.select_selection(&DashboardSelection::Range {
+            from: "bbbbbbbb".to_string(),
+            to: "cccccccc".to_string(),
+        });
+        assert_eq!(dashboard.pinned_from, None);
     }
 
     #[test]
