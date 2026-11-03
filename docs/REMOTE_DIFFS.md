@@ -29,7 +29,7 @@ A commit compares against its first parent, or an empty tree for a root commit. 
 
 ## Loading and refresh
 
-Oyo loads complete file contents in the background and keeps them tied to fixed revisions. Press `R` to resolve a new snapshot. A failed refresh keeps the current view. Saved reviews remain available when you open the same URL from another directory.
+Oyo opens a loading screen while it resolves the remote snapshot and saved review. Press `q`, `Esc` or `ctrl-c` to cancel startup. If startup fails, press `r` to retry. Once the file list appears, Oyo loads complete file contents concurrently and gives the selected file priority. Contents stay tied to fixed revisions. Press `R` to resolve a new snapshot. A failed refresh keeps the current view. Saved reviews remain available when you open the same URL from another directory.
 
 ## Saved reviews
 
@@ -72,7 +72,7 @@ Revision checks precede API requests. Providers do not offer an atomic revision 
 
 ## Limits
 
-Checkout history and remote image previews are unavailable in remote URL sessions. File-count and download limits produce explicit errors instead of partial diffs. Tree-based comparisons reject submodules and file-mode changes, and show renames as deletions and additions. Review URLs preserve provider rename information.
+Checkout history and remote image previews are unavailable in remote URL sessions. Direct URL launches render review avatars with terminal text blocks to avoid a blocking terminal capability query. Opening a local target restores automatic image protocol detection. File-count and download limits produce explicit errors instead of partial diffs. Tree-based comparisons reject submodules and file-mode changes, and show renames as deletions and additions. Review URLs preserve provider rename information.
 
 GitHub commit enumeration stops at 3,000 files, and comparisons stop at 300 files. Oyo rejects those results because the provider may have truncated them. GitLab reviews require an exact changed-file count.
 

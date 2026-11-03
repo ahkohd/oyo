@@ -2,9 +2,30 @@ use super::{App, ContentResponse};
 use oyo_core::multi::{ContentSource, PendingFileContent};
 use oyo_core::MultiFileDiff;
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{mpsc, Arc, Mutex};
+
+pub(super) struct ContentWorker {
+    rx: mpsc::Receiver<ContentResponse>,
+    context: crate::remote::loading::ReadContext,
+    selected: Arc<AtomicUsize>,
+    foreground: Arc<Mutex<Option<(usize, crate::remote::loading::ReadContext)>>>,
+}
+
+impl ContentWorker {
+    fn try_recv(&self) -> Result<ContentResponse, mpsc::TryRecvError> {
+        self.rx.try_recv()
+    }
+}
+
+impl Drop for ContentWorker {
+    fn drop(&mut self) {
+        self.context.cancel();
+    }
+}
 use std::thread;
 
 const MAX_CONTENT_BYTES: u64 = 32 * 1024 * 1024;
@@ -61,6 +82,9 @@ fn load_requests(
                     MultiFileDiff::failed_file_content(&format!("Remote file unavailable: {error}"))
                 }
             };
+            if crate::remote::loading::cancelled() {
+                break;
+            }
             if tx
                 .send(ContentResponse {
                     generation,
@@ -130,6 +154,13 @@ pub(crate) fn load_content_request_sync(
 
 impl App {
     pub(crate) fn start_content_loading(&mut self) -> bool {
+        self.start_content_loading_with_context(crate::remote::loading::ReadContext::default())
+    }
+
+    pub(crate) fn start_content_loading_with_context(
+        &mut self,
+        context: crate::remote::loading::ReadContext,
+    ) -> bool {
         let mut requests = self.multi_diff.take_pending_content();
         if requests.is_empty() {
             return false;
@@ -143,15 +174,70 @@ impl App {
         }
         let selected = self.multi_diff.selected_index;
         requests.sort_by_key(|request| usize::from(request.file_index != selected));
-        let first = requests.remove(0);
         let (tx, rx) = mpsc::sync_channel(2);
-        thread::spawn(move || {
-            load_requests(generation, vec![first], &tx);
-            if !requests.is_empty() {
-                load_requests(generation, requests, &tx);
+        let selected = Arc::new(AtomicUsize::new(selected));
+        let remote = self.multi_diff.remote_snapshot.is_some();
+        let foreground = Arc::new(Mutex::new(None));
+        if remote {
+            let queue = Arc::new(Mutex::new(VecDeque::from(requests)));
+            for worker_index in 0..6 {
+                let queue = queue.clone();
+                let selected = selected.clone();
+                let context = context.clone();
+                let foreground = foreground.clone();
+                let tx = tx.clone();
+                thread::spawn(move || loop {
+                    if context.is_cancelled() {
+                        break;
+                    }
+                    let request = {
+                        let mut queue = queue.lock().unwrap_or_else(|e| e.into_inner());
+                        let priority = selected.load(Ordering::Acquire);
+                        let index = queue.iter().position(|r| {
+                            if worker_index == 0 {
+                                r.file_index == priority
+                            } else {
+                                r.file_index != priority
+                            }
+                        });
+                        index.and_then(|index| queue.remove(index))
+                    };
+                    let Some(request) = request else {
+                        thread::sleep(std::time::Duration::from_millis(10));
+                        continue;
+                    };
+                    let job = context.child(worker_index == 0);
+                    if worker_index == 0 {
+                        *foreground.lock().unwrap_or_else(|e| e.into_inner()) =
+                            Some((request.file_index, job.clone()));
+                    }
+                    job.run(|| load_requests(generation, vec![request.clone()], &tx));
+                    if worker_index == 0 {
+                        foreground.lock().unwrap_or_else(|e| e.into_inner()).take();
+                        if job.is_cancelled() && !context.is_cancelled() {
+                            queue
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .push_back(request);
+                        }
+                    }
+                });
             }
+        } else {
+            let first = requests.remove(0);
+            thread::spawn(move || {
+                load_requests(generation, vec![first], &tx);
+                if !requests.is_empty() {
+                    load_requests(generation, requests, &tx);
+                }
+            });
+        }
+        self.content_worker_rx = Some(ContentWorker {
+            rx,
+            context,
+            selected,
+            foreground,
         });
-        self.content_worker_rx = Some(rx);
         true
     }
 
@@ -163,10 +249,19 @@ impl App {
         let Some(rx) = self.content_worker_rx.as_ref() else {
             return false;
         };
-        let mut responses = Vec::new();
-        while let Ok(response) = rx.try_recv() {
-            responses.push(response);
+        rx.selected
+            .store(self.multi_diff.selected_index, Ordering::Release);
+        if let Some((index, context)) = rx
+            .foreground
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            if *index != self.multi_diff.selected_index {
+                context.cancel();
+            }
         }
+        let responses = (0..4).map_while(|_| rx.try_recv().ok()).collect::<Vec<_>>();
         if responses.is_empty() {
             return false;
         }
@@ -204,10 +299,10 @@ impl App {
                 self.syntax_scope_cache = None;
                 let _ = self.queue_current_file_diff();
             }
-            if self.multi_diff.remote_snapshot.is_some() {
-                self.repair_review_comments_after_diff_refresh();
-            }
             self.mark_diff_changed();
+        }
+        if self.multi_diff.remote_snapshot.is_some() {
+            self.repair_review_comments_after_diff_refresh();
         }
         if self.content_loading.is_empty() {
             self.content_worker_rx = None;

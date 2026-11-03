@@ -16,6 +16,7 @@ mod keybindings;
 mod markdown;
 mod remote;
 mod remote_sync;
+mod startup;
 mod structured_preview;
 mod syntax;
 #[cfg(test)]
@@ -7703,7 +7704,7 @@ fn main() {
 
 fn run() -> Result<()> {
     install_panic_terminal_restore();
-    let args = Args::parse();
+    let args = std::sync::Arc::new(Args::parse());
     let view_limit = match &args.command {
         Some(Command::Themes) => {
             for name in config::list_ui_themes() {
@@ -7798,6 +7799,7 @@ fn run() -> Result<()> {
         return handle_review_command(command, &config, &args);
     }
 
+    let config = std::sync::Arc::new(config);
     let mut dashboard_state = None;
     if let Some(limit) = view_limit {
         let mut terminal = setup_terminal()?;
@@ -7832,52 +7834,84 @@ fn run() -> Result<()> {
                 }
                 _ => Some("No changes found.".to_string()),
             };
-            let built = match build_diff_from_input_mode(&input_mode, &config, &args) {
-                Ok(Some(result)) => result,
-                Ok(None) => {
-                    exit_message = empty_message;
-                    break;
+            let mut prepared_control = None;
+            let mut app = if let InputMode::Remote { url } = &input_mode {
+                match startup::remote_app(
+                    &mut terminal,
+                    url,
+                    config.clone(),
+                    args.clone(),
+                    light_mode,
+                    control_session_name.clone(),
+                    control_last_applied_seq,
+                ) {
+                    Ok(Some((app, control))) => {
+                        prepared_control = Some(control);
+                        app
+                    }
+                    Ok(None) => break,
+                    Err(error) => {
+                        restore_terminal(&mut terminal)?;
+                        return Err(error);
+                    }
                 }
-                Err(error) => {
-                    restore_terminal(&mut terminal)?;
-                    return Err(error);
-                }
-            };
-
-            let view_mode = resolve_view_mode(args.view, &config);
-            let speed = if args.speed != 200 {
-                args.speed
             } else {
-                config.playback.speed
-            };
-            let autoplay = args.autoplay || config.playback.autoplay;
+                let built = match build_diff_from_input_mode(&input_mode, &config, &args) {
+                    Ok(Some(result)) => result,
+                    Ok(None) => {
+                        exit_message = empty_message;
+                        break;
+                    }
+                    Err(error) => {
+                        restore_terminal(&mut terminal)?;
+                        return Err(error);
+                    }
+                };
 
-            let mut app = App::new(built.multi_diff, view_mode, speed, autoplay, built.branch);
-            if let (InputMode::JjRevision { rev }, Some(repo_root)) =
-                (&input_mode, built.workspace_root.as_ref())
-            {
-                app.set_jj_watch_target(repo_root.clone(), rev.clone());
-            }
+                let view_mode = resolve_view_mode(args.view, &config);
+                let speed = if args.speed != 200 {
+                    args.speed
+                } else {
+                    config.playback.speed
+                };
+                let autoplay = args.autoplay || config.playback.autoplay;
+
+                let mut app = App::new(built.multi_diff, view_mode, speed, autoplay, built.branch);
+                if let (InputMode::JjRevision { rev }, Some(repo_root)) =
+                    (&input_mode, built.workspace_root.as_ref())
+                {
+                    app.set_jj_watch_target(repo_root.clone(), rev.clone());
+                }
+                if let Some(picker) = image_picker.as_ref() {
+                    app.set_image_picker(picker.clone());
+                }
+                app.no_changes_message = empty_message.clone();
+                apply_config_to_app(&mut app, &config, &args, light_mode);
+                if let Some((theme, name)) = &runtime_theme {
+                    app.theme = theme.clone();
+                    app.ui_theme_name = name.clone();
+                }
+                configure_review_state_for_app(
+                    &mut app,
+                    &config,
+                    &args,
+                    built.workspace_root,
+                    &input_mode,
+                    None,
+                    None,
+                    true,
+                )?;
+                app.start_content_loading();
+
+                app
+            };
             if let Some(picker) = image_picker.as_ref() {
                 app.set_image_picker(picker.clone());
             }
-            app.no_changes_message = empty_message.clone();
-            apply_config_to_app(&mut app, &config, &args, light_mode);
             if let Some((theme, name)) = &runtime_theme {
                 app.theme = theme.clone();
                 app.ui_theme_name = name.clone();
             }
-            configure_review_state_for_app(
-                &mut app,
-                &config,
-                &args,
-                built.workspace_root,
-                &input_mode,
-                None,
-                None,
-                true,
-            )?;
-            app.start_content_loading();
 
             let exit = run_app(
                 &mut terminal,
@@ -7886,6 +7920,7 @@ fn run() -> Result<()> {
                 &args,
                 control_last_applied_seq,
                 &mut control_session_name,
+                prepared_control,
             )?;
             review_hook_warnings.extend(app.take_review_hook_warnings());
             runtime_theme = Some((app.theme.clone(), app.ui_theme_name.clone()));
@@ -7955,24 +7990,35 @@ fn run() -> Result<()> {
         InputMode::GitRange { from, to } => Some(format!("No changes in range {}..{}.", from, to)),
         _ => Some("No changes found.".to_string()),
     };
-    let prefetched = match build_diff_from_input_mode(&input_mode, &config, &args) {
-        Ok(Some(result)) => result,
-        Ok(None) => {
-            if let Some(message) = empty_message {
-                println!("{message}");
-            }
-            return Ok(());
-        }
-        Err(error) => return Err(error),
+    let prefetched = if matches!(input_mode, InputMode::Remote { .. }) {
+        None
+    } else {
+        Some(
+            match build_diff_from_input_mode(&input_mode, &config, &args) {
+                Ok(Some(result)) => result,
+                Ok(None) => {
+                    if let Some(message) = empty_message {
+                        println!("{message}");
+                    }
+                    return Ok(());
+                }
+                Err(error) => return Err(error),
+            },
+        )
     };
     let mut terminal = setup_terminal()?;
-    let image_picker = setup_image_picker();
+    let mut image_picker = if matches!(input_mode, InputMode::Remote { .. }) {
+        Some(ratatui_image::picker::Picker::halfblocks())
+    } else {
+        setup_image_picker()
+    };
+    let mut image_picker_remote_fallback = matches!(input_mode, InputMode::Remote { .. });
     let dashboard_limit = view_limit.unwrap_or(200);
 
     let mut exit_message: Option<String> = None;
     let mut review_hook_warnings = Vec::new();
     let mut runtime_theme: Option<(config::ResolvedTheme, Option<String>)> = None;
-    let mut pending_diff = Some(prefetched);
+    let mut pending_diff = prefetched;
     let mut control_last_applied_seq = 0;
     let mut control_session_name = args.session.clone();
     loop {
@@ -7984,56 +8030,92 @@ fn run() -> Result<()> {
             }
             _ => Some("No changes found.".to_string()),
         };
-        let built = if let Some(result) = pending_diff.take() {
-            result
-        } else {
-            match build_diff_from_input_mode(&input_mode, &config, &args) {
-                Ok(Some(result)) => result,
-                Ok(None) => {
-                    exit_message = empty_message;
-                    break;
+        if image_picker_remote_fallback && !matches!(input_mode, InputMode::Remote { .. }) {
+            image_picker = setup_image_picker();
+            image_picker_remote_fallback = false;
+        }
+        let mut prepared_control = None;
+        let mut app = if let InputMode::Remote { url } = &input_mode {
+            match startup::remote_app(
+                &mut terminal,
+                url,
+                config.clone(),
+                args.clone(),
+                light_mode,
+                control_session_name.clone(),
+                control_last_applied_seq,
+            ) {
+                Ok(Some((app, control))) => {
+                    prepared_control = Some(control);
+                    app
                 }
+                Ok(None) => break,
                 Err(error) => {
                     restore_terminal(&mut terminal)?;
                     return Err(error);
                 }
             }
-        };
-
-        let view_mode = resolve_view_mode(args.view, &config);
-        let speed = if args.speed != 200 {
-            args.speed
         } else {
-            config.playback.speed
-        };
-        let autoplay = args.autoplay || config.playback.autoplay;
+            let built = if let Some(result) = pending_diff.take() {
+                result
+            } else {
+                match build_diff_from_input_mode(&input_mode, &config, &args) {
+                    Ok(Some(result)) => result,
+                    Ok(None) => {
+                        exit_message = empty_message;
+                        break;
+                    }
+                    Err(error) => {
+                        restore_terminal(&mut terminal)?;
+                        return Err(error);
+                    }
+                }
+            };
 
-        let mut app = App::new(built.multi_diff, view_mode, speed, autoplay, built.branch);
-        if let (InputMode::JjRevision { rev }, Some(repo_root)) =
-            (&input_mode, built.workspace_root.as_ref())
-        {
-            app.set_jj_watch_target(repo_root.clone(), rev.clone());
-        }
+            let view_mode = resolve_view_mode(args.view, &config);
+            let speed = if args.speed != 200 {
+                args.speed
+            } else {
+                config.playback.speed
+            };
+            let autoplay = args.autoplay || config.playback.autoplay;
+
+            let mut app = App::new(built.multi_diff, view_mode, speed, autoplay, built.branch);
+            if let (InputMode::JjRevision { rev }, Some(repo_root)) =
+                (&input_mode, built.workspace_root.as_ref())
+            {
+                app.set_jj_watch_target(repo_root.clone(), rev.clone());
+            }
+            if let Some(picker) = image_picker.as_ref() {
+                app.set_image_picker(picker.clone());
+            }
+            app.no_changes_message = empty_message.clone();
+            apply_config_to_app(&mut app, &config, &args, light_mode);
+            if let Some((theme, name)) = &runtime_theme {
+                app.theme = theme.clone();
+                app.ui_theme_name = name.clone();
+            }
+            configure_review_state_for_app(
+                &mut app,
+                &config,
+                &args,
+                built.workspace_root,
+                &input_mode,
+                None,
+                None,
+                true,
+            )?;
+            app.start_content_loading();
+
+            app
+        };
         if let Some(picker) = image_picker.as_ref() {
             app.set_image_picker(picker.clone());
         }
-        app.no_changes_message = empty_message.clone();
-        apply_config_to_app(&mut app, &config, &args, light_mode);
         if let Some((theme, name)) = &runtime_theme {
             app.theme = theme.clone();
             app.ui_theme_name = name.clone();
         }
-        configure_review_state_for_app(
-            &mut app,
-            &config,
-            &args,
-            built.workspace_root,
-            &input_mode,
-            None,
-            None,
-            true,
-        )?;
-        app.start_content_loading();
 
         let exit = run_app(
             &mut terminal,
@@ -8042,6 +8124,7 @@ fn run() -> Result<()> {
             &args,
             control_last_applied_seq,
             &mut control_session_name,
+            prepared_control,
         )?;
         review_hook_warnings.extend(app.take_review_hook_warnings());
         runtime_theme = Some((app.theme.clone(), app.ui_theme_name.clone()));
@@ -8090,6 +8173,7 @@ fn run_app(
     args: &Args,
     control_last_applied_seq: u64,
     control_session_name: &mut Option<String>,
+    prepared_control: Option<Result<control::ControlSession, String>>,
 ) -> Result<AppExit> {
     let editor_config = &config.editor;
     let mut pending_event: Option<Event> = None;
@@ -8108,14 +8192,21 @@ fn run_app(
     let workspace = app
         .review_workspace_root()
         .map(PathBuf::from)
-        .or_else(|| current_review_workspace().ok())
+        .or_else(|| {
+            (!app.is_remote_session())
+                .then(|| current_review_workspace().ok())
+                .flatten()
+        })
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-    let mut control_session = match control::ControlSession::start(
-        &workspace,
-        &app.control_target_label(),
-        control_session_name.as_deref(),
-        control_last_applied_seq,
-    ) {
+    let mut control_session = match prepared_control.unwrap_or_else(|| {
+        control::ControlSession::start(
+            &workspace,
+            &app.control_target_label(),
+            control_session_name.as_deref(),
+            control_last_applied_seq,
+        )
+        .map_err(|error| error.to_string())
+    }) {
         Ok(session) => Some(session),
         Err(error) => {
             app.notify(ToastEvent::SelectionActionFailed(format!(

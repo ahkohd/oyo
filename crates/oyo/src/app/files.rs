@@ -86,12 +86,8 @@ impl App {
         if self.remote_refresh_rx.is_some() {
             return true;
         }
-        let (tx, rx) = std::sync::mpsc::channel();
-        self.remote_refresh_rx = Some(rx);
+        self.remote_refresh_rx = Some(crate::remote::loading::SnapshotWorker::start(url));
         self.remote_sync_generation = self.remote_sync_generation.wrapping_add(1);
-        std::thread::spawn(move || {
-            let _ = tx.send(crate::remote::build(&url).map_err(|e| e.to_string()));
-        });
         true
     }
 
