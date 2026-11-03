@@ -1722,7 +1722,7 @@ pub struct ReviewProviderConfig {
 #[derive(Debug, Deserialize, Clone, Default)]
 #[serde(default)]
 pub struct ReviewConfig {
-    pub incremental_review: bool,
+    pub incremental: bool,
     pub dir: Option<PathBuf>,
     pub providers: BTreeMap<String, ReviewProviderConfig>,
     pub hooks: Vec<ReviewHookConfig>,
@@ -2075,13 +2075,13 @@ mod tests {
 
     #[test]
     fn incremental_review_is_opt_in() {
-        assert!(!Config::default().review.incremental_review);
-        for source in ["", "[review]", "[review]\nincremental_review = false"] {
+        assert!(!Config::default().review.incremental);
+        for source in ["", "[review]", "[review]\nincremental = false"] {
             let config: Config = toml::from_str(source).unwrap();
-            assert!(!config.review.incremental_review);
+            assert!(!config.review.incremental);
         }
-        let config: Config = toml::from_str("[review]\nincremental_review = true").unwrap();
-        assert!(config.review.incremental_review);
+        let config: Config = toml::from_str("[review]\nincremental = true").unwrap();
+        assert!(config.review.incremental);
     }
 
     #[test]

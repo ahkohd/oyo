@@ -214,10 +214,10 @@ To start every saved review with it on, set it in your config:
 
 ```toml
 [review]
-incremental_review = true
+incremental = true
 ```
 
-If you previously enabled this under `[experimental]`, move `incremental_review` to `[review]`. The old setting is no longer read.
+If you previously enabled this under `[experimental]`, replace `[experimental].incremental_review` with `[review].incremental`. The old setting is no longer read.
 
 The command palette changes it for the current session only. It does not change your config, so Oyo goes back to your config setting next time it starts, or when you open another diff from history or `oy ctl`.
 

@@ -399,7 +399,7 @@ dir = ".oyo/reviews"
 | Key | Values | Default | What it does |
 | --- | --- | --- | --- |
 | `dir` | path | platform app data directory | Sets the base directory for review databases |
-| `incremental_review` | `true`, `false` | `false` | Starts saved reviews with reviewed files hidden. You can turn it on or off for a session from the command palette |
+| `incremental` | `true`, `false` | `false` | Starts saved reviews with reviewed files hidden. You can turn it on or off for a session from the command palette |
 
 Relative paths resolve from the current workspace root. This supports Git worktrees and jj workspaces.
 
@@ -413,10 +413,10 @@ Incremental review is off by default. To enable it for saved reviews:
 
 ```toml
 [review]
-incremental_review = true
+incremental = true
 ```
 
-If you previously enabled this under `[experimental]`, move `incremental_review` to `[review]`. The old setting is no longer read.
+If you previously enabled this under `[experimental]`, replace `[experimental].incremental_review` with `[review].incremental`. The old setting is no longer read.
 
 See [incremental review](./REVIEW.md#hide-reviewed-files) for how it works.
 
