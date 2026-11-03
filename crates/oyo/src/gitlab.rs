@@ -87,6 +87,19 @@ pub(crate) struct GlDiscussion {
 pub(crate) struct GitlabProvider;
 
 impl ReviewProviderAdapter for GitlabProvider {
+    fn remote_json(&self, host: &str, endpoint: &str) -> Result<serde_json::Value> {
+        let mut command = glab_api_command(host);
+        command.arg(endpoint);
+        Ok(serde_json::from_str(&crate::remote::run_command(
+            command, None,
+        )?)?)
+    }
+    fn remote_snapshot(
+        &self,
+        target: &crate::remote::RemoteTarget,
+    ) -> Result<crate::remote::RemoteSnapshot> {
+        crate::remote::gitlab_snapshot(self, target)
+    }
     fn find_pr(&self, remote: &ReviewRemote, target: Option<&str>) -> Result<ProviderPr> {
         glab_pr(remote, target)
     }

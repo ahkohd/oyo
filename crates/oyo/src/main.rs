@@ -14,6 +14,7 @@ mod input;
 mod jless;
 mod keybindings;
 mod markdown;
+mod remote;
 mod structured_preview;
 mod syntax;
 #[cfg(test)]
@@ -882,6 +883,9 @@ impl From<CliViewMode> for ViewMode {
 /// Represents input mode detected from arguments
 #[derive(Debug)]
 enum InputMode {
+    Remote {
+        url: String,
+    },
     /// Git external diff: path old-file old-hex old-mode new-file new-hex new-mode
     GitExternal {
         display_path: PathBuf,
@@ -894,17 +898,26 @@ enum InputMode {
         new_path: PathBuf,
     },
     /// Single file compared against HEAD
-    GitFile { path: PathBuf },
+    GitFile {
+        path: PathBuf,
+    },
     /// No args - try git uncommitted changes in current directory
     GitUncommitted,
     /// Staged changes (index vs HEAD)
     GitStaged,
     /// Git range
-    GitRange { from: String, to: String },
+    GitRange {
+        from: String,
+        to: String,
+    },
     /// jj revision or revset
-    JjRevision { rev: String },
+    JjRevision {
+        rev: String,
+    },
     /// One file in a non-colocated jj workspace
-    JjFile { path: PathBuf },
+    JjFile {
+        path: PathBuf,
+    },
     /// No valid input
     None,
 }
@@ -964,6 +977,11 @@ fn detect_input_mode(paths: &[PathBuf]) -> InputMode {
 }
 
 fn detect_input_mode_in(paths: &[PathBuf], cwd: &Path) -> InputMode {
+    if paths.len() == 1 && paths[0].to_string_lossy().starts_with("https://") {
+        return InputMode::Remote {
+            url: paths[0].to_string_lossy().into_owned(),
+        };
+    }
     if paths.len() == 7 || paths.len() == 9 {
         // Git external diff format
         let display_path = if paths.len() == 9 {
@@ -1309,7 +1327,10 @@ fn current_editor_target(app: &mut App, needs_line: bool) -> Result<Option<Edito
         EditorSide::Old => FileSide::Old,
         EditorSide::New => FileSide::New,
     };
-    if let Some(path) = app.multi_diff.existing_source_path(file_index, file_side) {
+    if let Some(path) = (!app.is_remote_session())
+        .then(|| app.multi_diff.existing_source_path(file_index, file_side))
+        .flatten()
+    {
         return Ok(Some(EditorTarget {
             path,
             line,
@@ -2748,6 +2769,11 @@ fn review_input_mode(revision: Option<&str>, args: &Args) -> Result<InputMode> {
     let cwd = std::env::current_dir().unwrap_or_default();
     if let Some(revision) = revision {
         let revision = revision.trim();
+        if revision.starts_with("https://") {
+            return Ok(InputMode::Remote {
+                url: revision.to_owned(),
+            });
+        }
         if is_jj_repo(&cwd) {
             let revision = normalize_jj_revision(revision);
             let rev =
@@ -2796,6 +2822,7 @@ fn review_input_mode(revision: Option<&str>, args: &Args) -> Result<InputMode> {
 
 fn basic_review_target_metadata(label: impl Into<String>, vcs: &str) -> ReviewTargetMetadata {
     ReviewTargetMetadata {
+        remote_snapshot: None,
         label: label.into(),
         vcs: vcs.to_string(),
         jj_change_id: None,
@@ -2945,6 +2972,12 @@ fn git_target_metadata_for_input_mode(input_mode: &InputMode) -> ReviewTargetMet
 
 fn review_target_metadata_for_input_mode(input_mode: &InputMode) -> ReviewTargetMetadata {
     match input_mode {
+        InputMode::Remote { url } => basic_review_target_metadata(
+            remote::RemoteTarget::parse(url)
+                .map(|target| target.canonical_url())
+                .unwrap_or_else(|_| url.clone()),
+            "remote",
+        ),
         InputMode::JjRevision { rev } => {
             let label = rev.clone();
             jj_target_metadata(&label, rev)
@@ -3008,7 +3041,15 @@ fn configure_review_state_for_app(
     create: bool,
 ) -> Result<()> {
     apply_review_storage_to_app(app, config, args, workspace_root);
-    let local_metadata = review_target_metadata_for_input_mode(input_mode);
+    let mut local_metadata = review_target_metadata_for_input_mode(input_mode);
+    local_metadata.remote_snapshot = app.multi_diff.remote_snapshot.clone();
+    if let Some(target) = local_metadata
+        .remote_snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot["target"].as_str())
+    {
+        local_metadata.label = target.to_owned();
+    }
     let target_metadata = pr
         .map(|pr| review_pr_target_metadata(pr, Some(&local_metadata)))
         .unwrap_or(local_metadata);
@@ -3026,7 +3067,7 @@ fn configure_review_state_for_app(
     } else {
         app.load_review_mode();
     }
-    if pr.is_some() {
+    if pr.is_some() || matches!(input_mode, InputMode::Remote { .. }) {
         app.set_review_target_metadata(Some(target_metadata.clone()));
     }
     if let InputMode::JjRevision { rev } = input_mode {
@@ -3053,6 +3094,9 @@ fn configure_review_state_for_app(
 }
 
 fn should_load_saved_review_fallback(input_mode: &InputMode) -> bool {
+    if matches!(input_mode, InputMode::Remote { .. }) {
+        return false;
+    }
     !matches!(input_mode, InputMode::JjRevision { rev } if rev == "@")
 }
 
@@ -3527,7 +3571,8 @@ fn review_log_entries_for_scope(
     let entries = review_log_entries(config, args)?
         .into_iter()
         .filter(|entry| {
-            current.as_deref() == entry["diffFingerprint"].as_str()
+            review_log_entry_metadata(entry).is_some_and(|metadata| metadata.vcs == "remote")
+                || current.as_deref() == entry["diffFingerprint"].as_str()
                 || (!current_diff_only
                     && review_log_entry_metadata(entry)
                         .as_ref()
@@ -3842,10 +3887,31 @@ fn review_app_for_comment_target(
     args: &Args,
     target: Option<&str>,
 ) -> Result<App> {
-    let mut app = review_app_for_target(config, args, None, false)?;
     let Some(target) = target else {
-        return Ok(app);
+        return review_app_for_target(config, args, None, false);
     };
+    if target.starts_with("https://") {
+        return review_app_for_target(config, args, Some(target), false);
+    }
+    if let Some(fingerprint) = saved_review_fingerprint(config, args, target)? {
+        let remote = review_log_entries_for_scope(config, args)?
+            .into_iter()
+            .find(|entry| {
+                entry["diffFingerprint"].as_str() == Some(&fingerprint)
+                    && entry["target"]["vcs"].as_str() == Some("remote")
+            });
+        if let Some(entry) = remote {
+            let url = entry["target"]["label"]
+                .as_str()
+                .ok_or_else(|| anyhow!("Saved remote review has no target URL"))?;
+            let mut app = review_app_for_target(config, args, Some(url), false)?;
+            if !app.load_review_by_fingerprint(&fingerprint) {
+                anyhow::bail!("Could not load saved remote review {target}");
+            }
+            return Ok(app);
+        }
+    }
+    let mut app = review_app_for_target(config, args, None, false)?;
     if target == "@" {
         return review_app_for_target(config, args, Some("@"), false);
     }
@@ -5115,6 +5181,8 @@ pub(crate) fn usable_sync_pr_target(target: &str) -> Option<&str> {
 }
 
 trait ReviewProviderAdapter: Send + Sync {
+    fn remote_json(&self, host: &str, endpoint: &str) -> Result<serde_json::Value>;
+    fn remote_snapshot(&self, target: &remote::RemoteTarget) -> Result<remote::RemoteSnapshot>;
     fn find_pr(&self, remote: &ReviewRemote, target: Option<&str>) -> Result<ProviderPr>;
     fn whoami(&self, pr: &ProviderPr) -> Result<ProviderUser>;
     fn fetch_comments(&self, pr: ProviderPr, user: ProviderUser) -> Result<ReviewPullRemoteData>;
@@ -5128,6 +5196,14 @@ trait ReviewProviderAdapter: Send + Sync {
 struct GithubProvider;
 
 impl ReviewProviderAdapter for GithubProvider {
+    fn remote_json(&self, host: &str, endpoint: &str) -> Result<serde_json::Value> {
+        let mut command = ProcessCommand::new("gh");
+        command.args(["api", "--hostname", host, endpoint]);
+        Ok(serde_json::from_str(&remote::run_command(command, None)?)?)
+    }
+    fn remote_snapshot(&self, target: &remote::RemoteTarget) -> Result<remote::RemoteSnapshot> {
+        remote::github_snapshot(self, target)
+    }
     fn find_pr(&self, remote: &ReviewRemote, target: Option<&str>) -> Result<ProviderPr> {
         gh_pr(remote, target)
     }
@@ -6198,35 +6274,43 @@ fn handle_review_push_command(
 fn review_log_entries(config: &config::Config, args: &Args) -> Result<Vec<serde_json::Value>> {
     let workspace = current_review_workspace()?;
     let base = review_base_dir(config, args, Some(&workspace));
-    let root = base.join(review_hash(&workspace.to_string_lossy()));
-    let db_path = root.join("review.db");
-    if !db_path.exists() {
+    let local_root = base.join(review_hash(&workspace.to_string_lossy()));
+    if !base.exists() {
         return Ok(Vec::new());
     }
-    let conn = Connection::open(&db_path)?;
-    let mut stmt = conn.prepare(
-        "SELECT r.review_key, r.updated_at, r.target_json, COUNT(c.id)
-         FROM reviews r
-         LEFT JOIN comments c ON c.review_key = r.review_key
-         GROUP BY r.review_key, r.updated_at, r.target_json
-         ORDER BY r.updated_at DESC",
-    )?;
-    let rows = stmt.query_map([], |row| {
-        Ok(serde_json::json!({
-            "workspaceRoot": workspace.to_string_lossy().to_string(),
-            "reviewDir": root.to_string_lossy().to_string(),
-            "reviewDb": db_path.to_string_lossy().to_string(),
-            "diffFingerprint": row.get::<_, String>(0)?,
-            "reviewKey": row.get::<_, String>(0)?,
-            "updatedAt": row.get::<_, i64>(1)?.max(0) as u64,
-            "target": row.get::<_, Option<String>>(2)?.and_then(|json| serde_json::from_str::<ReviewTargetMetadata>(&json).ok()),
-            "commentCount": row.get::<_, i64>(3)?.max(0) as u64,
-        }))
-    })?;
     let mut entries = Vec::new();
-    for row in rows {
-        entries.push(row?);
+    for directory in fs::read_dir(&base)? {
+        let root = directory?.path();
+        let db_path = root.join("review.db");
+        if !db_path.is_file() {
+            continue;
+        }
+        let conn =
+            Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let mut stmt = conn.prepare(
+            "SELECT r.review_key, r.updated_at, r.target_json, COUNT(c.id)
+             FROM reviews r LEFT JOIN comments c ON c.review_key = r.review_key
+             GROUP BY r.review_key, r.updated_at, r.target_json ORDER BY r.updated_at DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let metadata = row.get::<_, Option<String>>(2)?.and_then(|json| serde_json::from_str::<ReviewTargetMetadata>(&json).ok());
+            let remote = metadata.as_ref().is_some_and(|metadata| metadata.vcs == "remote");
+            Ok((remote, serde_json::json!({
+                "workspaceRoot": if remote { None } else { Some(workspace.to_string_lossy().to_string()) },
+                "reviewDir": root.to_string_lossy(), "reviewDb": db_path.to_string_lossy(),
+                "diffFingerprint": row.get::<_, String>(0)?, "reviewKey": row.get::<_, String>(0)?,
+                "updatedAt": row.get::<_, i64>(1)?.max(0) as u64,
+                "target": metadata, "commentCount": row.get::<_, i64>(3)?.max(0) as u64,
+            })))
+        })?;
+        for row in rows {
+            let (remote, entry) = row?;
+            if remote || root == local_root {
+                entries.push(entry);
+            }
+        }
     }
+    entries.sort_by_key(|entry| std::cmp::Reverse(entry["updatedAt"].as_u64().unwrap_or(0)));
     Ok(entries)
 }
 
@@ -6290,6 +6374,7 @@ fn dedupe_review_log_entries(
 
 fn review_target_metadata_display_id(metadata: &ReviewTargetMetadata, fallback: &str) -> String {
     match metadata.vcs.as_str() {
+        "remote" => Some(metadata.label.clone()),
         "git" => metadata
             .git_head_commit
             .clone()
@@ -6308,6 +6393,7 @@ fn review_target_metadata_match_ids(
     fallback: &str,
 ) -> Vec<String> {
     let mut ids = match metadata.vcs.as_str() {
+        "remote" => vec![Some(metadata.label.clone())],
         "git" => vec![
             metadata.git_head_commit.clone(),
             metadata.git_base_commit.clone(),
@@ -7154,7 +7240,11 @@ fn build_diff_from_input_mode(
     config: &config::Config,
     args: &Args,
 ) -> Result<Option<BuiltDiff>> {
+    if let InputMode::Remote { url } = input_mode {
+        return remote::build(url).map(Some);
+    }
     let (mut multi_diff, git_branch, workspace_root) = match input_mode {
+        InputMode::Remote { .. } => unreachable!(),
         InputMode::GitExternal {
             display_path,
             old_file,
@@ -7855,9 +7945,9 @@ fn run_app(
     let mut mouse_scroll_runs = MouseScrollRuns::default();
     let mut review_sync_worker: Option<ReviewSyncWorker> = None;
     let mut review_sync_pull_stats: Option<ReviewPullStats> = None;
-    let mut review_pr_lookup_worker = app
-        .review_pull_request_lookup_needed()
-        .then(|| spawn_review_pr_lookup_worker(app.review_pull_request_lookup_target(None)));
+    let mut review_pr_lookup_worker = (!app.is_remote_session()
+        && app.review_pull_request_lookup_needed())
+    .then(|| spawn_review_pr_lookup_worker(app.review_pull_request_lookup_target(None)));
     let workspace = app
         .review_workspace_root()
         .map(PathBuf::from)
@@ -8690,6 +8780,13 @@ fn run_app(
         }
 
         if let Some(request) = app.take_review_sync_requested() {
+            if app.is_remote_session() {
+                app.notify(ToastEvent::SelectionActionFailed(
+                    "Provider comment sync is unavailable for remote URL sessions".to_owned(),
+                ));
+                needs_draw = true;
+                continue;
+            }
             match request.remote {
                 None => match review_remote_options() {
                     Ok(remotes) if remotes.is_empty() => app.notify(
@@ -8731,6 +8828,13 @@ fn run_app(
 
         if app.open_dashboard {
             app.open_dashboard = false;
+            if app.is_remote_session() {
+                app.notify(ToastEvent::SelectionActionFailed(
+                    "Commit history requires a local checkout".to_owned(),
+                ));
+                needs_draw = true;
+                continue;
+            }
             return Ok(AppExit::OpenDashboard);
         }
         if app.should_quit {
@@ -12242,6 +12346,7 @@ mod tests {
     #[test]
     fn review_log_dedupes_current_git_snapshots() {
         let current = ReviewTargetMetadata {
+            remote_snapshot: None,
             label: "feature".to_string(),
             vcs: "git".to_string(),
             jj_change_id: None,

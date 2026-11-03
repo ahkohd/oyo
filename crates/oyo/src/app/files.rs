@@ -62,6 +62,56 @@ fn open_url(url: &str) {
 }
 
 impl App {
+    pub(crate) fn is_remote_session(&self) -> bool {
+        self.review_live_diff().remote_snapshot.is_some()
+            || self
+                .review_target_metadata
+                .as_ref()
+                .is_some_and(|metadata| metadata.vcs == "remote")
+    }
+
+    fn start_remote_refresh(&mut self) -> bool {
+        let Some(url) = self
+            .review_target_metadata
+            .as_ref()
+            .filter(|m| m.vcs == "remote")
+            .map(|m| m.label.clone())
+        else {
+            return false;
+        };
+        if self.remote_refresh_rx.is_some() {
+            return true;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.remote_refresh_rx = Some(rx);
+        std::thread::spawn(move || {
+            let _ = tx.send(crate::remote::build(&url).map_err(|e| e.to_string()));
+        });
+        true
+    }
+
+    pub(crate) fn poll_remote_refresh(&mut self) -> bool {
+        let result = match self.remote_refresh_rx.as_ref().map(|rx| rx.try_recv()) {
+            Some(Ok(result)) => result,
+            Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
+                Err("Remote refresh worker stopped".to_owned())
+            }
+            _ => return false,
+        };
+        self.remote_refresh_rx = None;
+        match result {
+            Ok(built) => {
+                self.restore_live_diff_after_outdated_view();
+                self.replace_multi_diff(built.multi_diff);
+                self.refresh_remote_review_snapshot();
+            }
+            Err(error) => self.notify(ToastEvent::SelectionActionFailed(format!(
+                "Remote refresh failed: {error}"
+            ))),
+        }
+        true
+    }
+
     pub fn clear_preview_link_boxes(&mut self) {
         self.preview_link_boxes.clear();
     }
@@ -2166,6 +2216,9 @@ impl App {
     }
 
     fn disk_stamp_for_index(&self, idx: usize) -> FileDiskStamp {
+        if self.multi_diff.remote_snapshot.is_some() {
+            return FileDiskStamp::default();
+        }
         let Some(file) = self.multi_diff.files.get(idx) else {
             return FileDiskStamp::default();
         };
@@ -2430,6 +2483,9 @@ impl App {
 
     /// Refresh current file from disk
     pub fn refresh_current_file(&mut self) {
+        if self.start_remote_refresh() {
+            return;
+        }
         if self.multi_diff.file_count() == 0 {
             return;
         }
@@ -2538,6 +2594,9 @@ impl App {
 
     /// Refresh all files from the active VCS.
     pub fn refresh_all_files(&mut self) {
+        if self.start_remote_refresh() {
+            return;
+        }
         if let Some(target) = self.jj_watch_target.clone() {
             let working_copy_stamp = crate::jj_working_copy_stamp(&target.repo_root);
             if let Ok(refreshed) = crate::build_jj_diff(&target.repo_root, &target.revision, None) {
@@ -2629,7 +2688,7 @@ impl App {
         self.remap_file_indices_after_refresh(&old_paths);
         if let Some(request) = self
             .multi_diff
-            .take_pending_content_for(self.multi_diff.selected_index)
+            .take_pending_content_for_sync(self.multi_diff.selected_index)
         {
             let content = super::load_content_request_sync(request);
             self.multi_diff

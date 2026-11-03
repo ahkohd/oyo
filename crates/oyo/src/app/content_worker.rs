@@ -41,15 +41,40 @@ fn load_direct(source: &ContentSource) -> Option<Option<Vec<u8>>> {
             revision,
             path,
         } => Some(read_jj_file(repo_root, revision, path)),
-        ContentSource::GitObject { .. } => None,
+        ContentSource::GitObject { .. } | ContentSource::RemoteBlob { .. } => None,
     }
 }
 
 fn load_requests(
     generation: u64,
     requests: Vec<PendingFileContent>,
-    tx: &mpsc::Sender<ContentResponse>,
+    tx: &mpsc::SyncSender<ContentResponse>,
 ) {
+    if requests.iter().any(|r| {
+        matches!(r.old, ContentSource::RemoteBlob { .. })
+            || matches!(r.new, ContentSource::RemoteBlob { .. })
+    }) {
+        for request in requests {
+            let content = match crate::remote::load_pair(&request) {
+                Ok((old, new)) => MultiFileDiff::prepare_remote_file_content(old, new),
+                Err(error) => {
+                    MultiFileDiff::failed_file_content(&format!("Remote file unavailable: {error}"))
+                }
+            };
+            if tx
+                .send(ContentResponse {
+                    generation,
+                    file_index: request.file_index,
+                    identity: request,
+                    content,
+                })
+                .is_err()
+            {
+                break;
+            }
+        }
+        return;
+    }
     let mut bytes = vec![[None, None]; requests.len()];
     let mut git_groups: HashMap<PathBuf, Vec<(usize, usize, String)>> = HashMap::new();
     for (request_idx, request) in requests.iter().enumerate() {
@@ -96,7 +121,7 @@ fn load_requests(
 pub(crate) fn load_content_request_sync(
     request: PendingFileContent,
 ) -> oyo_core::multi::PreparedFileContent {
-    let (tx, rx) = mpsc::channel();
+    let (tx, rx) = mpsc::sync_channel(2);
     load_requests(0, vec![request], &tx);
     rx.recv()
         .expect("content loader must return one response")
@@ -119,7 +144,7 @@ impl App {
         let selected = self.multi_diff.selected_index;
         requests.sort_by_key(|request| usize::from(request.file_index != selected));
         let first = requests.remove(0);
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::sync_channel(2);
         thread::spawn(move || {
             load_requests(generation, vec![first], &tx);
             if !requests.is_empty() {
@@ -160,6 +185,14 @@ impl App {
             }
             if response.file_index == self.multi_diff.selected_index {
                 self.multi_diff.ensure_full_navigator(response.file_index);
+                if self.multi_diff.remote_snapshot.is_some()
+                    && !self.stepping
+                    && self.multi_diff.diff_status(response.file_index)
+                        == oyo_core::multi::DiffStatus::Ready
+                {
+                    self.multi_diff.current_navigator().goto_end();
+                    self.multi_diff.current_navigator().clear_active_change();
+                }
                 self.clear_fold_context_caches();
                 self.reset_current_max_line_width();
                 if let Some(cache) = self.syntax_caches.get_mut(response.file_index) {
@@ -170,6 +203,9 @@ impl App {
                 }
                 self.syntax_scope_cache = None;
                 let _ = self.queue_current_file_diff();
+            }
+            if self.multi_diff.remote_snapshot.is_some() {
+                self.repair_review_comments_after_diff_refresh();
             }
             self.mark_diff_changed();
         }
