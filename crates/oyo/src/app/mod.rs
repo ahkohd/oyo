@@ -38,6 +38,7 @@ mod palette;
 mod playback;
 pub(crate) mod review;
 mod review_queue;
+pub(crate) mod startup;
 pub(crate) use review_queue::ReviewedFilesExhausted;
 mod search;
 mod selection;
@@ -252,7 +253,7 @@ struct OutdatedDiffWorkerState {
     diff_refresh_restore_end: Option<usize>,
     diff_worker_tx: Option<mpsc::Sender<DiffRequest>>,
     diff_worker_rx: Option<mpsc::Receiver<DiffResponse>>,
-    content_worker_rx: Option<mpsc::Receiver<ContentResponse>>,
+    content_worker_rx: Option<content_worker::ContentWorker>,
     content_generation: u64,
     content_loading: FxHashMap<usize, oyo_core::multi::PendingFileContent>,
 }
@@ -739,8 +740,8 @@ pub struct App {
     /// Worker thread for diff computation
     diff_worker_tx: Option<mpsc::Sender<DiffRequest>>,
     diff_worker_rx: Option<mpsc::Receiver<DiffResponse>>,
-    content_worker_rx: Option<mpsc::Receiver<ContentResponse>>,
-    remote_refresh_rx: Option<mpsc::Receiver<Result<crate::BuiltDiff, String>>>,
+    content_worker_rx: Option<content_worker::ContentWorker>,
+    remote_refresh_rx: Option<crate::remote::loading::SnapshotWorker>,
     remote_sync_generation: u64,
 
     content_generation: u64,
@@ -3107,6 +3108,8 @@ impl App {
             || self.step_edge_hint.is_some()
             || self.hunk_edge_hint.is_some()
             || self.review_sync_status.is_some()
+            || self.content_worker_rx.is_some()
+            || self.remote_refresh_rx.is_some()
         {
             Duration::from_millis(100)
         } else {

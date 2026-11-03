@@ -1,3 +1,4 @@
+pub(crate) mod loading;
 mod trees;
 use crate::{
     provider_adapter, review_provider_for_host, BuiltDiff, ReviewProviderAdapter,
@@ -432,15 +433,20 @@ pub(crate) fn github_snapshot(
     let pr = adapter.remote_json(&target.host, &endpoint)?;
     let head = revision(&pr, "/head/sha")?;
     let base = revision(&pr, "/base/sha")?;
-    let comparison = adapter.remote_json(
-        &target.host,
-        &format!("repos/{}/compare/{base}...{head}", target.repo),
-    )?;
+    let context = loading::current();
+    let (comparison, files) = std::thread::scope(|scope| -> Result<_> {
+        let files = scope
+            .spawn(|| context.run(|| pages(adapter, &target.host, &format!("{endpoint}/files"))));
+        let comparison = adapter.remote_json(
+            &target.host,
+            &format!("repos/{}/compare/{base}...{head}", target.repo),
+        );
+        let files = files
+            .join()
+            .map_err(|_| anyhow!("Remote file-list worker stopped"))?;
+        Ok((comparison?, entries(files?, false)?))
+    })?;
     let before = revision(&comparison, "/merge_base_commit/sha")?;
-    let files = entries(
-        pages(adapter, &target.host, &format!("{endpoint}/files"))?,
-        false,
-    )?;
     verify_count(&pr, &files)?;
     let end = adapter.remote_json(&target.host, &endpoint)?;
     if end["head"]["sha"] != pr["head"]["sha"] || end["base"]["sha"] != pr["base"]["sha"] {
@@ -626,10 +632,11 @@ fn git_blob(
     for (index, component) in components.iter().enumerate() {
         let mut found = None;
         for page in 1..=1000 {
-            let value = adapter.remote_json(
-                host,
-                &format!("{prefix}repos/{repo}/git/trees/{tree}?per_page=100&page={page}"),
-            )?;
+            let endpoint =
+                format!("{prefix}repos/{repo}/git/trees/{tree}?per_page=100&page={page}");
+            let value = loading::tree_page(format!("{kind:?}:{host}:{endpoint}"), || {
+                adapter.remote_json(host, &endpoint)
+            })?;
             if matches!(kind, ReviewProviderKind::GitHub)
                 && value["truncated"].as_bool() == Some(true)
             {
@@ -773,7 +780,22 @@ fn load(source: &ContentSource) -> Result<Vec<u8>> {
 }
 
 pub(crate) fn load_pair(request: &PendingFileContent) -> Result<(Vec<u8>, Vec<u8>)> {
-    Ok((load(&request.old)?, load(&request.new)?))
+    if matches!(request.old, ContentSource::Empty) || matches!(request.new, ContentSource::Empty) {
+        return Ok((load(&request.old)?, load(&request.new)?));
+    }
+    if request.old == request.new {
+        let bytes = load(&request.old)?;
+        return Ok((bytes.clone(), bytes));
+    }
+    let context = loading::current();
+    std::thread::scope(|scope| {
+        let old = scope.spawn(|| context.run(|| load(&request.old)));
+        let new = load(&request.new);
+        let old = old
+            .join()
+            .map_err(|_| anyhow!("Remote content worker stopped"))?;
+        Ok((old?, new?))
+    })
 }
 
 pub(crate) fn run_command(
@@ -789,11 +811,15 @@ pub(crate) fn run_command(
         use std::os::unix::process::CommandExt;
         command.process_group(0);
     }
-    let mut child = command
+    if loading::cancelled() {
+        bail!("Remote loading cancelled");
+    }
+    let _permit = loading::TransportPermit::acquire()?;
+    command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
+        .stderr(Stdio::piped());
+    let mut child = loading::RegisteredChild::spawn(&mut command)?;
     if let Some(input) = input {
         if let Some(mut stdin) = child.stdin.take() {
             stdin.write_all(input.as_bytes())?;
@@ -822,19 +848,17 @@ pub(crate) fn run_command(
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut status = None;
     loop {
-        if status.is_none() {
+        if status.is_none() && output_reader.is_finished() && error_reader.is_finished() {
             status = child.try_wait()?;
         }
         if status.is_some() && output_reader.is_finished() && error_reader.is_finished() {
             break;
         }
-        if Instant::now() >= deadline {
-            #[cfg(unix)]
-            unsafe {
-                libc::kill(-(child.id() as i32), libc::SIGKILL);
+        if Instant::now() >= deadline || loading::cancelled() {
+            child.stop();
+            if loading::cancelled() {
+                bail!("Remote loading cancelled");
             }
-            let _ = child.kill();
-            let _ = child.wait();
             bail!("Remote request timed out after 30 seconds");
         }
         std::thread::sleep(Duration::from_millis(20));
