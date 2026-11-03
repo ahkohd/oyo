@@ -1732,7 +1732,7 @@ fn apply_config_to_app(app: &mut App, config: &config::Config, args: &Args, ligh
     app.strikethrough_deletions = config.ui.strikethrough_deletions;
     app.gutter_signs = config.ui.gutter_signs;
     app.toasts_enabled = config.ui.toasts.enabled;
-    app.toast_position = config.ui.toasts.position.toast_position();
+    app.toast_position = config.ui.toasts.position;
     app.preview_change_bars = config.ui.diff.preview_change_bars;
     app.diff_bg = config.ui.diff.bg;
     app.diff_fg = config.ui.diff.fg;
@@ -8763,14 +8763,10 @@ fn coalesce_key_repeats(
     Ok(count)
 }
 
-fn toast_mouse_button(kind: MouseEventKind) -> Option<ratatui_comfy_toaster::ToastMouseButton> {
+fn toast_mouse_button(kind: MouseEventKind) -> Option<crate::toasts::ToastMouseButton> {
     match kind {
-        MouseEventKind::Down(MouseButton::Left) => {
-            Some(ratatui_comfy_toaster::ToastMouseButton::Left)
-        }
-        MouseEventKind::Down(MouseButton::Right) => {
-            Some(ratatui_comfy_toaster::ToastMouseButton::Right)
-        }
+        MouseEventKind::Down(MouseButton::Left) => Some(crate::toasts::ToastMouseButton::Left),
+        MouseEventKind::Down(MouseButton::Right) => Some(crate::toasts::ToastMouseButton::Right),
         _ => None,
     }
 }

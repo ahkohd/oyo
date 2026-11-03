@@ -40,13 +40,12 @@ use crate::views::{
 use image::GenericImageView;
 use oyo_core::{multi::DiffStatus, multi::FileSide, ChangeKind, FileStatus, LineKind};
 use ratatui::{
-    buffer::Buffer,
     layout::{Alignment, Constraint, Direction, Layout, Margin, Rect, Size},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{
         Block, Borders, Clear, List, ListItem, ListState, Paragraph, Scrollbar,
-        ScrollbarOrientation, ScrollbarState, WidgetRef,
+        ScrollbarOrientation, ScrollbarState,
     },
     Frame,
 };
@@ -1356,189 +1355,13 @@ fn draw_status_mode_menu(frame: &mut Frame, app: &mut App) {
 }
 
 fn draw_toasts(frame: &mut Frame, app: &mut App) {
-    if !app.toasts_enabled {
-        return;
-    }
-    let area = frame.area();
-    app.toast_engine.set_area(area);
-    const MAX_AUTO_TOAST_WIDTH: u16 = 54;
-    if area.width < MAX_AUTO_TOAST_WIDTH {
-        // Auto-sized toasts can exceed a narrow frame. Render them into a
-        // buffer wide enough for the crate's maximum auto toast, then copy
-        // only the cells that are inside the real frame.
-        let scratch_area = Rect::new(area.x, area.y, MAX_AUTO_TOAST_WIDTH, area.height);
-        let mut scratch = Buffer::empty(scratch_area);
-        app.toast_engine.render_ref(area, &mut scratch);
-        let buffer = frame.buffer_mut();
-        for y in area.top()..area.bottom() {
-            for x in area.left()..area.right() {
-                if app.toast_engine.toast_index_at(x, y).is_some() {
-                    if let (Some(source), Some(destination)) =
-                        (scratch.cell((x, y)), buffer.cell_mut((x, y)))
-                    {
-                        *destination = source.clone();
-                    }
-                }
-            }
-        }
-    } else {
-        frame.render_widget(&app.toast_engine, area);
-    }
-    if !app.toast_engine.has_toast() {
-        return;
-    }
-
-    // The engine renders every queued toast but only exposes the front's rect,
-    // so reconstruct each toast's rect by probing which cells belong to a toast.
-    // Each is then re-skinned to match the app background, hug the message with a
-    // thin rounded frame, and color its severity icon.
-    let mut bounds: Vec<Option<(u16, u16, u16, u16)>> = vec![None; app.toast_engine.queue_len()];
-    for y in area.top()..area.bottom() {
-        for x in area.left()..area.right() {
-            if let Some(idx) = app.toast_engine.toast_index_at(x, y) {
-                match bounds.get_mut(idx) {
-                    Some(Some(b)) => {
-                        b.0 = b.0.min(x);
-                        b.1 = b.1.min(y);
-                        b.2 = b.2.max(x);
-                        b.3 = b.3.max(y);
-                    }
-                    Some(slot @ None) => *slot = Some((x, y, x, y)),
-                    None => {}
-                }
-            }
-        }
-    }
-
-    let border = app.theme.border_subtle;
-    // None => transparent (matches a theme with no background).
-    let bg = app.theme.background.unwrap_or(Color::Reset);
-    // The toaster crate hard-codes the message fg to white (fine on dark themes,
-    // unreadable on light ones), so repaint it with the theme's text color.
-    let text = app.theme.text;
-    let icons = [
-        ('✕', app.theme.error),
-        ('✓', app.theme.success),
-        ('▲', app.theme.warning),
-        ('●', app.theme.info),
-    ];
-    let mut rects: Vec<Rect> = bounds
-        .into_iter()
-        .flatten()
-        .map(|(x0, y0, x1, y1)| Rect {
-            x: x0,
-            y: y0,
-            width: x1 - x0 + 1,
-            height: y1 - y0 + 1,
-        })
-        .collect();
-    // The crate leaves a one-row gap between stacked toasts (not configurable).
-    // `rects` is in queue order: index 0 is the front (anchored so its click area
-    // stays correct); the rest are pulled flush against it, in the stack's
-    // direction (newer toasts sit above the front on bottom positions, below on
-    // top positions).
-    let upward = rects.len() >= 2 && rects[1].y < rects[0].y;
-    let buffer = frame.buffer_mut();
-    let mut boundary: Option<u16> = None;
-    for r in &mut rects {
-        let target_y = match boundary {
-            None => r.y,
-            Some(b) if upward => b.saturating_sub(r.height),
-            Some(b) => b,
-        };
-        if target_y != r.y {
-            let (from, to, w, h) = (r.y, target_y, r.width, r.height);
-            let rows: Vec<u16> = if to < from {
-                (0..h).collect()
-            } else {
-                (0..h).rev().collect()
-            };
-            for row in rows {
-                for x in r.x..r.x + w {
-                    if let Some(cell) = buffer.cell((x, from + row)).cloned() {
-                        if let Some(dst) = buffer.cell_mut((x, to + row)) {
-                            *dst = cell;
-                        }
-                    }
-                }
-            }
-            // Clear the rows the toast vacated.
-            let vacated = if to < from {
-                (to + h)..(from + h)
-            } else {
-                from..to
-            };
-            for row in vacated {
-                for x in r.x..r.x + w {
-                    if let Some(dst) = buffer.cell_mut((x, row)) {
-                        dst.set_symbol(" ").set_bg(bg);
-                    }
-                }
-            }
-            r.y = target_y;
-        }
-        boundary = Some(if upward { r.y } else { r.y + r.height });
-        reskin_toast(buffer, *r, border, bg, text, &icons);
-    }
-}
-
-/// Re-skin one crate-rendered toast in place: match `bg` (transparent when the
-/// theme has none), tuck a thin rounded border in over the crate's outer padding
-/// rows so the frame hugs the message, recolor the message text to `text`, and
-/// color the leading severity icon.
-fn reskin_toast(
-    buffer: &mut ratatui::buffer::Buffer,
-    ta: Rect,
-    border: Color,
-    bg: Color,
-    text: Color,
-    icons: &[(char, Color)],
-) {
-    if ta.width < 2 || ta.height < 3 {
-        return;
-    }
-    let right = ta.x + ta.width - 1;
-    let bottom = ta.y + ta.height - 1;
-    for y in ta.y..=bottom {
-        for x in ta.x..=right {
-            let Some(cell) = buffer.cell_mut((x, y)) else {
-                continue;
-            };
-            if y == ta.y || y == bottom {
-                let ch = if x == ta.x {
-                    if y == ta.y {
-                        "╭"
-                    } else {
-                        "╰"
-                    }
-                } else if x == right {
-                    if y == ta.y {
-                        "╮"
-                    } else {
-                        "╯"
-                    }
-                } else {
-                    "─"
-                };
-                cell.set_symbol(ch).set_fg(border).set_bg(bg);
-            } else if x == ta.x || x == right {
-                cell.set_symbol("│").set_fg(border).set_bg(bg);
-            } else {
-                cell.set_bg(bg).set_fg(text);
-            }
-        }
-    }
-    'find: for y in ta.y..=bottom {
-        for x in ta.x..=right {
-            if let Some(cell) = buffer.cell_mut((x, y)) {
-                for (glyph, color) in icons {
-                    if cell.symbol().chars().eq(std::iter::once(*glyph)) {
-                        cell.set_fg(*color);
-                        break 'find;
-                    }
-                }
-            }
-        }
+    if app.toasts_enabled {
+        app.toast_engine.render(
+            frame.area(),
+            frame.buffer_mut(),
+            app.toast_position,
+            &app.theme,
+        );
     }
 }
 

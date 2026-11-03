@@ -12,14 +12,12 @@ use crate::keybindings::Keybindings;
 use crate::structured_preview::StructuredPreviewState;
 use crate::syntax::{EnclosingScopeRange, SyntaxCache, SyntaxEngine};
 use crate::time_format::TimeFormatter;
-use crate::toasts::{toast_builder, ToastEvent};
+use crate::toasts::{ToastEvent, ToastInteraction, ToastMouseButton, Toasts};
 use oyo_core::{
     multi::DiffStatus, AnimationFrame, LineKind, MultiFileDiff, StepDirection, StepState, ViewLine,
 };
 use ratatui::{layout::Size, style::Color};
-use ratatui_comfy_toaster::{
-    ToastEngine, ToastEngineBuilder, ToastInteraction, ToastMouseButton, ToastPosition,
-};
+
 use ratatui_image::{picker::Picker, protocol::Protocol};
 use regex::Regex;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -631,9 +629,9 @@ pub struct App {
     /// Show toast notifications.
     pub toasts_enabled: bool,
     /// Toast notification engine.
-    pub(crate) toast_engine: ToastEngine<()>,
+    pub(crate) toast_engine: Toasts,
     /// Toast screen position.
-    pub(crate) toast_position: ToastPosition,
+    pub(crate) toast_position: crate::config::ToastPositionConfig,
     /// Show change bars in previews with source-line mapping.
     pub preview_change_bars: bool,
     /// Whether user has manually toggled the file panel (overrides auto-hide)
@@ -1384,10 +1382,8 @@ impl App {
             strikethrough_deletions: false,
             gutter_signs: true,
             toasts_enabled: true,
-            toast_engine: ToastEngineBuilder::new(ratatui::layout::Rect::default())
-                .max_queue_depth(3)
-                .build(),
-            toast_position: ToastPosition::BottomRight,
+            toast_engine: Toasts::default(),
+            toast_position: crate::config::ToastPositionConfig::BottomRight,
             preview_change_bars: true,
             file_panel_manually_set: false,
             show_path_popup: false,
@@ -1732,27 +1728,8 @@ impl App {
 
     pub(crate) fn notify(&mut self, event: ToastEvent) {
         if self.toasts_enabled {
-            let bg = self.toast_bg();
-            self.toast_engine
-                .show_toast(toast_builder(event, bg).position(self.toast_position));
+            self.toast_engine.push(event);
         }
-    }
-
-    /// Toast body background — the app/diff-viewer background so the toast reads
-    /// as part of the window. When the theme is transparent (no background), a
-    /// dark surface is derived from the theme's own text color so it harmonizes
-    /// with the palette instead of using an unrelated hardcoded color. The crate
-    /// draws the message in white, so light themes fall back to dark.
-    pub(crate) fn toast_bg(&self) -> Color {
-        if self.theme_is_light {
-            return Color::Rgb(0x26, 0x28, 0x2c);
-        }
-        self.theme
-            .background
-            .or(self.theme.background_panel)
-            .or(self.theme.background_element)
-            .or_else(|| crate::color::blend_colors(Color::Rgb(0, 0, 0), self.theme.text, 0.10))
-            .unwrap_or(Color::Rgb(0x1b, 0x1c, 0x1e))
     }
 
     pub(crate) fn toast_tick(&mut self) -> bool {
