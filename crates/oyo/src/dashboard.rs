@@ -33,6 +33,12 @@ pub enum DashboardSelection {
 }
 
 #[derive(Debug, Clone)]
+pub struct DashboardState {
+    selection: DashboardSelection,
+    pinned_from: Option<String>,
+}
+
+#[derive(Debug, Clone)]
 enum EntryKind {
     WorkingTree { files: usize },
     Staged { files: usize },
@@ -277,7 +283,7 @@ impl Dashboard {
         self.filter_cursor_last_blink = Instant::now();
     }
 
-    pub fn select_selection(&mut self, selection: &DashboardSelection) {
+    pub fn select_selection(&mut self, selection: &DashboardSelection) -> bool {
         let selected = match selection {
             DashboardSelection::Uncommitted => {
                 self.entry_position(|entry| matches!(entry.kind, EntryKind::WorkingTree { .. }))
@@ -299,14 +305,38 @@ impl Dashboard {
             }
         };
         let Some(selected) = selected else {
-            return;
+            return false;
         };
         self.selected = selected;
         self.scroll = 0;
         self.pinned_from = match selection {
-            DashboardSelection::Range { from, .. } => Some(from.clone()),
+            DashboardSelection::Range { from, .. } => match self.current_entry().map(|e| &e.kind) {
+                Some(EntryKind::Commit(commit)) if *from == default_range_from(commit) => None,
+                _ => Some(from.clone()),
+            },
             _ => None,
         };
+        true
+    }
+
+    pub fn state(&self) -> Option<DashboardState> {
+        Some(DashboardState {
+            selection: self.selection()?,
+            pinned_from: self.pinned_from.clone(),
+        })
+    }
+
+    pub fn restore_selection(
+        &mut self,
+        selection: &DashboardSelection,
+        previous: Option<&DashboardState>,
+    ) {
+        if !self.select_selection(selection) {
+            return;
+        }
+        if let Some(previous) = previous.filter(|state| &state.selection == selection) {
+            self.pinned_from = previous.pinned_from.clone();
+        }
     }
 
     fn entry_position(&self, matches: impl Fn(&DashboardEntry) -> bool) -> Option<usize> {
@@ -448,8 +478,7 @@ impl Dashboard {
                 let from = self
                     .pinned_from
                     .clone()
-                    .or_else(|| commit.parents.first().cloned())
-                    .unwrap_or_else(|| EMPTY_TREE_HASH.to_string());
+                    .unwrap_or_else(|| default_range_from(commit));
                 Some(DashboardSelection::Range { from, to })
             }
         }
@@ -1409,6 +1438,14 @@ fn truncate_text_from_start(text: &str, max_width: usize) -> String {
     format!("...{suffix}")
 }
 
+fn default_range_from(commit: &CommitEntry) -> String {
+    commit
+        .parents
+        .first()
+        .cloned()
+        .unwrap_or_else(|| EMPTY_TREE_HASH.to_string())
+}
+
 fn shorten_hash(hash: &str) -> String {
     hash.chars().take(8).collect()
 }
@@ -1593,13 +1630,17 @@ mod tests {
     }
 
     fn dashboard() -> Dashboard {
+        dashboard_with(vec![
+            commit("bbbbbbbb", "aaaaaaaa"),
+            commit("aaaaaaaa", EMPTY_TREE_HASH),
+        ])
+    }
+
+    fn dashboard_with(commits: Vec<CommitEntry>) -> Dashboard {
         Dashboard::new(DashboardConfig {
             repo_root: PathBuf::from("/tmp/oyo"),
             branch: Some("main".to_string()),
-            commits: vec![
-                commit("bbbbbbbb", "aaaaaaaa"),
-                commit("aaaaaaaa", EMPTY_TREE_HASH),
-            ],
+            commits,
             working_files: 1,
             staged_files: 1,
             theme: ResolvedTheme::default(),
@@ -1621,6 +1662,113 @@ mod tests {
         dashboard.select_selection(&selection);
 
         assert_eq!(dashboard.selection(), Some(selection));
+    }
+
+    #[test]
+    fn select_selection_restores_pinned_range_start() {
+        let mut dashboard = dashboard();
+        dashboard.select_selection(&DashboardSelection::Range {
+            from: EMPTY_TREE_HASH.to_string(),
+            to: "bbbbbbbb".to_string(),
+        });
+
+        assert_eq!(dashboard.pinned_from.as_deref(), Some(EMPTY_TREE_HASH));
+    }
+
+    #[test]
+    fn select_selection_does_not_pin_single_commit_base() {
+        let mut root = commit("aaaaaaaa", "");
+        root.parents.clear();
+        let mut dashboard = dashboard_with(vec![
+            commit("cccccccc", "bbbbbbbb"),
+            commit("bbbbbbbb", "aaaaaaaa"),
+            root,
+        ]);
+
+        dashboard.select_selection(&DashboardSelection::Range {
+            from: EMPTY_TREE_HASH.to_string(),
+            to: "aaaaaaaa".to_string(),
+        });
+        assert_eq!(dashboard.pinned_from, None);
+
+        dashboard.move_selection(-2, 10);
+        assert_eq!(
+            dashboard.selection(),
+            Some(DashboardSelection::Range {
+                from: "bbbbbbbb".to_string(),
+                to: "cccccccc".to_string(),
+            })
+        );
+
+        dashboard.select_selection(&DashboardSelection::Range {
+            from: "bbbbbbbb".to_string(),
+            to: "cccccccc".to_string(),
+        });
+        assert_eq!(dashboard.pinned_from, None);
+    }
+
+    #[test]
+    fn explicit_parent_pin_survives_history_round_trip() {
+        let commits = vec![
+            commit("dddddddd", "cccccccc"),
+            commit("cccccccc", "bbbbbbbb"),
+            commit("bbbbbbbb", "aaaaaaaa"),
+        ];
+        let mut first = dashboard_with(commits.clone());
+        first.select_selection(&DashboardSelection::Range {
+            from: "aaaaaaaa".to_string(),
+            to: "bbbbbbbb".to_string(),
+        });
+        first.toggle_pin();
+        first.move_selection(-1, 10);
+        let state = first.state().unwrap();
+        let mut reopened = dashboard_with(commits);
+        reopened.restore_selection(&state.selection, Some(&state));
+        reopened.move_selection(-1, 10);
+        assert_eq!(
+            reopened.selection(),
+            Some(DashboardSelection::Range {
+                from: "bbbbbbbb".to_string(),
+                to: "dddddddd".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn missing_history_target_keeps_working_tree_unpinned() {
+        let mut first = dashboard();
+        first.select_selection(&DashboardSelection::Range {
+            from: "aaaaaaaa".to_string(),
+            to: "bbbbbbbb".to_string(),
+        });
+        first.move_selection(1, 10);
+        first.toggle_pin();
+        first.move_selection(-1, 10);
+        let state = first.state().unwrap();
+        let mut reopened = dashboard_with(vec![commit("dddddddd", "cccccccc")]);
+        reopened.restore_selection(&state.selection, Some(&state));
+        assert_eq!(reopened.selection(), Some(DashboardSelection::Uncommitted));
+        reopened.move_selection(1, 10);
+        assert_eq!(reopened.selection(), Some(DashboardSelection::Staged));
+    }
+
+    #[test]
+    fn previous_pin_does_not_override_a_different_review() {
+        let mut first = dashboard();
+        first.select_selection(&DashboardSelection::Range {
+            from: EMPTY_TREE_HASH.to_string(),
+            to: "bbbbbbbb".to_string(),
+        });
+        let state = first.state().unwrap();
+        let mut reopened = dashboard();
+        reopened.restore_selection(
+            &DashboardSelection::Range {
+                from: "aaaaaaaa".to_string(),
+                to: "bbbbbbbb".to_string(),
+            },
+            Some(&state),
+        );
+        assert_eq!(reopened.pinned_from, None);
     }
 
     #[test]
