@@ -1,7 +1,6 @@
 use super::{
-    run_output, run_output_with_stdin, App, ProviderPr, ProviderUser, ReviewProviderAdapter,
-    ReviewProviderComment, ReviewProviderKind, ReviewProviderPushOps, ReviewPullRemoteData,
-    ReviewRemote,
+    App, ProviderPr, ProviderUser, ReviewProviderAdapter, ReviewProviderComment,
+    ReviewProviderKind, ReviewProviderPushOps, ReviewPullRemoteData, ReviewRemote,
 };
 use crate::app::review::{ReviewComment, ReviewRange, ReviewSide, ReviewTargetKind};
 use anyhow::{anyhow, Result};
@@ -50,6 +49,10 @@ pub(crate) struct GlAuthor {
 
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct GlPosition {
+    #[serde(default)]
+    pub(crate) head_sha: Option<String>,
+    #[serde(default)]
+    pub(crate) base_sha: Option<String>,
     #[serde(default)]
     pub(crate) new_path: Option<String>,
     #[serde(default)]
@@ -373,13 +376,26 @@ pub(crate) fn positioned_discussion_body(
         .start_commit
         .as_deref()
         .ok_or_else(|| anyhow!("GitLab merge request is missing diff refs."))?;
+    let old_path = anchor
+        .snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.target.as_ref())
+        .and_then(|target| target.remote_snapshot.as_ref())
+        .and_then(|snapshot| snapshot["files"].as_array())
+        .and_then(|files| {
+            files
+                .iter()
+                .find(|file| file["path"].as_str() == Some(anchor.file_path.as_str()))
+        })
+        .and_then(|file| file["oldPath"].as_str())
+        .unwrap_or(&anchor.file_path);
     let mut position = serde_json::json!({
         "position_type": "text",
         "base_sha": pr.base_commit,
         "start_sha": start_sha,
         "head_sha": pr.head_commit,
         "new_path": anchor.file_path,
-        "old_path": anchor.file_path,
+        "old_path": old_path,
     });
     if anchor.kind == ReviewTargetKind::Line {
         if let Some(range) = anchor.old_range {
@@ -494,13 +510,13 @@ fn inline_note_to_review_comment(
     } else if position.old_line.is_some() {
         ReviewSide::Old
     } else {
-        anyhow::bail!("GitLab note has no line.");
+        ReviewSide::New
     };
     let file = match side {
         ReviewSide::New => position.new_path.or_else(|| position.old_path.clone()),
         ReviewSide::Old => position.old_path.or(position.new_path),
     }
-    .ok_or_else(|| anyhow!("GitLab note has no path."))?;
+    .unwrap_or_default();
     let old_range = position.old_line.map(|line| ReviewRange {
         start: line,
         end: line,
@@ -516,7 +532,9 @@ fn inline_note_to_review_comment(
         "version": 1,
         "comments": [{
             "file": file,
-            "kind": "line",
+            "kind": if old_range.is_none() && new_range.is_none() { "file" } else { "line" },
+            "reviewedHead": position.head_sha,
+            "reviewedBase": position.base_sha,
             "side": side.as_str(),
             "oldRange": old_range,
             "newRange": new_range,
@@ -648,14 +666,14 @@ fn provider_link(
 fn glab_json<T: for<'de> Deserialize<'de>>(host: &str, endpoint: &str) -> Result<T> {
     let mut command = glab_api_command(host);
     command.arg(endpoint);
-    let data = run_output(command)?;
+    let data = crate::remote::run_command(command, None)?;
     serde_json::from_str(&data).map_err(|error| anyhow!(error))
 }
 
 fn glab_json_paginated<T: for<'de> Deserialize<'de>>(host: &str, endpoint: &str) -> Result<Vec<T>> {
     let mut command = glab_api_command(host);
     command.arg(endpoint).arg("--paginate");
-    let data = run_output(command)?;
+    let data = crate::remote::run_command(command, None)?;
     parse_paginated_json(&data)
 }
 
@@ -682,14 +700,14 @@ fn glab_api_json<T: for<'de> Deserialize<'de>>(
         .arg("Content-Type: application/json")
         .arg("--input")
         .arg("-");
-    let data = run_output_with_stdin(command, &body.to_string())?;
+    let data = crate::remote::run_command(command, Some(&body.to_string()))?;
     serde_json::from_str(&data).map_err(|error| anyhow!(error))
 }
 
 fn glab_api_no_output(host: &str, method: &str, endpoint: &str) -> Result<()> {
     let mut command = glab_api_command(host);
     command.arg("-X").arg(method).arg(endpoint).arg("--silent");
-    run_output(command).map(|_| ())
+    crate::remote::run_command(command, None).map(|_| ())
 }
 
 fn glab_api_command(host: &str) -> ProcessCommand {

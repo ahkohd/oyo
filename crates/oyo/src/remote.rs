@@ -37,6 +37,18 @@ pub(crate) struct RemoteSnapshot {
     before: String,
     after: String,
     files: Vec<FileEntry>,
+    review_version: Option<Value>,
+}
+
+impl RemoteSnapshot {
+    pub(crate) fn matches_descriptor(&self, descriptor: &Value) -> bool {
+        descriptor["target"].as_str() == Some(self.target.canonical_url().as_str())
+            && descriptor["beforeRepository"].as_str() == Some(self.before_repo.as_str())
+            && descriptor["afterRepository"].as_str() == Some(self.after_repo.as_str())
+            && descriptor["beforeRevision"].as_str() == Some(self.before.as_str())
+            && descriptor["afterRevision"].as_str() == Some(self.after.as_str())
+            && descriptor.get("reviewVersion") == self.review_version.as_ref()
+    }
 }
 
 fn validate_ref(value: &str) -> Result<()> {
@@ -113,6 +125,7 @@ fn github_revision_snapshot(
         RemoteTargetKind::Review(_) => unreachable!(),
     };
     Ok(RemoteSnapshot {
+        review_version: None,
         target: target.clone(),
         before_repo: target.repo.clone(),
         after_repo: target.repo.clone(),
@@ -194,6 +207,13 @@ impl RemoteTarget {
     }
 
     pub(crate) fn parse(url: &str) -> Result<Self> {
+        Self::parse_with_provider(url, None)
+    }
+
+    pub(crate) fn parse_with_provider(
+        url: &str,
+        known_provider: Option<ReviewProviderKind>,
+    ) -> Result<Self> {
         let rest = url
             .strip_prefix("https://")
             .ok_or_else(|| anyhow!("Remote URLs must use HTTPS"))?;
@@ -208,7 +228,8 @@ impl RemoteTarget {
             bail!("Invalid remote host");
         }
         let host = host.to_ascii_lowercase();
-        let provider = review_provider_for_host(&host)
+        let provider = known_provider
+            .or_else(|| review_provider_for_host(&host))
             .ok_or_else(|| anyhow!("Unsupported or unauthenticated review provider: {host}"))?;
         let path = path
             .split(['?', '#'])
@@ -426,6 +447,9 @@ pub(crate) fn github_snapshot(
         bail!("Review changed while loading; retry to load a consistent snapshot");
     }
     Ok(RemoteSnapshot {
+        review_version: Some(
+            serde_json::json!({"baseTip": pr["base"]["sha"], "head": pr["head"]["sha"]}),
+        ),
         target: RemoteTarget {
             repo: field(&pr, "/base/repo/full_name")?,
             ..target.clone()
@@ -486,6 +510,7 @@ pub(crate) fn gitlab_snapshot(
         .as_u64()
         .ok_or_else(|| anyhow!("Missing target project"))?;
     Ok(RemoteSnapshot {
+        review_version: Some(pr["diff_refs"].clone()),
         target: target.clone(),
         before_repo: destination.to_string(),
         after_repo: source.to_string(),
@@ -516,6 +541,9 @@ pub(crate) fn forgejo_snapshot(
         bail!("Pull request changed while loading; retry");
     }
     Ok(RemoteSnapshot {
+        review_version: Some(
+            serde_json::json!({"baseTip": pr["base"]["sha"], "head": pr["head"]["sha"]}),
+        ),
         target: RemoteTarget {
             repo: field(&pr, "/base/repo/full_name")?,
             ..target.clone()
@@ -571,6 +599,7 @@ pub(crate) fn build(url: &str) -> Result<BuiltDiff> {
         "version": 1, "target": target.canonical_url(), "provider": target.provider.id(), "host": target.host,
         "beforeRepository": snapshot.before_repo, "afterRepository": snapshot.after_repo,
         "beforeRevision": snapshot.before, "afterRevision": snapshot.after, "files": manifest,
+        "reviewVersion": snapshot.review_version,
     }));
     Ok(BuiltDiff {
         multi_diff,
