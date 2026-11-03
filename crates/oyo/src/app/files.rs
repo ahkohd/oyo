@@ -70,6 +70,10 @@ impl App {
                 .is_some_and(|metadata| metadata.vcs == "remote")
     }
 
+    pub(crate) fn remote_sync_generation(&self) -> u64 {
+        self.remote_sync_generation
+    }
+
     fn start_remote_refresh(&mut self) -> bool {
         let Some(url) = self
             .review_target_metadata
@@ -84,6 +88,7 @@ impl App {
         }
         let (tx, rx) = std::sync::mpsc::channel();
         self.remote_refresh_rx = Some(rx);
+        self.remote_sync_generation = self.remote_sync_generation.wrapping_add(1);
         std::thread::spawn(move || {
             let _ = tx.send(crate::remote::build(&url).map_err(|e| e.to_string()));
         });

@@ -291,19 +291,38 @@ fn review_comments_share_origin(left: &ReviewComment, right: &ReviewComment) -> 
 }
 
 fn review_comment_can_reply(comment: &ReviewComment) -> bool {
-    !comment.deleted
-        && !comment.outdated
-        && matches!(
-            comment.anchor.kind,
-            ReviewTargetKind::Line | ReviewTargetKind::Hunk
-        )
-        && comment.provider.as_ref().is_none_or(|provider| {
+    if comment.deleted {
+        return false;
+    }
+    match comment.provider.as_ref() {
+        Some(provider) => {
             matches!(provider.provider.as_str(), "github" | "gitlab" | "forgejo")
                 && provider.api_kind == "review"
                 && provider.thread_id.is_some()
                 && (!provider.comment_id.is_empty() || provider.in_reply_to_id.is_some())
                 && provider.sync_state != "deleted"
-        })
+        }
+        None => {
+            !comment.outdated
+                && matches!(
+                    comment.anchor.kind,
+                    ReviewTargetKind::Line | ReviewTargetKind::Hunk
+                )
+        }
+    }
+}
+
+pub(crate) fn new_review_local_key() -> String {
+    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    format!(
+        "{:x}-{:x}-{:x}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos(),
+        std::process::id(),
+        SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    )
 }
 
 fn is_false(value: &bool) -> bool {
@@ -315,6 +334,12 @@ const REVIEW_ANCHOR_CONTEXT_LINES: usize = 3;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ReviewComment {
+    #[serde(default)]
+    pub(crate) local_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) pending_snapshot: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) resolution_snapshot: Option<serde_json::Value>,
     pub(crate) id: u64,
     pub(crate) anchor: ReviewAnchor,
     pub(crate) body: String,
@@ -351,6 +376,10 @@ pub(crate) struct ReviewEditorState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ReviewReplyDraft {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) resolution_snapshot: Option<serde_json::Value>,
+    #[serde(default)]
+    pub(crate) outdated: bool,
     pub(crate) provider: Option<ReviewProviderComment>,
     pub(crate) in_reply_to: Option<u64>,
     pub(crate) resolved: bool,
@@ -1964,17 +1993,23 @@ impl App {
     }
 
     fn review_anchor_snapshot(&self, anchor: &ReviewAnchor) -> Option<ReviewAnchorSnapshot> {
+        self.review_anchor_snapshot_in_diff(anchor, &self.multi_diff)
+    }
+
+    fn review_anchor_snapshot_in_diff(
+        &self,
+        anchor: &ReviewAnchor,
+        diff: &oyo_core::MultiFileDiff,
+    ) -> Option<ReviewAnchorSnapshot> {
         let (side, line_number) = review_anchor_snapshot_position(anchor)?;
-        let (old_content, new_content) = self.multi_diff.file_contents(anchor.file_index)?;
+        let (old_content, new_content) = diff.file_contents(anchor.file_index)?;
         let content = match side {
             ReviewSide::Old => old_content,
             ReviewSide::New => new_content,
         };
         let (line_text, context_before, context_after) = line_with_context(content, line_number)?;
         let mut target = review_anchor_snapshot_target(self.review_target_metadata.as_ref());
-        if let (Some(target), Some(snapshot)) =
-            (target.as_mut(), self.multi_diff.remote_snapshot.as_ref())
-        {
+        if let (Some(target), Some(snapshot)) = (target.as_mut(), diff.remote_snapshot.as_ref()) {
             target.remote_snapshot = Some(snapshot.clone());
         }
         Some(ReviewAnchorSnapshot {
@@ -2970,7 +3005,8 @@ impl App {
                         edit_label: comment
                             .can_edit
                             .then(|| review_index_action_label("i", idx)),
-                        reply_label: None,
+                        reply_label: review_comment_can_reply(comment)
+                            .then(|| review_index_action_label("r", idx)),
                         resolve_label: Some(review_index_action_label("v", idx)),
                         delete_label: comment
                             .can_edit
@@ -3203,6 +3239,12 @@ impl App {
     }
 
     pub(crate) fn inline_review_reply_available(&mut self) -> bool {
+        if self.active_outdated_comments_view() {
+            return self
+                .outdated_comment_overlays()
+                .iter()
+                .any(|comment| comment.overlay.reply_label.is_some());
+        }
         !self.active_pr_comments_view()
             && !self.active_outdated_comments_view()
             && self.view_mode != ViewMode::Preview
@@ -3228,6 +3270,13 @@ impl App {
     }
 
     fn reply_to_review_comment_index(&mut self, idx: usize) -> bool {
+        if self.active_outdated_comments_view() {
+            return self
+                .outdated_comment_ids()
+                .get(idx)
+                .copied()
+                .is_some_and(|id| self.start_review_comment_reply(id));
+        }
         let Some(id) = self
             .review_comment_overlays_for_current_file()
             .get(idx)
@@ -3491,24 +3540,17 @@ impl App {
             .iter()
             .find(|comment| comment.id == parent_id && !comment.deleted)
             .ok_or_else(|| format!("No comment matches id {parent_id}."))?;
-        if parent.deleted
-            || parent.outdated
-            || !matches!(
-                parent.anchor.kind,
-                ReviewTargetKind::Line | ReviewTargetKind::Hunk
-            )
-        {
-            return Err(format!("Comment {parent_id} is not an inline comment."));
+        if !review_comment_can_reply(parent) {
+            return Err(format!("Comment {parent_id} cannot accept replies."));
         }
         let (provider, in_reply_to) = if let Some(parent_provider) = parent.provider.as_ref() {
             if !review_comment_can_reply(parent) {
                 return Err(format!("Comment {parent_id} cannot accept replies."));
             }
-            let remote_parent_id = if parent_provider.comment_id.is_empty() {
-                parent_provider.in_reply_to_id.clone().unwrap()
-            } else {
-                parent_provider.comment_id.clone()
-            };
+            let remote_parent_id = parent_provider
+                .in_reply_to_id
+                .clone()
+                .unwrap_or_else(|| parent_provider.comment_id.clone());
             let mut provider = parent_provider.clone();
             provider.in_reply_to_id = Some(remote_parent_id);
             provider.comment_id.clear();
@@ -3529,6 +3571,8 @@ impl App {
         Ok((
             anchor,
             ReviewReplyDraft {
+                resolution_snapshot: parent.resolution_snapshot.clone(),
+                outdated: parent.outdated,
                 provider,
                 in_reply_to,
                 resolved: parent.resolved,
@@ -3556,6 +3600,7 @@ impl App {
         parent_id: u64,
         body: String,
     ) -> Result<u64, String> {
+        let pending_snapshot = self.review_live_diff().remote_snapshot.clone();
         if body.trim().is_empty() {
             return Err("Comment body cannot be empty.".to_string());
         }
@@ -3564,13 +3609,16 @@ impl App {
         self.review_next_comment_id = self.review_next_comment_id.saturating_add(1);
         let now = now_ts();
         self.review_comments.push(ReviewComment {
+            local_key: crate::app::review::new_review_local_key(),
+            pending_snapshot: pending_snapshot.clone(),
+            resolution_snapshot: reply.resolution_snapshot,
             id,
             anchor,
             body,
             author: self.review_author.clone(),
             can_edit: true,
             resolved: reply.resolved,
-            outdated: false,
+            outdated: reply.outdated,
             reanchored: false,
             deleted: false,
             provider: reply.provider,
@@ -3939,6 +3987,7 @@ impl App {
     }
 
     fn set_review_comment_resolved_at(&mut self, idx: usize, resolved: bool) -> bool {
+        let pending_snapshot = self.review_live_diff().remote_snapshot.clone();
         let thread_key = self
             .review_comments
             .get(idx)
@@ -3964,6 +4013,7 @@ impl App {
             {
                 continue;
             }
+            comment.resolution_snapshot = pending_snapshot.clone();
             comment.resolved = resolved;
             if let Some(provider) = comment.provider.as_mut() {
                 provider.resolved_dirty = provider
@@ -6011,12 +6061,19 @@ impl App {
     }
 
     pub fn review_save_editor(&mut self) {
+        let pending_snapshot = self.review_live_diff().remote_snapshot.clone();
         self.review_mention_picker = None;
         self.clear_review_editor_toolbar();
         let Some(editor) = self.review_editor.take() else {
             return;
         };
-        if self.remote_anchor_snapshot_missing(&editor.anchor) {
+        if editor
+            .reply
+            .as_ref()
+            .and_then(|reply| reply.provider.as_ref())
+            .is_none()
+            && self.remote_anchor_snapshot_missing(&editor.anchor)
+        {
             self.review_editor = Some(editor);
             self.notify(ToastEvent::SelectionActionFailed(
                 "Cannot comment on unavailable remote text".to_owned(),
@@ -6062,6 +6119,7 @@ impl App {
         if let Some(idx) = existing_idx {
             let author = self.review_author.clone();
             if let Some(existing) = self.review_comments.get_mut(idx) {
+                existing.pending_snapshot = pending_snapshot.clone();
                 existing.body = body;
                 existing.anchor = editor.anchor;
                 if existing.author.is_none() {
@@ -6075,18 +6133,29 @@ impl App {
         } else {
             let id = self.review_next_comment_id;
             self.review_next_comment_id = self.review_next_comment_id.saturating_add(1);
-            let (provider, in_reply_to, resolved) = editor
+            let (provider, in_reply_to, resolved, outdated, resolution_snapshot) = editor
                 .reply
-                .map(|reply| (reply.provider, reply.in_reply_to, reply.resolved))
-                .unwrap_or((None, None, false));
+                .map(|reply| {
+                    (
+                        reply.provider,
+                        reply.in_reply_to,
+                        reply.resolved,
+                        reply.outdated,
+                        reply.resolution_snapshot,
+                    )
+                })
+                .unwrap_or((None, None, false, false, None));
             self.review_comments.push(ReviewComment {
+                local_key: crate::app::review::new_review_local_key(),
+                pending_snapshot: pending_snapshot.clone(),
+                resolution_snapshot,
                 id,
                 anchor: editor.anchor,
                 body,
                 author: self.review_author.clone(),
                 can_edit: true,
                 resolved,
-                outdated: false,
+                outdated,
                 reanchored: false,
                 deleted: false,
                 provider,
@@ -6318,11 +6387,13 @@ impl App {
             .is_some_and(|provider| {
                 provider.comment_id.is_empty() && provider.in_reply_to_id.is_some()
             });
-        if pending_reply {
+        if pending_reply && self.review_live_diff().remote_snapshot.is_none() {
             self.review_comments.remove(idx);
             return;
         }
         // Keep tombstones for concurrent persistence and removed-comment history.
+        self.review_comments[idx].pending_snapshot =
+            self.review_live_diff().remote_snapshot.clone();
         self.review_comments[idx].deleted = true;
         self.review_comments[idx].updated_at = bumped_ts(self.review_comments[idx].updated_at);
         if let Some(provider) = self.review_comments[idx].provider.as_mut() {
@@ -7979,7 +8050,74 @@ impl App {
         &self,
         data: &str,
     ) -> Result<Vec<ReviewComment>, String> {
-        self.parse_public_review_comments(data)
+        let raw: serde_json::Value = serde_json::from_str(data).map_err(|e| e.to_string())?;
+        let file: PublicReviewComments = serde_json::from_str(data).map_err(|e| e.to_string())?;
+        if file.version != 1 {
+            return Err("Unsupported comments JSON version".to_owned());
+        }
+        let mut comments = file
+            .comments
+            .into_iter()
+            .map(|item| {
+                self.public_comment_to_review_comment_in_diff(item, self.review_live_diff())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if let Some(current) = self.review_live_diff().remote_snapshot.as_ref() {
+            for (index, comment) in comments.iter_mut().enumerate() {
+                if comment.anchor.kind == ReviewTargetKind::PullRequest {
+                    continue;
+                }
+                let item = &raw["comments"][index];
+                let head = item["reviewedHead"].as_str();
+                let base = item["reviewedBase"].as_str();
+                let same_revision = head
+                    .is_some_and(|head| current["afterRevision"].as_str() == Some(head))
+                    && base.is_none_or(|base| current["beforeRevision"].as_str() == Some(base));
+                if same_revision && !comment.outdated {
+                    comment.anchor.snapshot = self
+                        .review_anchor_snapshot_in_diff(&comment.anchor, self.review_live_diff());
+                }
+                if comment.anchor.snapshot.is_none() {
+                    let mut original = current.clone();
+                    original["afterRevision"] = head
+                        .map(serde_json::Value::from)
+                        .unwrap_or(serde_json::Value::Null);
+                    if let Some(base) = base {
+                        original["beforeRevision"] = base.into();
+                    }
+                    let line = comment
+                        .anchor
+                        .new_range
+                        .or(comment.anchor.old_range)
+                        .map(|r| r.start)
+                        .unwrap_or(0);
+                    comment.anchor.snapshot = Some(ReviewAnchorSnapshot {
+                        side: comment
+                            .anchor
+                            .side
+                            .map(|s| s.as_str())
+                            .unwrap_or("new")
+                            .to_owned(),
+                        line_number: line,
+                        line_text: String::new(),
+                        context_before: Vec::new(),
+                        context_after: Vec::new(),
+                        target: Some(ReviewAnchorSnapshotTarget {
+                            vcs: "remote".to_owned(),
+                            remote_snapshot: Some(original),
+                            jj_change_id: None,
+                            jj_commit_id: None,
+                            git_base_commit: base.map(str::to_owned),
+                            git_head_commit: head.map(str::to_owned),
+                        }),
+                        old_file: None,
+                        new_file: None,
+                    });
+                    comment.outdated |= !same_revision || comment.anchor.file_index == usize::MAX;
+                }
+            }
+        }
+        Ok(comments)
     }
 
     fn parse_public_review_comments(&self, data: &str) -> Result<Vec<ReviewComment>, String> {
@@ -7998,6 +8136,14 @@ impl App {
         &self,
         item: PublicReviewComment,
     ) -> Result<ReviewComment, String> {
+        self.public_comment_to_review_comment_in_diff(item, &self.multi_diff)
+    }
+
+    fn public_comment_to_review_comment_in_diff(
+        &self,
+        item: PublicReviewComment,
+        diff: &oyo_core::MultiFileDiff,
+    ) -> Result<ReviewComment, String> {
         let kind = match item.kind.as_deref().unwrap_or("line") {
             "review" | "pr" | "pullRequest" => ReviewTargetKind::PullRequest,
             "file" => ReviewTargetKind::File,
@@ -8008,12 +8154,14 @@ impl App {
         let file_index = if kind == ReviewTargetKind::PullRequest {
             0
         } else {
-            self.multi_diff
-                .files
+            diff.files
                 .iter()
                 .position(|file| {
-                    file.display_name == item.file || file.path == Path::new(&item.file)
+                    file.display_name == item.file
+                        || file.path == Path::new(&item.file)
+                        || file.old_path.as_deref() == Some(Path::new(&item.file))
                 })
+                .or_else(|| item.provider.as_ref().map(|_| usize::MAX))
                 .ok_or_else(|| format!("No changed file matches {}", item.file))?
         };
         let side = match item.side.as_deref() {
@@ -8076,13 +8224,20 @@ impl App {
             self.fill_review_anchor_snapshot(&mut anchor);
         }
         Ok(ReviewComment {
+            local_key: crate::app::review::new_review_local_key(),
+            resolution_snapshot: None,
+            pending_snapshot: item
+                .provider
+                .is_none()
+                .then(|| self.review_live_diff().remote_snapshot.clone())
+                .flatten(),
             id: item.id.unwrap_or(0),
             anchor,
             body: item.body,
             author: item.author.or_else(|| self.review_author.clone()),
             can_edit: item.can_edit.unwrap_or(true),
             resolved: item.resolved,
-            outdated: item.outdated,
+            outdated: item.outdated || file_index == usize::MAX,
             reanchored: item.reanchored,
             deleted: item.deleted,
             provider: item.provider,
@@ -8194,6 +8349,7 @@ impl App {
     }
 
     pub fn edit_review_comment_from_cli(&mut self, id: u64, body: String) -> bool {
+        let pending_snapshot = self.review_live_diff().remote_snapshot.clone();
         let Some(comment) = self
             .review_comments
             .iter_mut()
@@ -8201,6 +8357,7 @@ impl App {
         else {
             return false;
         };
+        comment.pending_snapshot = pending_snapshot;
         comment.body = body;
         if let Some(provider) = comment.provider.as_mut() {
             provider.sync_state = "dirty".to_string();
@@ -8242,6 +8399,12 @@ impl App {
     }
 
     pub(crate) fn review_comments_for_sync(&mut self) -> Vec<ReviewComment> {
+        for comment in &mut self.review_comments {
+            if comment.local_key.is_empty() {
+                comment.local_key = new_review_local_key();
+            }
+        }
+        self.persist_review_session();
         let mut comments = self.review_comments.clone();
         let previous_file = self.multi_diff.selected_index;
         for comment in &mut comments {
@@ -8331,23 +8494,45 @@ impl App {
         comments
     }
 
-    pub(crate) fn mark_review_comment_synced(
+    pub(crate) fn apply_review_comment_receipt(
         &mut self,
-        id: u64,
-        provider: ReviewProviderComment,
+        submitted: &ReviewComment,
+        mut provider: ReviewProviderComment,
     ) -> bool {
-        let Some(idx) = self
+        let Some(index) = self
             .review_comments
             .iter()
-            .position(|comment| comment.id == id)
+            .position(|comment| comment.local_key == submitted.local_key)
         else {
             return false;
         };
-        if self.review_comments[idx].deleted {
-            self.review_comments.remove(idx);
+        let current = &mut self.review_comments[index];
+        if submitted
+            .provider
+            .as_ref()
+            .is_none_or(|provider| provider.comment_id.is_empty())
+            && current
+                .provider
+                .as_ref()
+                .is_some_and(|provider| !provider.comment_id.is_empty())
+        {
+            return false;
+        }
+        if submitted.deleted && current.deleted {
+            self.review_comments.remove(index);
         } else {
-            self.review_comments[idx].provider = Some(provider);
-            self.review_comments[idx].can_edit = true;
+            if current.deleted {
+                provider.sync_state = "deleted".to_owned();
+            } else if current.body != submitted.body {
+                provider.sync_state = "dirty".to_owned();
+            }
+            provider.resolved_dirty = provider
+                .thread_resolved
+                .is_some_and(|remote| remote != current.resolved);
+            if provider.sync_state == "clean" {
+                current.pending_snapshot = None;
+            }
+            current.provider = Some(provider);
         }
         self.touch_review_state();
         self.persist_review_session();
@@ -8385,6 +8570,9 @@ impl App {
             if let Some(provider) = comment.provider.as_mut() {
                 provider.thread_resolved = Some(resolved);
                 provider.resolved_dirty = comment.resolved != resolved;
+                if !provider.resolved_dirty {
+                    comment.resolution_snapshot = None;
+                }
             }
             changed.push(comment.id);
         }
@@ -8505,7 +8693,17 @@ impl App {
                     return id;
                 }
                 comment.id = id;
+                comment.local_key.clone_from(&existing.local_key);
+                if existing.anchor.snapshot.is_some() {
+                    comment
+                        .anchor
+                        .snapshot
+                        .clone_from(&existing.anchor.snapshot);
+                }
                 if local_resolution_change {
+                    comment
+                        .resolution_snapshot
+                        .clone_from(&existing.resolution_snapshot);
                     comment.resolved = existing.resolved;
                     if let Some(provider) = comment.provider.as_mut() {
                         provider.resolved_dirty = provider
@@ -8532,6 +8730,13 @@ impl App {
         let mut comments = self.parse_public_review_comments(data)?;
         for comment in &mut comments {
             self.ensure_remote_comment_snapshot(comment)?;
+            comment.pending_snapshot = self.review_live_diff().remote_snapshot.clone();
+            comment.resolution_snapshot = self.review_live_diff().remote_snapshot.clone();
+            if let Some(provider) = comment.provider.as_mut() {
+                provider.resolved_dirty = provider
+                    .thread_resolved
+                    .is_some_and(|remote| remote != comment.resolved);
+            }
         }
         let mut ids = Vec::new();
         for mut comment in comments.drain(..) {
@@ -8545,6 +8750,28 @@ impl App {
                 .iter_mut()
                 .find(|existing| existing.id == comment.id)
             {
+                comment.local_key = existing.local_key.clone();
+                comment.pending_snapshot = existing
+                    .pending_snapshot
+                    .clone()
+                    .or_else(|| comment.pending_snapshot.clone());
+                comment.resolution_snapshot = existing
+                    .resolution_snapshot
+                    .clone()
+                    .or_else(|| comment.resolution_snapshot.clone());
+                if let Some(provider) = existing.provider.as_ref() {
+                    let mut provider = provider.clone();
+                    if comment.body != existing.body {
+                        provider.sync_state = "dirty".to_owned();
+                    }
+                    if comment.deleted {
+                        provider.sync_state = "deleted".to_owned();
+                    }
+                    provider.resolved_dirty = provider
+                        .thread_resolved
+                        .is_some_and(|remote| remote != comment.resolved);
+                    comment.provider = Some(provider);
+                }
                 *existing = comment;
             } else {
                 self.review_comments.push(comment);
@@ -8604,6 +8831,9 @@ impl App {
         for (index, file) in self.multi_diff.files.iter().enumerate() {
             paths.insert(file.display_name.clone(), index);
             paths.insert(file.path.to_string_lossy().to_string(), index);
+            if let Some(old_path) = file.old_path.as_ref() {
+                paths.insert(old_path.to_string_lossy().to_string(), index);
+            }
         }
         paths
     }
@@ -8664,6 +8894,27 @@ impl App {
             self.review_comments[comment_idx].outdated = true;
             return true;
         };
+        if snapshot.old_file.is_none() && snapshot.new_file.is_none() {
+            if let Some(original) = snapshot
+                .target
+                .as_ref()
+                .and_then(|target| target.remote_snapshot.as_ref())
+            {
+                if self.multi_diff.remote_snapshot.as_ref() == Some(original)
+                    && !self.review_comments[comment_idx].outdated
+                {
+                    let anchor = &self.review_comments[comment_idx].anchor;
+                    if let Some(captured) = self.review_anchor_snapshot(anchor) {
+                        self.review_comments[comment_idx].anchor.snapshot = Some(captured);
+                        return true;
+                    }
+                    return false;
+                }
+                let changed = !self.review_comments[comment_idx].outdated;
+                self.review_comments[comment_idx].outdated = true;
+                return changed;
+            }
+        }
         let Some(side) = snapshot_review_side(&snapshot) else {
             return false;
         };
@@ -9434,6 +9685,9 @@ mod tests {
 
     fn line_comment() -> ReviewComment {
         ReviewComment {
+            local_key: crate::app::review::new_review_local_key(),
+            pending_snapshot: None,
+            resolution_snapshot: None,
             id: 1,
             anchor: ReviewAnchor {
                 file_index: 0,
@@ -9459,6 +9713,56 @@ mod tests {
             created_at: 1,
             updated_at: 1,
         }
+    }
+
+    #[test]
+    fn publication_receipt_preserves_a_newer_edit_and_deletion() {
+        let mut app = test_app();
+        let submitted = line_comment();
+        app.review_comments.push(submitted.clone());
+        app.review_comments[0].body = "newer text".to_owned();
+        let provider = provider_link("clean");
+        assert!(app.apply_review_comment_receipt(&submitted, provider));
+        assert_eq!(app.review_comments[0].body, "newer text");
+        assert_eq!(
+            app.review_comments[0].provider.as_ref().unwrap().sync_state,
+            "dirty"
+        );
+        let submitted = app.review_comments[0].clone();
+        app.review_comments[0].deleted = true;
+        assert!(app.apply_review_comment_receipt(&submitted, provider_link("clean")));
+        assert!(app.review_comments[0].deleted);
+        assert_eq!(
+            app.review_comments[0].provider.as_ref().unwrap().sync_state,
+            "deleted"
+        );
+    }
+
+    #[test]
+    fn provider_reply_to_unlocated_outdated_comment_uses_root_identity() {
+        let mut app = test_app();
+        let mut parent = line_comment();
+        parent.anchor.file_index = usize::MAX;
+        parent.anchor.kind = ReviewTargetKind::File;
+        parent.outdated = true;
+        parent.provider = Some(provider_link("clean"));
+        parent.provider.as_mut().unwrap().in_reply_to_id = Some("original-root".to_owned());
+        parent.provider.as_mut().unwrap().thread_id = Some("thread-1".to_owned());
+        app.review_comments.push(parent);
+        app.review_next_comment_id = 2;
+        let id = app
+            .add_review_reply_from_cli(1, "reply without a display anchor".to_owned())
+            .unwrap();
+        let reply = app
+            .review_comments
+            .iter()
+            .find(|comment| comment.id == id)
+            .unwrap();
+        assert!(reply.outdated);
+        assert_eq!(
+            reply.provider.as_ref().unwrap().in_reply_to_id.as_deref(),
+            Some("original-root")
+        );
     }
 
     #[test]
@@ -11187,7 +11491,13 @@ mod tests {
         let mut pushed_parent = provider_link("clean");
         pushed_parent.thread_id = None;
         pushed_parent.thread_resolved = None;
-        assert!(app.mark_review_comment_synced(1, pushed_parent));
+        let submitted = app
+            .review_comments
+            .iter()
+            .find(|comment| comment.id == 1)
+            .unwrap()
+            .clone();
+        assert!(app.apply_review_comment_receipt(&submitted, pushed_parent));
         let overlays = app.review_comment_overlays_for_current_file();
         assert!(!overlays[0].anchor_key.starts_with("reply|"));
         assert!(overlays[1].anchor_key.starts_with("reply|"));
@@ -11372,7 +11682,13 @@ mod tests {
         clean.in_reply_to_id = Some("10".to_string());
         clean.thread_id = Some("thread-1".to_string());
         clean.thread_resolved = Some(false);
-        assert!(app.mark_review_comment_synced(reply_id, clean));
+        let submitted = app
+            .review_comments
+            .iter()
+            .find(|comment| comment.id == reply_id)
+            .unwrap()
+            .clone();
+        assert!(app.apply_review_comment_receipt(&submitted, clean));
 
         let mut incoming = app
             .review_comments
@@ -11929,6 +12245,9 @@ mod tests {
     fn review_export_json_contains_comments() {
         let mut app = test_app();
         app.review_comments.push(ReviewComment {
+            local_key: crate::app::review::new_review_local_key(),
+            pending_snapshot: None,
+            resolution_snapshot: None,
             id: 7,
             anchor: ReviewAnchor {
                 file_index: 0,

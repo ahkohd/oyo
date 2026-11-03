@@ -1,7 +1,6 @@
 use super::{
-    run_output_with_stdin, App, ProviderPr, ProviderUser, ReviewProviderAdapter,
-    ReviewProviderComment, ReviewProviderKind, ReviewProviderPushOps, ReviewPullRemoteData,
-    ReviewRemote,
+    App, ProviderPr, ProviderUser, ReviewProviderAdapter, ReviewProviderComment,
+    ReviewProviderKind, ReviewProviderPushOps, ReviewPullRemoteData, ReviewRemote,
 };
 use crate::app::review::{ReviewComment, ReviewRange, ReviewSide, ReviewTargetKind};
 use anyhow::{anyhow, Context, Result};
@@ -51,6 +50,10 @@ pub(crate) struct FjReview {
 
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct FjReviewComment {
+    #[serde(default)]
+    pub(crate) commit_id: Option<String>,
+    #[serde(default)]
+    pub(crate) original_commit_id: Option<String>,
     pub(crate) id: u64,
     pub(crate) body: String,
     pub(crate) user: FjUser,
@@ -84,8 +87,8 @@ pub(crate) struct ForgejoProvider;
 
 impl ReviewProviderAdapter for ForgejoProvider {
     fn remote_json(&self, host: &str, endpoint: &str) -> Result<serde_json::Value> {
-        Ok(serde_json::from_str(&cb_output_bounded(
-            host, "GET", endpoint, None, true,
+        Ok(serde_json::from_str(&cb_output(
+            host, "GET", endpoint, None,
         )?)?)
     }
     fn remote_snapshot(
@@ -141,11 +144,13 @@ impl ReviewProviderPushOps for ForgejoPushOps<'_> {
         provider: &ReviewProviderComment,
         body: &str,
     ) -> Result<ReviewProviderComment> {
-        let review_id = review_id(provider)?;
-        let parent_id = provider
-            .in_reply_to_id
-            .as_deref()
-            .ok_or_else(|| anyhow!("Forgejo reply is missing a parent comment id."))?;
+        let review_id =
+            review_id(provider).map_err(crate::remote_sync::WriteFailure::NotAttempted)?;
+        let parent_id = provider.in_reply_to_id.as_deref().ok_or_else(|| {
+            crate::remote_sync::WriteFailure::NotAttempted(anyhow!(
+                "Forgejo reply is missing a parent comment id."
+            ))
+        })?;
         let parent: FjReviewComment = cb_json(
             &self.pr.host,
             "GET",
@@ -154,7 +159,8 @@ impl ReviewProviderPushOps for ForgejoPushOps<'_> {
                 self.pr.repo, self.pr.number
             ),
             None,
-        )?;
+        )
+        .map_err(crate::remote_sync::WriteFailure::NotAttempted)?;
         let comment = create_review_comment(
             self.pr,
             review_id,
@@ -412,13 +418,13 @@ fn inline_comment_to_oyo(
     } else if old_range.is_some() {
         ReviewSide::Old
     } else {
-        anyhow::bail!("Forgejo review comment {} has no position.", comment.id);
+        ReviewSide::New
     };
     let data = serde_json::json!({
         "version": 1,
         "comments": [{
             "file": comment.path,
-            "kind": "line",
+            "kind": if old_range.is_none() && new_range.is_none() { "file" } else { "line" },
             "side": side.as_str(),
             "oldRange": old_range,
             "newRange": new_range,
@@ -436,6 +442,7 @@ fn inline_comment_to_oyo(
             "updatedAt": parse_time(&comment.updated_at),
             "resolved": resolved,
             "outdated": stale,
+            "reviewedHead": if stale { comment.original_commit_id.as_deref() } else { comment.commit_id.as_deref() },
             "body": comment.body
         }]
     });
@@ -520,11 +527,16 @@ fn create_inline_comment(
             pr.repo, pr.number, review.id
         ),
         None,
-    )?;
+    )
+    .map_err(crate::remote_sync::WriteFailure::MayHaveSucceeded)?;
     let created = comments
         .into_iter()
         .max_by_key(|comment| comment.id)
-        .ok_or_else(|| anyhow!("Forgejo returned no created review comment."))?;
+        .ok_or_else(|| {
+            crate::remote_sync::WriteFailure::MayHaveSucceeded(anyhow!(
+                "Forgejo returned no created review comment."
+            ))
+        })?;
     let thread_id = format!("review:{}:{}", review.id, created.id);
     Ok(provider_link(
         pr,
@@ -551,7 +563,10 @@ fn create_review_comment(
     } else if old_position > 0 {
         data["old_position"] = serde_json::json!(old_position);
     } else {
-        anyhow::bail!("Forgejo review comment has no position.");
+        return Err(crate::remote_sync::WriteFailure::NotAttempted(anyhow!(
+            "Forgejo review comment has no position."
+        ))
+        .into());
     }
     cb_json(
         &pr.host,
@@ -726,16 +741,6 @@ fn cb_output(
     endpoint: &str,
     body: Option<serde_json::Value>,
 ) -> Result<String> {
-    cb_output_bounded(host, method, endpoint, body, false)
-}
-
-fn cb_output_bounded(
-    host: &str,
-    method: &str,
-    endpoint: &str,
-    body: Option<serde_json::Value>,
-    bounded: bool,
-) -> Result<String> {
     let token = forgejo_token(host)?;
     let mut config = format!(
         "silent\nshow-error\nfail-with-body\nurl = \"{}\"\nrequest = \"{}\"\nheader = \"Accept: application/json\"\nheader = \"Authorization: token {}\"\n",
@@ -752,11 +757,7 @@ fn cb_output_bounded(
     }
     let mut command = ProcessCommand::new("curl");
     command.arg("--config").arg("-");
-    if bounded {
-        crate::remote::run_command(command, Some(&config))
-    } else {
-        run_output_with_stdin(command, &config)
-    }
+    crate::remote::run_command(command, Some(&config))
 }
 
 pub(crate) fn has_forgejo_token(host: &str) -> bool {
@@ -808,17 +809,23 @@ fn curl_config_escape(value: &str) -> String {
 
 fn cb_pages<T: DeserializeOwned>(host: &str, endpoint: &str) -> Result<Vec<T>> {
     let mut items = Vec::new();
-    for page in 1.. {
+    let mut seen = std::collections::BTreeSet::new();
+    for page in 1..=1000 {
         let separator = if endpoint.contains('?') { '&' } else { '?' };
         let path = format!("{endpoint}{separator}page={page}&limit={PAGE_SIZE}");
-        let mut batch: Vec<T> = cb_json(host, "GET", &path, None)?;
-        let done = batch.len() < PAGE_SIZE;
-        items.append(&mut batch);
-        if done {
-            break;
+        let batch: Vec<serde_json::Value> = cb_json(host, "GET", &path, None)?;
+        if batch.is_empty() {
+            return Ok(items);
+        }
+        for value in batch {
+            let identity = value.get("id").unwrap_or(&value).to_string();
+            if !seen.insert(identity) {
+                anyhow::bail!("Forgejo pagination repeated an item; refusing an incomplete list");
+            }
+            items.push(serde_json::from_value(value)?);
         }
     }
-    Ok(items)
+    anyhow::bail!("Forgejo pagination limit reached; refusing an incomplete list")
 }
 
 fn can_delete_empty_review(review: &FjReview) -> bool {

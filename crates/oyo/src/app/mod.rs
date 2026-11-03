@@ -741,6 +741,7 @@ pub struct App {
     diff_worker_rx: Option<mpsc::Receiver<DiffResponse>>,
     content_worker_rx: Option<mpsc::Receiver<ContentResponse>>,
     remote_refresh_rx: Option<mpsc::Receiver<Result<crate::BuiltDiff, String>>>,
+    remote_sync_generation: u64,
 
     content_generation: u64,
     content_loading: FxHashMap<usize, oyo_core::multi::PendingFileContent>,
@@ -1443,6 +1444,7 @@ impl App {
             diff_worker_rx: None,
             content_worker_rx: None,
             remote_refresh_rx: None,
+            remote_sync_generation: 0,
             content_generation: 0,
             content_loading: FxHashMap::default(),
             blame_extra_rows: None,

@@ -258,6 +258,7 @@ pub(super) fn snapshot(
         tree(adapter, target, &after)?,
     )?;
     Ok(RemoteSnapshot {
+        review_version: None,
         target: target.clone(),
         before_repo: target.repo.clone(),
         after_repo: target.repo.clone(),

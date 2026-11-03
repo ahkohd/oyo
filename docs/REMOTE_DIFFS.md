@@ -44,9 +44,35 @@ Saved state is keyed by the canonical remote target. Comments retain the revisio
 
 See [review commands](./REVIEW.md) for comment, export and import operations.
 
+## Sync review discussions
+
+Open the comments sidebar and use its overflow menu to pull or push. Pull imports provider threads and their replies. You can reply, save with `ctrl-s` and push through the same authentication used to load the diff. Repeated pulls update existing comments without importing duplicates.
+
+The CLI accepts the review URL too:
+
+```sh
+oy review pull -t https://github.com/owner/repo/pull/123
+oy review comment reply 1 --body "Checked this change." -t https://github.com/owner/repo/pull/123
+oy review push -t https://github.com/owner/repo/pull/123
+```
+
+GitHub and GitLab support resolving and reopening threads. Forgejo and Codeberg expose resolved state as read-only. Threads whose original file or line is unavailable remain in the outdated comments view. Replies use their provider thread identity. Forgejo still requires a usable position from the provider to publish a reply; otherwise the draft stays local with an error.
+
+Only review URLs identify a provider review. Commit and comparison URLs cannot pull or push discussions, and Oyo does not select a pull request for them.
+
+### Changed revisions and failed writes
+
+Oyo checks the displayed head, base and repository identities against the provider before each write. Pending changes retain the revision reviewed when they were saved. Text edits and resolution changes retain separate reviewed revisions. If a revision changes, refresh and review the new diff, then save the pending text or toggle the pending resolution again. New inline comments also require an anchor captured from that displayed snapshot. Older anchors keep their original snapshot.
+
+Publishing requires persistent review storage. Successful creates have durable receipts so an interrupted session can recover their provider IDs. A partial failure keeps successful changes and leaves failed changes pending. An explicit provider rejection can be retried after correcting its cause.
+
+If a connection fails after a create may have reached the provider, Oyo blocks automatic reposting. Pull and inspect the provider. If the comment exists, remove the unsent local draft and keep the imported comment. If it does not exist, remove and recreate the draft before pushing. This avoids treating an uncertain response as a failed write that is safe to repeat.
+
+Revision checks precede API requests. Providers do not offer an atomic revision condition for every mutation, so a provider can still change between the check and the write.
+
 ## Limits
 
-Remote URL sessions support local review comments, but provider comment synchronization, checkout history and remote image previews are unavailable. File-count and download limits produce explicit errors instead of partial diffs. Tree-based comparisons reject submodules and file-mode changes, and show renames as deletions and additions. Review URLs preserve provider rename information.
+Checkout history and remote image previews are unavailable in remote URL sessions. File-count and download limits produce explicit errors instead of partial diffs. Tree-based comparisons reject submodules and file-mode changes, and show renames as deletions and additions. Review URLs preserve provider rename information.
 
 GitHub commit enumeration stops at 3,000 files, and comparisons stop at 300 files. Oyo rejects those results because the provider may have truncated them. GitLab reviews require an exact changed-file count.
 

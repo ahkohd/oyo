@@ -183,7 +183,7 @@ Open a review, commit or comparison URL without cloning:
 oy https://github.com/owner/repo/pull/123
 ```
 
-Supports GitHub, GitLab, Codeberg and Forgejo using existing CLI authentication. See [remote diffs](./docs/REMOTE_DIFFS.md) for supported URLs and limits.
+Supports GitHub, GitLab, Codeberg and Forgejo using existing CLI authentication. Review URLs also support pulling discussions and pushing replies without a checkout. See [remote diffs](./docs/REMOTE_DIFFS.md) for supported URLs and limits.
 
 ### Choose a view mode
 

@@ -15,6 +15,7 @@ mod jless;
 mod keybindings;
 mod markdown;
 mod remote;
+mod remote_sync;
 mod structured_preview;
 mod syntax;
 #[cfg(test)]
@@ -637,11 +638,14 @@ enum ReviewCommand {
     },
     /// Pull provider comments into the local review
     Pull {
-        /// Optional PR number, target or remote followed by an optional remote
-        #[arg(num_args = 0..=2)]
+        #[arg(num_args = 0..=2, help = "Review URL, or local PR number, target or remote followed by an optional remote")]
         args: Vec<String>,
-        /// Local review target
-        #[arg(short = 't', long = "target", value_name = "REV")]
+        #[arg(
+            short = 't',
+            long = "target",
+            value_name = "REV",
+            help = "Review URL or local review target"
+        )]
         target: Option<String>,
         /// Pull request or merge request number
         #[arg(long, value_name = "NUMBER")]
@@ -652,11 +656,14 @@ enum ReviewCommand {
     },
     /// Push local review comments to the provider
     Push {
-        /// Optional PR number, target or remote followed by an optional remote
-        #[arg(num_args = 0..=2)]
+        #[arg(num_args = 0..=2, help = "Review URL, or local PR number, target or remote followed by an optional remote")]
         args: Vec<String>,
-        /// Local review target
-        #[arg(short = 't', long = "target", value_name = "REV")]
+        #[arg(
+            short = 't',
+            long = "target",
+            value_name = "REV",
+            help = "Review URL or local review target"
+        )]
         target: Option<String>,
         /// Pull request or merge request number
         #[arg(long, value_name = "NUMBER")]
@@ -4093,7 +4100,9 @@ fn review_pr_target_metadata(
     let mut metadata = local.cloned().unwrap_or_else(|| {
         basic_review_target_metadata(format!("{}#{}", pr.provider.id(), pr.number), "git")
     });
-    metadata.label = format!("{}#{}", pr.provider.id(), pr.number);
+    if metadata.vcs != "remote" {
+        metadata.label = format!("{}#{}", pr.provider.id(), pr.number);
+    }
     if metadata.git_base_ref.is_none() {
         metadata.git_base_ref = Some(pr.base_branch.clone());
     }
@@ -4161,6 +4170,10 @@ struct GhCommentUser {
 
 #[derive(Debug, Clone, Deserialize)]
 struct GhComment {
+    #[serde(default)]
+    commit_id: Option<String>,
+    #[serde(default)]
+    original_commit_id: Option<String>,
     id: u64,
     body: String,
     path: String,
@@ -4236,9 +4249,11 @@ struct GhReviewThread {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct GhReviewThreadComments {
     #[serde(default)]
     nodes: Vec<GhReviewThreadComment>,
+    page_info: GhPageInfo,
 }
 
 #[derive(Debug, Deserialize)]
@@ -4473,15 +4488,31 @@ fn parse_sync_args(root: &Path, items: &[String]) -> Result<(Option<String>, Str
     }
 }
 
-fn gh_json<T: for<'de> Deserialize<'de>>(args: &[&str]) -> Result<T> {
+fn gh_json<T: for<'de> Deserialize<'de>>(host: &str, args: &[&str]) -> Result<T> {
     let mut command = ProcessCommand::new("gh");
-    command.args(args);
-    let data = run_output(command)?;
-    serde_json::from_str(&data).map_err(|error| anyhow!(error))
+    command.args(args).env("GH_HOST", host);
+    if args.first() == Some(&"api") {
+        command.args(["--hostname", host]);
+    }
+    let data = remote::run_command(command, None)?;
+    if args.contains(&"--paginate") {
+        let mut values = Vec::new();
+        for page in serde_json::Deserializer::from_str(&data).into_iter::<Vec<serde_json::Value>>()
+        {
+            values.extend(page?);
+        }
+        return serde_json::from_value(serde_json::Value::Array(values))
+            .map_err(|error| anyhow!(error));
+    }
+    let value: serde_json::Value = serde_json::from_str(&data)?;
+    if value.get("errors").is_some_and(|errors| !errors.is_null()) {
+        anyhow::bail!("GitHub GraphQL request failed: {}", value["errors"]);
+    }
+    serde_json::from_value(value).map_err(|error| anyhow!(error))
 }
 
-fn gh_whoami() -> Result<ProviderUser> {
-    let user: GhUser = gh_json(&["api", "user"])?;
+fn gh_whoami(host: &str) -> Result<ProviderUser> {
+    let user: GhUser = gh_json(host, &["api", "user"])?;
     if let Some(url) = user.avatar_url.as_deref() {
         let _ = crate::avatars::cache_avatar_url(url);
     }
@@ -4503,8 +4534,8 @@ fn github_canonical_repo_with(
     Ok(canonical)
 }
 
-fn github_canonical_repo(repo: &str) -> Result<String> {
-    github_canonical_repo_with(repo, |endpoint| gh_json(&["api", endpoint]))
+fn github_canonical_repo(host: &str, repo: &str) -> Result<String> {
+    github_canonical_repo_with(repo, |endpoint| gh_json(host, &["api", endpoint]))
         .with_context(|| format!("Could not resolve canonical GitHub repository for {repo}"))
 }
 
@@ -4515,11 +4546,12 @@ fn gh_pr_with(
     fetch_pr: impl FnOnce(&[&str]) -> Result<GhPr>,
 ) -> Result<ProviderPr> {
     let canonical_repo = canonical_repo(&remote.repo)?;
+    let qualified_repo = format!("{}/{}", remote.host, canonical_repo);
     let mut args = vec![
         "pr",
         "view",
         "--repo",
-        &canonical_repo,
+        &qualified_repo,
         "--json",
         "number,title,url,baseRefName,headRefName,baseRefOid,headRefOid",
     ];
@@ -4550,12 +4582,17 @@ fn gh_pr_with(
 }
 
 fn gh_pr(remote: &ReviewRemote, target: Option<&str>) -> Result<ProviderPr> {
-    gh_pr_with(remote, target, github_canonical_repo, gh_json)
+    gh_pr_with(
+        remote,
+        target,
+        |repo| github_canonical_repo(&remote.host, repo),
+        |args| gh_json(&remote.host, args),
+    )
 }
 
 fn gh_comments(pr: &ProviderPr) -> Result<Vec<GhComment>> {
     let endpoint = format!("repos/{}/pulls/{}/comments", pr.repo, pr.number);
-    gh_json(&["api", &endpoint, "--paginate"])
+    gh_json(&pr.host, &["api", &endpoint, "--paginate"])
 }
 
 fn insert_review_thread_states(
@@ -4590,7 +4627,7 @@ query($owner: String!, $name: String!, $number: Int!, $endCursor: String) {
         nodes {
           id
           isResolved
-          comments(first: 100) { nodes { fullDatabaseId } }
+          comments(first: 100) { nodes { fullDatabaseId } pageInfo { hasNextPage endCursor } }
         }
         pageInfo { hasNextPage endCursor }
       }
@@ -4608,7 +4645,11 @@ query($owner: String!, $name: String!, $number: Int!, $endCursor: String) {
     let number = format!("number={}", pr.number);
     let mut end_cursor = None;
     let mut states = BTreeMap::new();
+    let mut seen_cursors = BTreeSet::new();
     loop {
+        if seen_cursors.len() >= 100 {
+            anyhow::bail!("GitHub review thread pagination limit reached");
+        }
         let mut args = vec![
             "api",
             "graphql",
@@ -4627,14 +4668,51 @@ query($owner: String!, $name: String!, $number: Int!, $endCursor: String) {
         if let Some(cursor) = cursor_arg.as_deref() {
             args.extend(["-f", cursor]);
         }
-        let response: GhReviewThreadsResponse = gh_json(&args)?;
-        let threads = response.data.repository.pull_request.review_threads;
+        let response: GhReviewThreadsResponse = gh_json(&pr.host, &args)?;
+        let mut threads = response.data.repository.pull_request.review_threads;
+        for thread in &mut threads.nodes {
+            let mut cursors = BTreeSet::new();
+            while thread.comments.page_info.has_next_page {
+                let cursor = thread
+                    .comments
+                    .page_info
+                    .end_cursor
+                    .as_ref()
+                    .ok_or_else(|| {
+                        anyhow!("GitHub nested comment pagination returned no cursor")
+                    })?;
+                if cursors.len() >= 100 || !cursors.insert(cursor.clone()) {
+                    anyhow::bail!("GitHub nested comment pagination did not complete");
+                }
+                let query = "query=query($id: ID!, $cursor: String!) { node(id: $id) { ... on PullRequestReviewThread { comments(first: 100, after: $cursor) { nodes { fullDatabaseId } pageInfo { hasNextPage endCursor } } } } }";
+                let value: serde_json::Value = gh_json(
+                    &pr.host,
+                    &[
+                        "api",
+                        "graphql",
+                        "-f",
+                        query,
+                        "-f",
+                        &format!("id={}", thread.id),
+                        "-f",
+                        &format!("cursor={cursor}"),
+                    ],
+                )?;
+                let next: GhReviewThreadComments =
+                    serde_json::from_value(value["data"]["node"]["comments"].clone())?;
+                thread.comments.nodes.extend(next.nodes);
+                thread.comments.page_info = next.page_info;
+            }
+        }
         insert_review_thread_states(&mut states, threads.nodes);
         if !threads.page_info.has_next_page {
             break;
         }
         end_cursor = threads.page_info.end_cursor;
-        if end_cursor.is_none() {
+        if end_cursor
+            .as_ref()
+            .is_none_or(|cursor| !seen_cursors.insert(cursor.clone()))
+        {
             anyhow::bail!("GitHub review thread pagination returned no cursor.");
         }
     }
@@ -4643,12 +4721,12 @@ query($owner: String!, $name: String!, $number: Int!, $endCursor: String) {
 
 fn gh_issue_comments(pr: &ProviderPr) -> Result<Vec<GhIssueComment>> {
     let endpoint = format!("repos/{}/issues/{}/comments", pr.repo, pr.number);
-    gh_json(&["api", &endpoint, "--paginate"])
+    gh_json(&pr.host, &["api", &endpoint, "--paginate"])
 }
 
 fn gh_reviews(pr: &ProviderPr) -> Result<Vec<GhReview>> {
     let endpoint = format!("repos/{}/pulls/{}/reviews", pr.repo, pr.number);
-    gh_json(&["api", &endpoint, "--paginate"])
+    gh_json(&pr.host, &["api", &endpoint, "--paginate"])
 }
 
 fn add_login(value: &serde_json::Value, users: &mut BTreeSet<String>) {
@@ -4661,15 +4739,18 @@ fn github_conversation_comment_users(
     pr: &ProviderPr,
     current_login: &str,
 ) -> Result<BTreeSet<String>> {
-    let value: serde_json::Value = gh_json(&[
-        "pr",
-        "view",
-        &pr.number.to_string(),
-        "--repo",
-        &pr.repo,
-        "--json",
-        "author,reviewRequests,reviews",
-    ])?;
+    let value: serde_json::Value = gh_json(
+        &pr.host,
+        &[
+            "pr",
+            "view",
+            &pr.number.to_string(),
+            "--repo",
+            &format!("{}/{}", pr.host, pr.repo),
+            "--json",
+            "author,reviewRequests,reviews",
+        ],
+    )?;
     let mut users = BTreeSet::from([current_login.to_string()]);
     add_login(&value["author"], &mut users);
     if let Some(reviews) = value["reviews"].as_array() {
@@ -4758,9 +4839,6 @@ fn github_issue_comment_to_review_comment(
     comment: GhIssueComment,
 ) -> Result<ReviewComment> {
     let avatar_url = comment.user.avatar_url.clone();
-    if let Some(url) = avatar_url.as_deref() {
-        let _ = crate::avatars::cache_avatar_url(url);
-    }
     let login = comment.user.login;
     let provider_id = pr.provider.id();
     let mut usernames = BTreeMap::new();
@@ -4826,9 +4904,6 @@ fn github_review_to_review_comment(
         avatar_url: None,
     });
     let avatar_url = user.avatar_url.clone();
-    if let Some(url) = avatar_url.as_deref() {
-        let _ = crate::avatars::cache_avatar_url(url);
-    }
     let login = user.login;
     let provider_id = pr.provider.id();
     let mut usernames = BTreeMap::new();
@@ -4883,10 +4958,10 @@ fn github_comment_to_review_comment(
         _ => Some(ReviewSide::New),
     };
     let line = match side {
-        Some(ReviewSide::Old) => comment.original_line.or(comment.line),
+        Some(ReviewSide::Old) => comment.line.or(comment.original_line),
         _ => comment.line.or(comment.original_line),
     }
-    .ok_or_else(|| anyhow!("Skipped provider comment without a line."))?;
+    .unwrap_or(0);
     let (old_range, new_range) = match side {
         Some(ReviewSide::Old) => (
             Some(ReviewRange {
@@ -4904,9 +4979,6 @@ fn github_comment_to_review_comment(
         ),
     };
     let avatar_url = comment.user.avatar_url.clone();
-    if let Some(url) = avatar_url.as_deref() {
-        let _ = crate::avatars::cache_avatar_url(url);
-    }
     let login = comment.user.login;
     let provider_id = pr.provider.id();
     let mut usernames = BTreeMap::new();
@@ -4915,7 +4987,9 @@ fn github_comment_to_review_comment(
         "version": 1,
         "comments": [{
             "file": comment.path,
-            "kind": "line",
+            "kind": if line == 0 { "file" } else { "line" },
+            "outdated": comment.line.is_none(),
+            "reviewedHead": if comment.line.is_some() { comment.commit_id.as_deref() } else { comment.original_commit_id.as_deref() },
             "side": side.map(|side| side.as_str()),
             "oldRange": old_range,
             "newRange": new_range,
@@ -4954,30 +5028,8 @@ fn github_comment_to_review_comment(
         .ok_or_else(|| anyhow!("Provider comment did not map to this diff."))
 }
 
-fn run_output_with_stdin(mut command: ProcessCommand, stdin_data: &str) -> Result<String> {
-    use std::io::Write;
-    let mut child = command
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()?;
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(stdin_data.as_bytes())?;
-    }
-    let output = child.wait_with_output()?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let message = if stderr.is_empty() {
-            format!("command exited with status {}", output.status)
-        } else {
-            stderr
-        };
-        anyhow::bail!(message);
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
-
 fn gh_api_json<T: for<'de> Deserialize<'de>>(
+    host: &str,
     method: &str,
     endpoint: &str,
     body: serde_json::Value,
@@ -4985,6 +5037,7 @@ fn gh_api_json<T: for<'de> Deserialize<'de>>(
     let mut command = ProcessCommand::new("gh");
     command
         .arg("api")
+        .args(["--hostname", host])
         .arg("-X")
         .arg(method)
         .arg(endpoint)
@@ -4992,14 +5045,19 @@ fn gh_api_json<T: for<'de> Deserialize<'de>>(
         .arg("Content-Type: application/json")
         .arg("--input")
         .arg("-");
-    let data = run_output_with_stdin(command, &body.to_string())?;
+    let data = remote::run_command(command, Some(&body.to_string()))?;
     serde_json::from_str(&data).map_err(|error| anyhow!(error))
 }
 
-fn gh_api_no_output(method: &str, endpoint: &str) -> Result<()> {
+fn gh_api_no_output(host: &str, method: &str, endpoint: &str) -> Result<()> {
     let mut command = ProcessCommand::new("gh");
-    command.arg("api").arg("-X").arg(method).arg(endpoint);
-    run_output(command).map(|_| ())
+    command
+        .arg("api")
+        .args(["--hostname", host])
+        .arg("-X")
+        .arg(method)
+        .arg(endpoint);
+    remote::run_command(command, None).map(|_| ())
 }
 
 fn github_side(side: Option<ReviewSide>) -> &'static str {
@@ -5046,7 +5104,12 @@ fn github_repo_endpoint(pr: &ProviderPr, path: impl std::fmt::Display) -> String
 
 fn github_create_comment(pr: &ProviderPr, comment: &ReviewComment) -> Result<GhComment> {
     let endpoint = github_repo_endpoint(pr, format!("pulls/{}/comments", pr.number));
-    gh_api_json("POST", &endpoint, github_comment_body(pr, comment)?)
+    gh_api_json(
+        &pr.host,
+        "POST",
+        &endpoint,
+        github_comment_body(pr, comment)?,
+    )
 }
 
 fn github_create_reply(pr: &ProviderPr, parent_comment_id: &str, body: &str) -> Result<GhComment> {
@@ -5054,12 +5117,22 @@ fn github_create_reply(pr: &ProviderPr, parent_comment_id: &str, body: &str) -> 
         pr,
         format!("pulls/{}/comments/{parent_comment_id}/replies", pr.number),
     );
-    gh_api_json("POST", &endpoint, serde_json::json!({ "body": body }))
+    gh_api_json(
+        &pr.host,
+        "POST",
+        &endpoint,
+        serde_json::json!({ "body": body }),
+    )
 }
 
 fn github_update_comment(pr: &ProviderPr, comment_id: &str, body: &str) -> Result<GhComment> {
     let endpoint = github_repo_endpoint(pr, format!("pulls/comments/{comment_id}"));
-    gh_api_json("PATCH", &endpoint, serde_json::json!({ "body": body }))
+    gh_api_json(
+        &pr.host,
+        "PATCH",
+        &endpoint,
+        serde_json::json!({ "body": body }),
+    )
 }
 
 fn ignore_github_delete_not_found(result: Result<()>) -> Result<()> {
@@ -5071,12 +5144,17 @@ fn ignore_github_delete_not_found(result: Result<()>) -> Result<()> {
 
 fn github_delete_comment(pr: &ProviderPr, comment_id: &str) -> Result<()> {
     let endpoint = github_repo_endpoint(pr, format!("pulls/comments/{comment_id}"));
-    ignore_github_delete_not_found(gh_api_no_output("DELETE", &endpoint))
+    ignore_github_delete_not_found(gh_api_no_output(&pr.host, "DELETE", &endpoint))
 }
 
 fn github_create_issue_comment(pr: &ProviderPr, body: &str) -> Result<GhIssueComment> {
     let endpoint = github_repo_endpoint(pr, format!("issues/{}/comments", pr.number));
-    gh_api_json("POST", &endpoint, serde_json::json!({ "body": body }))
+    gh_api_json(
+        &pr.host,
+        "POST",
+        &endpoint,
+        serde_json::json!({ "body": body }),
+    )
 }
 
 fn github_update_issue_comment(
@@ -5085,15 +5163,24 @@ fn github_update_issue_comment(
     body: &str,
 ) -> Result<GhIssueComment> {
     let endpoint = github_repo_endpoint(pr, format!("issues/comments/{comment_id}"));
-    gh_api_json("PATCH", &endpoint, serde_json::json!({ "body": body }))
+    gh_api_json(
+        &pr.host,
+        "PATCH",
+        &endpoint,
+        serde_json::json!({ "body": body }),
+    )
 }
 
 fn github_delete_issue_comment(pr: &ProviderPr, comment_id: &str) -> Result<()> {
     let endpoint = github_repo_endpoint(pr, format!("issues/comments/{comment_id}"));
-    ignore_github_delete_not_found(gh_api_no_output("DELETE", &endpoint))
+    ignore_github_delete_not_found(gh_api_no_output(&pr.host, "DELETE", &endpoint))
 }
 
-fn github_set_review_thread_resolved(thread_id: &str, resolved: bool) -> Result<()> {
+fn github_set_review_thread_resolved(
+    pr: &ProviderPr,
+    thread_id: &str,
+    resolved: bool,
+) -> Result<()> {
     let mutation = if resolved {
         "resolveReviewThread"
     } else {
@@ -5103,14 +5190,17 @@ fn github_set_review_thread_resolved(thread_id: &str, resolved: bool) -> Result<
         "query=mutation($threadId: ID!) {{ {mutation}(input: {{threadId: $threadId}}) {{ thread {{ id isResolved }} }} }}"
     );
     let thread_id = format!("threadId={thread_id}");
-    let _: serde_json::Value = gh_json(&[
-        "api",
-        "graphql",
-        "-f",
-        query.as_str(),
-        "-f",
-        thread_id.as_str(),
-    ])?;
+    let _: serde_json::Value = gh_json(
+        &pr.host,
+        &[
+            "api",
+            "graphql",
+            "-f",
+            query.as_str(),
+            "-f",
+            thread_id.as_str(),
+        ],
+    )?;
     Ok(())
 }
 
@@ -5208,8 +5298,8 @@ impl ReviewProviderAdapter for GithubProvider {
         gh_pr(remote, target)
     }
 
-    fn whoami(&self, _pr: &ProviderPr) -> Result<ProviderUser> {
-        gh_whoami()
+    fn whoami(&self, pr: &ProviderPr) -> Result<ProviderUser> {
+        gh_whoami(&pr.host)
     }
 
     fn fetch_comments(&self, pr: ProviderPr, user: ProviderUser) -> Result<ReviewPullRemoteData> {
@@ -5435,6 +5525,7 @@ struct ReviewPushStats {
 #[derive(Debug)]
 struct ReviewPushChange {
     id: u64,
+    submitted: ReviewComment,
     provider: ReviewProviderComment,
 }
 
@@ -5633,6 +5724,7 @@ fn pull_provider_comments_into_app(
 }
 
 trait ReviewProviderPushOps {
+    fn select_comment(&mut self, _comment: &ReviewComment) {}
     fn provider_label(&self) -> &'static str;
     fn create_root(&mut self, comment: &ReviewComment) -> Result<ReviewProviderComment>;
     fn create_reply(
@@ -5725,7 +5817,7 @@ impl ReviewProviderPushOps for GithubPushOps<'_> {
     }
 
     fn set_thread_resolved(&mut self, thread_id: &str, resolved: bool) -> Result<()> {
-        github_set_review_thread_resolved(thread_id, resolved)
+        github_set_review_thread_resolved(self.pr, thread_id, resolved)
     }
 }
 
@@ -5903,6 +5995,7 @@ where
     let mut warnings = Vec::new();
     let mut pending_replies = Vec::new();
     for comment in comments {
+        ops.select_comment(&comment);
         if !comment.can_edit {
             skipped += 1;
             continue;
@@ -5918,13 +6011,18 @@ where
             }
             if provider.comment_id.is_empty() {
                 if !comment.deleted {
-                    pending_replies.push((comment.id, comment.body, provider.clone()));
+                    pending_replies.push((comment.clone(), provider.clone()));
                 }
                 continue;
             }
             if comment.deleted {
-                ops.delete(provider)?;
+                if let Err(error) = ops.delete(provider) {
+                    skipped += 1;
+                    warnings.push(format!("Could not delete comment {}: {error}", comment.id));
+                    continue;
+                }
                 changes.push(ReviewPushChange {
+                    submitted: comment.clone(),
                     id: comment.id,
                     provider: provider.clone(),
                 });
@@ -5932,7 +6030,14 @@ where
                 continue;
             }
             if provider.sync_state == "dirty" {
-                let mut clean_provider = ops.update(provider, &comment.body)?;
+                let mut clean_provider = match ops.update(provider, &comment.body) {
+                    Ok(provider) => provider,
+                    Err(error) => {
+                        skipped += 1;
+                        warnings.push(format!("Could not update comment {}: {error}", comment.id));
+                        continue;
+                    }
+                };
                 clean_provider
                     .in_reply_to_id
                     .clone_from(&provider.in_reply_to_id);
@@ -5940,6 +6045,7 @@ where
                 clean_provider.thread_resolved = provider.thread_resolved;
                 clean_provider.resolved_dirty = provider.resolved_dirty;
                 changes.push(ReviewPushChange {
+                    submitted: comment.clone(),
                     id: comment.id,
                     provider: clean_provider,
                 });
@@ -5954,18 +6060,29 @@ where
             skipped += 1;
             continue;
         }
-        let mut provider = ops.create_root(&comment)?;
+        let mut provider = match ops.create_root(&comment) {
+            Ok(provider) => provider,
+            Err(error) => {
+                skipped += 1;
+                warnings.push(format!("Could not publish comment {}: {error}", comment.id));
+                continue;
+            }
+        };
         provider.resolved_dirty = comment.resolved;
         changes.push(ReviewPushChange {
+            submitted: comment.clone(),
             id: comment.id,
             provider,
         });
         created += 1;
     }
 
-    for (id, body, provider) in pending_replies {
+    for (comment, provider) in pending_replies {
+        ops.select_comment(&comment);
+        let id = comment.id;
+        let body = &comment.body;
         let parent_comment_id = provider.in_reply_to_id.as_deref().unwrap_or_default();
-        match ops.create_reply(&provider, &body) {
+        match ops.create_reply(&provider, body) {
             Ok(mut clean_provider) => {
                 clean_provider
                     .in_reply_to_id
@@ -5974,6 +6091,7 @@ where
                 clean_provider.thread_resolved = provider.thread_resolved;
                 clean_provider.resolved_dirty = provider.resolved_dirty;
                 changes.push(ReviewPushChange {
+                    submitted: comment.clone(),
                     id,
                     provider: clean_provider,
                 });
@@ -6027,7 +6145,7 @@ fn apply_push_outcome_to_app(app: &mut App, outcome: ReviewPushOutcome) -> Revie
     let mut changed = Vec::new();
     let threads_updated = outcome.thread_changes.len();
     for change in outcome.changes {
-        app.mark_review_comment_synced(change.id, change.provider);
+        app.apply_review_comment_receipt(&change.submitted, change.provider);
         changed.push(change.id);
     }
     for change in outcome.thread_changes {
@@ -6078,6 +6196,15 @@ enum ReviewSyncWorkerResult {
 
 struct ReviewSyncWorker {
     rx: std::sync::mpsc::Receiver<Result<ReviewSyncWorkerResult>>,
+    remote_context: Option<remote_sync::RemoteReviewContext>,
+    canceled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Drop for ReviewSyncWorker {
+    fn drop(&mut self) {
+        self.canceled
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
 }
 
 struct ReviewPrLookupWorker {
@@ -6112,7 +6239,11 @@ fn spawn_review_pull_worker(
         })();
         let _ = tx.send(result);
     });
-    ReviewSyncWorker { rx }
+    ReviewSyncWorker {
+        rx,
+        remote_context: None,
+        canceled: Default::default(),
+    }
 }
 
 fn spawn_review_push_worker(
@@ -6134,7 +6265,11 @@ fn spawn_review_push_worker(
         })();
         let _ = tx.send(result);
     });
-    ReviewSyncWorker { rx }
+    ReviewSyncWorker {
+        rx,
+        remote_context: None,
+        canceled: Default::default(),
+    }
 }
 
 fn spawn_review_push_request_worker(
@@ -6158,7 +6293,11 @@ fn spawn_review_push_request_worker(
         })();
         let _ = tx.send(result);
     });
-    ReviewSyncWorker { rx }
+    ReviewSyncWorker {
+        rx,
+        remote_context: None,
+        canceled: Default::default(),
+    }
 }
 
 fn review_remote_options() -> Result<Vec<ReviewRemoteOption>> {
@@ -6182,6 +6321,15 @@ fn handle_review_pull_command(
     config: &config::Config,
     args: &Args,
 ) -> Result<()> {
+    if let Some(url) = target
+        .or_else(|| items.first().map(String::as_str))
+        .filter(|target| target.starts_with("https://"))
+    {
+        if pr_number.is_some() || items.len() > usize::from(target.is_none()) {
+            anyhow::bail!("A review URL already identifies its provider and review; omit the PR number and remote name");
+        }
+        return remote_sync::run_cli(ReviewSyncAction::Pull, url, json, config, args);
+    }
     let (_target, _remote, pr, revision) =
         resolve_sync_target(config, args, items, target, pr_number)?;
     let mut app = review_app_for_pr(config, args, &revision, &pr, true)?;
@@ -6227,6 +6375,15 @@ fn handle_review_push_command(
     config: &config::Config,
     args: &Args,
 ) -> Result<()> {
+    if let Some(url) = target
+        .or_else(|| items.first().map(String::as_str))
+        .filter(|target| target.starts_with("https://"))
+    {
+        if pr_number.is_some() || items.len() > usize::from(target.is_none()) {
+            anyhow::bail!("A review URL already identifies its provider and review; omit the PR number and remote name");
+        }
+        return remote_sync::run_cli(ReviewSyncAction::Push, url, json, config, args);
+    }
     let (_target, _remote, pr, revision) =
         resolve_sync_target(config, args, items, target, pr_number)?;
     let mut app = review_app_for_pr(config, args, &revision, &pr, false)?;
@@ -8672,6 +8829,18 @@ fn run_app(
             }
         }
 
+        if review_sync_worker
+            .as_ref()
+            .and_then(|worker| worker.remote_context.as_ref())
+            .is_some_and(|context| !context.matches_app(app))
+        {
+            review_sync_worker = None;
+            app.set_review_sync_status(None);
+            app.notify(ToastEvent::SelectionActionFailed(
+                "Review changed during sync. Pull again for the displayed revision.".to_owned(),
+            ));
+            needs_draw = true;
+        }
         let worker_result =
             review_sync_worker
                 .as_ref()
@@ -8698,12 +8867,20 @@ fn run_app(
                     match apply_provider_comments_to_app(app, *data) {
                         Ok(pull) if action == ReviewSyncAction::Sync => {
                             review_sync_pull_stats = Some(pull);
-                            review_sync_worker = Some(spawn_review_push_worker(
-                                action,
-                                pr,
-                                user,
-                                app.review_comments_for_sync(),
-                            ));
+                            review_sync_worker = Some(if app.is_remote_session() {
+                                remote_sync::spawn(
+                                    ReviewSyncAction::Push,
+                                    remote_sync::RemoteReviewContext::from_app(app)?,
+                                    app.review_comments_for_sync(),
+                                )
+                            } else {
+                                spawn_review_push_worker(
+                                    action,
+                                    pr,
+                                    user,
+                                    app.review_comments_for_sync(),
+                                )
+                            });
                         }
                         Ok(pull) => {
                             app.mark_review_session_clean();
@@ -8781,9 +8958,33 @@ fn run_app(
 
         if let Some(request) = app.take_review_sync_requested() {
             if app.is_remote_session() {
-                app.notify(ToastEvent::SelectionActionFailed(
-                    "Provider comment sync is unavailable for remote URL sessions".to_owned(),
-                ));
+                if review_sync_worker.is_some() {
+                    app.notify(ToastEvent::SelectionActionFailed(
+                        "Review sync is already running".to_owned(),
+                    ));
+                } else {
+                    match remote_sync::RemoteReviewContext::from_app(app) {
+                        Ok(context) => {
+                            if let Err(error) = context.recover_receipts(app) {
+                                app.notify(ToastEvent::SelectionActionFailed(format!(
+                                    "Could not recover published comments: {error}"
+                                )));
+                                needs_draw = true;
+                                continue;
+                            }
+                            app.set_review_sync_status(Some(request.action));
+                            review_sync_pull_stats = None;
+                            review_sync_worker = Some(remote_sync::spawn(
+                                request.action,
+                                context,
+                                app.review_comments_for_sync(),
+                            ));
+                        }
+                        Err(error) => {
+                            app.notify(ToastEvent::SelectionActionFailed(error.to_string()))
+                        }
+                    }
+                }
                 needs_draw = true;
                 continue;
             }
@@ -9714,6 +9915,9 @@ mod tests {
         resolved: bool,
     ) -> ReviewComment {
         ReviewComment {
+            local_key: crate::app::review::new_review_local_key(),
+            pending_snapshot: None,
+            resolution_snapshot: None,
             id,
             anchor: ReviewAnchor {
                 file_index: 0,
@@ -9960,6 +10164,8 @@ mod tests {
             avatar_url: None,
         };
         let review = GhComment {
+            commit_id: None,
+            original_commit_id: None,
             id: 10,
             body: "Review".to_string(),
             path: "f.txt".to_string(),
@@ -10023,7 +10229,7 @@ mod tests {
             |args| {
                 assert!(canonicalized.get());
                 assert_eq!(args[2], "feature");
-                assert_eq!(args[4], "new-owner/new-repo");
+                assert_eq!(args[4], "github.com/new-owner/new-repo");
                 Ok(GhPr {
                     number: 7,
                     title: "PR".to_string(),
@@ -10090,7 +10296,7 @@ mod tests {
                             "nodes": [{
                                 "id": "PRRT_thread",
                                 "isResolved": true,
-                                "comments": { "nodes": [{ "fullDatabaseId": "42" }] }
+                                "comments": { "nodes": [{ "fullDatabaseId": "42" }], "pageInfo": {"hasNextPage": false, "endCursor": null} }
                             }],
                             "pageInfo": { "hasNextPage": false, "endCursor": null }
                         }
@@ -10124,6 +10330,8 @@ mod tests {
             "me",
             GhProviderComment {
                 comment: GhComment {
+                    commit_id: None,
+                    original_commit_id: None,
                     id: 42,
                     body: "review".to_string(),
                     path: "file.rs".to_string(),
@@ -10612,6 +10820,8 @@ mod tests {
             |parent_id, body| {
                 calls.push((parent_id.to_string(), body.to_string()));
                 Ok(GhComment {
+                    commit_id: None,
+                    original_commit_id: None,
                     id: 99,
                     body: body.to_string(),
                     path: "file.rs".to_string(),
@@ -10666,6 +10876,8 @@ mod tests {
                     anyhow::bail!("parent deleted")
                 }
                 Ok(GhComment {
+                    commit_id: None,
+                    original_commit_id: None,
                     id: 99,
                     body: body.to_string(),
                     path: "file.rs".to_string(),

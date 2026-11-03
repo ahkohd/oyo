@@ -34,7 +34,8 @@ use crate::views::{
     render_blame, render_diff_scrollbar, render_evolution, render_review_note_avatar, render_split,
     render_unified_pane, reserve_diff_scrollbar_lane, review_note_block_with_footer,
     review_note_delete_width, review_note_delete_x_offset, review_note_edit_width,
-    review_note_lines, review_note_resolve_width, review_note_resolve_x_offset, review_preview_row,
+    review_note_lines, review_note_reply_width, review_note_reply_x_offset,
+    review_note_resolve_width, review_note_resolve_x_offset, review_preview_row,
     ReviewNoteActionHits,
 };
 use image::GenericImageView;
@@ -3936,6 +3937,9 @@ fn render_outdated_comments_view(frame: &mut Frame, app: &mut App, area: Rect) {
         if let Some(label) = comment.overlay.edit_label.as_ref() {
             footer_actions.push(format!("{label} edit"));
         }
+        if let Some(label) = comment.overlay.reply_label.as_ref() {
+            footer_actions.push(format!("{label} reply"));
+        }
         if let Some(label) = comment.overlay.resolve_label.as_ref() {
             footer_actions.push(format!(
                 "{label} {}",
@@ -3961,6 +3965,8 @@ fn render_outdated_comments_view(frame: &mut Frame, app: &mut App, area: Rect) {
         let snapshot_rows = block.snapshot_rows;
         let anchor_key = comment.overlay.anchor_key.clone();
         let edit_width = review_note_edit_width(&comment.overlay);
+        let reply_x = review_note_reply_x_offset(&comment.overlay);
+        let reply_width = review_note_reply_width(&comment.overlay);
         let resolve_x = review_note_resolve_x_offset(&comment.overlay);
         let resolve_width = review_note_resolve_width(&comment.overlay);
         let delete_x = review_note_delete_x_offset(&comment.overlay);
@@ -3980,6 +3986,8 @@ fn render_outdated_comments_view(frame: &mut Frame, app: &mut App, area: Rect) {
             snapshot_rows,
             anchor_key,
             edit_width,
+            reply_x,
+            reply_width,
             resolve_x,
             resolve_width,
             delete_x,
@@ -4007,6 +4015,8 @@ fn render_outdated_comments_view(frame: &mut Frame, app: &mut App, area: Rect) {
         snapshot_rows,
         anchor_key,
         edit_width,
+        reply_x,
+        reply_width,
         resolve_x,
         resolve_width,
         delete_x,
@@ -4055,6 +4065,16 @@ fn render_outdated_comments_view(frame: &mut Frame, app: &mut App, area: Rect) {
                 content_area.x.saturating_add(2),
                 y,
                 edit_width,
+                1,
+                comment_id,
+                anchor_key.clone(),
+            );
+        }
+        if reply_width > 0 {
+            app.add_review_preview_reply_box(
+                content_area.x.saturating_add(reply_x),
+                y,
+                reply_width,
                 1,
                 comment_id,
                 anchor_key.clone(),

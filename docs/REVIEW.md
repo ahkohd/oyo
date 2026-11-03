@@ -99,7 +99,7 @@ oy review status -t https://github.com/owner/repo/pull/123
 oy review comment -t https://github.com/owner/repo/pull/123
 ```
 
-These commands manage local saved comments. Provider comment synchronization requires a local checkout and is unavailable for remote URL sessions.
+These commands manage saved comments. Use `oy review pull -t <review-url>` and `oy review push -t <review-url>` to synchronize provider discussions from any directory. Commit and comparison URLs have no review identity, so provider synchronization is unavailable for those targets. See [remote diffs](./REMOTE_DIFFS.md) for revision checks, replies and retry behaviour.
 
 ## Use Git and jj review targets
 
@@ -376,7 +376,7 @@ Press `g o` or choose Outdated comments from the command palette to open the ded
 
 `--since` returns comments changed at or after the Unix timestamp. JSON output includes `changeType` as `added`, `updated` or `removed`. An outdated-state transition appears as `updated`. A deleted comment appears as `removed`.
 
-Reply to a local or pulled inline comment:
+Reply to a local or pulled inline comment. Pulled provider threads also accept replies when their display anchor is outdated or unavailable:
 
 ```sh
 oy review comment reply 1 --body "Fixed in the latest change."
@@ -412,7 +412,7 @@ oy review comment unresolve 1
 
 ## Push and pull provider comments
 
-Push and pull sync the local review with the matching pull request or merge request.
+Push and pull sync the local review with the matching pull request or merge request. A review URL can identify that request without a local checkout. Use the URL with `-t` for pull, push and comment commands. See [remote review synchronization](./REMOTE_DIFFS.md#sync-review-discussions) for revision checks and recovery after failed writes.
 
 Oyo supports GitHub, GitLab, Codeberg and self-hosted Forgejo. Authenticate `gh` for GitHub, `glab` for each GitLab host, `cb` for Codeberg or `fj` for each self-hosted Forgejo host before you run these commands.
 
