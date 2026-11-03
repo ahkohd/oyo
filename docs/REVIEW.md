@@ -1,16 +1,18 @@
 # Review commands
 
-Use `oy review` from the Git worktree or jj workspace you are reviewing.
+Use `oy review` from the Git worktree or jj workspace you are reviewing. For a remote review, pass its URL with `-t` from any directory.
 
 Oyo resolves the current workspace and review target. It then reads or writes the saved review for that target.
 
 ## Saved review database
 
-Oyo saves review state in one SQLite database per workspace:
+Oyo saves local review state in one SQLite database per workspace:
 
 ```text
 <data>/oyo/reviews/<workspace>/review.db
 ```
+
+Remote reviews use a canonical target identity instead of a local workspace. See [remote diffs](./REMOTE_DIFFS.md) for supported URLs, authentication and storage behaviour.
 
 Use `--json` when a script needs stable output.
 
@@ -87,6 +89,17 @@ Plain `status` hides the internal database path and shows comment IDs. `status -
   ]
 }
 ```
+
+## Use remote review targets
+
+Pass a supported review, commit or comparison URL with `-t`:
+
+```sh
+oy review status -t https://github.com/owner/repo/pull/123
+oy review comment -t https://github.com/owner/repo/pull/123
+```
+
+These commands manage local saved comments. Provider comment synchronization requires a local checkout and is unavailable for remote URL sessions.
 
 ## Use Git and jj review targets
 

@@ -177,30 +177,13 @@ oy --range main...feature
 
 ### Open a remote diff
 
-Pass an HTTPS review, commit or comparison URL. You can run Oyo from any directory without a local checkout.
+Open a review, commit or comparison URL without cloning:
 
 ```sh
 oy https://github.com/owner/repo/pull/123
-oy https://gitlab.com/group/project/-/merge_requests/123
-oy https://codeberg.org/owner/repo/pulls/123
-oy https://forgejo.example.org/owner/repo/pulls/123
 ```
 
-Replace the example repository and request number with your own. Authenticate the corresponding CLI for the target host first. Oyo uses `gh` for GitHub, `glab` for GitLab, credentials saved by `cb` for Codeberg, and host credentials saved by `fj` for Forgejo. Oyo does not ask for a separate access token. Private repositories require access through that account.
-
-Commit and comparison URLs use these paths after the repository name:
-
-| Provider | Commit | Comparison |
-| --- | --- | --- |
-| GitHub | `/commit/REV` | `/compare/BASE...HEAD` |
-| GitLab | `/-/commit/REV` | `/-/compare/BASE...HEAD` |
-| Codeberg and Forgejo | `/commit/REV` | `/compare/BASE...HEAD` |
-
-A commit compares against its first parent, or an empty tree for a root commit. Three-dot comparisons start at the merge base. GitLab, Codeberg and Forgejo also accept `BASE..HEAD` to compare the endpoints directly. GitHub two-dot comparisons and comparison query options are unsupported.
-
-Oyo loads complete file contents in the background and keeps them tied to fixed revisions. Refresh resolves a new snapshot. Saved reviews remain available when you open the same URL from another directory.
-
-Remote URL sessions support local review comments, but provider comment synchronization, checkout history and remote image previews are unavailable. File-count and download limits produce explicit errors instead of partial diffs. Tree-based comparisons reject submodules and file-mode changes, and show renames as deletions and additions. Review URLs preserve provider rename information.
+Supports GitHub, GitLab, Codeberg and Forgejo using existing CLI authentication. See [remote diffs](./docs/REMOTE_DIFFS.md) for supported URLs and limits.
 
 ### Choose a view mode
 
