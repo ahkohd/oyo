@@ -2709,6 +2709,7 @@ fn outdated_comment_reconstruction_swaps_and_restores_live_git_diff() {
     )
     .unwrap();
     let target = review::ReviewAnchorSnapshotTarget {
+        remote_snapshot: None,
         vcs: "git".to_string(),
         jj_change_id: None,
         jj_commit_id: None,
@@ -2835,6 +2836,7 @@ fn outdated_comment_reconstruction_swaps_and_restores_live_git_diff() {
     fallback.id = fallback.id.saturating_add(100);
     let stale_base = target.git_base_commit.clone();
     fallback.anchor.snapshot.as_mut().unwrap().target = Some(review::ReviewAnchorSnapshotTarget {
+        remote_snapshot: None,
         vcs: "git".to_string(),
         jj_change_id: None,
         jj_commit_id: None,
@@ -2922,6 +2924,7 @@ fn outdated_comment_reconstruction_repairs_jj_evolog_and_falls_back() {
     let snapshot = app.review_comments[0].anchor.snapshot.as_mut().unwrap();
     snapshot.line_text = "historical".to_string();
     snapshot.target = Some(review::ReviewAnchorSnapshotTarget {
+        remote_snapshot: None,
         vcs: "jj".to_string(),
         jj_change_id: Some(current_change.clone()),
         jj_commit_id: Some(historical_commit),
@@ -2950,6 +2953,7 @@ fn outdated_comment_reconstruction_repairs_jj_evolog_and_falls_back() {
     stale.id = stale.id.saturating_add(100);
     let stale_snapshot = stale.anchor.snapshot.as_mut().unwrap();
     stale_snapshot.target = Some(review::ReviewAnchorSnapshotTarget {
+        remote_snapshot: None,
         vcs: "jj".to_string(),
         jj_change_id: Some(current_change),
         jj_commit_id: Some(base_commit.clone()),
@@ -2972,6 +2976,7 @@ fn outdated_comment_reconstruction_repairs_jj_evolog_and_falls_back() {
     let mut missing = app.review_comments[0].clone();
     missing.id = missing.id.saturating_add(200);
     missing.anchor.snapshot.as_mut().unwrap().target = Some(review::ReviewAnchorSnapshotTarget {
+        remote_snapshot: None,
         vcs: "jj".to_string(),
         jj_change_id: Some("missing-change".to_string()),
         jj_commit_id: Some(base_commit),

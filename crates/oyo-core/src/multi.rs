@@ -56,6 +56,13 @@ pub enum FileSide {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContentSource {
+    RemoteBlob {
+        provider: String,
+        host: String,
+        repo: String,
+        revision: String,
+        path: String,
+    },
     Empty,
     File(PathBuf),
     GitObject {
@@ -121,6 +128,7 @@ pub struct MultiFileDiff {
     stats_authoritative: bool,
     /// Blame sources supplied by non-Git frontends backed by Git objects.
     blame_sources_override: Option<(BlameSource, BlameSource)>,
+    pub remote_snapshot: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -550,6 +558,7 @@ impl MultiFileDiff {
             pending_content,
             stats_authoritative,
             blame_sources_override: None,
+            remote_snapshot: None,
         }
     }
 
@@ -606,6 +615,7 @@ impl MultiFileDiff {
             pending_content: Vec::new(),
             stats_authoritative: false,
             blame_sources_override: None,
+            remote_snapshot: None,
         }
     }
 
@@ -668,6 +678,7 @@ impl MultiFileDiff {
             pending_content,
             stats_authoritative: true,
             blame_sources_override: None,
+            remote_snapshot: None,
         }
     }
 
@@ -964,6 +975,7 @@ impl MultiFileDiff {
             pending_content: Vec::new(),
             stats_authoritative: true,
             blame_sources_override: None,
+            remote_snapshot: None,
         })
     }
 
@@ -1045,6 +1057,7 @@ impl MultiFileDiff {
             pending_content: Vec::new(),
             stats_authoritative: true,
             blame_sources_override: None,
+            remote_snapshot: None,
         })
     }
 
@@ -1138,6 +1151,7 @@ impl MultiFileDiff {
             pending_content: Vec::new(),
             stats_authoritative: true,
             blame_sources_override: None,
+            remote_snapshot: None,
         })
     }
 
@@ -1221,6 +1235,7 @@ impl MultiFileDiff {
             pending_content: Vec::new(),
             stats_authoritative: true,
             blame_sources_override: None,
+            remote_snapshot: None,
         })
     }
 
@@ -1360,6 +1375,7 @@ impl MultiFileDiff {
             pending_content: Vec::new(),
             stats_authoritative: false,
             blame_sources_override: None,
+            remote_snapshot: None,
         })
     }
 
@@ -1382,6 +1398,37 @@ impl MultiFileDiff {
     /// Create from a single file pair (bytes, with binary detection).
     pub fn from_file_pair_bytes(new_path: PathBuf, old_bytes: Vec<u8>, new_bytes: Vec<u8>) -> Self {
         Self::from_file_pair_with_sources(new_path, old_bytes, new_bytes, None, None)
+    }
+
+    pub fn from_remote_file_pair(
+        path: PathBuf,
+        old_content: String,
+        new_content: String,
+        snapshot: serde_json::Value,
+    ) -> Self {
+        let file = FileEntry {
+            display_name: path.display().to_string(),
+            path,
+            old_path: None,
+            old_source_path: None,
+            new_source_path: None,
+            status: FileStatus::Modified,
+            insertions: 0,
+            deletions: 0,
+            binary: false,
+        };
+        let mut diff = Self::from_pending_files(
+            None,
+            vec![(file, ContentSource::Empty, ContentSource::Empty)],
+            false,
+        );
+        diff.take_pending_content_for(0);
+        diff.apply_prepared_content(
+            0,
+            Self::prepare_remote_file_content(old_content.into_bytes(), new_content.into_bytes()),
+        );
+        diff.remote_snapshot = Some(snapshot);
+        diff
     }
 
     pub fn from_file_pair_with_sources(
@@ -1425,6 +1472,7 @@ impl MultiFileDiff {
             pending_content: Vec::new(),
             stats_authoritative: false,
             blame_sources_override: None,
+            remote_snapshot: None,
         }
     }
 
@@ -1475,6 +1523,7 @@ impl MultiFileDiff {
             pending_content: Vec::new(),
             stats_authoritative: false,
             blame_sources_override: None,
+            remote_snapshot: None,
         }
     }
 
@@ -1544,6 +1593,48 @@ impl MultiFileDiff {
             .count()
     }
 
+    pub fn failed_file_content(message: &str) -> PreparedFileContent {
+        PreparedFileContent {
+            old: Arc::from(""),
+            new: Arc::from(""),
+            binary: false,
+            precomputed: Some(PrecomputedDiff::Placeholder(Self::context_only_diff(
+                message,
+            ))),
+            status: DiffStatus::Failed,
+        }
+    }
+
+    pub fn take_pending_content_for_sync(&mut self, idx: usize) -> Option<PendingFileContent> {
+        let request = self.pending_content.get(idx)?.as_ref()?;
+        if matches!(request.old, ContentSource::RemoteBlob { .. })
+            || matches!(request.new, ContentSource::RemoteBlob { .. })
+        {
+            return None;
+        }
+        self.take_pending_content_for(idx)
+    }
+
+    pub fn prepare_remote_file_content(old: Vec<u8>, new: Vec<u8>) -> PreparedFileContent {
+        let binary = old.contains(&0)
+            || new.contains(&0)
+            || std::str::from_utf8(&old).is_err()
+            || std::str::from_utf8(&new).is_err();
+        let old = String::from_utf8(old).unwrap_or_default();
+        let new = String::from_utf8(new).unwrap_or_default();
+        let (old, new, mut precomputed, status) = Self::maybe_defer_diff(old, new, binary);
+        if status == DiffStatus::Ready {
+            precomputed = Some(PrecomputedDiff::Ready(Self::diff_strings(&old, &new)));
+        }
+        PreparedFileContent {
+            old: Arc::from(old),
+            new: Arc::from(new),
+            binary,
+            precomputed,
+            status,
+        }
+    }
+
     pub fn prepare_file_content(
         old_bytes: Option<Vec<u8>>,
         new_bytes: Option<Vec<u8>>,
@@ -1583,7 +1674,12 @@ impl MultiFileDiff {
     }
 
     pub fn file_contents(&self, idx: usize) -> Option<(&str, &str)> {
-        if self.diff_status(idx) == DiffStatus::Loading {
+        if matches!(
+            self.diff_status(idx),
+            DiffStatus::Loading | DiffStatus::Failed
+        ) || (self.remote_snapshot.is_some()
+            && self.files.get(idx).is_some_and(|file| file.binary))
+        {
             return None;
         }
         let old = self.old_contents.get(idx)?;
@@ -1592,7 +1688,12 @@ impl MultiFileDiff {
     }
 
     pub fn file_contents_arc(&self, idx: usize) -> Option<(Arc<str>, Arc<str>)> {
-        if self.diff_status(idx) == DiffStatus::Loading {
+        if matches!(
+            self.diff_status(idx),
+            DiffStatus::Loading | DiffStatus::Failed
+        ) || (self.remote_snapshot.is_some()
+            && self.files.get(idx).is_some_and(|file| file.binary))
+        {
             return None;
         }
         let old = self.old_contents.get(idx)?;
@@ -1609,6 +1710,9 @@ impl MultiFileDiff {
     }
 
     pub fn source_path(&self, idx: usize, side: FileSide) -> Option<PathBuf> {
+        if self.remote_snapshot.is_some() {
+            return None;
+        }
         let file = self.files.get(idx)?;
         if let Some(path) = match side {
             FileSide::Old => file.old_source_path.as_ref(),
@@ -2739,5 +2843,47 @@ mod tests {
 
         MultiFileDiff::set_diff_max_bytes(DEFAULT_DIFF_MAX_BYTES);
         MultiFileDiff::set_diff_defer(true);
+    }
+}
+
+#[cfg(test)]
+mod remote_content_tests {
+    use super::*;
+
+    #[test]
+    fn remote_text_preserves_the_tail_of_long_lines() {
+        let text = format!("{}tail\n", "x".repeat(20_000));
+        let prepared =
+            MultiFileDiff::prepare_remote_file_content(Vec::new(), text.as_bytes().to_vec());
+        assert_eq!(&*prepared.new, text);
+        assert!(!prepared.binary);
+    }
+
+    #[test]
+    fn failed_remote_content_is_not_available_as_empty_text() {
+        let entry = FileEntry {
+            path: "file.txt".into(),
+            old_path: None,
+            old_source_path: None,
+            new_source_path: None,
+            display_name: "file.txt".into(),
+            status: FileStatus::Modified,
+            insertions: 0,
+            deletions: 0,
+            binary: false,
+        };
+        let mut diff = MultiFileDiff::from_pending_files(
+            None,
+            vec![(entry, ContentSource::Empty, ContentSource::Empty)],
+            false,
+        );
+        diff.remote_snapshot = Some(serde_json::json!({"version":1}));
+        assert!(
+            diff.apply_prepared_content(0, MultiFileDiff::failed_file_content("Download failed"))
+        );
+        assert!(diff.file_contents(0).is_none());
+        assert!(diff.file_contents_arc(0).is_none());
+        assert!(!diff.files[0].binary);
+        assert_eq!(diff.diff_status(0), DiffStatus::Failed);
     }
 }

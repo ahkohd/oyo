@@ -75,6 +75,8 @@ pub(crate) struct OutdatedReconstructionResponse {
 pub(crate) struct ReviewAnchorSnapshotTarget {
     pub(crate) vcs: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) remote_snapshot: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) jj_change_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) jj_commit_id: Option<String>,
@@ -366,6 +368,8 @@ pub(crate) struct ReviewPullRequestTarget {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ReviewTargetMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) remote_snapshot: Option<serde_json::Value>,
     pub(crate) label: String,
     pub(crate) vcs: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1057,10 +1061,12 @@ fn review_anchor_snapshot_target(
         && metadata.jj_commit_id.is_none()
         && metadata.git_base_commit.is_none()
         && metadata.git_head_commit.is_none()
+        && metadata.remote_snapshot.is_none()
     {
         return None;
     }
     Some(ReviewAnchorSnapshotTarget {
+        remote_snapshot: metadata.remote_snapshot.clone(),
         vcs: metadata.vcs.clone(),
         jj_change_id: metadata.jj_change_id.clone(),
         jj_commit_id: metadata.jj_commit_id.clone(),
@@ -1965,13 +1971,19 @@ impl App {
             ReviewSide::New => new_content,
         };
         let (line_text, context_before, context_after) = line_with_context(content, line_number)?;
+        let mut target = review_anchor_snapshot_target(self.review_target_metadata.as_ref());
+        if let (Some(target), Some(snapshot)) =
+            (target.as_mut(), self.multi_diff.remote_snapshot.as_ref())
+        {
+            target.remote_snapshot = Some(snapshot.clone());
+        }
         Some(ReviewAnchorSnapshot {
             side: side.as_str().to_string(),
             line_number,
             line_text,
             context_before,
             context_after,
-            target: review_anchor_snapshot_target(self.review_target_metadata.as_ref()),
+            target,
             old_file: capture_file(old_content),
             new_file: capture_file(new_content),
         })
@@ -2404,8 +2416,20 @@ impl App {
         let old_content = decode_captured_file(snapshot.old_file.as_ref()?)?;
         let new_content = decode_captured_file(snapshot.new_file.as_ref()?)?;
         let path = PathBuf::from(&comment.anchor.file_path);
-        let diff =
-            oyo_core::MultiFileDiff::from_file_pair(path.clone(), path, old_content, new_content);
+        let diff = if let Some(remote_snapshot) = snapshot
+            .target
+            .as_ref()
+            .and_then(|target| target.remote_snapshot.as_ref())
+        {
+            oyo_core::MultiFileDiff::from_remote_file_pair(
+                path,
+                old_content,
+                new_content,
+                remote_snapshot.clone(),
+            )
+        } else {
+            oyo_core::MultiFileDiff::from_file_pair(path.clone(), path, old_content, new_content)
+        };
         Self::reconstructed_diff_places_anchor(comment, &diff).then_some(diff)
     }
 
@@ -2736,10 +2760,7 @@ impl App {
     pub(crate) fn outdated_diff_title(&self) -> Option<String> {
         self.outdated_diff_view
             .as_ref()
-            .map(|view| {
-                debug_assert_eq!(self.active_review_comment_id, Some(view.comment_id));
-                format!("Outdated: {}", view.file_path)
-            })
+            .map(|view| format!("Outdated: {}", view.file_path))
             .or_else(|| {
                 self.pending_outdated_reconstruction
                     .as_ref()
@@ -5153,12 +5174,23 @@ impl App {
         self.review_pull_request_target = None;
         self.touch_review_state();
 
-        let repo_root = self
-            .review_workspace_root_override
-            .clone()
-            .or_else(|| self.multi_diff.repo_root().map(|p| p.to_path_buf()))
+        let remote_root = self
+            .review_target_metadata
+            .as_ref()
+            .filter(|m| m.vcs == "remote")
+            .map(|m| PathBuf::from(format!("remote/{}", hash_hex(&m.label))));
+        let repo_root = remote_root
+            .or_else(|| {
+                self.review_workspace_root_override
+                    .clone()
+                    .or_else(|| self.multi_diff.repo_root().map(|p| p.to_path_buf()))
+            })
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-        self.review_repo_root = Some(repo_root.to_string_lossy().to_string());
+        self.review_repo_root = if self.multi_diff.remote_snapshot.is_some() {
+            None
+        } else {
+            Some(repo_root.to_string_lossy().to_string())
+        };
         self.invalidate_review_repo_file_cache();
 
         let diff_fingerprint = self.compute_review_diff_fingerprint();
@@ -5984,6 +6016,13 @@ impl App {
         let Some(editor) = self.review_editor.take() else {
             return;
         };
+        if self.remote_anchor_snapshot_missing(&editor.anchor) {
+            self.review_editor = Some(editor);
+            self.notify(ToastEvent::SelectionActionFailed(
+                "Cannot comment on unavailable remote text".to_owned(),
+            ));
+            return;
+        }
 
         let preserve_space = preserve_ref_trailing_space(&editor.text);
         let mut body = editor.text.trim_end().to_string();
@@ -6405,6 +6444,12 @@ impl App {
     }
 
     fn open_review_editor(&mut self, anchor: ReviewAnchor) {
+        if self.remote_anchor_snapshot_missing(&anchor) {
+            self.notify(ToastEvent::SelectionActionFailed(
+                "Cannot comment on unavailable remote text".to_owned(),
+            ));
+            return;
+        }
         let existing = self
             .review_comments
             .iter()
@@ -7868,7 +7913,11 @@ impl App {
         }
         self.review_session_created_at = created_at.max(0) as u64;
         self.review_editor = editor_json.and_then(|json| serde_json::from_str(&json).ok());
-        self.review_target_metadata = target_json.and_then(|json| serde_json::from_str(&json).ok());
+        self.review_target_metadata = self
+            .review_target_metadata
+            .clone()
+            .filter(|metadata| metadata.vcs == "remote")
+            .or_else(|| target_json.and_then(|json| serde_json::from_str(&json).ok()));
         self.review_comments = comments;
         self.reviewed_files = reviewed_files;
         if self.review_filter_to_current_diff {
@@ -8023,7 +8072,9 @@ impl App {
             anchor_key,
             snapshot: item.anchor_snapshot,
         };
-        self.fill_review_anchor_snapshot(&mut anchor);
+        if !self.is_remote_session() {
+            self.fill_review_anchor_snapshot(&mut anchor);
+        }
         Ok(ReviewComment {
             id: item.id.unwrap_or(0),
             anchor,
@@ -8041,6 +8092,50 @@ impl App {
         })
     }
 
+    fn remote_anchor_snapshot_missing(&self, anchor: &ReviewAnchor) -> bool {
+        self.is_remote_session()
+            && matches!(anchor.kind, ReviewTargetKind::Line | ReviewTargetKind::Hunk)
+            && anchor.snapshot.is_none()
+    }
+
+    fn ensure_remote_comment_snapshot(
+        &mut self,
+        comment: &mut ReviewComment,
+    ) -> Result<(), String> {
+        if !self.remote_anchor_snapshot_missing(&comment.anchor) {
+            return Ok(());
+        }
+        let index = comment.anchor.file_index;
+        let file = comment.anchor.file_path.clone();
+        if let Some(request) = self.multi_diff.take_pending_content_for(index) {
+            let content = super::load_content_request_sync(request);
+            self.multi_diff.apply_prepared_content(index, content);
+        }
+        let (old, new) = self
+            .multi_diff
+            .file_contents(index)
+            .ok_or_else(|| format!("Cannot anchor a comment on unavailable remote text: {file}"))?;
+        for (range, content) in [
+            (comment.anchor.old_range, old),
+            (comment.anchor.new_range, new),
+        ] {
+            if range.is_some_and(|range| {
+                range.start == 0 || range.end < range.start || range.end > content.lines().count()
+            }) {
+                return Err(format!(
+                    "Cannot anchor a comment outside remote text: {file}"
+                ));
+            }
+        }
+        self.fill_review_anchor_snapshot(&mut comment.anchor);
+        if comment.anchor.snapshot.is_none() {
+            return Err(format!(
+                "Cannot anchor a comment outside remote text: {file}"
+            ));
+        }
+        Ok(())
+    }
+
     pub fn add_review_comment_from_cli(
         &mut self,
         file: &str,
@@ -8050,7 +8145,7 @@ impl App {
         new_range: Option<ReviewRange>,
         body: String,
     ) -> Result<u64, String> {
-        let comment = self.public_comment_to_review_comment(PublicReviewComment {
+        let mut comment = self.public_comment_to_review_comment(PublicReviewComment {
             id: None,
             change_type: None,
             file: file.to_string(),
@@ -8080,10 +8175,10 @@ impl App {
             updated_at: None,
             body,
         })?;
+        self.ensure_remote_comment_snapshot(&mut comment)?;
         let id = self.review_next_comment_id;
         self.review_next_comment_id = self.review_next_comment_id.saturating_add(1);
         let now = now_ts();
-        let mut comment = comment;
         comment.id = id;
         comment.created_at = now;
         comment.updated_at = now;
@@ -8435,6 +8530,9 @@ impl App {
 
     pub fn apply_review_comments_from_cli(&mut self, data: &str) -> Result<Vec<u64>, String> {
         let mut comments = self.parse_public_review_comments(data)?;
+        for comment in &mut comments {
+            self.ensure_remote_comment_snapshot(comment)?;
+        }
         let mut ids = Vec::new();
         for mut comment in comments.drain(..) {
             if comment.id == 0 {
@@ -8640,6 +8738,16 @@ impl App {
         changed
     }
 
+    pub(crate) fn refresh_remote_review_snapshot(&mut self) {
+        if self.multi_diff.remote_snapshot.is_some() {
+            if let Some(metadata) = self.review_target_metadata.as_mut() {
+                metadata.remote_snapshot = self.multi_diff.remote_snapshot.clone();
+            }
+            self.review_diff_fingerprint = self.compute_review_diff_fingerprint();
+            self.persist_review_session();
+        }
+    }
+
     pub(crate) fn repair_review_comments_after_diff_refresh(&mut self) -> bool {
         if !self.review_mode || !self.repair_review_comment_file_indexes() {
             return false;
@@ -8777,6 +8885,9 @@ impl App {
         let Some(metadata) = metadata else {
             return format!("diff:{diff_fingerprint}");
         };
+        if metadata.vcs == "remote" {
+            return format!("remote:{}", hash_hex(&metadata.label));
+        }
         if let (Some(provider), Some(repo), Some(number)) = (
             metadata.pr_provider.as_ref(),
             metadata.pr_repo.as_ref(),
@@ -8834,6 +8945,11 @@ impl App {
 
     fn compute_review_diff_fingerprint(&self) -> String {
         let mut hasher = DefaultHasher::new();
+        self.multi_diff
+            .remote_snapshot
+            .as_ref()
+            .map(|value| value.to_string())
+            .hash(&mut hasher);
         if let Some(root) = self.multi_diff.repo_root() {
             root.to_string_lossy().hash(&mut hasher);
         }
@@ -8943,6 +9059,88 @@ mod tests {
     use crate::app::ViewMode;
     use oyo_core::MultiFileDiff;
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn remote_editor_requires_snapshot_and_keeps_an_invalid_draft_unsaved() {
+        let mut app = test_app();
+        app.multi_diff.remote_snapshot = Some(serde_json::json!({"target":"remote"}));
+        let anchor = line_comment().anchor;
+        assert!(anchor.snapshot.is_none());
+        app.open_review_editor(anchor.clone());
+        assert!(!app.review_editor_active());
+        app.open_review_editor_state(anchor, None, "unsaved draft".into());
+        app.review_save_editor();
+        assert!(app.review_comments.is_empty());
+        assert_eq!(app.review_editor.as_ref().unwrap().text, "unsaved draft");
+    }
+
+    #[test]
+    fn new_remote_anchors_use_the_displayed_capture_snapshot() {
+        let mut app = test_app();
+        let displayed = serde_json::json!({"afterRevision":"old-head"});
+        let mut metadata = crate::basic_review_target_metadata("remote", "remote");
+        metadata.remote_snapshot = Some(serde_json::json!({"afterRevision":"live-head"}));
+        app.set_review_target_metadata(Some(metadata));
+        app.multi_diff = MultiFileDiff::from_remote_file_pair(
+            "new.txt".into(),
+            "old\n".into(),
+            "captured\nsecond line\n".into(),
+            displayed.clone(),
+        );
+        app.add_review_comment_from_cli(
+            "new.txt",
+            ReviewTargetKind::Line,
+            Some(ReviewSide::New),
+            None,
+            Some(ReviewRange { start: 2, end: 2 }),
+            "captured comment".into(),
+        )
+        .unwrap();
+        assert_eq!(
+            app.review_comments[0]
+                .anchor
+                .snapshot
+                .as_ref()
+                .unwrap()
+                .target
+                .as_ref()
+                .unwrap()
+                .remote_snapshot,
+            Some(displayed)
+        );
+    }
+
+    #[test]
+    fn remote_capture_preserves_long_lines_and_has_no_local_sources() {
+        let mut app = test_app();
+        let text = format!("{}TAIL\n", "x".repeat(20_000));
+        let snapshot = serde_json::json!({"target":"https://github.com/owner/repo/pull/1"});
+        app.multi_diff = MultiFileDiff::from_remote_file_pair(
+            "new.txt".into(),
+            "old\n".into(),
+            text.clone(),
+            snapshot.clone(),
+        );
+        let mut metadata = crate::basic_review_target_metadata("remote", "remote");
+        metadata.remote_snapshot = Some(snapshot.clone());
+        app.set_review_target_metadata(Some(metadata));
+        app.add_review_comment_from_cli(
+            "new.txt",
+            ReviewTargetKind::Line,
+            Some(ReviewSide::New),
+            None,
+            Some(ReviewRange { start: 1, end: 1 }),
+            "long line".into(),
+        )
+        .unwrap();
+        let captured =
+            App::reconstruct_captured_outdated_comment_diff(&app.review_comments[0]).unwrap();
+        assert_eq!(captured.file_contents(0).unwrap().1, text);
+        assert_eq!(captured.remote_snapshot, Some(snapshot));
+        assert!(captured
+            .source_path(0, oyo_core::multi::FileSide::New)
+            .is_none());
+    }
 
     #[test]
     fn sync_keeps_modified_lines_on_the_declared_side() {
@@ -9074,6 +9272,7 @@ mod tests {
 
     fn test_metadata(label: &str, vcs: &str) -> ReviewTargetMetadata {
         ReviewTargetMetadata {
+            remote_snapshot: None,
             label: label.to_string(),
             vcs: vcs.to_string(),
             jj_change_id: None,

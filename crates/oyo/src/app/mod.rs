@@ -742,6 +742,8 @@ pub struct App {
     diff_worker_tx: Option<mpsc::Sender<DiffRequest>>,
     diff_worker_rx: Option<mpsc::Receiver<DiffResponse>>,
     content_worker_rx: Option<mpsc::Receiver<ContentResponse>>,
+    remote_refresh_rx: Option<mpsc::Receiver<Result<crate::BuiltDiff, String>>>,
+
     content_generation: u64,
     content_loading: FxHashMap<usize, oyo_core::multi::PendingFileContent>,
     /// Extra display rows after each line (blame wrapping).
@@ -1444,6 +1446,7 @@ impl App {
             diff_worker_tx: None,
             diff_worker_rx: None,
             content_worker_rx: None,
+            remote_refresh_rx: None,
             content_generation: 0,
             content_loading: FxHashMap::default(),
             blame_extra_rows: None,
@@ -3188,6 +3191,7 @@ impl App {
 
         dirty |= self.expire_recent_file_changes(now);
         dirty |= self.toast_tick();
+        dirty |= self.poll_remote_refresh();
         let mut reviewed_state_inputs_changed = self.poll_content_responses();
         dirty |= reviewed_state_inputs_changed;
         dirty |= self.poll_review_grep();

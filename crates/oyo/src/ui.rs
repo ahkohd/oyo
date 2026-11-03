@@ -4988,11 +4988,12 @@ fn preview_document(
                 SyntaxSide::Old => FileSide::Old,
                 SyntaxSide::New => FileSide::New,
             };
-            let source_path = app
-                .multi_diff
-                .existing_source_path(index, file_side)
-                .or_else(|| app.multi_diff.source_path(index, file_side))
-                .or_else(|| Some(PathBuf::from(&file.display_name)));
+            let source_path = (!app.is_remote_session()).then(|| {
+                app.multi_diff
+                    .existing_source_path(index, file_side)
+                    .or_else(|| app.multi_diff.source_path(index, file_side))
+                    .unwrap_or_else(|| PathBuf::from(&file.display_name))
+            });
             let base_dir = source_path
                 .as_ref()
                 .and_then(|path| path.parent().map(Path::to_path_buf));
@@ -10416,6 +10417,7 @@ mod tests {
 
     fn mark_pr_target(app: &mut App) {
         app.set_review_target_metadata(Some(crate::app::review::ReviewTargetMetadata {
+            remote_snapshot: None,
             label: "PR".to_string(),
             vcs: "git".to_string(),
             jj_change_id: None,
@@ -11083,6 +11085,7 @@ mod tests {
         app.set_review_persist_enabled(false);
         app.enable_review_mode();
         let mut metadata = crate::app::review::ReviewTargetMetadata {
+            remote_snapshot: None,
             label: "MR".to_string(),
             vcs: "git".to_string(),
             jj_change_id: None,
@@ -11296,6 +11299,35 @@ mod tests {
             counted_binding_label("r / ctrl-r"),
             "<count>r / <count>ctrl-r"
         );
+    }
+
+    #[test]
+    fn remote_markdown_preview_does_not_resolve_filesystem_images() {
+        let image = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/assets/preview.png"
+        ));
+        let source = image.parent().unwrap().join("readme.md");
+        let markdown = format!(
+            "![relative](preview.png)\n\n![absolute]({})\n",
+            image.display()
+        );
+        let mut diff =
+            MultiFileDiff::from_file_pair(source.clone(), source, String::new(), markdown);
+        diff.remote_snapshot = Some(serde_json::json!({"target":"remote"}));
+        let app = App::new(diff, ViewMode::Preview, 50, false, None);
+        let (_, text, _, _, base, image_path) = super::preview_document(&app);
+        assert!(base.is_none());
+        assert!(image_path.is_none());
+        let theme = rgb_theme();
+        let mut highlight = |_lang: Option<&str>, _code: &str| None;
+        let (remote, _) =
+            render_markdown_preview_lines(&text, &theme, 80, base.as_deref(), &mut highlight, None);
+        assert!(!flatten(&remote).contains('▀'));
+        assert!(flatten(&remote).contains("image: absolute"));
+        let (local, _) =
+            render_markdown_preview_lines(&text, &theme, 80, image.parent(), &mut highlight, None);
+        assert!(flatten(&local).contains('▀'));
     }
 
     #[test]

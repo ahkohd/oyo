@@ -928,6 +928,7 @@ impl<'a> MarkdownRenderer<'a> {
     }
 
     fn local_image_path(&self, url: &str) -> Option<PathBuf> {
+        let base_dir = self.base_dir.as_ref()?;
         if url.is_empty() || url.starts_with('#') || url.starts_with("data:") || url.contains("://")
         {
             return None;
@@ -940,7 +941,7 @@ impl<'a> MarkdownRenderer<'a> {
         let path = if path.is_absolute() {
             path
         } else {
-            self.base_dir.as_ref()?.join(path)
+            base_dir.join(path)
         };
         path.is_file().then_some(path)
     }

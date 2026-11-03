@@ -83,6 +83,17 @@ pub(crate) struct FjReviewComments {
 pub(crate) struct ForgejoProvider;
 
 impl ReviewProviderAdapter for ForgejoProvider {
+    fn remote_json(&self, host: &str, endpoint: &str) -> Result<serde_json::Value> {
+        Ok(serde_json::from_str(&cb_output_bounded(
+            host, "GET", endpoint, None, true,
+        )?)?)
+    }
+    fn remote_snapshot(
+        &self,
+        target: &crate::remote::RemoteTarget,
+    ) -> Result<crate::remote::RemoteSnapshot> {
+        crate::remote::forgejo_snapshot(self, target)
+    }
     fn find_pr(&self, remote: &ReviewRemote, target: Option<&str>) -> Result<ProviderPr> {
         forgejo_pr(remote, target)
     }
@@ -715,6 +726,16 @@ fn cb_output(
     endpoint: &str,
     body: Option<serde_json::Value>,
 ) -> Result<String> {
+    cb_output_bounded(host, method, endpoint, body, false)
+}
+
+fn cb_output_bounded(
+    host: &str,
+    method: &str,
+    endpoint: &str,
+    body: Option<serde_json::Value>,
+    bounded: bool,
+) -> Result<String> {
     let token = forgejo_token(host)?;
     let mut config = format!(
         "silent\nshow-error\nfail-with-body\nurl = \"{}\"\nrequest = \"{}\"\nheader = \"Accept: application/json\"\nheader = \"Authorization: token {}\"\n",
@@ -731,7 +752,11 @@ fn cb_output(
     }
     let mut command = ProcessCommand::new("curl");
     command.arg("--config").arg("-");
-    run_output_with_stdin(command, &config)
+    if bounded {
+        crate::remote::run_command(command, Some(&config))
+    } else {
+        run_output_with_stdin(command, &config)
+    }
 }
 
 pub(crate) fn has_forgejo_token(host: &str) -> bool {
