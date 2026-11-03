@@ -33,6 +33,12 @@ pub enum DashboardSelection {
 }
 
 #[derive(Debug, Clone)]
+pub struct DashboardState {
+    selection: DashboardSelection,
+    pinned_from: Option<String>,
+}
+
+#[derive(Debug, Clone)]
 enum EntryKind {
     WorkingTree { files: usize },
     Staged { files: usize },
@@ -277,7 +283,7 @@ impl Dashboard {
         self.filter_cursor_last_blink = Instant::now();
     }
 
-    pub fn select_selection(&mut self, selection: &DashboardSelection) {
+    pub fn select_selection(&mut self, selection: &DashboardSelection) -> bool {
         let selected = match selection {
             DashboardSelection::Uncommitted => {
                 self.entry_position(|entry| matches!(entry.kind, EntryKind::WorkingTree { .. }))
@@ -299,7 +305,7 @@ impl Dashboard {
             }
         };
         let Some(selected) = selected else {
-            return;
+            return false;
         };
         self.selected = selected;
         self.scroll = 0;
@@ -310,6 +316,27 @@ impl Dashboard {
             },
             _ => None,
         };
+        true
+    }
+
+    pub fn state(&self) -> Option<DashboardState> {
+        Some(DashboardState {
+            selection: self.selection()?,
+            pinned_from: self.pinned_from.clone(),
+        })
+    }
+
+    pub fn restore_selection(
+        &mut self,
+        selection: &DashboardSelection,
+        previous: Option<&DashboardState>,
+    ) {
+        if !self.select_selection(selection) {
+            return;
+        }
+        if let Some(previous) = previous.filter(|state| &state.selection == selection) {
+            self.pinned_from = previous.pinned_from.clone();
+        }
     }
 
     fn entry_position(&self, matches: impl Fn(&DashboardEntry) -> bool) -> Option<usize> {
@@ -1678,6 +1705,70 @@ mod tests {
             to: "cccccccc".to_string(),
         });
         assert_eq!(dashboard.pinned_from, None);
+    }
+
+    #[test]
+    fn explicit_parent_pin_survives_history_round_trip() {
+        let commits = vec![
+            commit("dddddddd", "cccccccc"),
+            commit("cccccccc", "bbbbbbbb"),
+            commit("bbbbbbbb", "aaaaaaaa"),
+        ];
+        let mut first = dashboard_with(commits.clone());
+        first.select_selection(&DashboardSelection::Range {
+            from: "aaaaaaaa".to_string(),
+            to: "bbbbbbbb".to_string(),
+        });
+        first.toggle_pin();
+        first.move_selection(-1, 10);
+        let state = first.state().unwrap();
+        let mut reopened = dashboard_with(commits);
+        reopened.restore_selection(&state.selection, Some(&state));
+        reopened.move_selection(-1, 10);
+        assert_eq!(
+            reopened.selection(),
+            Some(DashboardSelection::Range {
+                from: "bbbbbbbb".to_string(),
+                to: "dddddddd".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn missing_history_target_keeps_working_tree_unpinned() {
+        let mut first = dashboard();
+        first.select_selection(&DashboardSelection::Range {
+            from: "aaaaaaaa".to_string(),
+            to: "bbbbbbbb".to_string(),
+        });
+        first.move_selection(1, 10);
+        first.toggle_pin();
+        first.move_selection(-1, 10);
+        let state = first.state().unwrap();
+        let mut reopened = dashboard_with(vec![commit("dddddddd", "cccccccc")]);
+        reopened.restore_selection(&state.selection, Some(&state));
+        assert_eq!(reopened.selection(), Some(DashboardSelection::Uncommitted));
+        reopened.move_selection(1, 10);
+        assert_eq!(reopened.selection(), Some(DashboardSelection::Staged));
+    }
+
+    #[test]
+    fn previous_pin_does_not_override_a_different_review() {
+        let mut first = dashboard();
+        first.select_selection(&DashboardSelection::Range {
+            from: EMPTY_TREE_HASH.to_string(),
+            to: "bbbbbbbb".to_string(),
+        });
+        let state = first.state().unwrap();
+        let mut reopened = dashboard();
+        reopened.restore_selection(
+            &DashboardSelection::Range {
+                from: "aaaaaaaa".to_string(),
+                to: "bbbbbbbb".to_string(),
+            },
+            Some(&state),
+        );
+        assert_eq!(reopened.pinned_from, None);
     }
 
     #[test]

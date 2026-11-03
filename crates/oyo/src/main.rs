@@ -24,7 +24,7 @@ mod ui;
 mod views;
 
 use crate::dashboard::{
-    Dashboard, DashboardConfig, DashboardContextMenuResult, DashboardSelection,
+    Dashboard, DashboardConfig, DashboardContextMenuResult, DashboardSelection, DashboardState,
 };
 use crate::input::handle_app_key;
 use crate::keybindings::{DashboardAction, DashboardFilterAction, Dispatch, Keybindings};
@@ -7551,17 +7551,25 @@ fn run() -> Result<()> {
         return handle_review_command(command, &config, &args);
     }
 
+    let mut dashboard_state = None;
     if let Some(limit) = view_limit {
         let mut terminal = setup_terminal()?;
         let image_picker = setup_image_picker();
-        let mut input_mode =
-            match run_commit_picker(&mut terminal, &config, light_mode, limit, None, None)? {
-                Some(mode) => mode,
-                None => {
-                    restore_terminal(&mut terminal)?;
-                    return Ok(());
-                }
-            };
+        let mut input_mode = match run_commit_picker(
+            &mut terminal,
+            &config,
+            light_mode,
+            limit,
+            None,
+            None,
+            &mut dashboard_state,
+        )? {
+            Some(mode) => mode,
+            None => {
+                restore_terminal(&mut terminal)?;
+                return Ok(());
+            }
+        };
 
         let mut exit_message: Option<String> = None;
         let mut review_hook_warnings = Vec::new();
@@ -7637,6 +7645,7 @@ fn run() -> Result<()> {
             match exit {
                 AppExit::Quit => break,
                 AppExit::Reload(mode, seq) => {
+                    dashboard_state = None;
                     input_mode = mode;
                     control_last_applied_seq = seq;
                 }
@@ -7648,6 +7657,7 @@ fn run() -> Result<()> {
                         limit,
                         Some(&input_mode),
                         runtime_theme.as_ref().map(|(theme, _)| theme),
+                        &mut dashboard_state,
                     )?
                     else {
                         break;
@@ -7791,6 +7801,7 @@ fn run() -> Result<()> {
         match exit {
             AppExit::Quit => break,
             AppExit::Reload(mode, seq) => {
+                dashboard_state = None;
                 input_mode = mode;
                 pending_diff = None;
                 control_last_applied_seq = seq;
@@ -7803,6 +7814,7 @@ fn run() -> Result<()> {
                     dashboard_limit,
                     Some(&input_mode),
                     runtime_theme.as_ref().map(|(theme, _)| theme),
+                    &mut dashboard_state,
                 )?
                 else {
                     break;
@@ -9430,6 +9442,7 @@ fn run_commit_picker<B: Backend>(
     limit: usize,
     initial: Option<&InputMode>,
     theme_override: Option<&config::ResolvedTheme>,
+    previous: &mut Option<DashboardState>,
 ) -> Result<Option<InputMode>> {
     let cwd = std::env::current_dir().unwrap_or_default();
     if !oyo_core::git::is_git_repo(&cwd) {
@@ -9463,10 +9476,11 @@ fn run_commit_picker<B: Backend>(
         keybindings: Keybindings::from_config(&config.keybindings),
     });
     if let Some(selection) = initial.and_then(dashboard_selection_for_input) {
-        dashboard.select_selection(&selection);
+        dashboard.restore_selection(&selection, previous.as_ref());
     }
 
     let selection = run_dashboard(terminal, &mut dashboard)?;
+    *previous = dashboard.state();
     let input_mode = match selection {
         None => return Ok(None),
         Some(DashboardSelection::Uncommitted) => InputMode::GitUncommitted,
