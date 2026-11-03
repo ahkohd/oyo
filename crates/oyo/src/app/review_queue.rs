@@ -106,8 +106,8 @@ impl App {
     pub(crate) fn incremental_review_toggle_label(&self) -> Option<&'static str> {
         self.incremental_review_available()
             .then_some(match self.incremental_review {
-                IncrementalReview::Off => "Enable incremental review (experimental)",
-                IncrementalReview::On(_) => "Disable incremental review (experimental)",
+                IncrementalReview::Off => "Enable incremental review",
+                IncrementalReview::On(_) => "Disable incremental review",
             })
     }
 
@@ -619,8 +619,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(base);
     }
 
-    const ENABLE_LABEL: &str = "Enable incremental review (experimental)";
-    const DISABLE_LABEL: &str = "Disable incremental review (experimental)";
+    const ENABLE_LABEL: &str = "Enable incremental review";
+    const DISABLE_LABEL: &str = "Disable incremental review";
 
     fn toggle_from_palette(app: &mut App) {
         app.execute_palette_action(PaletteAction::ToggleIncrementalReview);

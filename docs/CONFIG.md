@@ -387,9 +387,9 @@ file_scope = "repo"
 finder = "auto"
 ```
 
-## Review database and sync
+## Review
 
-Use `[review]` to set where Oyo saves the review database.
+Use `[review]` to configure saved reviews and where Oyo saves the review database.
 
 ```toml
 [review]
@@ -399,12 +399,26 @@ dir = ".oyo/reviews"
 | Key | Values | Default | What it does |
 | --- | --- | --- | --- |
 | `dir` | path | platform app data directory | Sets the base directory for review databases |
+| `incremental_review` | `true`, `false` | `false` | Starts saved reviews with reviewed files hidden. You can turn it on or off for a session from the command palette |
 
 Relative paths resolve from the current workspace root. This supports Git worktrees and jj workspaces.
 
 GitHub sync uses the built-in `gh` adapter. Use provider config when you need to define another provider command interface.
 
 Pass a remote name to `oy review pull` or `oy review push` when you do not want the default remote.
+
+### Incremental review
+
+Incremental review is off by default. To enable it for saved reviews:
+
+```toml
+[review]
+incremental_review = true
+```
+
+If you previously enabled this under `[experimental]`, move `incremental_review` to `[review]`. The old setting is no longer read.
+
+See [incremental review](./REVIEW.md#hide-reviewed-files) for how it works.
 
 ### Provider command interface
 
@@ -527,21 +541,6 @@ Oyo sends JSON on standard input by default. The payload includes the selected t
 `stdin` can be `json` or `none`.
 
 If you omit `message` or `failure_message`, Oyo uses `<label> started` and `<label> failed`.
-
-## Experimental
-
-Use `[experimental]` to try features that may change or be removed.
-
-| Key | Values | Default | What it does |
-| --- | --- | --- | --- |
-| `incremental_review` | `true`, `false` | `false` | Starts saved reviews with files you mark as reviewed hidden. You can turn it on or off for a session from the command palette |
-
-```toml
-[experimental]
-incremental_review = true
-```
-
-See [incremental review](./REVIEW.md#hide-reviewed-files) for how it works.
 
 ## Keybindings
 

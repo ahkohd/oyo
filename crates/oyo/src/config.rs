@@ -1722,6 +1722,7 @@ pub struct ReviewProviderConfig {
 #[derive(Debug, Deserialize, Clone, Default)]
 #[serde(default)]
 pub struct ReviewConfig {
+    pub incremental_review: bool,
     pub dir: Option<PathBuf>,
     pub providers: BTreeMap<String, ReviewProviderConfig>,
     pub hooks: Vec<ReviewHookConfig>,
@@ -1837,13 +1838,6 @@ pub struct Config {
     pub selection: SelectionConfig,
     pub editor: EditorConfig,
     pub keybindings: KeybindingsConfig,
-    pub experimental: ExperimentalConfig,
-}
-
-#[derive(Debug, Deserialize, Default)]
-#[serde(default)]
-pub struct ExperimentalConfig {
-    pub incremental_review: bool,
 }
 
 fn append_config_array(path: &[String]) -> bool {
@@ -2078,6 +2072,17 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn incremental_review_is_opt_in() {
+        assert!(!Config::default().review.incremental_review);
+        for source in ["", "[review]", "[review]\nincremental_review = false"] {
+            let config: Config = toml::from_str(source).unwrap();
+            assert!(!config.review.incremental_review);
+        }
+        let config: Config = toml::from_str("[review]\nincremental_review = true").unwrap();
+        assert!(config.review.incremental_review);
+    }
 
     #[test]
     fn settings_write_changes_one_key_and_preserves_comments() {

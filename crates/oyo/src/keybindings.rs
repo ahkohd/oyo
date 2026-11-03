@@ -317,7 +317,7 @@ binding_action!(NormalAction, [
     TogglePathPopup => ("toggle_path_popup", "Show full file path", ["ctrl-g"]),
     OpenEditor => ("open_editor", "Open file in editor", ["o", "ctrl-e"]),
     ToggleFileReviewed => ("toggle_file_reviewed", "Toggle file reviewed", ["g r"]),
-    ToggleIncrementalReview => ("toggle_incremental_review", "Toggle incremental review (experimental)", []),
+    ToggleIncrementalReview => ("toggle_incremental_review", "Toggle incremental review", []),
     GotoStart => ("goto_start", "Go to start", ["g g", "home"]),
     GotoEnd => ("goto_end", "Go to end", ["G", "end"]),
     FirstStep => ("first_step", "First step (or hunk in no-step)", ["<"]),
