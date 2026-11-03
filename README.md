@@ -67,6 +67,7 @@ Oyo helps you complete a review without leaving the terminal. You can:
 - use the review CLI and installed skill with coding agents
 - read changes in scroll mode or step mode
 - move between hunks and files
+- hide reviewed files with opt-in [incremental review](./docs/REVIEW.md#hide-reviewed-files)
 - find reviewed files with typo-tolerant path search
 - find text in changed lines or complete reviewed file content
 - switch between unified, split, evolution, blame and preview views
