@@ -1,6 +1,6 @@
 {
   "name": "@ahkohd/oyo-darwin-arm64",
-  "version": "0.1.61",
+  "version": "0.1.62",
   "description": "Prebuilt binary for @ahkohd/oyo (darwin arm64)",
   "license": "MIT",
   "repository": {
