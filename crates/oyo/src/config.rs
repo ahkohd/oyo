@@ -920,18 +920,6 @@ pub enum ToastPositionConfig {
     Center,
 }
 
-impl ToastPositionConfig {
-    pub fn toast_position(self) -> ratatui_comfy_toaster::ToastPosition {
-        match self {
-            Self::TopLeft => ratatui_comfy_toaster::ToastPosition::TopLeft,
-            Self::TopRight => ratatui_comfy_toaster::ToastPosition::TopRight,
-            Self::BottomLeft => ratatui_comfy_toaster::ToastPosition::BottomLeft,
-            Self::BottomRight => ratatui_comfy_toaster::ToastPosition::BottomRight,
-            Self::Center => ratatui_comfy_toaster::ToastPosition::Center,
-        }
-    }
-}
-
 /// Step wrap behavior at the ends of a file.
 #[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
