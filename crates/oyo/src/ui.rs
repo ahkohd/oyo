@@ -8946,9 +8946,8 @@ mod tests {
             false,
             None,
         );
-        assert!(help_markdown(&app).contains(
-            "| `toggle_incremental_review` | unbound | Toggle incremental review (experimental) |"
-        ));
+        assert!(help_markdown(&app)
+            .contains("| `toggle_incremental_review` | unbound | Toggle incremental review |"));
     }
 
     /// Render Markdown through the real preview renderer without needing an
