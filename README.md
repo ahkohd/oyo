@@ -59,7 +59,6 @@ Press `s` in the TUI to switch modes. Set `stepping = true` in your config to st
 
 Oyo helps you complete a review without leaving the terminal. You can:
 
-- open remote reviews, commits and comparisons without cloning
 - comment on lines, hunks and files
 - reply in flat review threads
 - resolve and reopen thread roots
@@ -86,6 +85,7 @@ Oyo helps you complete a review without leaving the terminal. You can:
 - animate or autoplay changes in step mode
 - wrap long lines
 - review Git and jj targets
+- open remote reviews, commits and comparisons without cloning
 - open saved review history with `oy log`
 - run review hooks
 - load configuration from XDG config paths
@@ -183,7 +183,7 @@ Open a review, commit or comparison URL without cloning:
 oy https://github.com/owner/repo/pull/123
 ```
 
-Supports GitHub, GitLab, Codeberg and Forgejo using existing CLI authentication. Review URLs also support pulling discussions and pushing replies without a checkout. See [remote diffs](./docs/REMOTE_DIFFS.md) for supported URLs and limits.
+Review and reply on GitHub, GitLab, Codeberg and Forgejo with your existing CLI login. See [remote diffs](./docs/REMOTE_DIFFS.md).
 
 ### Choose a view mode
 
