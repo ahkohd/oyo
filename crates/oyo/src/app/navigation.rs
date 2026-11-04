@@ -2098,6 +2098,9 @@ impl App {
             self.view_mode = ViewMode::UnifiedPane;
         }
 
+        if !self.current_file_diff_ready() {
+            return;
+        }
         self.peek_state = None;
         self.multi_diff.current_navigator().goto_end();
         self.multi_diff.current_navigator().clear_active_change();

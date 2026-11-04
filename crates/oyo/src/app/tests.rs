@@ -3589,4 +3589,64 @@ fn test_diff_worker_upgrades_deferred_diff_and_updates_counts() {
     let file = &app.multi_diff.files[0];
     assert_eq!(file.insertions, expected.insertions);
     assert_eq!(file.deletions, expected.deletions);
+    app.toggle_stepping();
+    assert_eq!(app.multi_diff.current_navigator().state().current_step, 0);
+}
+
+#[test]
+fn pending_remote_content_finishes_initial_no_step_entry() {
+    let root = std::env::temp_dir().join(format!(
+        "oyo-content-worker-{}-{:?}",
+        std::process::id(),
+        Instant::now()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("old.txt"), "old\n").unwrap();
+    std::fs::write(root.join("new.txt"), "new\n").unwrap();
+    let file = oyo_core::multi::FileEntry {
+        path: "file.txt".into(),
+        old_path: None,
+        old_source_path: None,
+        new_source_path: None,
+        display_name: "file.txt".to_string(),
+        status: oyo_core::git::FileStatus::Modified,
+        insertions: 1,
+        deletions: 1,
+        binary: false,
+    };
+    let mut diff = MultiFileDiff::from_pending_files(
+        Some(root.clone()),
+        vec![(
+            file,
+            oyo_core::multi::ContentSource::File(root.join("old.txt")),
+            oyo_core::multi::ContentSource::File(root.join("new.txt")),
+        )],
+        true,
+    );
+    diff.remote_snapshot = Some(serde_json::json!({}));
+    let mut app = App::new(diff, ViewMode::UnifiedPane, 100, false, None);
+    app.stepping = false;
+    app.enter_no_step_mode();
+    app.handle_file_enter();
+    assert_eq!(app.multi_diff.diff_status(0), DiffStatus::Loading);
+    assert!(app.start_content_loading());
+    assert_eq!(app.content_loading_count(), 1);
+    for _ in 0..100 {
+        if app.poll_content_responses() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(app.content_loading_count(), 0);
+    assert_eq!(app.multi_diff.diff_status(0), DiffStatus::Ready);
+    assert_eq!(app.multi_diff.file_contents(0), Some(("old\n", "new\n")));
+    assert!(app
+        .multi_diff
+        .current_navigator()
+        .state()
+        .cursor_change
+        .is_some());
+    assert!(app.multi_diff.current_navigator().state().last_nav_was_hunk);
+    assert_eq!(app.stats(), (1, 1));
+    let _ = std::fs::remove_dir_all(root);
 }

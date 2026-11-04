@@ -285,8 +285,7 @@ impl App {
                     && self.multi_diff.diff_status(response.file_index)
                         == oyo_core::multi::DiffStatus::Ready
                 {
-                    self.multi_diff.current_navigator().goto_end();
-                    self.multi_diff.current_navigator().clear_active_change();
+                    self.finish_file_enter();
                 }
                 self.clear_fold_context_caches();
                 self.reset_current_max_line_width();

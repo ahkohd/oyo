@@ -139,6 +139,9 @@ impl App {
                     self.mark_diff_changed();
                     if resp.file_index == self.multi_diff.selected_index {
                         self.multi_diff.ensure_full_navigator(resp.file_index);
+                        if !self.stepping {
+                            self.ensure_step_state_snapshot(resp.file_index);
+                        }
                         if !self.stepping || restore_refresh_end {
                             self.multi_diff.current_navigator().goto_end();
                             if !self.stepping {
