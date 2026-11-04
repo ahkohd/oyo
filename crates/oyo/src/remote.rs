@@ -313,14 +313,31 @@ impl RemoteTarget {
     }
 }
 
-fn pages(adapter: &dyn ReviewProviderAdapter, host: &str, endpoint: &str) -> Result<Vec<Value>> {
-    let mut all = Vec::new();
-    for page in 1..=100 {
+fn pages(
+    adapter: &dyn ReviewProviderAdapter,
+    host: &str,
+    endpoint: &str,
+    expected: Option<u64>,
+) -> Result<Vec<Value>> {
+    collect_pages(expected, |page| {
         let separator = if endpoint.contains('?') { '&' } else { '?' };
-        let value = adapter.remote_json(
+        adapter.remote_json(
             host,
             &format!("{endpoint}{separator}per_page=100&limit=100&page={page}"),
-        )?;
+        )
+    })
+}
+
+fn collect_pages(
+    expected: Option<u64>,
+    mut fetch: impl FnMut(u32) -> Result<Value>,
+) -> Result<Vec<Value>> {
+    let mut all = Vec::new();
+    if expected == Some(0) {
+        return Ok(all);
+    }
+    for page in 1..=100 {
+        let value = fetch(page)?;
         let items = value
             .as_array()
             .ok_or_else(|| anyhow!("Expected a provider file list"))?;
@@ -328,6 +345,14 @@ fn pages(adapter: &dyn ReviewProviderAdapter, host: &str, endpoint: &str) -> Res
             return Ok(all);
         }
         all.extend(items.iter().cloned());
+        if let Some(expected) = expected {
+            if all.len() as u64 > expected {
+                bail!("Provider file list exceeded its changed-file count");
+            }
+            if all.len() as u64 == expected {
+                return Ok(all);
+            }
+        }
     }
     bail!("Remote file enumeration exceeded its page limit; refusing a partial diff")
 }
@@ -409,10 +434,14 @@ fn entries(values: Vec<Value>, gitlab: bool) -> Result<Vec<FileEntry>> {
         .collect()
 }
 
-fn verify_count(metadata: &Value, files: &[FileEntry]) -> Result<()> {
-    let count = metadata["changed_files"]
+fn changed_file_count(metadata: &Value) -> Result<u64> {
+    metadata["changed_files"]
         .as_u64()
-        .ok_or_else(|| anyhow!("Provider did not report a complete changed-file count"))?;
+        .ok_or_else(|| anyhow!("Provider did not report a complete changed-file count"))
+}
+
+fn verify_count(metadata: &Value, files: &[FileEntry]) -> Result<()> {
+    let count = changed_file_count(metadata)?;
     if count != files.len() as u64 {
         bail!(
             "Provider file list is incomplete: expected {count}, received {}",
@@ -433,10 +462,19 @@ pub(crate) fn github_snapshot(
     let pr = adapter.remote_json(&target.host, &endpoint)?;
     let head = revision(&pr, "/head/sha")?;
     let base = revision(&pr, "/base/sha")?;
+    let expected = changed_file_count(&pr)?;
     let context = loading::current();
     let (comparison, files) = std::thread::scope(|scope| -> Result<_> {
-        let files = scope
-            .spawn(|| context.run(|| pages(adapter, &target.host, &format!("{endpoint}/files"))));
+        let files = scope.spawn(|| {
+            context.run(|| {
+                pages(
+                    adapter,
+                    &target.host,
+                    &format!("{endpoint}/files"),
+                    Some(expected),
+                )
+            })
+        });
         let comparison = adapter.remote_json(
             &target.host,
             &format!("repos/{}/compare/{base}...{head}", target.repo),
@@ -491,7 +529,7 @@ pub(crate) fn gitlab_snapshot(
     let before = revision(&pr, "/diff_refs/base_sha")?;
     let after = revision(&pr, "/diff_refs/head_sha")?;
     let files = entries(
-        pages(adapter, &target.host, &format!("{endpoint}/diffs"))?,
+        pages(adapter, &target.host, &format!("{endpoint}/diffs"), None)?,
         true,
     )?;
     let expected = pr["changes_count"]
@@ -538,7 +576,7 @@ pub(crate) fn forgejo_snapshot(
     let before = revision(&pr, "/merge_base")?;
     let after = revision(&pr, "/head/sha")?;
     let files = entries(
-        pages(adapter, &target.host, &format!("{endpoint}/files"))?,
+        pages(adapter, &target.host, &format!("{endpoint}/files"), None)?,
         false,
     )?;
     verify_count(&pr, &files)?;
@@ -930,6 +968,69 @@ mod tests {
         let files = entries(vec![file], false).unwrap();
         assert!(verify_count(&json!({"changed_files": 2}), &files).is_err());
         assert!(entries(vec![json!({"new_path":"file.rs","too_large":true})], true).is_ok());
+    }
+
+    #[test]
+    fn counted_pages_stop_at_exact_boundaries() {
+        for count in [0u64, 1, 99, 100, 101, 200, 3000, 10_000] {
+            let mut requests = 0;
+            let values = collect_pages(Some(count), |page| {
+                requests += 1;
+                Ok(Value::Array(
+                    ((page as u64 - 1) * 100..count.min(page as u64 * 100))
+                        .map(|i| json!({"filename": format!("file-{i}"), "status": "modified"}))
+                        .collect(),
+                ))
+            })
+            .unwrap();
+            assert_eq!(requests, count.div_ceil(100));
+            assert_eq!(entries(values, false).unwrap().len() as u64, count);
+        }
+    }
+
+    #[test]
+    fn counted_pages_reject_overflow_and_preserve_incomplete_validation() {
+        assert!(collect_pages(Some(1), |_| Ok(json!([{}, {}]))).is_err());
+        assert!(collect_pages(Some(1), |_| Ok(json!({}))).is_err());
+        assert!(collect_pages(Some(10_001), |_| Ok(Value::Array(vec![json!({}); 100]))).is_err());
+        let files = collect_pages(Some(2), |page| {
+            Ok(if page == 1 {
+                json!([{"filename":"one", "status":"modified"}])
+            } else {
+                json!([])
+            })
+        })
+        .unwrap();
+        assert!(
+            verify_count(&json!({"changed_files":2}), &entries(files, false).unwrap()).is_err()
+        );
+        let duplicates = collect_pages(Some(2), |_| {
+            Ok(json!([
+                {"filename":"one", "status":"modified"},
+                {"filename":"one", "status":"modified"}
+            ]))
+        })
+        .unwrap();
+        assert!(entries(duplicates, false).is_err());
+        for metadata in [
+            json!({}),
+            json!({"changed_files":-1}),
+            json!({"changed_files":"1"}),
+        ] {
+            assert!(changed_file_count(&metadata).is_err());
+        }
+    }
+
+    #[test]
+    fn uncounted_provider_pages_still_require_the_terminal_page() {
+        let mut requests = 0;
+        let files = collect_pages(None, |page| {
+            requests += 1;
+            Ok(if page == 1 { json!([{}]) } else { json!([]) })
+        })
+        .unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(requests, 2);
     }
 
     #[test]
