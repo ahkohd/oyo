@@ -83,6 +83,27 @@ pub struct PendingFileContent {
     pub new: ContentSource,
 }
 
+#[derive(Clone)]
+enum RemoteMaterial {
+    Patch {
+        patch: Arc<crate::patch::PatchRecord>,
+        request: Box<PendingFileContent>,
+        hydration: HydrationState,
+    },
+    Full {
+        old_mode: u32,
+        new_mode: u32,
+        display_patch: Option<Arc<crate::patch::PatchRecord>>,
+    },
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub enum HydrationState {
+    Idle,
+    Loading,
+    Failed(String),
+}
+
 pub struct PreparedFileContent {
     old: Arc<str>,
     new: Arc<str>,
@@ -129,6 +150,7 @@ pub struct MultiFileDiff {
     /// Blame sources supplied by non-Git frontends backed by Git objects.
     blame_sources_override: Option<(BlameSource, BlameSource)>,
     pub remote_snapshot: Option<serde_json::Value>,
+    remote_material: std::collections::HashMap<usize, RemoteMaterial>,
 }
 
 #[derive(Debug, Clone)]
@@ -559,6 +581,7 @@ impl MultiFileDiff {
             stats_authoritative,
             blame_sources_override: None,
             remote_snapshot: None,
+            remote_material: std::collections::HashMap::new(),
         }
     }
 
@@ -616,6 +639,7 @@ impl MultiFileDiff {
             stats_authoritative: false,
             blame_sources_override: None,
             remote_snapshot: None,
+            remote_material: std::collections::HashMap::new(),
         }
     }
 
@@ -679,6 +703,7 @@ impl MultiFileDiff {
             stats_authoritative: true,
             blame_sources_override: None,
             remote_snapshot: None,
+            remote_material: std::collections::HashMap::new(),
         }
     }
 
@@ -976,6 +1001,7 @@ impl MultiFileDiff {
             stats_authoritative: true,
             blame_sources_override: None,
             remote_snapshot: None,
+            remote_material: std::collections::HashMap::new(),
         })
     }
 
@@ -1058,6 +1084,7 @@ impl MultiFileDiff {
             stats_authoritative: true,
             blame_sources_override: None,
             remote_snapshot: None,
+            remote_material: std::collections::HashMap::new(),
         })
     }
 
@@ -1152,6 +1179,7 @@ impl MultiFileDiff {
             stats_authoritative: true,
             blame_sources_override: None,
             remote_snapshot: None,
+            remote_material: std::collections::HashMap::new(),
         })
     }
 
@@ -1236,6 +1264,7 @@ impl MultiFileDiff {
             stats_authoritative: true,
             blame_sources_override: None,
             remote_snapshot: None,
+            remote_material: std::collections::HashMap::new(),
         })
     }
 
@@ -1376,6 +1405,7 @@ impl MultiFileDiff {
             stats_authoritative: false,
             blame_sources_override: None,
             remote_snapshot: None,
+            remote_material: std::collections::HashMap::new(),
         })
     }
 
@@ -1473,6 +1503,7 @@ impl MultiFileDiff {
             stats_authoritative: false,
             blame_sources_override: None,
             remote_snapshot: None,
+            remote_material: std::collections::HashMap::new(),
         }
     }
 
@@ -1524,11 +1555,24 @@ impl MultiFileDiff {
             stats_authoritative: false,
             blame_sources_override: None,
             remote_snapshot: None,
+            remote_material: std::collections::HashMap::new(),
         }
     }
 
     /// Get the navigator for the currently selected file
+    pub fn navigator_for(&self, index: usize) -> Option<&DiffNavigator> {
+        self.navigators.get(index)?.as_ref()
+    }
+
+    pub fn restore_navigator_state(&mut self, index: usize, state: crate::step::StepState) -> bool {
+        self.navigators
+            .get_mut(index)
+            .and_then(Option::as_mut)
+            .is_some_and(|nav| nav.set_state(state))
+    }
+
     pub fn current_navigator(&mut self) -> &mut DiffNavigator {
+        self.ensure_patch_navigator(self.selected_index);
         if self.navigators[self.selected_index].is_none() {
             let mut placeholder = false;
             let lazy_maps = self.file_is_large(self.selected_index);
@@ -1573,6 +1617,129 @@ impl MultiFileDiff {
     /// Get the current file entry
     pub fn current_file(&self) -> Option<&FileEntry> {
         self.files.get(self.selected_index)
+    }
+
+    pub fn append_patch(
+        &mut self,
+        patch: crate::patch::PatchRecord,
+        old: ContentSource,
+        new: ContentSource,
+    ) -> usize {
+        let index = self.files.len();
+        let request = PendingFileContent {
+            file_index: index,
+            old,
+            new,
+        };
+        self.files.push(patch.entry.clone());
+        self.navigators.push(None);
+        self.navigator_is_placeholder.push(false);
+        self.old_contents.push(Arc::from(""));
+        self.new_contents.push(Arc::from(""));
+        self.precomputed_diffs.push(None);
+        self.diff_statuses.push(DiffStatus::Ready);
+        self.pending_content.push(None);
+        self.remote_material.insert(
+            index,
+            RemoteMaterial::Patch {
+                patch: Arc::new(patch),
+                request: Box::new(request),
+                hydration: HydrationState::Idle,
+            },
+        );
+        index
+    }
+
+    fn ensure_patch_navigator(&mut self, index: usize) -> bool {
+        let Some(patch) = self.patch_for_display(index) else {
+            return false;
+        };
+        if self.navigators[index].is_none() {
+            let diff = patch.display_diff().unwrap_or_else(|_| {
+                Self::context_only_diff("Patch text is unavailable. Request full contents.")
+            });
+            self.navigators[index] = Some(
+                if matches!(
+                    self.remote_material.get(&index),
+                    Some(RemoteMaterial::Full { .. })
+                ) {
+                    DiffNavigator::new(
+                        diff,
+                        self.old_contents[index].clone(),
+                        self.new_contents[index].clone(),
+                        true,
+                    )
+                } else {
+                    DiffNavigator::from_patch(diff)
+                },
+            );
+        }
+        true
+    }
+
+    fn patch_for_display(&self, index: usize) -> Option<&Arc<crate::patch::PatchRecord>> {
+        match self.remote_material.get(&index)? {
+            RemoteMaterial::Patch { patch, .. } => Some(patch),
+            RemoteMaterial::Full { display_patch, .. } => display_patch.as_ref(),
+        }
+    }
+
+    pub fn has_patch_display(&self, index: usize) -> bool {
+        self.patch_for_display(index).is_some()
+    }
+
+    pub fn file_is_sparse(&self, index: usize) -> bool {
+        matches!(
+            self.remote_material.get(&index),
+            Some(RemoteMaterial::Patch { .. })
+        )
+    }
+
+    pub fn ensure_full_content(&mut self, index: usize) -> bool {
+        if matches!(
+            self.remote_material.get(&index),
+            Some(RemoteMaterial::Patch {
+                hydration: HydrationState::Failed(_),
+                ..
+            })
+        ) {
+            return false;
+        }
+        self.request_full_content(index)
+    }
+
+    pub fn request_full_content(&mut self, index: usize) -> bool {
+        let Some(RemoteMaterial::Patch {
+            request, hydration, ..
+        }) = self.remote_material.get_mut(&index)
+        else {
+            return false;
+        };
+        if *hydration == HydrationState::Loading {
+            return false;
+        }
+        *hydration = HydrationState::Loading;
+        self.pending_content[index] = Some(request.as_ref().clone());
+        true
+    }
+
+    pub fn file_modes(&self, index: usize) -> Option<(u32, u32)> {
+        match self.remote_material.get(&index)? {
+            RemoteMaterial::Patch { patch, .. } => Some((patch.old_mode, patch.new_mode)),
+            RemoteMaterial::Full {
+                old_mode, new_mode, ..
+            } => Some((*old_mode, *new_mode)),
+        }
+    }
+
+    pub fn hydration_failure(&self, index: usize) -> Option<&str> {
+        match self.remote_material.get(&index)? {
+            RemoteMaterial::Patch {
+                hydration: HydrationState::Failed(error),
+                ..
+            } => Some(error),
+            _ => None,
+        }
     }
 
     pub fn take_pending_content_for(&mut self, idx: usize) -> Option<PendingFileContent> {
@@ -1660,7 +1827,33 @@ impl MultiFileDiff {
     }
 
     pub fn apply_prepared_content(&mut self, idx: usize, content: PreparedFileContent) -> bool {
-        if self.diff_status(idx) != DiffStatus::Loading {
+        if let Some(RemoteMaterial::Patch {
+            patch, hydration, ..
+        }) = self.remote_material.get_mut(&idx)
+        {
+            if *hydration != HydrationState::Loading {
+                return false;
+            }
+            if content.status == DiffStatus::Failed {
+                *hydration = HydrationState::Failed(
+                    "Full contents could not be loaded. The patch is retained.".to_owned(),
+                );
+                return true;
+            }
+            let modes = (patch.old_mode, patch.new_mode);
+            let display_patch = ((!patch.has_changed_lines()
+                || content.status != DiffStatus::Ready)
+                && !content.binary)
+                .then(|| patch.clone());
+            self.remote_material.insert(
+                idx,
+                RemoteMaterial::Full {
+                    old_mode: modes.0,
+                    new_mode: modes.1,
+                    display_patch,
+                },
+            );
+        } else if self.diff_status(idx) != DiffStatus::Loading {
             return false;
         }
         self.old_contents[idx] = content.old;
@@ -1668,12 +1861,17 @@ impl MultiFileDiff {
         self.precomputed_diffs[idx] = content.precomputed;
         self.diff_statuses[idx] = content.status;
         self.files[idx].binary = content.binary;
-        self.navigators[idx] = None;
-        self.navigator_is_placeholder[idx] = false;
+        if !self.has_patch_display(idx) {
+            self.navigators[idx] = None;
+            self.navigator_is_placeholder[idx] = false;
+        }
         true
     }
 
     pub fn file_contents(&self, idx: usize) -> Option<(&str, &str)> {
+        if self.file_is_sparse(idx) {
+            return None;
+        }
         if matches!(
             self.diff_status(idx),
             DiffStatus::Loading | DiffStatus::Failed
@@ -1688,6 +1886,9 @@ impl MultiFileDiff {
     }
 
     pub fn file_contents_arc(&self, idx: usize) -> Option<(Arc<str>, Arc<str>)> {
+        if self.file_is_sparse(idx) {
+            return None;
+        }
         if matches!(
             self.diff_status(idx),
             DiffStatus::Loading | DiffStatus::Failed
@@ -1762,6 +1963,9 @@ impl MultiFileDiff {
 
     /// True when diffing is not ready for the current file (deferred/disabled)
     pub fn current_file_diff_disabled(&self) -> bool {
+        if self.has_patch_display(self.selected_index) {
+            return false;
+        }
         matches!(
             self.diff_statuses.get(self.selected_index),
             Some(
@@ -1815,6 +2019,12 @@ impl MultiFileDiff {
     }
 
     pub fn apply_diff_result(&mut self, idx: usize, diff: DiffResult) {
+        if let Some(RemoteMaterial::Full { display_patch, .. }) = self.remote_material.get_mut(&idx)
+        {
+            if display_patch.take().is_some() {
+                self.navigator_is_placeholder[idx] = true;
+            }
+        }
         if let Some(status) = self.diff_statuses.get_mut(idx) {
             *status = DiffStatus::Ready;
         }
@@ -1832,6 +2042,9 @@ impl MultiFileDiff {
     }
 
     pub fn ensure_full_navigator(&mut self, idx: usize) {
+        if self.ensure_patch_navigator(idx) {
+            return;
+        }
         if !matches!(self.diff_status(idx), DiffStatus::Ready) {
             return;
         }

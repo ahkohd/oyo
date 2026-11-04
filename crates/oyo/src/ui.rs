@@ -812,6 +812,8 @@ fn draw_all_reviewed_tab(
 
 /// Main drawing function
 pub fn draw(frame: &mut Frame, app: &mut App) {
+    app.restore_remote_viewport();
+    app.begin_remote_position_frame(frame.area());
     app.clear_review_preview_boxes();
     app.clear_fold_context_hits();
     app.begin_scrollbar_frame();
@@ -936,6 +938,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     } else {
         app.set_search_bar_hits(None, None, None, None);
     }
+    app.end_remote_position_frame();
 }
 
 fn rects_overlap(left: Rect, right: Rect) -> bool {
@@ -1644,7 +1647,12 @@ fn draw_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
         Style::default().fg(app.theme.text_muted),
     ));
     right_spans.push(Span::raw(" "));
-    if app.content_loading_count() > 0 {
+    if let Some(status) = app.remote_manifest_status() {
+        right_spans.push(Span::styled(
+            status,
+            Style::default().fg(app.theme.text_muted),
+        ));
+    } else if app.content_loading_count() > 0 {
         right_spans.push(Span::styled(
             format!("loading {} files…", app.content_loading_count()),
             Style::default().fg(app.theme.text_muted),
@@ -4823,10 +4831,16 @@ fn preview_document(
                 .multi_diff
                 .file_contents(index)
                 .map(|(old, new)| match side {
-                    SyntaxSide::Old => old.to_string(),
-                    SyntaxSide::New => new.to_string(),
+                    SyntaxSide::Old => if app.is_remote_session() {oyo_core::patch::terminal_document_text(old)}else {old.to_string()},
+                    SyntaxSide::New => if app.is_remote_session() {oyo_core::patch::terminal_document_text(new)}else {new.to_string()},
                 })
-                .unwrap_or_default();
+                .unwrap_or_else(|| if let Some(error) = app.multi_diff.hydration_failure(index) {
+                    format!("Full file preview failed: {}. Retry full contents from diff view; the patch remains readable.", oyo_core::patch::terminal_text(error))
+                } else if app.multi_diff.file_is_sparse(index) {
+                    "Full file preview is loading. Patch content remains available in diff view.".to_owned()
+                } else if file.binary {
+                    "Binary content has no text preview.".to_owned()
+                } else {String::new()});
             let file_side = match side {
                 SyntaxSide::Old => FileSide::Old,
                 SyntaxSide::New => FileSide::New,
@@ -8510,6 +8524,7 @@ fn draw_review_grep_popover(frame: &mut Frame, app: &mut App) {
     );
 
     let pending = app.review_grep_pending_files();
+    let manifest_incomplete = app.review_grep_manifest_incomplete();
     let status = if app.review_grep_query().is_empty() {
         String::new()
     } else {
@@ -8518,11 +8533,17 @@ fn draw_review_grep_popover(frame: &mut Frame, app: &mut App) {
         } else {
             format!("{result_count} matches")
         };
-        if pending > 0 {
-            format!("{matches}; indexing {pending} more...")
+        let pending_label = if pending > 0 {
+            format!("; indexing {pending} more...")
         } else {
-            matches
-        }
+            String::new()
+        };
+        let manifest_label = if manifest_incomplete {
+            "; snapshot incomplete"
+        } else {
+            ""
+        };
+        format!("{matches}{pending_label}{manifest_label}")
     };
     frame.render_widget(
         Paragraph::new(Span::styled(
@@ -8537,7 +8558,11 @@ fn draw_review_grep_popover(frame: &mut Frame, app: &mut App) {
         if !app.review_grep_query().is_empty() && !app.review_grep_searching() {
             frame.render_widget(
                 Paragraph::new(Span::styled(
-                    "No results",
+                    if manifest_incomplete || pending > 0 {
+                        "Search incomplete"
+                    } else {
+                        "No results"
+                    },
                     Style::default().fg(app.theme.text_muted),
                 ))
                 .alignment(Alignment::Center),
@@ -8625,6 +8650,11 @@ fn draw_review_grep_popover(frame: &mut Frame, app: &mut App) {
                     .fg(app.theme.accent)
                     .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
             ));
+        }
+        if app.is_remote_session() {
+            for span in &mut spans {
+                span.content = oyo_core::patch::terminal_text(&span.content).into();
+            }
         }
         items.push(ListItem::new(Line::from(spans)));
     }

@@ -1,4 +1,6 @@
+pub(crate) mod github;
 pub(crate) mod loading;
+pub(crate) mod stream;
 mod trees;
 use crate::{
     provider_adapter, review_provider_for_host, BuiltDiff, ReviewProviderAdapter,
@@ -601,6 +603,10 @@ pub(crate) fn forgejo_snapshot(
 }
 
 pub(crate) fn build(url: &str) -> Result<BuiltDiff> {
+    stream::finish(url)
+}
+
+fn build_legacy(url: &str) -> Result<BuiltDiff> {
     let target = RemoteTarget::parse(url)?;
     let snapshot = provider_adapter(target.provider)?.remote_snapshot(&target)?;
     let target = snapshot.target.clone();
@@ -645,7 +651,12 @@ pub(crate) fn build(url: &str) -> Result<BuiltDiff> {
         "beforeRevision": snapshot.before, "afterRevision": snapshot.after, "files": manifest,
         "reviewVersion": snapshot.review_version,
     }));
+    let remote_validation = multi_diff
+        .remote_snapshot
+        .clone()
+        .map(stream::ValidatedSnapshot::legacy);
     Ok(BuiltDiff {
+        remote_validation,
         multi_diff,
         branch: Some(url.to_owned()),
         workspace_root: None,
@@ -836,9 +847,18 @@ pub(crate) fn load_pair(request: &PendingFileContent) -> Result<(Vec<u8>, Vec<u8
     })
 }
 
-pub(crate) fn run_command(
+pub(crate) fn run_command(command: std::process::Command, input: Option<&str>) -> Result<String> {
+    run_command_response(command, input, false)
+}
+
+pub(super) fn run_public_http(command: std::process::Command) -> Result<String> {
+    run_command_response(command, None, true)
+}
+
+fn run_command_response(
     mut command: std::process::Command,
     input: Option<&str>,
+    public_http: bool,
 ) -> Result<String> {
     use std::io::{Read, Write};
     use std::process::Stdio;
@@ -873,8 +893,16 @@ pub(crate) fn run_command(
         .take()
         .ok_or_else(|| anyhow!("Missing transport diagnostics"))?;
     let output_reader = std::thread::spawn(move || {
+        let reader: Box<dyn Read + Send> = if public_http {
+            Box::new(github::ResponseBody::new(
+                std::io::BufReader::new(stdout),
+                github::ReadTransport::PublicHttps,
+            ))
+        } else {
+            Box::new(stdout)
+        };
         let mut bytes = Vec::new();
-        stdout
+        reader
             .take(LIMIT + 1)
             .read_to_end(&mut bytes)
             .map(|_| bytes)
@@ -885,11 +913,31 @@ pub(crate) fn run_command(
     });
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut status = None;
+    let mut output_reader = Some(output_reader);
+    let mut output = None;
     loop {
-        if status.is_none() && output_reader.is_finished() && error_reader.is_finished() {
+        if output_reader
+            .as_ref()
+            .is_some_and(|reader| reader.is_finished())
+        {
+            output = Some(
+                output_reader
+                    .take()
+                    .unwrap()
+                    .join()
+                    .map_err(|_| anyhow!("Transport reader failed"))?,
+            );
+            if output
+                .as_ref()
+                .is_some_and(|v| v.as_ref().map_or(true, |bytes| bytes.len() as u64 > LIMIT))
+            {
+                child.stop();
+            }
+        }
+        if status.is_none() {
             status = child.try_wait()?;
         }
-        if status.is_some() && output_reader.is_finished() && error_reader.is_finished() {
+        if status.is_some() && output.is_some() && error_reader.is_finished() {
             break;
         }
         if Instant::now() >= deadline || loading::cancelled() {
@@ -901,9 +949,7 @@ pub(crate) fn run_command(
         }
         std::thread::sleep(Duration::from_millis(20));
     }
-    let bytes = output_reader
-        .join()
-        .map_err(|_| anyhow!("Transport reader failed"))??;
+    let bytes = output.ok_or_else(|| anyhow!("Transport reader stopped"))??;
     let errors = error_reader
         .join()
         .map_err(|_| anyhow!("Transport diagnostics failed"))??;
@@ -914,16 +960,81 @@ pub(crate) fn run_command(
     if !status.success() {
         bail!(
             "Remote request failed: {}",
-            String::from_utf8_lossy(&errors).trim()
+            oyo_core::patch::terminal_text(String::from_utf8_lossy(&errors).trim())
         );
     }
     Ok(String::from_utf8(bytes)?)
+}
+
+pub(crate) fn same_review_snapshot(left: &serde_json::Value, right: &serde_json::Value) -> bool {
+    if left == right {
+        return left["acquisition"] != "patch-v1" || left["streamState"] == "complete";
+    }
+    let normalize = |value: &serde_json::Value| -> Option<serde_json::Value> {
+        if value["version"] != 1
+            || value["reviewVersion"].is_null()
+            || value["acquisition"] == "patch-v1" && value["streamState"] != "complete"
+        {
+            return None;
+        }
+        let mut value = value.clone();
+        let object = value.as_object_mut()?;
+        for key in [
+            "acquisition",
+            "streamState",
+            "expectedFiles",
+            "expectedAdditions",
+            "expectedDeletions",
+        ] {
+            object.remove(key);
+        }
+        for key in ["beforeRepositoryId", "afterRepositoryId"] {
+            if left.get(key).is_none() || right.get(key).is_none() {
+                object.remove(key);
+            }
+        }
+        let files = object.get_mut("files")?.as_array_mut()?;
+        files.sort_by_cached_key(serde_json::Value::to_string);
+        Some(value)
+    };
+    match (normalize(left), normalize(right)) {
+        (Some(left), Some(right)) => left == right,
+        _ => false,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn completed_patch_preserves_legacy_review_identity_without_ignoring_changes() {
+        let legacy = json!({"version":1,"provider":"github","target":"https://github.com/o/r/pull/1","host":"github.com","beforeRepository":"o/r","afterRepository":"fork/r","beforeRevision":"old","afterRevision":"new","reviewVersion":{"baseTip":"tip","head":"new"},"files":[{"path":"b","oldPath":null,"status":"Added"},{"path":"a","oldPath":null,"status":"Modified"}]});
+        let mut patch = legacy.clone();
+        patch["acquisition"] = "patch-v1".into();
+        patch["streamState"] = "complete".into();
+        patch["expectedFiles"] = 2.into();
+        patch["expectedAdditions"] = 4.into();
+        patch["expectedDeletions"] = 1.into();
+        patch["beforeRepositoryId"] = 1.into();
+        patch["afterRepositoryId"] = 2.into();
+        patch["files"].as_array_mut().unwrap().reverse();
+        assert!(same_review_snapshot(&legacy, &patch));
+        for (key, value) in [
+            ("afterRevision", json!("changed")),
+            ("beforeRepository", json!("other/r")),
+            ("streamState", json!("receiving")),
+            ("files", json!([])),
+        ] {
+            let mut changed = patch.clone();
+            changed[key] = value;
+            assert!(!same_review_snapshot(&legacy, &changed));
+        }
+        let mut changed = patch.clone();
+        changed["beforeRepositoryId"] = 99.into();
+        assert!(!same_review_snapshot(&patch, &changed));
+    }
 
     #[test]
     fn urls_preserve_provider_host_and_nested_repository() {

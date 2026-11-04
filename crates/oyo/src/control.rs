@@ -1093,6 +1093,8 @@ fn diff_response(app: &mut App, info: &ControlSessionInfo, include_patch: bool) 
         "session": info.name,
         "target": app.control_target_label(),
         "fileCount": app.multi_diff.file_count(),
+        "manifestComplete": app.remote_manifest_complete(),
+        "remoteStatus": app.remote_manifest_status(),
         "currentFile": app.current_file_path(),
         "includePatch": include_patch,
         "files": files,
@@ -1150,6 +1152,8 @@ fn context_json(
         "file": app.current_file_path(),
         "fileIndex": app.multi_diff.selected_index,
         "fileCount": app.multi_diff.file_count(),
+        "manifestComplete": app.remote_manifest_complete(),
+        "remoteStatus": app.remote_manifest_status(),
         "hunk": state.current_hunk.saturating_add(1),
         "hunkCount": state.total_hunks,
         "step": step,
@@ -1417,11 +1421,11 @@ fn apply_goto(app: &mut App, target: GotoTarget<'_>) -> Result<()> {
         return Ok(());
     }
     if let Some(line) = target.new_line {
-        app.goto_line_on_side(true, line);
+        anyhow::ensure!(app.goto_line_on_side(true, line), "Requested line is unavailable in the displayed contents; full contents may still be loading");
         return Ok(());
     }
     if let Some(line) = target.old_line {
-        app.goto_line_on_side(false, line);
+        anyhow::ensure!(app.goto_line_on_side(false, line), "Requested line is unavailable in the displayed contents; full contents may still be loading");
         return Ok(());
     }
     let query = if let Some(hunk) = target.hunk {

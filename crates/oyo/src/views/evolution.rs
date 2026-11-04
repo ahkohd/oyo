@@ -496,7 +496,9 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
 
         // In evolution mode, use subtle line number coloring based on type
         let line_num_style = match view_line.kind {
-            LineKind::Context => Style::default().fg(app.theme.diff_line_number),
+            LineKind::Context | LineKind::Unloaded => {
+                Style::default().fg(app.theme.diff_line_number)
+            }
             LineKind::Inserted | LineKind::PendingInsert => {
                 // Use insert gradient base color for line numbers
                 let rgb = crate::color::gradient_color(&app.theme.insert, 0.5);
@@ -606,7 +608,7 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
                 | LineKind::Modified
                 | LineKind::PendingInsert
                 | LineKind::PendingModify => false,
-                LineKind::Context => view_line.has_changes,
+                LineKind::Context | LineKind::Unloaded => view_line.has_changes,
             };
             let side = if use_old {
                 SyntaxSide::Old
@@ -688,6 +690,24 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
         } else {
             1
         };
+        app.record_remote_render_row(
+            view_line,
+            crate::app::RemoteRowGeometry {
+                side: None,
+                source_scroll: if app.line_wrap {
+                    display_len + app.view_window_start()
+                } else {
+                    display_idx + app.view_window_start()
+                },
+                rendered_start: if app.line_wrap {
+                    display_len
+                } else {
+                    content_lines.len()
+                },
+                viewport_start: if app.line_wrap { scroll_offset } else { 0 },
+                wrap_count,
+            },
+        );
         if app.line_wrap {
             display_len += wrap_count;
         }

@@ -141,16 +141,17 @@ impl StepState {
     }
 }
 
-/// Navigator for stepping through diff changes
+enum NavigatorContent {
+    Full { old: Arc<str>, new: Arc<str> },
+    Sparse,
+}
+
 pub struct DiffNavigator {
     /// The diff result we're navigating
     diff: DiffResult,
     /// Current step state
     state: StepState,
-    /// Original content (for reconstructing views)
-    old_content: Arc<str>,
-    /// New content (for reconstructing views)
-    new_content: Arc<str>,
+    content: NavigatorContent,
     /// Mapping from change ID to hunk index
     change_to_hunk: Vec<Option<usize>>,
     /// Exact mapping from change ID to hunk index (no context padding)
@@ -186,6 +187,12 @@ struct HunkStepRange {
 }
 
 impl DiffNavigator {
+    pub fn from_patch(diff: DiffResult) -> Self {
+        let mut navigator = Self::new(diff, Arc::from(""), Arc::from(""), true);
+        navigator.content = NavigatorContent::Sparse;
+        navigator
+    }
+
     pub fn new(
         diff: DiffResult,
         old_content: Arc<str>,
@@ -279,8 +286,10 @@ impl DiffNavigator {
         Self {
             diff,
             state: StepState::new(total_changes, total_hunks),
-            old_content,
-            new_content,
+            content: NavigatorContent::Full {
+                old: old_content,
+                new: new_content,
+            },
             change_to_hunk,
             change_id_to_hunk_exact,
             change_to_index,
@@ -1779,13 +1788,19 @@ impl DiffNavigator {
     }
 
     /// Get old content
-    pub fn old_content(&self) -> &str {
-        self.old_content.as_ref()
+    pub fn old_content(&self) -> Option<&str> {
+        match &self.content {
+            NavigatorContent::Full { old, .. } => Some(old.as_ref()),
+            NavigatorContent::Sparse => None,
+        }
     }
 
     /// Get new content
-    pub fn new_content(&self) -> &str {
-        self.new_content.as_ref()
+    pub fn new_content(&self) -> Option<&str> {
+        match &self.content {
+            NavigatorContent::Full { new, .. } => Some(new.as_ref()),
+            NavigatorContent::Sparse => None,
+        }
     }
 }
 
@@ -1836,6 +1851,7 @@ pub struct ViewLine {
 /// The kind of line in the view
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LineKind {
+    Unloaded,
     /// Unchanged context line
     Context,
     /// Line was inserted

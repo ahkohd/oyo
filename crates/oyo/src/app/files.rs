@@ -80,6 +80,13 @@ impl App {
             .as_ref()
             .filter(|m| m.vcs == "remote")
             .map(|m| m.label.clone())
+            .or_else(|| {
+                self.multi_diff
+                    .remote_snapshot
+                    .as_ref()
+                    .and_then(|s| s["target"].as_str())
+                    .map(str::to_owned)
+            })
         else {
             return false;
         };
@@ -103,7 +110,16 @@ impl App {
         match result {
             Ok(built) => {
                 self.restore_live_diff_after_outdated_view();
+                self.remote_stream = None;
+                self.remote_validation = built.remote_validation;
                 self.replace_multi_diff(built.multi_diff);
+                if let Some(configure) = self.pending_remote_review.take() {
+                    if let Err(error) = configure(self) {
+                        self.review_mode = false;
+                        self.pending_remote_review = Some(configure);
+                        self.notify(ToastEvent::SelectionActionFailed(error.to_string()));
+                    }
+                }
                 self.refresh_remote_review_snapshot();
             }
             Err(error) => self.notify(ToastEvent::SelectionActionFailed(format!(
@@ -287,6 +303,7 @@ impl App {
         self.centered_once = false;
         self.update_file_list_scroll();
         self.handle_file_enter();
+        self.restore_remote_viewport();
     }
 
     pub(crate) fn ensure_topbar_tabs(&mut self) {
@@ -426,6 +443,7 @@ impl App {
     }
 
     pub(crate) fn save_active_topbar_tab_state(&mut self) {
+        self.remember_remote_viewport();
         let Some(active) = self.active_topbar_tab else {
             return;
         };
@@ -2786,6 +2804,7 @@ impl App {
     }
 
     pub(crate) fn reset_after_file_list_refresh(&mut self, repair_comments: bool) {
+        self.remote_positions = super::remote_position::RemotePositions::default();
         if repair_comments {
             self.clear_outdated_reconstruction_cache();
         }

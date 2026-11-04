@@ -24,7 +24,7 @@ pub enum AnimationPhase {
 }
 
 /// View mode for displaying diffs
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
 pub enum ViewMode {
     /// Single pane showing both old and new with markers
     #[default]

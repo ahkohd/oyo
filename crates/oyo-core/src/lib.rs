@@ -7,6 +7,7 @@ pub mod change;
 pub mod diff;
 pub mod git;
 pub mod multi;
+pub mod patch;
 pub mod step;
 
 pub use change::{Change, ChangeKind, ChangeSpan};

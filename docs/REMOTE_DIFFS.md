@@ -13,7 +13,7 @@ oy https://forgejo.example.org/owner/repo/pulls/123
 
 ## Authentication
 
-Replace the example repository and request number with your own. Authenticate the corresponding CLI for the target host first. Oyo uses `gh` for GitHub, `glab` for GitLab, credentials saved by `cb` for Codeberg, and host credentials saved by `fj` for Forgejo. Oyo does not ask for a separate access token. Private repositories require access through that account.
+Replace the example repository and request number with your own. Public github.com URLs work without signing in and require `curl` for HTTPS reads. GitHub limits unauthenticated API requests per originating IP. Oyo reports rate-limit responses and provider retry or reset information, and does not automatically retry or change identities. Authentication through `gh` remains available for private repositories and higher limits. Other providers require their corresponding CLI login. Oyo uses `gh` for authenticated GitHub reads and all GitHub discussion writes, `glab` for GitLab, credentials saved by `cb` for Codeberg, and host credentials saved by `fj` for Forgejo. Oyo does not ask for a separate access token. Private repositories require access through that account.
 
 ## Supported targets
 
@@ -29,7 +29,15 @@ A commit compares against its first parent, or an empty tree for a root commit. 
 
 ## Loading and refresh
 
-Oyo opens a loading screen while it resolves the remote snapshot and saved review. Press `q`, `Esc` or `ctrl-c` to cancel startup. If startup fails, press `r` to retry. Once the file list appears, Oyo loads complete file contents concurrently and gives the selected file priority. Contents stay tied to fixed revisions. Press `R` to resolve a new snapshot. A failed refresh keeps the current view. Saved reviews remain available when you open the same URL from another directory.
+Oyo opens a loading screen while it resolves the remote snapshot. Press `q`, `Esc` or `ctrl-c` to cancel startup. If startup fails, press `r` to retry.
+
+Public github.com review URLs stream changed lines over HTTPS. Authenticated GitHub review URLs stream when the installed `gh api` supports `--allow-escape-sequences`. Oyo uses that flag only on a private parser pipe and escapes terminal controls in displayed text. The first parsed changed file becomes readable while the file list grows. The status marks the manifest incomplete until the entire response and a second provider identity check succeed. Readable partial content is for inspection; comments, reviewed marks and provider writes wait for validation.
+
+Patch context is distinct from complete file contents. Press `F`, expand context or open preview to load the selected file at its fixed revisions. All-file search requests missing full contents and marks results incomplete while data or snapshot validation is unavailable. A failed download keeps the readable patch and waits for an explicit retry. Hydration retains the logical cursor, viewport and saved drafts. An active text selection is cleared with a notice when the layout changes; select the text again before copying or commenting.
+
+GitLab, Codeberg, Forgejo, commit and comparison URLs use complete-content loading. Older authenticated GitHub CLIs also use that path. Configured GitHub credentials stay on the CLI route even if they fail validation; an authentication or quota failure does not trigger an anonymous retry. Pass `--remote-full` to choose it explicitly, including when a patch exceeds the streaming limits. The complete-content path retains the provider enumeration limits below.
+
+Press `R` to resolve a new snapshot. A failed refresh keeps the current view. A successful refresh after an initial stream failure also restores saved review setup. Saved reviews remain available when you open the same URL from another directory.
 
 ## Saved reviews
 
@@ -74,7 +82,9 @@ Revision checks precede API requests. Providers do not offer an atomic revision 
 
 Checkout history and remote image previews are unavailable in remote URL sessions. Direct URL launches render review avatars with terminal text blocks to avoid a blocking terminal capability query. Opening a local target restores automatic image protocol detection. File-count and download limits produce explicit errors instead of partial diffs. Tree-based comparisons reject submodules and file-mode changes, and show renames as deletions and additions. Review URLs preserve provider rename information.
 
-GitHub commit enumeration stops at 3,000 files, and comparisons stop at 300 files. Oyo rejects those results because the provider may have truncated them. GitLab reviews require an exact changed-file count.
+GitHub streaming review manifests come from the complete pinned patch rather than the REST changed-files list. Oyo checks unique paths, file count, additions and deletions against review metadata before marking the snapshot complete. Metadata-only changes, empty files, renames, binary records, symlinks and mode changes remain manifest entries. GitHub complete-content review enumeration rejects lists beyond 3,000 files. GitHub commit enumeration stops at 3,000 files, and comparisons stop at 300 files. Oyo rejects those results because the provider may have truncated them. GitLab reviews require an exact changed-file count.
+
+A streamed patch is limited to 48 MiB in total, 32 MiB per file record or line, 250,000 lines per file record and 100,000 files. Malformed, combined, truncated and over-limit patches produce an explicit incomplete state. Git paths containing control characters, backslashes or traversal components are rejected. Use `--remote-full` when a supported complete-content path can handle a patch outside these bounds.
 
 Review enumeration stops after 100 pages and tree enumeration after 1,000 pages. Forgejo merge-base searches stop after 2,048 commits and reject missing or multiple merge bases. Use a two-dot comparison when you need a direct endpoint comparison.
 

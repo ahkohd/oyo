@@ -28,6 +28,9 @@ impl App {
             app.review_session_created_at = self.review_session_created_at;
             app.review_next_comment_id = self.review_next_comment_id;
             app.review_mention_picker = self.review_mention_picker;
+            app.remote_stream = self.remote_stream;
+            app.remote_validation = self.remote_validation;
+            app.pending_remote_review = self.pending_remote_review;
             app.content_worker_rx = self.content_worker_rx;
             app.content_generation = self.content_generation;
             app.content_loading = self.content_loading;

@@ -106,7 +106,7 @@ impl App {
                 &file.path,
                 new_source,
             ),
-            LineKind::Context => {
+            LineKind::Context | LineKind::Unloaded => {
                 if view_line.has_changes {
                     if let Some(old_line) = view_line.old_line {
                         (old_line, old_path, old_source)
@@ -528,7 +528,10 @@ impl App {
                         }
                     }
                 }
-                LineKind::Modified | LineKind::PendingModify | LineKind::Context => {
+                LineKind::Modified
+                | LineKind::PendingModify
+                | LineKind::Context
+                | LineKind::Unloaded => {
                     if line.new_line.is_none() {
                         if let Some(old_line) = line.old_line {
                             let key = BlameCacheKey {

@@ -88,6 +88,7 @@ impl App {
         if !self.ensure_syntax_engine() {
             return None;
         }
+        let remote = self.is_remote_session();
         let engine = self.syntax_engine.as_ref()?;
         Some(
             engine
@@ -95,7 +96,16 @@ impl App {
                 .into_iter()
                 .map(|line| {
                     line.into_iter()
-                        .map(|span| Span::styled(span.text, span.style))
+                        .map(|span| {
+                            Span::styled(
+                                if remote {
+                                    oyo_core::patch::terminal_text(&span.text)
+                                } else {
+                                    span.text
+                                },
+                                span.style,
+                            )
+                        })
                         .collect()
                 })
                 .collect(),
@@ -166,7 +176,13 @@ impl App {
             return None;
         }
         let cache = self.ensure_syntax_cache()?;
-        cache.rendered_spans(side, line_num - 1)
+        let mut spans = cache.rendered_spans(side, line_num - 1)?;
+        if self.is_remote_session() {
+            for span in &mut spans {
+                span.content = oyo_core::patch::terminal_text(&span.content).into();
+            }
+        }
+        Some(spans)
     }
 
     pub(crate) fn review_grep_syntax_spans(
@@ -418,8 +434,8 @@ impl App {
         let file_name = self.current_file_path();
         let nav = self.multi_diff.current_navigator();
         let content = match side {
-            SyntaxSide::Old => nav.old_content(),
-            SyntaxSide::New => nav.new_content(),
+            SyntaxSide::Old => nav.old_content()?,
+            SyntaxSide::New => nav.new_content()?,
         };
         let engine = self.syntax_engine.as_ref()?;
         let scopes = engine.scopes_for_line(content, &file_name, line_num - 1);
