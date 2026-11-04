@@ -453,7 +453,7 @@ pub(crate) fn fold_context_view_with_expand_all(
 }
 
 pub(crate) fn is_fold_line(line: &ViewLine) -> bool {
-    matches!(line.kind, LineKind::Context)
+    matches!(line.kind, LineKind::Context | LineKind::Unloaded)
         && line.hunk_index.is_none()
         && line.old_line.is_none()
         && line.new_line.is_none()

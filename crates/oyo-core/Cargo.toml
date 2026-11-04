@@ -19,6 +19,8 @@ imara-diff = { workspace = true }
 rustc-hash = { workspace = true }
 ignore = { workspace = true }
 
+git2 = { version = "0.21", default-features = false }
+
 [dev-dependencies]
 criterion = "0.8"
 

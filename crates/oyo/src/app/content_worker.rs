@@ -13,6 +13,7 @@ pub(super) struct ContentWorker {
     context: crate::remote::loading::ReadContext,
     selected: Arc<AtomicUsize>,
     foreground: Arc<Mutex<Option<(usize, crate::remote::loading::ReadContext)>>>,
+    queue: Option<Arc<Mutex<VecDeque<PendingFileContent>>>>,
 }
 
 impl ContentWorker {
@@ -165,6 +166,19 @@ impl App {
         if requests.is_empty() {
             return false;
         }
+        if let Some(worker) = self.content_worker_rx.as_ref() {
+            if let Some(queue) = &worker.queue {
+                for request in &requests {
+                    self.content_loading
+                        .insert(request.file_index, request.clone());
+                }
+                queue
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .extend(requests);
+                return true;
+            }
+        }
         self.content_generation = self.content_generation.wrapping_add(1);
         let generation = self.content_generation;
         self.content_loading.clear();
@@ -178,8 +192,10 @@ impl App {
         let selected = Arc::new(AtomicUsize::new(selected));
         let remote = self.multi_diff.remote_snapshot.is_some();
         let foreground = Arc::new(Mutex::new(None));
+        let mut shared_queue = None;
         if remote {
             let queue = Arc::new(Mutex::new(VecDeque::from(requests)));
+            shared_queue = Some(queue.clone());
             for worker_index in 0..6 {
                 let queue = queue.clone();
                 let selected = selected.clone();
@@ -237,6 +253,7 @@ impl App {
             context,
             selected,
             foreground,
+            queue: shared_queue,
         });
         true
     }
@@ -246,8 +263,14 @@ impl App {
     }
 
     pub(crate) fn poll_content_responses(&mut self) -> bool {
+        let streamed = self.poll_remote_stream();
+        if self.multi_diff.file_count() > 0
+            && (self.view_mode == super::ViewMode::Preview || !self.fold_context.is_enabled())
+        {
+            self.ensure_remote_content(self.multi_diff.selected_index);
+        }
         let Some(rx) = self.content_worker_rx.as_ref() else {
-            return false;
+            return streamed;
         };
         rx.selected
             .store(self.multi_diff.selected_index, Ordering::Release);
@@ -263,7 +286,7 @@ impl App {
         }
         let responses = (0..4).map_while(|_| rx.try_recv().ok()).collect::<Vec<_>>();
         if responses.is_empty() {
-            return false;
+            return streamed;
         }
         for response in responses {
             if response.generation != self.content_generation
@@ -272,15 +295,32 @@ impl App {
                 continue;
             }
             self.content_loading.remove(&response.file_index);
+            let was_sparse = self.multi_diff.has_patch_display(response.file_index);
+            let promotion = if was_sparse {
+                self.capture_file_promotion(response.file_index)
+            } else {
+                None
+            };
             if !self
                 .multi_diff
                 .apply_prepared_content(response.file_index, response.content)
             {
                 continue;
             }
+            if self.multi_diff.file_is_sparse(response.file_index) {
+                if let Some(error) = self
+                    .multi_diff
+                    .hydration_failure(response.file_index)
+                    .map(str::to_owned)
+                {
+                    self.notify(crate::toasts::ToastEvent::SelectionActionFailed(error));
+                }
+                continue;
+            }
             if response.file_index == self.multi_diff.selected_index {
                 self.multi_diff.ensure_full_navigator(response.file_index);
-                if self.multi_diff.remote_snapshot.is_some()
+                if !was_sparse
+                    && self.multi_diff.remote_snapshot.is_some()
                     && !self.stepping
                     && self.multi_diff.diff_status(response.file_index)
                         == oyo_core::multi::DiffStatus::Ready
@@ -298,9 +338,12 @@ impl App {
                 self.syntax_scope_cache = None;
                 let _ = self.queue_current_file_diff();
             }
+            if let Some(position) = promotion {
+                self.restore_file_promotion(position);
+            }
             self.mark_diff_changed();
         }
-        if self.multi_diff.remote_snapshot.is_some() {
+        if self.multi_diff.remote_snapshot.is_some() && self.remote_manifest_complete() {
             self.repair_review_comments_after_diff_refresh();
         }
         if self.content_loading.is_empty() {

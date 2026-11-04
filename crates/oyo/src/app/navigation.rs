@@ -2165,6 +2165,7 @@ impl App {
             self.animation_progress = 1.0;
             self.needs_scroll_to_active = false;
         }
+        self.restore_remote_viewport();
         self.notify(ToastEvent::Stepping(self.stepping));
     }
 
@@ -2426,6 +2427,19 @@ impl App {
         }
         self.clear_peek();
         let view = self.current_view_with_frame(AnimationFrame::Idle);
+        if line_number > 0
+            && self
+                .multi_diff
+                .file_is_sparse(self.multi_diff.selected_index)
+            && !view.iter().any(|line| match side {
+                Some(true) => line.new_line == Some(line_number),
+                Some(false) => line.old_line == Some(line_number),
+                None => line.old_line == Some(line_number) || line.new_line == Some(line_number),
+            })
+        {
+            self.require_selected_complete_content();
+            return false;
+        }
         let target_idx = match self.view_mode {
             ViewMode::Split => {
                 let mut old_idx = 0usize;
@@ -2668,6 +2682,7 @@ impl App {
     }
 
     pub fn toggle_view_mode(&mut self) {
+        self.remember_remote_viewport();
         self.preview_forced_by_content = false;
         let allow_blame = self.blame_enabled;
         if !self.stepping {
@@ -2700,6 +2715,10 @@ impl App {
     }
 
     pub fn set_view_mode(&mut self, target: ViewMode) {
+        self.remember_remote_viewport();
+        if target == ViewMode::Preview {
+            self.request_remote_content(self.multi_diff.selected_index);
+        }
         self.preview_forced_by_content = false;
         if target == ViewMode::Blame && !self.blame_enabled {
             return;
@@ -2726,6 +2745,7 @@ impl App {
     }
 
     pub fn toggle_view_mode_reverse(&mut self) {
+        self.remember_remote_viewport();
         self.preview_forced_by_content = false;
         let allow_blame = self.blame_enabled;
         if !self.stepping {

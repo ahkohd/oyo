@@ -7,6 +7,7 @@ use std::time::Instant;
 
 impl App {
     pub(crate) fn mark_user_input(&mut self) {
+        self.release_remote_scroll();
         self.diff_last_input = Instant::now();
         self.diff_refresh_restore_end = None;
         self.scroll_to_render_end = false;
@@ -135,6 +136,11 @@ impl App {
             }
             match resp.diff {
                 Ok(diff) => {
+                    let promotion = if self.multi_diff.has_patch_display(resp.file_index) {
+                        self.capture_file_promotion(resp.file_index)
+                    } else {
+                        None
+                    };
                     self.multi_diff.apply_diff_result(resp.file_index, diff);
                     self.mark_diff_changed();
                     if resp.file_index == self.multi_diff.selected_index {
@@ -156,6 +162,9 @@ impl App {
                         {
                             self.finish_file_enter();
                         }
+                    }
+                    if let Some(position) = promotion {
+                        self.restore_file_promotion(position);
                     }
                 }
                 Err(_) => {

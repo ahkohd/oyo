@@ -710,6 +710,7 @@ impl App {
                 new_max = Some(new_max.map_or(new_line, |value| value.max(new_line)));
             }
             match line.kind {
+                LineKind::Unloaded => {}
                 LineKind::Deleted | LineKind::PendingDelete => old_side = true,
                 LineKind::Inserted | LineKind::PendingInsert => new_side = true,
                 LineKind::Context | LineKind::Modified | LineKind::PendingModify => {

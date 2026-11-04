@@ -41,6 +41,14 @@ impl RemoteReviewContext {
             .remote_snapshot
             .clone()
             .ok_or_else(|| anyhow!("Remote review snapshot is unavailable"))?;
+        if snapshot["acquisition"] == "patch-v1"
+            && !app
+                .remote_validation
+                .as_ref()
+                .is_some_and(|proof| proof.matches(&snapshot))
+        {
+            bail!("Remote snapshot is incomplete or unvalidated. Wait for validation or refresh. Drafts were kept.");
+        }
         let provider = match snapshot["provider"].as_str() {
             Some("github") => crate::ReviewProviderKind::GitHub,
             Some("gitlab") => crate::ReviewProviderKind::GitLab,
@@ -120,8 +128,9 @@ impl RemoteReviewContext {
         if canceled.load(Ordering::Acquire) {
             bail!("Review sync canceled; unpublished drafts were kept");
         }
-        let current = provider_adapter(self.target.provider)?.remote_snapshot(&self.target)?;
-        if !current.matches_descriptor(&self.snapshot) {
+        if !provider_adapter(self.target.provider)?
+            .remote_snapshot_matches(&self.target, &self.snapshot)?
+        {
             bail!("The provider revision changed since this diff was loaded. Refresh and review the new revision before pushing. Drafts were kept.");
         }
         if canceled.load(Ordering::Acquire) {
@@ -150,7 +159,11 @@ impl RemoteReviewContext {
                 (content_pending, comment.pending_snapshot.as_ref()),
                 (resolution_pending, comment.resolution_snapshot.as_ref()),
             ] {
-                if pending && reviewed != Some(&self.snapshot) {
+                if pending
+                    && !reviewed.is_some_and(|snapshot| {
+                        crate::remote::same_review_snapshot(snapshot, &self.snapshot)
+                    })
+                {
                     bail!("Comment {} has pending changes from a different reviewed revision or no reviewed version. Refresh, review the change and save the pending edit or toggle its resolution again before pushing. Drafts were kept.", comment.id);
                 }
             }
@@ -171,7 +184,11 @@ impl RemoteReviewContext {
                 .as_ref()
                 .and_then(|s| s.target.as_ref())
                 .and_then(|t| t.remote_snapshot.as_ref());
-            if comment.outdated || snapshot != Some(&self.snapshot) {
+            if comment.outdated
+                || !snapshot.is_some_and(|snapshot| {
+                    crate::remote::same_review_snapshot(snapshot, &self.snapshot)
+                })
+            {
                 bail!("Comment {} belongs to an older or unavailable snapshot. Re-anchor it against the displayed revision before pushing. Drafts were kept.", comment.id);
             }
         }

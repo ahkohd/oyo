@@ -44,7 +44,7 @@ fn start(
     std::thread::spawn(move || {
         worker_context.run(|| {
             let result = (|| -> Result<PreparedRemote> {
-                let built = remote::build(&url)?;
+                let (built, patch_session) = remote::stream::start(&url, worker_contents.clone())?;
                 let _ = tx.send(StartupEvent::Progress("Preparing review..."));
                 if worker_context.is_cancelled() {
                     anyhow::bail!("Remote loading cancelled");
@@ -61,17 +61,40 @@ fn start(
                     args.autoplay || config.playback.autoplay,
                     built.branch,
                 );
+                app.remote_validation = built.remote_validation;
+                app.remote_stream = patch_session;
                 app.start_content_loading_with_context(worker_contents);
-                configure_review_state_for_app(
-                    &mut app,
-                    &config,
-                    &args,
-                    built.workspace_root,
-                    &InputMode::Remote { url: url.clone() },
-                    None,
-                    None,
-                    true,
-                )?;
+                if app.remote_stream.is_some() {
+                    let review_config = config.clone();
+                    let review_args = args.clone();
+                    let review_url = url.clone();
+                    let workspace = built.workspace_root;
+                    app.pending_remote_review = Some(Box::new(move |app| {
+                        configure_review_state_for_app(
+                            app,
+                            &review_config,
+                            &review_args,
+                            workspace.clone(),
+                            &InputMode::Remote {
+                                url: review_url.clone(),
+                            },
+                            None,
+                            None,
+                            true,
+                        )
+                    }));
+                } else {
+                    configure_review_state_for_app(
+                        &mut app,
+                        &config,
+                        &args,
+                        built.workspace_root,
+                        &InputMode::Remote { url: url.clone() },
+                        None,
+                        None,
+                        true,
+                    )?;
+                }
                 if worker_context.is_cancelled() {
                     anyhow::bail!("Remote loading cancelled");
                 }

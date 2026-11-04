@@ -735,7 +735,9 @@ fn build_unified_render_model(
         let modify_base = color::gradient_color(&app.theme.modify, 0.5);
 
         let line_num_style = match view_line.kind {
-            LineKind::Context => Style::default().fg(app.theme.diff_line_number),
+            LineKind::Context | LineKind::Unloaded => {
+                Style::default().fg(app.theme.diff_line_number)
+            }
             LineKind::Inserted | LineKind::PendingInsert => Style::default().fg(insert_base),
             LineKind::Deleted | LineKind::PendingDelete => Style::default().fg(delete_base),
             LineKind::Modified | LineKind::PendingModify => {
@@ -750,7 +752,9 @@ fn build_unified_render_model(
         });
 
         let (mut line_prefix, mut sign_style) = match view_line.kind {
-            LineKind::Context => (" ", Style::default().fg(app.theme.diff_line_number)),
+            LineKind::Context | LineKind::Unloaded => {
+                (" ", Style::default().fg(app.theme.diff_line_number))
+            }
             LineKind::Inserted | LineKind::PendingInsert => {
                 if view_line.is_active {
                     (
@@ -1226,6 +1230,24 @@ fn build_unified_render_model(
         };
         let line_display_row = display_len;
         let line_content_row = content_lines.len();
+        app.record_remote_render_row(
+            view_line,
+            crate::app::RemoteRowGeometry {
+                side: None,
+                source_scroll: if app.line_wrap {
+                    line_display_row + app.view_window_start()
+                } else {
+                    idx + app.view_window_start()
+                },
+                rendered_start: if app.line_wrap {
+                    line_display_row
+                } else {
+                    line_content_row
+                },
+                viewport_start: if app.line_wrap { scroll_offset } else { 0 },
+                wrap_count,
+            },
+        );
         if app.line_wrap {
             display_len += wrap_count;
         }

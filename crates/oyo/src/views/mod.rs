@@ -1645,7 +1645,7 @@ pub(crate) fn extent_marker_style(
                 LineKind::Inserted | LineKind::PendingInsert => app.theme.insert_base(),
                 LineKind::Deleted | LineKind::PendingDelete => app.theme.delete_base(),
                 LineKind::Modified | LineKind::PendingModify => app.theme.modify_base(),
-                LineKind::Context => app.theme.diff_ext_marker,
+                LineKind::Context | LineKind::Unloaded => app.theme.diff_ext_marker,
             },
             DiffExtentMarkerScope::Hunk => {
                 if !has_changes {

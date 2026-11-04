@@ -599,7 +599,18 @@ impl App {
 
     fn build_review_grep_sources(&self) -> (Arc<Vec<ReviewGrepSource>>, usize) {
         let mut sources = Vec::new();
-        let mut pending_files = 0usize;
+        let mut pending_files = if self.remote_manifest_complete() {
+            0
+        } else {
+            self.multi_diff
+                .remote_snapshot
+                .as_ref()
+                .and_then(|s| s["expectedFiles"].as_u64())
+                .unwrap_or(0)
+                .try_into()
+                .unwrap_or(usize::MAX)
+                .saturating_sub(self.multi_diff.file_count())
+        };
         for (file_index, file) in self.multi_diff.files.iter().enumerate() {
             if file.binary {
                 continue;
@@ -620,6 +631,12 @@ impl App {
     }
 
     fn submit_review_grep(&mut self) {
+        if !self.review_grep.query.trim().is_empty() {
+            for index in 0..self.multi_diff.file_count() {
+                self.multi_diff.ensure_full_content(index);
+            }
+            self.start_content_loading();
+        }
         let query = self.review_grep.query.trim().to_string();
         self.review_grep.generation = self.review_grep.generation.wrapping_add(1);
         if query.is_empty() {
@@ -720,6 +737,10 @@ impl App {
 
     pub(crate) fn review_grep_searching(&self) -> bool {
         self.review_grep.searching
+    }
+
+    pub(crate) fn review_grep_manifest_incomplete(&self) -> bool {
+        !self.remote_manifest_complete()
     }
 
     pub(crate) fn review_grep_pending_files(&self) -> usize {

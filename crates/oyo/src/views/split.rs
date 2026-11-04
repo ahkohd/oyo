@@ -45,7 +45,7 @@ fn line_num_style_for_kind(kind: LineKind, app: &App) -> Style {
         LineKind::Modified | LineKind::PendingModify => {
             Style::default().fg(Color::Rgb(modify_base.r, modify_base.g, modify_base.b))
         }
-        LineKind::Context => Style::default().fg(app.theme.diff_line_number),
+        LineKind::Context | LineKind::Unloaded => Style::default().fg(app.theme.diff_line_number),
     }
 }
 
@@ -1384,6 +1384,24 @@ fn render_old_pane(
             }
             let line_display_row = display_row;
             let line_content_row = content_lines.len();
+            app.record_remote_render_row(
+                view_line,
+                crate::app::RemoteRowGeometry {
+                    side: Some(crate::app::review::ReviewSide::Old),
+                    source_scroll: if app.line_wrap {
+                        line_display_row + app.view_window_start()
+                    } else {
+                        line_idx + app.view_window_start()
+                    },
+                    rendered_start: if app.line_wrap {
+                        line_display_row
+                    } else {
+                        line_content_row
+                    },
+                    viewport_start: if app.line_wrap { scroll_offset } else { 0 },
+                    wrap_count,
+                },
+            );
             content_lines.push(Line::from(display_spans));
             display_row = display_row.saturating_add(wrap_count);
             for wrapped_row in 0..wrap_count {
@@ -2436,6 +2454,24 @@ fn render_new_pane(
             }
             let line_display_row = display_row;
             let line_content_row = content_lines.len();
+            app.record_remote_render_row(
+                view_line,
+                crate::app::RemoteRowGeometry {
+                    side: Some(crate::app::review::ReviewSide::New),
+                    source_scroll: if app.line_wrap {
+                        line_display_row + app.view_window_start()
+                    } else {
+                        line_idx + app.view_window_start()
+                    },
+                    rendered_start: if app.line_wrap {
+                        line_display_row
+                    } else {
+                        line_content_row
+                    },
+                    viewport_start: if app.line_wrap { scroll_offset } else { 0 },
+                    wrap_count,
+                },
+            );
             content_lines.push(Line::from(display_spans));
             display_row = display_row.saturating_add(wrap_count);
             for wrapped_row in 0..wrap_count {

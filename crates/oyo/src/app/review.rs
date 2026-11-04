@@ -1834,6 +1834,9 @@ impl App {
     }
 
     fn review_file_fingerprint(&self, file_index: usize) -> Option<String> {
+        if !self.remote_manifest_complete() {
+            return None;
+        }
         let live_diff = self.review_live_diff();
         let file = live_diff.files.get(file_index)?;
         let (old_content, new_content) = live_diff.file_contents(file_index)?;
@@ -1843,6 +1846,12 @@ impl App {
         file.old_path.hash(&mut hasher);
         format!("{:?}", file.status).hash(&mut hasher);
         file.binary.hash(&mut hasher);
+        if let Some(modes) = live_diff
+            .file_modes(file_index)
+            .filter(|(old, new)| old != new)
+        {
+            modes.hash(&mut hasher);
+        }
         old_content.hash(&mut hasher);
         new_content.hash(&mut hasher);
         Some(format!("{:016x}", hasher.finish()))
@@ -1859,6 +1868,9 @@ impl App {
     }
 
     pub(crate) fn toggle_current_file_reviewed(&mut self) -> bool {
+        if !self.require_selected_complete_content() {
+            return false;
+        }
         if !self.review_mode {
             return false;
         }
@@ -5220,6 +5232,9 @@ impl App {
     }
 
     fn configure_review_mode(&mut self, create_missing: bool) {
+        if !self.remote_manifest_complete() {
+            return;
+        }
         self.review_mode = true;
         self.review_pull_request_target = None;
         self.touch_review_state();
@@ -5306,6 +5321,9 @@ impl App {
     }
 
     pub fn start_file_comment(&mut self) -> bool {
+        if !self.remote_manifest_complete() || !self.require_selected_complete_content() {
+            return false;
+        }
         if !self.file_review_comments_supported() {
             return false;
         }
@@ -5317,6 +5335,9 @@ impl App {
     }
 
     pub fn start_line_comment(&mut self) {
+        if !self.remote_manifest_complete() || !self.require_selected_complete_content() {
+            return;
+        }
         if !self.review_mode {
             return;
         }
@@ -5388,6 +5409,9 @@ impl App {
     }
 
     pub fn start_hunk_comment(&mut self) {
+        if !self.remote_manifest_complete() || !self.require_selected_complete_content() {
+            return;
+        }
         if !self.review_mode {
             return;
         }
@@ -8004,6 +8028,9 @@ impl App {
     }
 
     fn public_review_comments_json_filtered(&self, filter: &ReviewCommentFilter) -> String {
+        if !self.remote_manifest_complete() {
+            return serde_json::json!({"version":1,"comments":[],"manifestComplete":false,"status":self.remote_manifest_status()}).to_string();
+        }
         let comments = self
             .review_comments
             .iter()
@@ -8257,11 +8284,17 @@ impl App {
         &mut self,
         comment: &mut ReviewComment,
     ) -> Result<(), String> {
+        if self.is_remote_session() && !self.remote_manifest_complete() {
+            return Err(
+                "Remote snapshot is incomplete. Wait for validation before commenting.".to_owned(),
+            );
+        }
         if !self.remote_anchor_snapshot_missing(&comment.anchor) {
             return Ok(());
         }
         let index = comment.anchor.file_index;
         let file = comment.anchor.file_path.clone();
+        self.multi_diff.request_full_content(index);
         if let Some(request) = self.multi_diff.take_pending_content_for(index) {
             let content = super::load_content_request_sync(request);
             self.multi_diff.apply_prepared_content(index, content);
@@ -8900,7 +8933,11 @@ impl App {
                 .as_ref()
                 .and_then(|target| target.remote_snapshot.as_ref())
             {
-                if self.multi_diff.remote_snapshot.as_ref() == Some(original)
+                if self
+                    .multi_diff
+                    .remote_snapshot
+                    .as_ref()
+                    .is_some_and(|current| crate::remote::same_review_snapshot(current, original))
                     && !self.review_comments[comment_idx].outdated
                 {
                     let anchor = &self.review_comments[comment_idx].anchor;

@@ -227,6 +227,9 @@ impl App {
     }
 
     pub(crate) fn reviewed_files_exhausted(&self) -> Option<ReviewedFilesExhausted> {
+        if !self.remote_manifest_complete() {
+            return None;
+        }
         if !self.selection_shows_hidden_reviewed_file() || !self.navigable_file_indices().is_empty()
         {
             return None;

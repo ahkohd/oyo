@@ -36,6 +36,9 @@ mod history;
 mod navigation;
 mod palette;
 mod playback;
+mod remote_position;
+mod remote_stream;
+pub(crate) use remote_position::RemoteRowGeometry;
 pub(crate) mod review;
 mod review_queue;
 pub(crate) mod startup;
@@ -742,6 +745,10 @@ pub struct App {
     diff_worker_rx: Option<mpsc::Receiver<DiffResponse>>,
     content_worker_rx: Option<content_worker::ContentWorker>,
     remote_refresh_rx: Option<crate::remote::loading::SnapshotWorker>,
+    pub(crate) remote_stream: Option<crate::remote::stream::PatchSession>,
+    pub(crate) remote_validation: Option<std::sync::Arc<crate::remote::stream::ValidatedSnapshot>>,
+    pub(crate) pending_remote_review: Option<remote_stream::ConfigureRemoteReview>,
+    remote_positions: remote_position::RemotePositions,
     remote_sync_generation: u64,
 
     content_generation: u64,
@@ -1219,6 +1226,7 @@ impl App {
         git_branch: Option<String>,
     ) -> Self {
         let file_count = multi_diff.file_count();
+        let selected_file = multi_diff.selected_index;
         let mut app = Self {
             multi_diff,
             view_mode,
@@ -1339,7 +1347,7 @@ impl App {
             file_panel_scrollbar_dragging: false,
             topbar_tabs: vec![TopbarTab {
                 id: 1,
-                content: TopbarTabContent::File(0),
+                content: TopbarTabContent::File(selected_file),
                 view_mode,
                 step_view_mode: view_mode,
                 stepping: true,
@@ -1445,6 +1453,10 @@ impl App {
             diff_worker_rx: None,
             content_worker_rx: None,
             remote_refresh_rx: None,
+            remote_stream: None,
+            remote_validation: None,
+            pending_remote_review: None,
+            remote_positions: remote_position::RemotePositions::default(),
             remote_sync_generation: 0,
             content_generation: 0,
             content_loading: FxHashMap::default(),
@@ -1975,9 +1987,12 @@ impl App {
         viewport_height: usize,
         allow_overscroll: bool,
     ) {
-        self.scroll_offset =
-            self.scroll_offset
-                .min(max_scroll(total_lines, viewport_height, allow_overscroll));
+        let maximum = if self.remote_scroll_preserved() {
+            total_lines.saturating_sub(1)
+        } else {
+            max_scroll(total_lines, viewport_height, allow_overscroll)
+        };
+        self.scroll_offset = self.scroll_offset.min(maximum);
     }
 
     /// Whether overscroll is allowed (centering is about to happen or manual zz was used)
@@ -2158,6 +2173,7 @@ impl App {
     }
 
     pub fn toggle_fold_context(&mut self) {
+        self.request_remote_content(self.multi_diff.selected_index);
         self.fold_context = self.fold_context.next();
         self.fold_context_expansions.clear();
         self.fold_context_fully_expanded_files.clear();
@@ -2166,6 +2182,9 @@ impl App {
     }
 
     pub fn set_fold_context_mode(&mut self, mode: FoldContextMode) {
+        if !mode.is_enabled() {
+            self.request_remote_content(self.multi_diff.selected_index);
+        }
         self.fold_context = mode;
         self.fold_context_expansions.clear();
         self.fold_context_fully_expanded_files.clear();
@@ -2325,6 +2344,16 @@ impl App {
     }
 
     pub(crate) fn expand_all_context_folds(&mut self) -> bool {
+        if self
+            .multi_diff
+            .file_is_sparse(self.multi_diff.selected_index)
+        {
+            if let Some(path) = self.multi_diff.current_file().map(|f| f.path.clone()) {
+                self.fold_context_fully_expanded_files.insert(path);
+            }
+            self.request_remote_content(self.multi_diff.selected_index);
+            return true;
+        }
         if !self.fold_context.is_enabled() {
             return false;
         }
@@ -2426,6 +2455,9 @@ impl App {
     }
 
     fn save_scroll_position_for(&mut self, index: usize) {
+        if index == self.multi_diff.selected_index {
+            self.remember_remote_viewport();
+        }
         let scroll_offset = self.scroll_offset;
         let horizontal_scroll = self.horizontal_scroll;
         let (scrolls, horizontals) = self.active_scroll_buffers_mut();
@@ -2716,7 +2748,14 @@ impl App {
             self.view_build_pending = false;
             return std::sync::Arc::new(Vec::new());
         }
-        let window = self.compute_view_window();
+        let window = if self
+            .multi_diff
+            .has_patch_display(self.multi_diff.selected_index)
+        {
+            None
+        } else {
+            self.compute_view_window()
+        };
         let windowed = window.is_some();
         let window_start = window.map(|w| w.start).unwrap_or(0);
         let mut window_start_override = None;
@@ -2830,6 +2869,20 @@ impl App {
                         }
                         view = nav.current_view_for_change_window(frame, anchor, radius);
                     }
+                }
+            }
+        }
+        if self
+            .multi_diff
+            .has_patch_display(self.multi_diff.selected_index)
+        {
+            view = remote_stream::with_unloaded_context(view);
+        }
+        if self.is_remote_session() {
+            for line in &mut view {
+                line.content = oyo_core::patch::terminal_text(&line.content);
+                for span in &mut line.spans {
+                    span.text = oyo_core::patch::terminal_text(&span.text);
                 }
             }
         }
@@ -3098,6 +3151,9 @@ impl App {
     }
 
     pub fn redraw_interval(&self) -> Duration {
+        if self.remote_stream.is_some() {
+            return Duration::from_millis(16);
+        }
         if self.animation_phase != AnimationPhase::Idle || self.snap_frame.is_some() {
             Duration::from_millis(33)
         } else if self.autoplay

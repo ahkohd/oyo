@@ -200,6 +200,12 @@ struct SuppressedMouseScroll {
 #[command(author, version, about = "A terminal diff viewer")]
 #[command(subcommand_precedence_over_arg = true)]
 struct Args {
+    #[arg(
+        long,
+        help = "Use complete remote-file acquisition with the provider's file-list limits"
+    )]
+    remote_full: bool,
+
     #[command(subcommand)]
     command: Option<Command>,
 
@@ -973,6 +979,7 @@ fn carry_control_session_name(
 }
 
 struct BuiltDiff {
+    remote_validation: Option<std::sync::Arc<remote::stream::ValidatedSnapshot>>,
     multi_diff: MultiFileDiff,
     branch: Option<String>,
     workspace_root: Option<PathBuf>,
@@ -1313,6 +1320,9 @@ fn resolve_editor_command(config: &config::EditorConfig) -> String {
 }
 
 fn current_editor_target(app: &mut App, needs_line: bool) -> Result<Option<EditorTarget>> {
+    if !app.require_selected_complete_content() {
+        return Ok(None);
+    }
     let focus = if needs_line {
         current_editor_focus(app)
     } else {
@@ -3134,6 +3144,7 @@ fn review_app_for_target_and_pr(
         false,
         built.branch,
     );
+    app.remote_validation = built.remote_validation;
     configure_review_state_for_app(
         &mut app,
         config,
@@ -5272,6 +5283,17 @@ pub(crate) fn usable_sync_pr_target(target: &str) -> Option<&str> {
 }
 
 trait ReviewProviderAdapter: Send + Sync {
+    fn supports_patch_stream(&self, _host: &str) -> bool {
+        false
+    }
+    fn remote_snapshot_matches(
+        &self,
+        target: &remote::RemoteTarget,
+        descriptor: &serde_json::Value,
+    ) -> Result<bool> {
+        Ok(self.remote_snapshot(target)?.matches_descriptor(descriptor))
+    }
+
     fn remote_json(&self, host: &str, endpoint: &str) -> Result<serde_json::Value>;
     fn remote_snapshot(&self, target: &remote::RemoteTarget) -> Result<remote::RemoteSnapshot>;
     fn find_pr(&self, remote: &ReviewRemote, target: Option<&str>) -> Result<ProviderPr>;
@@ -5287,10 +5309,23 @@ trait ReviewProviderAdapter: Send + Sync {
 struct GithubProvider;
 
 impl ReviewProviderAdapter for GithubProvider {
+    fn supports_patch_stream(&self, host: &str) -> bool {
+        remote::stream::github_streaming(host)
+    }
+    fn remote_snapshot_matches(
+        &self,
+        target: &remote::RemoteTarget,
+        descriptor: &serde_json::Value,
+    ) -> Result<bool> {
+        if matches!(target.kind, remote::RemoteTargetKind::Review(_)) {
+            remote::stream::verify_github_identity(target, descriptor)
+        } else {
+            Ok(self.remote_snapshot(target)?.matches_descriptor(descriptor))
+        }
+    }
+
     fn remote_json(&self, host: &str, endpoint: &str) -> Result<serde_json::Value> {
-        let mut command = ProcessCommand::new("gh");
-        command.args(["api", "--hostname", host, endpoint]);
-        Ok(serde_json::from_str(&remote::run_command(command, None)?)?)
+        remote::github::json(host, endpoint)
     }
     fn remote_snapshot(&self, target: &remote::RemoteTarget) -> Result<remote::RemoteSnapshot> {
         remote::github_snapshot(self, target)
@@ -7685,6 +7720,7 @@ fn build_diff_from_input_mode(
     }
 
     Ok(Some(BuiltDiff {
+        remote_validation: None,
         multi_diff,
         branch: git_branch,
         workspace_root,
@@ -7705,6 +7741,7 @@ fn main() {
 fn run() -> Result<()> {
     install_panic_terminal_restore();
     let args = std::sync::Arc::new(Args::parse());
+    remote::stream::set_patch_enabled(!args.remote_full);
     let view_limit = match &args.command {
         Some(Command::Themes) => {
             for name in config::list_ui_themes() {
@@ -7877,6 +7914,7 @@ fn run() -> Result<()> {
                 let autoplay = args.autoplay || config.playback.autoplay;
 
                 let mut app = App::new(built.multi_diff, view_mode, speed, autoplay, built.branch);
+                app.remote_validation = built.remote_validation;
                 if let (InputMode::JjRevision { rev }, Some(repo_root)) =
                     (&input_mode, built.workspace_root.as_ref())
                 {
@@ -8081,6 +8119,7 @@ fn run() -> Result<()> {
             let autoplay = args.autoplay || config.playback.autoplay;
 
             let mut app = App::new(built.multi_diff, view_mode, speed, autoplay, built.branch);
+            app.remote_validation = built.remote_validation;
             if let (InputMode::JjRevision { rev }, Some(repo_root)) =
                 (&input_mode, built.workspace_root.as_ref())
             {
