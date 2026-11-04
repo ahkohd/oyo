@@ -120,15 +120,17 @@ pub(crate) fn remote_app(
         session.clone(),
         last_applied_seq,
     ));
+    let theme = config.ui.theme.resolve(light);
     let mut status = "Loading remote snapshot...".to_owned();
+    let mut prepared_app = None;
     loop {
-        if let Some(active) = &worker {
+        if let Some(active) = worker.as_ref().filter(|_| prepared_app.is_none()) {
             loop {
                 let event = match active.rx.try_recv() {
                     Ok(event) => event,
                     Err(mpsc::TryRecvError::Empty) => break,
                     Err(mpsc::TryRecvError::Disconnected) => {
-                        status = "Remote loading worker stopped. Press r to retry.".to_owned();
+                        status = "Unable to load review.".to_owned();
                         worker = None;
                         break;
                     }
@@ -152,25 +154,97 @@ pub(crate) fn remote_app(
                         apply_config_to_app(&mut app, &config, &args, light);
                         (prepared.restore_review)(&mut app);
                         app.move_selection_off_hidden_reviewed_file();
-                        worker.as_mut().and_then(|worker| worker.contents.take());
-                        return Ok(Some((app, prepared.control)));
+                        prepared_app = Some((app, prepared.control));
+                        status = "Loading diff...".to_owned();
+                        break;
                     }
                     StartupEvent::Ready(Err(error)) => {
-                        status = format!("Remote loading failed\n\n{error}\n\nPress r to retry.");
+                        status = format!("Unable to load review\n\n{error}");
                         worker = None;
                         break;
                     }
                 }
             }
         }
+        if let Some((app, _)) = prepared_app.as_mut() {
+            app.poll_content_responses();
+            app.poll_diff_responses();
+            app.move_selection_off_hidden_reviewed_file();
+            app.queue_current_file_diff();
+            if app.multi_diff.file_count() == 0
+                || !matches!(
+                    app.multi_diff.diff_status(app.multi_diff.selected_index),
+                    oyo_core::multi::DiffStatus::Loading
+                        | oyo_core::multi::DiffStatus::Deferred
+                        | oyo_core::multi::DiffStatus::Computing
+                )
+            {
+                worker.as_mut().and_then(|worker| worker.contents.take());
+                return Ok(prepared_app.take());
+            }
+        }
         terminal.draw(|frame| {
-            use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
-            frame.render_widget(
-                Paragraph::new(format!("{status}\n\nq / Esc to quit"))
-                    .wrap(Wrap { trim: false })
-                    .block(Block::default().borders(Borders::ALL).title("Oyo")),
-                frame.area(),
+            use ratatui::{
+                layout::{Alignment, Rect},
+                style::{Modifier, Style},
+                text::Line,
+                widgets::{Block, Paragraph, Wrap},
+            };
+            let area = frame.area();
+            let mut background = Style::default().fg(theme.text);
+            if let Some(color) = theme.background {
+                background = background.bg(color);
+            }
+            frame.render_widget(Block::default().style(background), area);
+            let width = area.width.min(64);
+            let text_rows = Paragraph::new(status.as_str())
+                .wrap(Wrap { trim: true })
+                .line_count(width)
+                .min(usize::from(u16::MAX)) as u16;
+            let height = area.height.min(text_rows.saturating_add(2));
+            let content = Rect::new(
+                area.x + area.width.saturating_sub(width) / 2,
+                area.y + area.height.saturating_sub(height) / 2,
+                width,
+                height,
             );
+            let hint = if width < 15 && worker.is_none() {
+                "r/q"
+            } else if width < 28 && worker.is_none() {
+                "r retry  q quit"
+            } else if width < 6 {
+                "q"
+            } else if width < 15 {
+                "q quit"
+            } else if worker.is_some() {
+                "q / Esc to quit"
+            } else {
+                "r to retry   q / Esc to quit"
+            };
+            let body_height = height.saturating_sub(2);
+            frame.render_widget(
+                Paragraph::new(status.as_str())
+                    .style(
+                        Style::default()
+                            .fg(if worker.is_some() {
+                                theme.accent
+                            } else {
+                                theme.error
+                            })
+                            .add_modifier(Modifier::BOLD),
+                    )
+                    .alignment(Alignment::Center)
+                    .wrap(Wrap { trim: true }),
+                Rect::new(content.x, content.y, width, body_height.max(1).min(height)),
+            );
+            if height > 2 {
+                frame.render_widget(
+                    Paragraph::new(Line::from(hint))
+                        .style(Style::default().fg(theme.text_muted))
+                        .alignment(Alignment::Center),
+                    Rect::new(content.x, content.y + height - 1, width, 1),
+                );
+            }
         })?;
         if input_event_poll(Duration::from_millis(16))? {
             if let Event::Key(key) = input_event_read()? {

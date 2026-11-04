@@ -1983,7 +1983,7 @@ impl App {
             return;
         }
         self.queue_current_file_diff();
-        if self.stepping && !self.current_file_diff_ready() {
+        if !self.current_file_diff_ready() {
             return;
         }
         self.finish_file_enter();

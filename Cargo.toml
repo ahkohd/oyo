@@ -24,7 +24,7 @@ rustc-hash = "1.1"
 ignore = "0.4"
 
 # TUI
-ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
+ratatui = { version = "0.30", default-features = false, features = ["crossterm", "unstable-rendered-line-info"] }
 ratatui-image = { version = "=12.0.0-rc.3", default-features = false, features = ["crossterm"] }
 crossterm = "0.29"
 keymap = { version = "1.0.0-rc.6", features = ["crossterm"] }
