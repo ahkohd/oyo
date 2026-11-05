@@ -9935,6 +9935,8 @@ mod tests {
             "new\n".to_string(),
         );
         app.show_reconstructed_outdated_diff(&line_comment(), reconstructed);
+        assert!(!app.command_enabled(super::super::palette::PaletteAction::ToggleFileReviewed));
+        assert!(!app.command_enabled(super::super::palette::PaletteAction::SyncReview));
     }
 
     #[test]

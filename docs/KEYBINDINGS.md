@@ -412,3 +412,7 @@ The selection toolbar appears above the selection after you finish a mouse selec
 | `select_last` | `G`, `end` | Select the last commit |
 hi
 this
+
+## Category menu controls
+
+`[keybindings.global]` supports `open_menu`, which defaults to `["f10"]`. The category menu uses its own `[keybindings.menu]` mode. Its actions are `cancel`, `accept`, `next_item`, `previous_item`, `next_category`, `previous_category`, `first_item`, and `last_item`. Defaults are Esc, Enter or Space, Down, Up, Right or Tab, Left or Shift-Tab, Home, and End respectively. Menu command hints follow the bindings available in the underlying view. The menu footer shows its effective select and close bindings.

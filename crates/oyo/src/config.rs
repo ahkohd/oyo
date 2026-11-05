@@ -792,6 +792,7 @@ pub struct UiConfig {
     pub zen: bool,
     /// Show top bar in diff view
     pub topbar: bool,
+    pub menu_bar: bool,
     /// Auto-center on active change after stepping (like vim's zz)
     pub auto_center: bool,
     /// Watch files and refresh changed diff entries
@@ -861,6 +862,7 @@ impl Default for UiConfig {
         Self {
             zen: false,
             topbar: true,
+            menu_bar: true,
             auto_center: true,
             watch: true,
             overscroll: false,

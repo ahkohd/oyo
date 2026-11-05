@@ -832,6 +832,17 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     app.all_reviewed_show_hit = None;
     app.topbar_area = None;
 
+    let mut content_area = frame.area();
+    app.menu_bar_frame_start();
+    if app.menu_bar && !app.zen_mode && content_area.height > 2 {
+        crate::app::menu::draw_bar(
+            frame,
+            app,
+            Rect::new(content_area.x, content_area.y, content_area.width, 1),
+        );
+        content_area.y += 1;
+        content_area.height -= 1;
+    }
     if app.zen_mode {
         // Zen mode: just the content with minimal progress indicator
         draw_content(frame, app, frame.area(), false);
@@ -851,7 +862,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                     Constraint::Length(1), // Status bar
                 ]
             })
-            .split(frame.area());
+            .split(content_area);
 
         if app.topbar {
             draw_content(frame, app, chunks[1], true);
@@ -916,6 +927,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     draw_file_context_menu(frame, app);
     draw_review_comment_context_menu(frame, app);
     draw_status_mode_menu(frame, app);
+    crate::app::menu::draw_popup(frame, app);
     if app.remote_open.is_some() {
         draw_remote_open_modal(frame, app);
     }

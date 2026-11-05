@@ -97,6 +97,11 @@ pub(crate) fn handle_app_key(
         return Ok(());
     }
 
+    if app.menu.open.is_some() {
+        app.handle_menu_key(key);
+        return Ok(());
+    }
+
     if app.status_mode_menu_open() {
         if key.code == KeyCode::Esc {
             app.close_status_mode_menu();
@@ -288,6 +293,12 @@ fn handle_selection_key(app: &mut App, key: KeyEvent) -> bool {
 
 fn handle_global_key(app: &mut App, key: KeyEvent) -> bool {
     match app.keybindings.global(key) {
+        Dispatch::Matched(GlobalAction::OpenMenu) => {
+            if app.menu_input_available() {
+                app.open_menu(0);
+            }
+            true
+        }
         Dispatch::Matched(GlobalAction::OpenCommandPalette) => {
             app.reset_count();
             if app.command_palette_active() {

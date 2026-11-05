@@ -1764,6 +1764,7 @@ fn apply_config_to_app(app: &mut App, config: &config::Config, args: &Args, ligh
     app.overscroll = config.ui.overscroll;
     app.confirm_quit = config.ui.confirm_quit;
     app.topbar = config.ui.topbar;
+    app.menu_bar = config.ui.menu_bar;
     app.line_wrap = config.ui.line_wrap;
     app.set_fold_context_lines(config.ui.fold_context_lines);
     app.set_fold_context_mode(config.ui.fold_context);
@@ -8686,6 +8687,9 @@ fn run_app(
                             }
                             _ => {}
                         }
+                        continue;
+                    }
+                    if app.handle_menu_mouse(me) {
                         continue;
                     }
                     match me.kind {

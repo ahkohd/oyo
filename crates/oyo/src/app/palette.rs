@@ -4,8 +4,14 @@ use crate::config::{list_ui_themes, ThemeConfig};
 use crate::syntax::list_syntax_themes;
 use crate::toasts::ToastEvent;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PaletteAction {
+    ToggleMenuBar,
+    OpenMenu,
+    OpenCommandPalette,
+    NextStep,
+    PreviousStep,
+    SyncReview,
     ToggleStepping,
     ToggleViewMode,
     SetViewMode(ViewMode),
@@ -212,6 +218,7 @@ impl App {
         self.command_palette_active = true;
         self.command_palette_query.clear();
         self.command_palette_selection = 0;
+        self.command_palette_rendered_actions.clear();
         self.reset_picker_cursor();
         self.file_filter_active = false;
         self.clear_search();
@@ -241,18 +248,21 @@ impl App {
     pub fn push_command_palette_char(&mut self, ch: char) {
         self.command_palette_query.push(ch);
         self.command_palette_selection = 0;
+        self.command_palette_rendered_actions.clear();
         self.reset_picker_cursor();
     }
 
     pub fn pop_command_palette_char(&mut self) {
         self.command_palette_query.pop();
         self.command_palette_selection = 0;
+        self.command_palette_rendered_actions.clear();
         self.reset_picker_cursor();
     }
 
     pub fn clear_command_palette_text(&mut self) {
         self.command_palette_query.clear();
         self.command_palette_selection = 0;
+        self.command_palette_rendered_actions.clear();
         self.reset_picker_cursor();
     }
 
@@ -269,16 +279,18 @@ impl App {
     }
 
     pub fn apply_command_palette_selection(&mut self) {
-        let entries = self.command_palette_filtered_entries();
-        if entries.is_empty() {
-            return;
+        if self.command_palette_rendered_actions.is_empty() {
+            self.command_palette_filtered_entries();
         }
-        let idx = self
-            .command_palette_selection
-            .min(entries.len().saturating_sub(1));
-        let action = entries[idx].action;
-        self.execute_palette_action(action);
+        let Some(action) = self
+            .command_palette_rendered_actions
+            .get(self.command_palette_selection)
+            .copied()
+        else {
+            return;
+        };
         self.stop_command_palette();
+        self.execute_palette_action(action);
     }
 
     pub fn set_command_palette_list_area(
@@ -315,11 +327,32 @@ impl App {
         true
     }
     pub(crate) fn command_palette_filtered_entries(&mut self) -> Vec<PaletteEntry> {
+        let selected = self
+            .command_palette_rendered_actions
+            .get(self.command_palette_selection)
+            .copied();
         let mut entries = self.command_palette_entries();
         let query = self.command_palette_query.trim().to_ascii_lowercase();
         if !query.is_empty() {
             entries.retain(|entry| entry.label.to_ascii_lowercase().contains(&query));
         }
+        if let Some(action) = selected {
+            if let Some(index) = entries.iter().position(|entry| entry.action == action) {
+                self.command_palette_selection = index;
+            } else if let Some(mut entry) = self
+                .command_entries()
+                .into_iter()
+                .find(|entry| entry.action == action)
+            {
+                if !self.command_enabled(action) {
+                    entry.label.push_str(" (unavailable)");
+                }
+                let index = self.command_palette_selection.min(entries.len());
+                entries.insert(index, entry);
+                self.command_palette_selection = index;
+            }
+        }
+        self.command_palette_rendered_actions = entries.iter().map(|entry| entry.action).collect();
         if entries.is_empty() {
             self.command_palette_selection = 0;
         } else if self.command_palette_selection >= entries.len() {
@@ -329,263 +362,201 @@ impl App {
     }
 
     pub(super) fn command_palette_entries(&self) -> Vec<PaletteEntry> {
-        let mut entries = vec![
-            PaletteEntry {
-                label: "Toggle step mode".to_string(),
-                action: PaletteAction::ToggleStepping,
-            },
-            PaletteEntry {
-                label: "Cycle view modes".to_string(),
-                action: PaletteAction::ToggleViewMode,
-            },
-            PaletteEntry {
-                label: "View: Unified".to_string(),
-                action: PaletteAction::SetViewMode(ViewMode::UnifiedPane),
-            },
-            PaletteEntry {
-                label: "View: Split".to_string(),
-                action: PaletteAction::SetViewMode(ViewMode::Split),
-            },
-            PaletteEntry {
-                label: "View: Evolution".to_string(),
-                action: PaletteAction::SetViewMode(ViewMode::Evolution),
-            },
-            PaletteEntry {
-                label: "View: Preview".to_string(),
-                action: PaletteAction::SetViewMode(ViewMode::Preview),
-            },
-        ];
+        self.command_entries()
+            .into_iter()
+            .filter(|entry| self.command_enabled(entry.action))
+            .collect()
+    }
 
+    pub(super) fn command_entries(&self) -> Vec<PaletteEntry> {
+        use PaletteAction::*;
+        let mut entries: Vec<_> = [
+            ("Toggle menu bar", ToggleMenuBar),
+            ("Open menu", OpenMenu),
+            ("Command palette...", OpenCommandPalette),
+            ("Toggle step mode", ToggleStepping),
+            ("Step forward", NextStep),
+            ("Step backward", PreviousStep),
+            ("Cycle view modes", ToggleViewMode),
+            ("View: Unified", SetViewMode(ViewMode::UnifiedPane)),
+            ("View: Split", SetViewMode(ViewMode::Split)),
+            ("View: Evolution", SetViewMode(ViewMode::Evolution)),
+            ("View: Preview", SetViewMode(ViewMode::Preview)),
+            ("Toggle line wrap", ToggleLineWrap),
+            ("Cycle context folding", ToggleFoldContext),
+            ("Toggle syntax highlight", ToggleSyntax),
+            ("Toggle help", ToggleHelp),
+            ("Open settings", OpenSettings),
+            ("Toggle zen mode", ToggleZen),
+            ("Toggle file panel", ToggleFilePanel),
+            ("Refresh all files", RefreshAllFiles),
+            ("Open remote review...", OpenRemoteReview),
+            ("History...", OpenDashboard),
+            ("Navigate back", NavigateBack),
+            ("Navigate forward", NavigateForward),
+            ("Files...", OpenFileSearch),
+            ("Find in files\u{2026}", OpenReviewGrep),
+            ("Find in files: changes\u{2026}", OpenReviewGrepChanges),
+            ("Find in files: all\u{2026}", OpenReviewGrepEverything),
+            ("Copy file path", CopyFilePath),
+            ("Copy file path and position", CopyFilePosition),
+            ("Copy absolute file path", CopyAbsoluteFilePath),
+            (
+                "Copy absolute file path and position",
+                CopyAbsoluteFilePosition,
+            ),
+            ("Copy file path and cursor position", CopyFileCursorPosition),
+            (
+                "Copy absolute file path and cursor position",
+                CopyAbsoluteFileCursorPosition,
+            ),
+            ("Themes...", OpenThemePicker),
+            ("Refresh current file", RefreshCurrentFile),
+            ("Copy session name", CopySessionName),
+            ("Rename session", RenameSession),
+            ("Toggle autoplay", ToggleAutoplay),
+            ("Toggle autoplay (reverse)", ToggleAutoplayReverse),
+            ("Comments...", OpenCommentPicker),
+            ("Outdated comments", OpenOutdatedComments),
+            ("Sync review", SyncReview),
+            ("Quit", Quit),
+        ]
+        .into_iter()
+        .map(|(label, action)| PaletteEntry {
+            label: label.to_string(),
+            action,
+        })
+        .collect();
         if self.blame_enabled {
             entries.push(PaletteEntry {
-                label: "View: Blame".to_string(),
-                action: PaletteAction::SetViewMode(ViewMode::Blame),
+                label: "View: Blame".into(),
+                action: SetViewMode(ViewMode::Blame),
             });
         }
-
-        entries.extend_from_slice(&[
-            PaletteEntry {
-                label: "Toggle line wrap".to_string(),
-                action: PaletteAction::ToggleLineWrap,
-            },
-            PaletteEntry {
-                label: "Cycle context folding".to_string(),
-                action: PaletteAction::ToggleFoldContext,
-            },
-            PaletteEntry {
-                label: "Toggle syntax highlight".to_string(),
-                action: PaletteAction::ToggleSyntax,
-            },
-            PaletteEntry {
-                label: "Toggle help".to_string(),
-                action: PaletteAction::ToggleHelp,
-            },
-            PaletteEntry {
-                label: "Open settings".to_string(),
-                action: PaletteAction::OpenSettings,
-            },
-            PaletteEntry {
-                label: "Toggle zen mode".to_string(),
-                action: PaletteAction::ToggleZen,
-            },
-        ]);
-
-        if self.can_show_file_panel() {
-            entries.push(PaletteEntry {
-                label: "Toggle file panel".to_string(),
-                action: PaletteAction::ToggleFilePanel,
-            });
-            entries.push(PaletteEntry {
-                label: "Refresh all files".to_string(),
-                action: PaletteAction::RefreshAllFiles,
-            });
-        }
-
         entries.push(PaletteEntry {
-            label: "Open remote review...".to_string(),
-            action: PaletteAction::OpenRemoteReview,
+            label: if self.file_is_reviewed(self.review_live_diff().selected_index) {
+                "Mark file as unreviewed"
+            } else {
+                "Mark file as reviewed"
+            }
+            .into(),
+            action: ToggleFileReviewed,
         });
         entries.push(PaletteEntry {
-            label: "History...".to_string(),
-            action: PaletteAction::OpenDashboard,
+            label: self
+                .incremental_review_toggle_label()
+                .unwrap_or("Enable incremental review")
+                .into(),
+            action: ToggleIncrementalReview,
         });
         entries.push(PaletteEntry {
-            label: "Navigate back".to_string(),
-            action: PaletteAction::NavigateBack,
+            label: self
+                .reviewed_files_visibility_label()
+                .unwrap_or_else(|| "Hide reviewed files".into()),
+            action: ToggleReviewedFilesVisibility,
         });
         entries.push(PaletteEntry {
-            label: "Navigate forward".to_string(),
-            action: PaletteAction::NavigateForward,
+            label: format!(
+                "{} comments",
+                self.review_provider_kind().long_review_noun_title()
+            ),
+            action: OpenPrComments,
         });
-
-        if self.multi_diff.file_count() > 0 {
-            entries.push(PaletteEntry {
-                label: "Files...".to_string(),
-                action: PaletteAction::OpenFileSearch,
-            });
-            entries.push(PaletteEntry {
-                label: "Find in files\u{2026}".to_string(),
-                action: PaletteAction::OpenReviewGrep,
-            });
-            entries.push(PaletteEntry {
-                label: "Find in files: changes\u{2026}".to_string(),
-                action: PaletteAction::OpenReviewGrepChanges,
-            });
-            entries.push(PaletteEntry {
-                label: "Find in files: all\u{2026}".to_string(),
-                action: PaletteAction::OpenReviewGrepEverything,
-            });
-        }
-
-        let diff_file_active = self.multi_diff.file_count() > 0
-            && self.view_mode != ViewMode::Preview
-            && !self.active_pr_comments_view()
-            && !self.active_outdated_comments_view();
-        if diff_file_active {
-            entries.push(PaletteEntry {
-                label: "Copy file path".to_string(),
-                action: PaletteAction::CopyFilePath,
-            });
-            entries.push(PaletteEntry {
-                label: "Copy file path and position".to_string(),
-                action: PaletteAction::CopyFilePosition,
-            });
-            entries.push(PaletteEntry {
-                label: "Copy absolute file path".to_string(),
-                action: PaletteAction::CopyAbsoluteFilePath,
-            });
-            entries.push(PaletteEntry {
-                label: "Copy absolute file path and position".to_string(),
-                action: PaletteAction::CopyAbsoluteFilePosition,
-            });
-            entries.push(PaletteEntry {
-                label: "Copy file path and cursor position".to_string(),
-                action: PaletteAction::CopyFileCursorPosition,
-            });
-            entries.push(PaletteEntry {
-                label: "Copy absolute file path and cursor position".to_string(),
-                action: PaletteAction::CopyAbsoluteFileCursorPosition,
-            });
-        }
-
-        entries.push(PaletteEntry {
-            label: "Themes...".to_string(),
-            action: PaletteAction::OpenThemePicker,
-        });
-
-        entries.push(PaletteEntry {
-            label: "Refresh current file".to_string(),
-            action: PaletteAction::RefreshCurrentFile,
-        });
-
-        if self.control_session_name().is_some() {
-            entries.push(PaletteEntry {
-                label: "Copy session name".to_string(),
-                action: PaletteAction::CopySessionName,
-            });
-            entries.push(PaletteEntry {
-                label: "Rename session".to_string(),
-                action: PaletteAction::RenameSession,
-            });
-        }
-
-        if self.stepping {
-            entries.push(PaletteEntry {
-                label: "Toggle autoplay".to_string(),
-                action: PaletteAction::ToggleAutoplay,
-            });
-            entries.push(PaletteEntry {
-                label: "Toggle autoplay (reverse)".to_string(),
-                action: PaletteAction::ToggleAutoplayReverse,
-            });
-        }
-
-        if self.review_mode && self.multi_diff.file_count() > 0 {
-            entries.push(PaletteEntry {
-                label: if self.file_is_reviewed(self.review_live_diff().selected_index) {
-                    "Mark file as unreviewed".to_string()
+        for (idx, action) in self.review_actions.iter().enumerate() {
+            if action.show.is_empty() || action.show.iter().any(|item| item == "command_palette") {
+                let label = if action.label.trim().is_empty() {
+                    &action.id
                 } else {
-                    "Mark file as reviewed".to_string()
-                },
-                action: PaletteAction::ToggleFileReviewed,
-            });
-            if let Some(label) = self.incremental_review_toggle_label() {
-                entries.push(PaletteEntry {
-                    label: label.to_string(),
-                    action: PaletteAction::ToggleIncrementalReview,
-                });
-            }
-            if let Some(label) = self.reviewed_files_visibility_label() {
-                entries.push(PaletteEntry {
-                    label,
-                    action: PaletteAction::ToggleReviewedFilesVisibility,
-                });
-            }
-            entries.push(PaletteEntry {
-                label: "Comments...".to_string(),
-                action: PaletteAction::OpenCommentPicker,
-            });
-            entries.push(PaletteEntry {
-                label: format!(
-                    "{} comments",
-                    self.review_provider_kind().long_review_noun_title()
-                ),
-                action: PaletteAction::OpenPrComments,
-            });
-            entries.push(PaletteEntry {
-                label: "Outdated comments".to_string(),
-                action: PaletteAction::OpenOutdatedComments,
-            });
-            for (idx, action) in self.review_actions.iter().enumerate() {
-                let show = action.show.is_empty()
-                    || action.show.iter().any(|item| item == "command_palette");
-                if show {
-                    let label = if action.label.trim().is_empty() {
-                        action.id.clone()
-                    } else {
-                        action.label.clone()
-                    };
-                    if !label.trim().is_empty() {
-                        entries.push(PaletteEntry {
-                            label: format!("Review: {label}"),
-                            action: PaletteAction::ReviewAction(idx),
-                        });
-                    }
+                    &action.label
+                };
+                if !label.trim().is_empty() {
+                    entries.push(PaletteEntry {
+                        label: format!("Review: {label}"),
+                        action: ReviewAction(idx),
+                    });
                 }
             }
         }
-
-        entries.push(PaletteEntry {
-            label: "Quit".to_string(),
-            action: PaletteAction::Quit,
-        });
-
         entries
     }
 
-    pub(super) fn execute_palette_action(&mut self, action: PaletteAction) {
-        if self.multi_diff.file_count() == 0
-            && !matches!(
-                action,
-                PaletteAction::ToggleHelp
-                    | PaletteAction::OpenSettings
-                    | PaletteAction::OpenDashboard
-                    | PaletteAction::OpenRemoteReview
-                    | PaletteAction::NavigateBack
-                    | PaletteAction::NavigateForward
-                    | PaletteAction::OpenThemePicker
-                    | PaletteAction::OpenCommentPicker
-                    | PaletteAction::OpenPrComments
-                    | PaletteAction::OpenOutdatedComments
-                    | PaletteAction::CopySessionName
-                    | PaletteAction::RenameSession
-                    | PaletteAction::Quit
-                    | PaletteAction::RefreshAllFiles
+    pub(crate) fn command_enabled(&self, action: PaletteAction) -> bool {
+        use PaletteAction::*;
+        let files = self.multi_diff.file_count() > 0;
+        let diff = files
+            && matches!(
+                self.active_topbar_content(),
+                Some(super::TopbarTabContent::File(_))
             )
-        {
+            && self.view_mode != ViewMode::Preview
+            && !self.active_pr_comments_view()
+            && !self.active_outdated_comments_view();
+        let review = self.review_mode
+            && files
+            && self.remote_manifest_complete()
+            && self.outdated_diff_view.is_none();
+        match action {
+            ToggleMenuBar | OpenMenu | OpenCommandPalette | ToggleHelp | OpenSettings
+            | OpenDashboard | OpenRemoteReview | OpenThemePicker | ToggleZen | ToggleFilePanel
+            | Quit | RefreshAllFiles => true,
+            NavigateBack => self.view_history_cursor > 0,
+            NavigateForward => self.view_history_cursor + 1 < self.view_history.len(),
+            CopySessionName | RenameSession => self.control_session_name().is_some(),
+            CopyFilePath
+            | CopyFilePosition
+            | CopyAbsoluteFilePath
+            | CopyAbsoluteFilePosition
+            | CopyFileCursorPosition
+            | CopyAbsoluteFileCursorPosition => diff,
+            SetViewMode(ViewMode::Blame) => files && self.blame_enabled,
+            NextStep | PreviousStep | ToggleAutoplay | ToggleAutoplayReverse => {
+                files && self.stepping
+            }
+            ToggleFileReviewed => {
+                review
+                    && !self
+                        .multi_diff
+                        .file_is_sparse(self.multi_diff.selected_index)
+            }
+            ToggleIncrementalReview => review && self.incremental_review_toggle_label().is_some(),
+            ToggleReviewedFilesVisibility => {
+                review && self.reviewed_files_visibility_label().is_some()
+            }
+            OpenCommentPicker | OpenPrComments | OpenOutdatedComments => {
+                self.review_mode && self.remote_manifest_complete()
+            }
+            SyncReview => {
+                self.review_mode
+                    && self.remote_manifest_complete()
+                    && self.outdated_diff_view.is_none()
+                    && self.is_remote_session()
+                    && self.review_sync_status().is_none()
+                    && crate::remote_sync::RemoteReviewContext::from_app(self).is_ok()
+            }
+            ReviewAction(idx) => {
+                review
+                    && !self
+                        .multi_diff
+                        .file_is_sparse(self.multi_diff.selected_index)
+                    && idx < self.review_actions.len()
+            }
+            _ => files,
+        }
+    }
+
+    pub(super) fn execute_palette_action(&mut self, action: PaletteAction) {
+        if !self.command_enabled(action) {
             return;
         }
         match action {
+            PaletteAction::ToggleMenuBar => {
+                self.menu_bar = !self.menu_bar;
+            }
+            PaletteAction::OpenMenu => self.open_menu(0),
+            PaletteAction::OpenCommandPalette => self.start_command_palette(),
+            PaletteAction::NextStep => self.next_step(),
+            PaletteAction::PreviousStep => self.prev_step(),
+            PaletteAction::SyncReview => self.run_comments_sidebar_sync(),
             PaletteAction::ToggleStepping => self.toggle_stepping(),
             PaletteAction::ToggleViewMode => self.toggle_view_mode(),
             PaletteAction::SetViewMode(mode) => self.set_view_mode(mode),
@@ -1120,6 +1091,37 @@ mod tests {
     }
 
     #[test]
+    fn displayed_review_action_cannot_shift_after_remote_validation_is_lost() {
+        let mut app = app();
+        app.set_review_persist_enabled(false);
+        app.enable_review_mode();
+        app.start_command_palette();
+        for ch in "review".chars() {
+            app.push_command_palette_char(ch);
+        }
+        let entries = app.command_palette_filtered_entries();
+        app.command_palette_selection = entries
+            .iter()
+            .position(|entry| entry.action == PaletteAction::ToggleFileReviewed)
+            .unwrap();
+        app.multi_diff.remote_snapshot =
+            Some(serde_json::json!({"acquisition":"patch-v1", "streamState":"failed"}));
+        for _ in 0..2 {
+            let entries = app.command_palette_filtered_entries();
+            assert_eq!(
+                entries[app.command_palette_selection].action,
+                PaletteAction::ToggleFileReviewed
+            );
+            assert!(entries[app.command_palette_selection]
+                .label
+                .contains("unavailable"));
+        }
+        app.apply_command_palette_selection();
+        assert!(!app.file_is_reviewed(0));
+        assert!(app.remote_open.is_none());
+    }
+
+    #[test]
     fn palette_toggles_current_file_reviewed() {
         let mut app = app();
         app.set_review_persist_enabled(false);
@@ -1140,7 +1142,7 @@ mod tests {
     #[test]
     fn palette_offers_current_file_path_and_position_in_diff_views() {
         let mut app = app();
-        let entries = app.command_palette_entries();
+        let entries = app.command_entries();
         assert!(entries.iter().any(|entry| {
             entry.label == "Find in files\u{2026}"
                 && matches!(entry.action, PaletteAction::OpenReviewGrep)

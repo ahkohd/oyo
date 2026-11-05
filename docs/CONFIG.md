@@ -61,6 +61,7 @@ Use `[ui]` for general display and navigation defaults.
 | --- | --- | --- | --- |
 | `zen` | `true`, `false` | `false` | Starts with minimal UI chrome |
 | `topbar` | `true`, `false` | `true` | Shows the top bar in the diff view |
+| `menu_bar` | `true`, `false` | `true` | Shows the File, View, Navigate, Review, and Help category row. Zen mode hides the row. |
 | `auto_center` | `true`, `false` | `true` | Keeps the active change centred while stepping |
 | `watch` | `true`, `false` | `true` | Refreshes changed files on disk |
 | `overscroll` | `true`, `false` | `false` | Allows extra end-of-file scroll while centring |
@@ -88,6 +89,7 @@ Press `f` to toggle full and folded context. Search checks rendered lines. Press
 [ui]
 zen = false
 topbar = true
+menu_bar = true
 auto_center = true
 watch = true
 overscroll = false
@@ -585,3 +587,13 @@ clear = ["ctrl-u"]
 If you omit an action, Oyo keeps the default keys. Set an action to an empty array to unbind it.
 
 See [keybinding actions](./KEYBINDINGS.md).
+
+## Category menus
+
+The category row appears above the tabs. Narrow terminals show Menu. Open a category with the mouse or press F10. Use Left and Right to change category, Up and Down to select a command, Enter to run it, and Esc to close. Click the arrows beside the popup title to change category with the mouse. Click outside to dismiss the menu.
+
+An asterisk marks an active option. Dimmed commands are unavailable in the current context. Selecting one keeps the menu open. Review mutations require a validated live review.
+
+Set `ui.menu_bar = false` to hide the row. Use F10 or the palette's Open menu command to open it while hidden. Use Toggle menu bar in the palette or Menu bar in Settings to restore the row. The tab bar remains controlled by `ui.topbar`.
+
+Remap activation with `keybindings.global.open_menu`. Remap menu controls in `[keybindings.menu]` using `cancel`, `accept`, `next_item`, `previous_item`, `next_category`, `previous_category`, `first_item`, and `last_item`. Shortcut hints use effective runtime bindings. A command without a reachable shortcut shows no hint.

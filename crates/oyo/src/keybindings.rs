@@ -7,6 +7,7 @@ use std::hash::Hash;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum KeybindingMode {
     Global,
+    Menu,
     Normal,
     Help,
     ReviewEditor,
@@ -27,6 +28,7 @@ impl KeybindingMode {
     fn id(self) -> &'static str {
         match self {
             Self::Global => "global",
+            Self::Menu => "menu",
             Self::Normal => "normal",
             Self::Help => "help",
             Self::ReviewEditor => "review_editor",
@@ -46,8 +48,21 @@ impl KeybindingMode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MenuAction {
+    Cancel,
+    Accept,
+    NextItem,
+    PreviousItem,
+    NextCategory,
+    PreviousCategory,
+    FirstItem,
+    LastItem,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[allow(clippy::enum_variant_names)]
 pub(crate) enum GlobalAction {
+    OpenMenu,
     OpenCommandPalette,
     OpenFileSearch,
     OpenReviewGrep,
@@ -288,7 +303,19 @@ macro_rules! binding_action {
     };
 }
 
+binding_action!(MenuAction, [
+    Cancel => ("cancel", "Close menu", ["esc"]),
+    Accept => ("accept", "Select command", ["enter", "space"]),
+    NextItem => ("next_item", "Next command", ["down"]),
+    PreviousItem => ("previous_item", "Previous command", ["up"]),
+    NextCategory => ("next_category", "Next category", ["right", "tab"]),
+    PreviousCategory => ("previous_category", "Previous category", ["left", "backtab"]),
+    FirstItem => ("first_item", "First command", ["home"]),
+    LastItem => ("last_item", "Last command", ["end"]),
+]);
+
 binding_action!(GlobalAction, [
+    OpenMenu => ("open_menu", "Menu", ["f10"]),
     OpenCommandPalette => ("open_command_palette", "Command palette", ["ctrl-p"]),
     OpenFileSearch => ("open_file_search", "Quick file search", ["ctrl-shift-p"]),
     OpenReviewGrep => ("open_review_grep", "Find in files", ["ctrl-shift-f"]),
@@ -487,6 +514,7 @@ binding_action!(DashboardFilterAction, [
 #[derive(Debug)]
 pub(crate) struct Keybindings {
     global: ModeBindings<GlobalAction>,
+    menu: ModeBindings<MenuAction>,
     normal: ModeBindings<NormalAction>,
     help: ModeBindings<HelpAction>,
     review_editor: ModeBindings<ReviewEditorAction>,
@@ -539,6 +567,7 @@ impl Keybindings {
         warn_unknown_modes(config, warnings);
         Self {
             global: ModeBindings::build(KeybindingMode::Global, config, warnings),
+            menu: ModeBindings::build(KeybindingMode::Menu, config, warnings),
             normal: ModeBindings::build(KeybindingMode::Normal, config, warnings),
             help: ModeBindings::build(KeybindingMode::Help, config, warnings),
             review_editor: ModeBindings::build(KeybindingMode::ReviewEditor, config, warnings),
@@ -568,6 +597,7 @@ impl Keybindings {
     pub(crate) fn clear_sequence(&mut self) {
         match self.active_sequence_mode.take() {
             Some(KeybindingMode::Global) => self.global.clear_sequence(),
+            Some(KeybindingMode::Menu) => self.menu.clear_sequence(),
             Some(KeybindingMode::Normal) => self.normal.clear_sequence(),
             Some(KeybindingMode::Help) => self.help.clear_sequence(),
             Some(KeybindingMode::ReviewEditor) => self.review_editor.clear_sequence(),
@@ -589,6 +619,15 @@ impl Keybindings {
     pub(crate) fn global(&mut self, key: KeyEvent) -> Dispatch<GlobalAction> {
         self.prepare_mode(KeybindingMode::Global);
         dispatch_mode(&mut self.active_sequence_mode, &mut self.global, key)
+    }
+
+    pub(crate) fn menu(&mut self, key: KeyEvent) -> Dispatch<MenuAction> {
+        self.prepare_mode(KeybindingMode::Menu);
+        dispatch_mode(&mut self.active_sequence_mode, &mut self.menu, key)
+    }
+
+    pub(crate) fn menu_keys(&self, action: MenuAction) -> String {
+        self.menu.keys_label(action)
     }
 
     pub(crate) fn normal(&mut self, key: KeyEvent) -> Dispatch<NormalAction> {
@@ -679,6 +718,27 @@ impl Keybindings {
 
     pub(crate) fn normal_keys(&self, action: NormalAction) -> String {
         self.normal.keys_label(action)
+    }
+
+    pub(crate) fn menu_normal_keys(&self, action: NormalAction) -> String {
+        self.normal
+            .effective
+            .get(action.id())
+            .into_iter()
+            .flatten()
+            .filter(|key| {
+                let Some(sequence) = parse_seq(key).ok() else {
+                    return false;
+                };
+                !self.global.effective.values().flatten().any(|global| {
+                    parse_seq(global)
+                        .ok()
+                        .is_some_and(|prefix| sequence.first() == prefix.first())
+                })
+            })
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" / ")
     }
 
     pub(crate) fn help_keys(&self, action: HelpAction) -> String {
@@ -772,13 +832,15 @@ impl<A: BindingAction + 'static> ModeBindings<A> {
             }
         }
 
-        let validation = validate_effective_bindings::<A>(&effective).and_then(|_| {
-            if mode == KeybindingMode::Normal {
-                validate_normal_count_bindings(&effective)
-            } else {
-                Ok(())
-            }
-        });
+        let validation = validate_effective_bindings::<A>(&effective)
+            .and_then(|_| validate_force_quit_bindings(mode, &effective))
+            .and_then(|_| {
+                if mode == KeybindingMode::Normal {
+                    validate_normal_count_bindings(&effective)
+                } else {
+                    Ok(())
+                }
+            });
         if let Err(error) = validation {
             warnings.push(format!(
                 "Ignoring [keybindings.{}]: {}; using defaults for this mode",
@@ -854,6 +916,7 @@ fn warn_unknown_modes(config: &KeybindingsConfig, warnings: &mut Vec<String>) {
     for mode in config.modes.keys() {
         if ![
             KeybindingMode::Global.id(),
+            KeybindingMode::Menu.id(),
             KeybindingMode::Normal.id(),
             KeybindingMode::Help.id(),
             KeybindingMode::ReviewEditor.id(),
@@ -922,6 +985,34 @@ fn validate_effective_bindings<A: BindingAction + 'static>(
                 ));
             }
             seen.push((parsed, id, key.clone()));
+        }
+    }
+    Ok(())
+}
+
+fn validate_force_quit_bindings(
+    mode: KeybindingMode,
+    bindings: &BTreeMap<&'static str, Vec<String>>,
+) -> Result<(), String> {
+    if !matches!(
+        mode,
+        KeybindingMode::Global | KeybindingMode::Normal | KeybindingMode::Menu
+    ) {
+        return Ok(());
+    }
+    let reserved = parse_seq("ctrl-c").unwrap();
+    for (id, keys) in bindings {
+        for key in keys {
+            let sequence = parse_seq(key).map_err(|error| error.to_string())?;
+            if sequence.iter().any(|event| reserved.contains(event))
+                || key
+                    .split_whitespace()
+                    .any(|token| token.eq_ignore_ascii_case("ctrl-c"))
+            {
+                return Err(format!(
+                    "key '{key}' for '{id}' uses reserved force-quit key ctrl-c"
+                ));
+            }
         }
     }
     Ok(())
@@ -1045,6 +1136,71 @@ mod tests {
         assert_eq!(
             bindings.selection(shift('l')),
             Dispatch::Matched(SelectionAction::ReanchorRight)
+        );
+    }
+
+    #[test]
+    fn menu_and_command_bindings_reject_the_reserved_force_quit_key() {
+        for (mode, action) in [
+            ("menu", "cancel"),
+            ("menu", "accept"),
+            ("menu", "next_category"),
+            ("global", "open_theme_picker"),
+            ("normal", "toggle_line_wrap"),
+        ] {
+            for binding in ["ctrl-c", "f6 ctrl-c", "f6 ctrl-C"] {
+                let config: crate::config::Config =
+                    toml::from_str(&format!("[keybindings.{mode}]\n{action} = [\"{binding}\"]"))
+                        .unwrap();
+                let mut warnings = Vec::new();
+                let bindings =
+                    Keybindings::from_config_with_warnings(&config.keybindings, &mut warnings);
+                assert!(
+                    warnings
+                        .iter()
+                        .any(|warning| warning.contains("reserved force-quit")),
+                    "{mode} {binding}: {warnings:?}"
+                );
+                assert!(!bindings.menu_keys(MenuAction::Cancel).contains("ctrl-c"));
+                assert!(!bindings
+                    .menu_normal_keys(NormalAction::ToggleLineWrap)
+                    .contains("ctrl-c"));
+                assert!(!bindings
+                    .global_keys(GlobalAction::OpenThemePicker)
+                    .contains("ctrl-c"));
+            }
+        }
+    }
+
+    #[test]
+    fn menu_hides_normal_sequences_consumed_by_a_global_prefix() {
+        let config: crate::config::Config = toml::from_str(
+            r#"
+[keybindings.global]
+open_theme_picker = ["f6 a"]
+[keybindings.normal]
+toggle_line_wrap = ["f6 w"]
+"#,
+        )
+        .unwrap();
+        let mut warnings = Vec::new();
+        let mut bindings =
+            Keybindings::from_config_with_warnings(&config.keybindings, &mut warnings);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert!(bindings
+            .menu_normal_keys(NormalAction::ToggleLineWrap)
+            .is_empty());
+        assert_eq!(
+            bindings.global(KeyEvent::new(KeyCode::F(6), KeyModifiers::NONE)),
+            Dispatch::Pending
+        );
+        assert_eq!(
+            bindings.global(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE)),
+            Dispatch::Unmatched
+        );
+        assert_eq!(
+            bindings.normal(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE)),
+            Dispatch::Unmatched
         );
     }
 

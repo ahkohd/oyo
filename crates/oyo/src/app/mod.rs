@@ -33,6 +33,7 @@ mod file_panel;
 mod files;
 pub(crate) mod grep;
 mod history;
+pub(crate) mod menu;
 mod navigation;
 mod palette;
 mod playback;
@@ -513,6 +514,8 @@ pub struct App {
     pub overscroll: bool,
     /// Show top bar in diff view
     pub topbar: bool,
+    pub menu_bar: bool,
+    pub(crate) menu: menu::MenuState,
     /// Animation duration in milliseconds (how long fade effects take)
     pub animation_duration: u64,
     /// Pending count for vim-style commands (e.g., 10j = scroll down 10 lines)
@@ -844,6 +847,7 @@ pub struct App {
     pub(crate) remote_open: Option<remote_open::RemoteOpen>,
     /// Selected command palette entry
     command_palette_selection: usize,
+    command_palette_rendered_actions: Vec<palette::PaletteAction>,
     /// Command palette list area (x, y, width, height)
     command_palette_list_area: Option<(u16, u16, u16, u16)>,
     /// Command palette list start index
@@ -1304,6 +1308,8 @@ impl App {
             watch: true,
             overscroll: false,
             topbar: true,
+            menu_bar: true,
+            menu: menu::MenuState::default(),
             animation_duration: 150,
             pending_count: None,
             files_changed_on_disk: false,
@@ -1510,6 +1516,7 @@ impl App {
             command_palette_active: false,
             remote_open: None,
             command_palette_selection: 0,
+            command_palette_rendered_actions: Vec::new(),
             command_palette_list_area: None,
             command_palette_list_start: 0,
             command_palette_list_count: 0,
