@@ -11,27 +11,60 @@ pub(crate) enum ResponseFormat {
 
 fn provider_label(provider: ReviewProviderKind) -> &'static str {
     match provider {
-        ReviewProviderKind::GitHub => "Public GitHub",
-        ReviewProviderKind::GitLab => "Public GitLab",
-        ReviewProviderKind::Forgejo => "Public Forgejo",
+        ReviewProviderKind::GitHub => "GitHub",
+        ReviewProviderKind::GitLab => "GitLab",
+        ReviewProviderKind::Forgejo => "Forgejo",
     }
 }
 
-pub(crate) fn json(url: &str, provider: ReviewProviderKind) -> anyhow::Result<serde_json::Value> {
-    Ok(serde_json::from_str(&super::run_public_http(
-        request(url, "Accept: application/json"),
-        provider,
-    )?)?)
+pub(crate) struct ReadRequest {
+    pub(super) command: Command,
+    pub(super) input: Option<String>,
+    pub(super) format: ResponseFormat,
+}
+
+pub(crate) struct Response {
+    pub(crate) body: Vec<u8>,
+    pub(crate) headers: HashMap<String, String>,
+}
+
+impl ReadRequest {
+    pub(crate) fn with_curl_config(mut self, input: String) -> Self {
+        self.command.args(["--config", "-"]);
+        self.input = Some(input);
+        self
+    }
+
+    pub(crate) fn execute(self) -> anyhow::Result<Response> {
+        super::run_response(self.command, self.input.as_deref(), self.format)
+    }
+
+    pub(crate) fn public(url: &str, accept: &str, provider: ReviewProviderKind) -> Self {
+        Self {
+            command: request(url, accept),
+            input: None,
+            format: ResponseFormat::Headers(provider),
+        }
+    }
 }
 
 pub(crate) struct ResponseBody<R> {
     reader: R,
     format: ResponseFormat,
+    headers: HashMap<String, String>,
 }
 
 impl<R: BufRead> ResponseBody<R> {
     pub(crate) fn new(reader: R, format: ResponseFormat) -> Self {
-        Self { reader, format }
+        Self {
+            reader,
+            format,
+            headers: HashMap::new(),
+        }
+    }
+
+    pub(super) fn take_headers(&mut self) -> HashMap<String, String> {
+        std::mem::take(&mut self.headers)
     }
 
     fn read_headers(&mut self) -> io::Result<()> {
@@ -93,6 +126,30 @@ impl<R: BufRead> ResponseBody<R> {
             }
             if let Some(error) = response_failure(text, provider) {
                 return Err(io::Error::other(error));
+            }
+            for line in text.lines().skip(1) {
+                if let Some((name, value)) = line.split_once(':') {
+                    let name = name.to_ascii_lowercase();
+                    if name == "link" {
+                        self.headers
+                            .entry(name)
+                            .and_modify(|previous| {
+                                previous.push(',');
+                                previous.push_str(value.trim());
+                            })
+                            .or_insert_with(|| value.trim().to_owned());
+                    } else if self
+                        .headers
+                        .insert(name.clone(), value.trim().to_owned())
+                        .is_some()
+                        && matches!(name.as_str(), "x-next-page" | "x-total" | "x-page")
+                    {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "Repeated HTTP pagination header",
+                        ));
+                    }
+                }
             }
             self.format = ResponseFormat::Body;
             return Ok(());

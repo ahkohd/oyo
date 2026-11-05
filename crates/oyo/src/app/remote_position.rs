@@ -94,7 +94,30 @@ fn source_for_change(diff: &DiffResult, id: usize) -> Option<SourceLine> {
 }
 
 fn change_for_source(diff: &DiffResult, source: SourceLine) -> Option<usize> {
-    diff.changes.iter().find(|change|change.spans.iter().any(|span|match source.side {ReviewSide::Old=>span.old_line,ReviewSide::New=>span.new_line}==Some(source.line))).map(|change|change.id)
+    let nearest = |side| {
+        diff.changes
+            .iter()
+            .filter_map(|change| {
+                change
+                    .spans
+                    .iter()
+                    .filter_map(|span| match side {
+                        ReviewSide::Old => span.old_line,
+                        ReviewSide::New => span.new_line,
+                    })
+                    .map(|line| line.abs_diff(source.line))
+                    .min()
+                    .map(|distance| (change.id, distance))
+            })
+            .min_by_key(|(_, distance)| *distance)
+            .map(|(id, _)| id)
+    };
+    nearest(source.side).or_else(|| {
+        nearest(match source.side {
+            ReviewSide::Old => ReviewSide::New,
+            ReviewSide::New => ReviewSide::Old,
+        })
+    })
 }
 
 fn logical_navigation(nav: &DiffNavigator, state: StepState) -> LogicalNavigation {
@@ -292,10 +315,9 @@ impl App {
     }
 
     pub(super) fn remember_remote_viewport(&mut self) {
-        let index = self.multi_diff.selected_index;
         if self.outdated_diff_view.is_some()
             || self.remote_positions.measuring
-            || !self.multi_diff.has_patch_display(index)
+            || !self.is_remote_session()
             || self.view_mode == ViewMode::Preview
         {
             return;
@@ -341,10 +363,29 @@ impl App {
             return;
         }
         let key = self.remote_view_key();
-        let Some(anchor) = self.remote_positions.saved.remove(&key) else {
+        let Some(mut anchor) = self.remote_positions.saved.remove(&key) else {
             return;
         };
         let view = self.current_view_with_frame(AnimationFrame::Idle);
+        let nearest = |side| {
+            view.iter()
+                .filter_map(|line| match side {
+                    ReviewSide::Old => line.old_line,
+                    ReviewSide::New => line.new_line,
+                })
+                .min_by_key(|line| line.abs_diff(anchor.source.line))
+        };
+        if let Some(line) = nearest(anchor.source.side) {
+            anchor.source.line = line;
+        } else {
+            let side = match anchor.source.side {
+                ReviewSide::Old => ReviewSide::New,
+                ReviewSide::New => ReviewSide::Old,
+            };
+            if let Some(line) = nearest(side) {
+                anchor.source = SourceLine { side, line };
+            }
+        }
         let mut row = 0usize;
         let mut target = None;
         for line in view.iter() {
@@ -433,7 +474,7 @@ impl App {
 
     pub(super) fn restore_file_promotion(&mut self, promotion: FilePromotion) {
         let index = promotion.index;
-        if self.multi_diff.has_patch_display(index) {
+        if self.multi_diff.has_patch_display(index) && !self.multi_diff.file_is_sparse(index) {
             return;
         }
         self.multi_diff.ensure_full_navigator(index);
@@ -469,7 +510,7 @@ impl App {
             if self.diff_selection.is_some() || self.diff_selection_cursor.is_some() {
                 self.clear_diff_selection();
                 self.notify(crate::toasts::ToastEvent::SelectionActionStarted(
-                    "Selection cleared after full contents loaded. Select the text again."
+                    "Selection cleared after displayed contents changed. Select the text again."
                         .to_owned(),
                 ));
             }
@@ -549,6 +590,88 @@ mod tests {
             MultiFileDiff::prepare_remote_file_content(old.into_bytes(), new.into_bytes())
         ));
         app.restore_file_promotion(state);
+    }
+
+    #[test]
+    fn rejected_full_bytes_return_to_nearest_patch_anchor_without_opening_context() {
+        use oyo_core::multi::{ExpectedFileContent, PendingFileContent};
+        use oyo_core::patch::BlobId;
+        let (old, new) = contents();
+        let old_source = ContentSource::RemoteBlob {
+            provider: "gitlab".to_owned(),
+            host: "fixture.test".to_owned(),
+            repo: "11".to_owned(),
+            revision: "1".repeat(40),
+            path: "f".to_owned(),
+        };
+        let new_source = ContentSource::RemoteBlob {
+            provider: "gitlab".to_owned(),
+            host: "fixture.test".to_owned(),
+            repo: "22".to_owned(),
+            revision: "2".repeat(40),
+            path: "f".to_owned(),
+        };
+        let patch=format!("diff --git a/f b/f\nindex {}..{} 100644\n--- a/f\n+++ b/f\n@@ -40 +40 @@\n-{}\n+{}\n@@ -80 +80 @@\n-before\n+after\n",BlobId::from_bytes(old.as_bytes()).unwrap(),BlobId::from_bytes(new.as_bytes()).unwrap(),"old ".repeat(80),"new ".repeat(80));
+        let mut diff = MultiFileDiff::from_pending_files(None, Vec::new(), true);
+        diff.append_patch(
+            PatchRecord::parse(patch.into_bytes()).unwrap(),
+            old_source.clone(),
+            new_source.clone(),
+        );
+        diff.remote_snapshot = Some(json!({"acquisition":"patch-v1","streamState":"receiving"}));
+        let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+        app.stepping = false;
+        app.syntax_mode = SyntaxMode::Off;
+        assert!(app.multi_diff.request_full_content(0));
+        app.multi_diff.take_pending_content();
+        app.multi_diff.apply_prepared_content(
+            0,
+            MultiFileDiff::prepare_remote_file_content(
+                old.clone().into_bytes(),
+                new.replace("line 50\n", "counterfeit 50\n").into_bytes(),
+            ),
+        );
+        app.multi_diff.current_navigator().goto_end();
+        app.needs_scroll_to_active = false;
+        app.centered_once = true;
+        draw(&mut app);
+        assert!(app.goto_line_on_side(true, 50));
+        draw(&mut app);
+        let nav = app.multi_diff.current_navigator();
+        let before = source_for_change(nav.diff(), nav.state().cursor_change.unwrap()).unwrap();
+        assert_eq!(before.line, 50);
+        let horizontal = app.horizontal_scroll;
+        let position = app.capture_file_promotion(0).unwrap();
+        let expected = vec![ExpectedFileContent {
+            request: PendingFileContent {
+                file_index: 0,
+                old: old_source,
+                new: new_source,
+            },
+            old: Some(BlobId::from_bytes(old.as_bytes()).unwrap()),
+            new: Some(BlobId::from_bytes(new.as_bytes()).unwrap()),
+        }];
+        assert_eq!(
+            app.multi_diff
+                .bind_remote_content_proof(expected.into())
+                .unwrap(),
+            vec![0]
+        );
+        app.restore_file_promotion(position);
+        assert_eq!(app.horizontal_scroll, horizontal);
+        assert!(app.fold_context.is_enabled());
+        let nav = app.multi_diff.current_navigator();
+        let cursor = nav.state().cursor_change.unwrap();
+        assert_eq!(
+            source_for_change(nav.diff(), cursor),
+            Some(SourceLine {
+                side: before.side,
+                line: 40
+            })
+        );
+        assert!(app.multi_diff.file_is_sparse(0));
+        assert!(app.multi_diff.file_contents(0).is_none());
+        assert!(!app.multi_diff.ensure_full_content(0));
     }
 
     #[test]

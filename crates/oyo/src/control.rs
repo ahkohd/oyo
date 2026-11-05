@@ -1167,6 +1167,8 @@ fn context_json(
         "stepMode": app.stepping,
         "autoplay": app.autoplay,
         "watch": app.watch,
+        "fullContext": !app.fold_context.is_enabled(),
+        "fullTextAvailable": app.multi_diff.file_contents(app.multi_diff.selected_index).is_some(),
         "lineWrap": app.line_wrap,
         "syntax": app.syntax_enabled(),
         "zen": app.zen_mode,

@@ -1,3 +1,4 @@
+mod content_proof;
 pub(crate) mod github;
 pub(crate) mod gitlab;
 pub(crate) mod http;
@@ -763,7 +764,12 @@ fn git_blob(
             {
                 bail!("File exceeds the 32 MiB loading limit");
             }
-            return adapter.remote_json(host, &format!("{prefix}repos/{repo}/git/blobs/{sha}"));
+            let value =
+                adapter.remote_json(host, &format!("{prefix}repos/{repo}/git/blobs/{sha}"))?;
+            if value["sha"].as_str() != Some(sha.as_str()) {
+                bail!("Provider changed the requested immutable blob identity");
+            }
+            return Ok(value);
         }
         if entry["type"].as_str() != Some("tree") {
             bail!("Remote path traverses a non-directory object");
@@ -794,29 +800,35 @@ fn load_uncached(source: &ContentSource) -> Result<Vec<u8>> {
         "forgejo" => ReviewProviderKind::Forgejo,
         _ => bail!("Unknown remote provider"),
     };
-    let endpoint = match kind {
-        ReviewProviderKind::GitLab => format!(
-            "projects/{}/repository/files/{}?ref={revision}",
-            encode(repo),
-            encode(path)
-        ),
-        ReviewProviderKind::GitHub => format!(
-            "repos/{repo}/contents/{}?ref={revision}",
-            path.split('/').map(encode).collect::<Vec<_>>().join("/")
-        ),
-        ReviewProviderKind::Forgejo => format!(
-            "/repos/{repo}/contents/{}?ref={revision}",
-            path.split('/').map(encode).collect::<Vec<_>>().join("/")
-        ),
-    };
-    let value = if matches!(
-        kind,
-        ReviewProviderKind::GitHub | ReviewProviderKind::Forgejo
-    ) {
-        git_blob(kind, host, repo, revision, path)?
-    } else {
-        provider_adapter(kind)?.remote_json(host, &endpoint)?
-    };
+    if kind != ReviewProviderKind::GitHub {
+        let request = match kind {
+            ReviewProviderKind::GitLab => gitlab::request(
+                host,
+                &format!(
+                    "projects/{}/repository/files/{}/raw?ref={revision}",
+                    encode(repo),
+                    encode(path)
+                ),
+                "Accept: application/octet-stream",
+            ),
+            ReviewProviderKind::Forgejo => crate::forgejo::read_request(
+                host,
+                &format!(
+                    "/repos/{}/raw/{}?ref={revision}",
+                    repo.split('/').map(encode).collect::<Vec<_>>().join("/"),
+                    path.split('/').map(encode).collect::<Vec<_>>().join("/")
+                ),
+                "Accept: application/octet-stream",
+            )?,
+            ReviewProviderKind::GitHub => unreachable!(),
+        };
+        let bytes = request.execute()?.body;
+        if bytes.len() > 32 * 1024 * 1024 {
+            bail!("File exceeds the 32 MiB loading limit");
+        }
+        return Ok(bytes);
+    }
+    let value = git_blob(kind, host, repo, revision, path)?;
     let size = value["size"]
         .as_u64()
         .ok_or_else(|| anyhow!("Missing remote file size"))?;
@@ -844,6 +856,9 @@ fn load_uncached(source: &ContentSource) -> Result<Vec<u8>> {
     if decoded.len() as u64 != size {
         bail!("Incomplete remote file contents");
     }
+    oyo_core::patch::BlobId::parse(&field(&value, "/sha")?)
+        .and_then(|id| id.verify(&decoded))
+        .map_err(|error| anyhow!(error.to_string()))?;
     Ok(decoded)
 }
 
@@ -851,14 +866,18 @@ type BlobCache = std::collections::VecDeque<(ContentSource, Vec<u8>)>;
 static BLOB_CACHE: std::sync::Mutex<BlobCache> =
     std::sync::Mutex::new(std::collections::VecDeque::new());
 
-fn load(source: &ContentSource) -> Result<Vec<u8>> {
-    if let Ok(cache) = BLOB_CACHE.lock() {
-        if let Some((_, bytes)) = cache.iter().find(|(key, _)| key == source) {
-            return Ok(bytes.clone());
-        }
-    }
-    let bytes = load_uncached(source)?;
+fn cached_content(source: &ContentSource) -> Option<Vec<u8>> {
+    BLOB_CACHE
+        .lock()
+        .ok()?
+        .iter()
+        .find(|(key, _)| key == source)
+        .map(|(_, bytes)| bytes.clone())
+}
+
+fn cache_content(source: ContentSource, bytes: Vec<u8>) {
     if let Ok(mut cache) = BLOB_CACHE.lock() {
+        cache.retain(|(key, _)| key != &source);
         while cache.iter().map(|(_, bytes)| bytes.len()).sum::<usize>() + bytes.len()
             > 64 * 1024 * 1024
         {
@@ -866,7 +885,17 @@ fn load(source: &ContentSource) -> Result<Vec<u8>> {
                 break;
             }
         }
-        cache.push_back((source.clone(), bytes.clone()));
+        cache.push_back((source, bytes));
+    }
+}
+
+fn load(source: &ContentSource) -> Result<Vec<u8>> {
+    if let Some(bytes) = cached_content(source) {
+        return Ok(bytes);
+    }
+    let bytes = load_uncached(source)?;
+    if !matches!(source,ContentSource::RemoteBlob {provider,..} if provider!="github") {
+        cache_content(source.clone(), bytes.clone());
     }
     Ok(bytes)
 }
@@ -902,10 +931,20 @@ pub(super) fn run_public_http(
 }
 
 fn run_command_response(
-    mut command: std::process::Command,
+    command: std::process::Command,
     input: Option<&str>,
     response_format: http::ResponseFormat,
 ) -> Result<String> {
+    Ok(String::from_utf8(
+        run_response(command, input, response_format)?.body,
+    )?)
+}
+
+fn run_response(
+    mut command: std::process::Command,
+    input: Option<&str>,
+    response_format: http::ResponseFormat,
+) -> Result<http::Response> {
     use std::io::{Read, Write};
     use std::process::Stdio;
     use std::time::{Duration, Instant};
@@ -917,6 +956,9 @@ fn run_command_response(
     }
     if loading::cancelled() {
         bail!("Remote loading cancelled");
+    }
+    if input.is_some_and(|input| input.len() > 65536) {
+        bail!("Private transport configuration exceeds its loading limit");
     }
     let _permit = loading::TransportPermit::acquire()?;
     command
@@ -939,12 +981,13 @@ fn run_command_response(
         .take()
         .ok_or_else(|| anyhow!("Missing transport diagnostics"))?;
     let output_reader = std::thread::spawn(move || {
-        let reader = http::ResponseBody::new(std::io::BufReader::new(stdout), response_format);
+        let mut reader = http::ResponseBody::new(std::io::BufReader::new(stdout), response_format);
         let mut bytes = Vec::new();
-        reader
-            .take(LIMIT + 1)
-            .read_to_end(&mut bytes)
-            .map(|_| bytes)
+        reader.by_ref().take(LIMIT + 1).read_to_end(&mut bytes)?;
+        Ok::<_, std::io::Error>(http::Response {
+            body: bytes,
+            headers: reader.take_headers(),
+        })
     });
     let error_reader = std::thread::spawn(move || {
         let mut bytes = Vec::new();
@@ -966,10 +1009,10 @@ fn run_command_response(
                     .join()
                     .map_err(|_| anyhow!("Transport reader failed"))?,
             );
-            if output
-                .as_ref()
-                .is_some_and(|v| v.as_ref().map_or(true, |bytes| bytes.len() as u64 > LIMIT))
-            {
+            if output.as_ref().is_some_and(|v| {
+                v.as_ref()
+                    .map_or(true, |response| response.body.len() as u64 > LIMIT)
+            }) {
                 child.stop();
             }
         }
@@ -988,7 +1031,8 @@ fn run_command_response(
         }
         std::thread::sleep(Duration::from_millis(20));
     }
-    let bytes = output.ok_or_else(|| anyhow!("Transport reader stopped"))??;
+    let response = output.ok_or_else(|| anyhow!("Transport reader stopped"))??;
+    let bytes = &response.body;
     let errors = error_reader
         .join()
         .map_err(|_| anyhow!("Transport diagnostics failed"))??;
@@ -1002,7 +1046,7 @@ fn run_command_response(
             oyo_core::patch::terminal_text(String::from_utf8_lossy(&errors).trim())
         );
     }
-    Ok(String::from_utf8(bytes)?)
+    Ok(response)
 }
 
 pub(crate) fn same_review_snapshot(left: &serde_json::Value, right: &serde_json::Value) -> bool {
@@ -1020,6 +1064,7 @@ pub(crate) fn same_review_snapshot(left: &serde_json::Value, right: &serde_json:
         let object = value.as_object_mut()?;
         for key in [
             "acquisition",
+            "coverage",
             "streamState",
             "expectedFiles",
             "expectedAdditions",

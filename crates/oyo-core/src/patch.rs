@@ -1,3 +1,4 @@
+use git2::DiffLineType;
 use std::collections::HashSet;
 use std::io::BufRead;
 use std::path::Path;
@@ -9,12 +10,134 @@ use crate::{Change, ChangeSpan, DiffResult, Hunk};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct BlobId(git2::Oid);
+
+impl std::fmt::Display for BlobId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl BlobId {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        Ok(Self(git2::Oid::hash_object(git2::ObjectType::Blob, bytes)?))
+    }
+
+    pub fn parse(value: &str) -> Result<Self> {
+        if value.len() != 40
+            || !value.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || value.bytes().all(|byte| byte == b'0')
+        {
+            return Err(
+                "Full SHA-1 blob identity required; other object formats are unsupported".into(),
+            );
+        }
+        Ok(Self(git2::Oid::from_str(value)?))
+    }
+
+    pub fn verify(self, bytes: &[u8]) -> Result<()> {
+        if git2::Oid::hash_object(git2::ObjectType::Blob, bytes)? != self.0 {
+            return Err("Immutable blob hash mismatch".into());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BlobSide {
+    pub id: BlobId,
+    pub mode: u32,
+}
+
+#[derive(Clone, Debug, Default)]
+struct RecordMetadata {
+    ids: Option<(String, String)>,
+    modes: (Option<u32>, Option<u32>),
+}
+
+impl RecordMetadata {
+    fn parse(bytes: &[u8]) -> Result<Self> {
+        let mut metadata = Self::default();
+        let parse_mode = |value: &str| -> Result<u32> {
+            let mode = u32::from_str_radix(value.trim(), 8)?;
+            if !matches!(mode, 0o100644 | 0o100755 | 0o120000) {
+                return Err("Unsupported patch object mode".into());
+            }
+            Ok(mode)
+        };
+        let set_mode = |slot: &mut Option<u32>, mode: u32| -> Result<()> {
+            if slot.replace(mode).is_some() {
+                return Err("Repeated patch object mode".into());
+            }
+            Ok(())
+        };
+        for line in bytes.split_inclusive(|byte| *byte == b'\n') {
+            if line.starts_with(b"@@ -")
+                || line == b"GIT binary patch\n"
+                || line.starts_with(b"Binary files ")
+            {
+                break;
+            }
+            let line = std::str::from_utf8(line)?.trim_end_matches('\n');
+            if let Some(value) = line.strip_prefix("index ") {
+                if metadata.ids.is_some() {
+                    return Err("Repeated patch object identities".into());
+                }
+                let mut fields = value.split_whitespace();
+                let pair = fields.next().ok_or("Missing patch object identities")?;
+                let (old, new) = pair
+                    .split_once("..")
+                    .ok_or("Invalid patch object identities")?;
+                if old.len() != new.len()
+                    || !(4..=40).contains(&old.len())
+                    || !old
+                        .bytes()
+                        .chain(new.bytes())
+                        .all(|byte| byte.is_ascii_hexdigit())
+                {
+                    return Err("Unsupported or malformed patch object identities".into());
+                }
+                metadata.ids = Some((old.to_ascii_lowercase(), new.to_ascii_lowercase()));
+                if let Some(value) = fields.next() {
+                    let mode = parse_mode(value)?;
+                    set_mode(&mut metadata.modes.0, mode)?;
+                    set_mode(&mut metadata.modes.1, mode)?;
+                }
+                if fields.next().is_some() {
+                    return Err("Unexpected index header data".into());
+                }
+            } else if let Some(value) = line.strip_prefix("old mode ") {
+                set_mode(&mut metadata.modes.0, parse_mode(value)?)?;
+            } else if let Some(value) = line.strip_prefix("new mode ") {
+                set_mode(&mut metadata.modes.1, parse_mode(value)?)?;
+            } else if let Some(value) = line.strip_prefix("new file mode ") {
+                set_mode(&mut metadata.modes.0, 0)?;
+                set_mode(&mut metadata.modes.1, parse_mode(value)?)?;
+            } else if let Some(value) = line.strip_prefix("deleted file mode ") {
+                set_mode(&mut metadata.modes.0, parse_mode(value)?)?;
+                set_mode(&mut metadata.modes.1, 0)?;
+            }
+        }
+        Ok(metadata)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PatchContentKind {
+    Text,
+    Metadata,
+    BinaryObjects,
+}
+
 #[derive(Debug, Clone)]
 pub struct PatchRecord {
     pub entry: FileEntry,
     pub old_mode: u32,
     pub new_mode: u32,
     bytes: Arc<[u8]>,
+    metadata: RecordMetadata,
+    content_kind: PatchContentKind,
 }
 
 fn safe_path(path: &Path) -> Result<()> {
@@ -219,7 +342,141 @@ fn validate_hunk_framing(bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
+fn hunk_line_offset(start: u32, lines: u32) -> Result<usize> {
+    if lines == 0 {
+        Ok(start as usize)
+    } else {
+        start
+            .checked_sub(1)
+            .map(|n| n as usize)
+            .ok_or("Invalid zero hunk start".into())
+    }
+}
+fn append_reconstructed_line(out: &mut Vec<u8>, line: &[u8], ended: &mut bool) -> Result<()> {
+    if *ended && !line.is_empty() {
+        return Err("New bytes follow an unterminated line".into());
+    }
+    if out
+        .len()
+        .checked_add(line.len())
+        .is_none_or(|n| n > 32 * 1024 * 1024)
+    {
+        return Err("Reconstructed blob exceeds32MiB".into());
+    }
+    if line.is_empty() {
+        return Err("Empty unterminated patch line".into());
+    }
+    out.extend_from_slice(line);
+    *ended = !line.ends_with(b"\n");
+    Ok(())
+}
+
 impl PatchRecord {
+    pub fn reconstruct_text(&self, old: &[u8]) -> Result<Vec<u8>> {
+        if old.len() > 32 * 1024 * 1024 {
+            return Err("Old blob exceeds32MiB".into());
+        }
+
+        if self.content_kind == PatchContentKind::BinaryObjects {
+            return Err("Binary payload uses separate proof".into());
+        }
+        let diff = Self::parse_diff(&self.bytes).map_err(|e| e.to_string())?;
+        let Some(patch) = git2::Patch::from_diff(&diff, 0).map_err(|e| e.to_string())? else {
+            return Ok(old.to_vec());
+        };
+        let mut input = old.split_inclusive(|b| *b == b'\n');
+        let (mut old_pos, mut new_pos) = (0usize, 0usize);
+        let mut out = Vec::new();
+        let mut ended = false;
+        for h in 0..patch.num_hunks() {
+            let (hunk, count) = patch.hunk(h).map_err(|e| e.to_string())?;
+            let target = hunk_line_offset(hunk.old_start(), hunk.old_lines())?;
+            if target < old_pos {
+                return Err("Overlapping old hunks".into());
+            }
+            while old_pos < target {
+                let line = input.next().ok_or("Old hunk starts beyond blob")?;
+                append_reconstructed_line(&mut out, line, &mut ended)?;
+                old_pos += 1;
+                new_pos += 1;
+            }
+            if hunk_line_offset(hunk.new_start(), hunk.new_lines())? != new_pos {
+                return Err("New hunk coordinates do not match transformation".into());
+            }
+            let old_start = old_pos;
+            let new_start = new_pos;
+            let mut n = 0;
+            while n < count {
+                let line = patch.line_in_hunk(h, n).map_err(|e| e.to_string())?;
+                let kind = line.origin_value();
+                let mut content = line.content();
+                let expected_marker = match kind {
+                    DiffLineType::Context => DiffLineType::ContextEOFNL,
+                    DiffLineType::Addition => DiffLineType::DeleteEOFNL,
+                    DiffLineType::Deletion => DiffLineType::AddEOFNL,
+                    _ => return Err("Unattached EOF marker".into()),
+                };
+                if n + 1 < count {
+                    let next = patch.line_in_hunk(h, n + 1).map_err(|e| e.to_string())?;
+                    if matches!(
+                        next.origin_value(),
+                        DiffLineType::ContextEOFNL
+                            | DiffLineType::AddEOFNL
+                            | DiffLineType::DeleteEOFNL
+                    ) {
+                        if next.origin_value() != expected_marker {
+                            return Err("Contradictory EOF marker".into());
+                        }
+                        content = content
+                            .strip_suffix(b"\n")
+                            .ok_or("EOF marker without patch newline")?;
+                        n += 1;
+                    }
+                }
+                match kind {
+                    DiffLineType::Context | DiffLineType::Deletion => {
+                        if line.old_lineno() != Some((old_pos + 1) as u32) {
+                            return Err("Wrong old coordinate".into());
+                        }
+                        if input.next() != Some(content) {
+                            return Err("Old bytes do not match exact hunk position".into());
+                        }
+                        old_pos += 1;
+                    }
+                    _ => {
+                        if line.old_lineno().is_some() {
+                            return Err("Addition has old coordinate".into());
+                        }
+                    }
+                }
+                match kind {
+                    DiffLineType::Context | DiffLineType::Addition => {
+                        if line.new_lineno() != Some((new_pos + 1) as u32) {
+                            return Err("Wrong new coordinate".into());
+                        }
+                        append_reconstructed_line(&mut out, content, &mut ended)?;
+                        new_pos += 1;
+                    }
+                    _ => {
+                        if line.new_lineno().is_some() {
+                            return Err("Deletion has new coordinate".into());
+                        }
+                    }
+                }
+                n += 1;
+            }
+            if old_pos - old_start != hunk.old_lines() as usize
+                || new_pos - new_start != hunk.new_lines() as usize
+            {
+                return Err("Hunk size changed".into());
+            }
+        }
+        for line in input {
+            append_reconstructed_line(&mut out, line, &mut ended)?;
+        }
+        Ok(out)
+    }
+
     pub fn parse(bytes: Vec<u8>) -> Result<Self> {
         if !bytes.starts_with(b"diff --git ") {
             return Err("Expected a Git patch record".into());
@@ -231,6 +488,7 @@ impl PatchRecord {
             return Err("Patch record exceeds the 250000-line resident parsing budget".into());
         }
         validate_hunk_framing(&bytes)?;
+        let metadata = RecordMetadata::parse(&bytes)?;
         let diff = Self::parse_diff(&bytes)?;
         if diff.deltas().len() != 1 {
             return Err("Expected exactly one patch file".into());
@@ -281,6 +539,13 @@ impl PatchRecord {
             .map(|p| p.line_stats())
             .transpose()?
             .unwrap_or((0, 0, 0));
+        let content_kind = if patch.as_ref().is_some_and(|patch| patch.num_hunks() > 0) {
+            PatchContentKind::Text
+        } else if delta.flags().contains(git2::DiffFlags::BINARY) {
+            PatchContentKind::BinaryObjects
+        } else {
+            PatchContentKind::Metadata
+        };
         let binary = old.is_binary()
             || new.is_binary()
             || delta.flags().contains(git2::DiffFlags::BINARY)
@@ -307,6 +572,8 @@ impl PatchRecord {
             old_mode: old.mode().into(),
             new_mode: new.mode().into(),
             bytes: bytes.into(),
+            metadata,
+            content_kind,
         })
     }
 
@@ -315,6 +582,58 @@ impl PatchRecord {
         framed.extend_from_slice(bytes);
         framed.extend_from_slice(b"-- \n");
         Ok(git2::Diff::from_buffer(&framed)?)
+    }
+
+    pub fn validate_sides(&self, old: Option<BlobSide>, new: Option<BlobSide>) -> Result<()> {
+        if old.is_none() != (self.entry.status == FileStatus::Added)
+            || new.is_none() != (self.entry.status == FileStatus::Deleted)
+            || old.is_none() && new.is_none()
+        {
+            return Err("Patch operation disagrees with immutable object presence".into());
+        }
+        for (reported, side) in [(self.metadata.modes.0, old), (self.metadata.modes.1, new)] {
+            if let Some(mode) = reported {
+                if mode != side.map_or(0, |side| side.mode) {
+                    return Err("Patch mode disagrees with immutable tree".into());
+                }
+            }
+        }
+        if (self.metadata.modes.0.is_none() || self.metadata.modes.1.is_none())
+            && old.map(|side| side.mode) != new.map(|side| side.mode)
+        {
+            return Err("Patch omitted a mode or presence change".into());
+        }
+        if let Some((old_id, new_id)) = &self.metadata.ids {
+            for (prefix, side) in [(old_id, old), (new_id, new)] {
+                let valid = side.map_or_else(
+                    || prefix.bytes().all(|byte| byte == b'0'),
+                    |side| side.id.0.to_string().starts_with(prefix),
+                );
+                if !valid
+                    || self.content_kind == PatchContentKind::BinaryObjects && prefix.len() != 40
+                {
+                    return Err("Patch identity disagrees with immutable tree or lacks a full binary identity".into());
+                }
+            }
+        } else if self.has_changed_lines() || self.entry.binary {
+            return Err("Changed patch contents lack object identity headers".into());
+        }
+        if !self.entry.binary
+            && !self.has_changed_lines()
+            && old.map(|side| side.id) != new.map(|side| side.id)
+        {
+            let empty = BlobId::parse("e69de29bb2d1d6434b8b29ae775ad8c2e48c5391")?;
+            if old.map_or(new.map(|side| side.id) != Some(empty), |side| {
+                new.is_some() || side.id != empty
+            }) {
+                return Err("Metadata-only patch changes object contents".into());
+            }
+        }
+        Ok(())
+    }
+
+    pub fn content_kind(&self) -> PatchContentKind {
+        self.content_kind
     }
 
     pub fn display_diff(&self) -> Result<DiffResult> {
@@ -383,11 +702,26 @@ impl PatchRecord {
         if result.changes.is_empty() {
             let text = if self.entry.binary {
                 "Binary patch. Full text is unavailable.".to_owned()
-            } else {
+            } else if self.entry.status == FileStatus::Renamed {
                 format!(
-                    "Metadata change. Modes {:o} -> {:o}.",
-                    self.old_mode, self.new_mode
+                    "Renamed from {}.",
+                    terminal_text(
+                        &self
+                            .entry
+                            .old_path
+                            .as_ref()
+                            .map(|path| path.to_string_lossy())
+                            .unwrap_or_default()
+                    )
                 )
+            } else if self.old_mode != self.new_mode {
+                match self.entry.status {
+                    FileStatus::Added => "Empty file added.".to_owned(),
+                    FileStatus::Deleted => "Empty file deleted.".to_owned(),
+                    _ => format!("Mode changed {:o} -> {:o}.", self.old_mode, self.new_mode),
+                }
+            } else {
+                "Metadata change.".to_owned()
             };
             result
                 .changes
@@ -488,6 +822,113 @@ mod tests {
     use super::*;
     use crate::multi::{ContentSource, DiffStatus, MultiFileDiff};
     use std::io::{BufReader, Cursor};
+
+    #[test]
+    fn exact_text_proof_checks_bytes_coordinates_newlines_and_complete_objects() {
+        #[derive(serde::Deserialize)]
+        struct Case {
+            name: String,
+            old: Vec<u8>,
+            new: Vec<u8>,
+            old_id: String,
+            new_id: String,
+            patch: Vec<u8>,
+            verified: bool,
+        }
+        let cases: Vec<Case> =
+            serde_json::from_str(include_str!("../tests/fixtures/exact_patch.json")).unwrap();
+        for case in cases {
+            let result = PatchRecord::parse(case.patch).and_then(|record| {
+                BlobId::parse(&case.old_id)?.verify(&case.old)?;
+                let reconstructed = record.reconstruct_text(&case.old)?;
+                BlobId::parse(&case.new_id)?.verify(&reconstructed)?;
+                assert_eq!(reconstructed, case.new, "{}", case.name);
+                Ok(())
+            });
+            assert_eq!(result.is_ok(), case.verified, "{}: {result:?}", case.name);
+        }
+        assert!(BlobId::parse("1234567").is_err());
+        assert!(BlobId::parse(&"a".repeat(64)).is_err());
+    }
+
+    #[test]
+    fn immutable_side_validation_preserves_metadata_and_rejects_forged_headers() {
+        let id = BlobId::parse("e69de29bb2d1d6434b8b29ae775ad8c2e48c5391").unwrap();
+        let plain = BlobSide { id, mode: 0o100644 };
+        let executable = BlobSide { id, mode: 0o100755 };
+        let rename = PatchRecord::parse(
+            b"diff --git a/a b/b\nsimilarity index 100%\nrename from a\nrename to b\n".to_vec(),
+        )
+        .unwrap();
+        assert!(rename.validate_sides(Some(plain), Some(plain)).is_ok());
+        assert!(rename
+            .validate_sides(Some(plain), Some(executable))
+            .is_err());
+        let mode =
+            PatchRecord::parse(b"diff --git a/f b/f\nold mode 100644\nnew mode 100755\n".to_vec())
+                .unwrap();
+        assert!(mode.validate_sides(Some(plain), Some(executable)).is_ok());
+        assert!(mode.validate_sides(Some(plain), Some(plain)).is_err());
+        let empty = PatchRecord::parse(
+            b"diff --git a/f b/f\nnew file mode 100644\nindex 0000000..e69de29\n".to_vec(),
+        )
+        .unwrap();
+        assert!(empty.validate_sides(None, Some(plain)).is_ok());
+        assert!(empty.validate_sides(Some(plain), Some(plain)).is_err());
+        let binary = PatchRecord::parse(
+            format!(
+                "diff --git a/f b/f\nindex {id}..{id} 100644\nBinary files a/f and b/f differ\n"
+            )
+            .into_bytes(),
+        )
+        .unwrap();
+        assert!(binary.validate_sides(Some(plain), Some(plain)).is_ok());
+        let abbreviated = PatchRecord::parse(
+            b"diff --git a/f b/f\nindex e69de29..e69de29 100644\nBinary files a/f and b/f differ\n"
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(abbreviated
+            .validate_sides(Some(plain), Some(plain))
+            .is_err());
+        assert!(BlobId::parse(&"0".repeat(40)).is_err());
+        assert!(PatchRecord::parse(b"diff --git a/f b/f\nindex 1111111..2222222 100644\nindex 1111111..2222222 100644\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n-old\n+new\n".to_vec()).is_err());
+    }
+
+    #[test]
+    fn unrenderable_text_uses_exact_byte_proof_and_retains_binary_display() {
+        let old = b"old\xff\n";
+        let new = b"new\xfe\n";
+        let old_id = git2::Oid::hash_object(git2::ObjectType::Blob, old)
+            .unwrap()
+            .to_string();
+        let new_id = git2::Oid::hash_object(git2::ObjectType::Blob, new)
+            .unwrap()
+            .to_string();
+        let mut raw = format!(
+            "diff --git a/f b/f\nindex {}..{} 100644\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n",
+            &old_id[..7],
+            &new_id[..7]
+        )
+        .into_bytes();
+        raw.extend_from_slice(b"-old\xff\n+new\xfe\n");
+        let record = PatchRecord::parse(raw).unwrap();
+        assert_eq!(record.content_kind(), PatchContentKind::Text);
+        assert!(record.entry.binary);
+        assert!(!record.has_changed_lines());
+        let side = |id: &str| {
+            Some(BlobSide {
+                id: BlobId::parse(id).unwrap(),
+                mode: 0o100644,
+            })
+        };
+        record.validate_sides(side(&old_id), side(&new_id)).unwrap();
+        assert_eq!(record.reconstruct_text(old).unwrap(), new);
+        assert_eq!(
+            record.display_diff().unwrap().changes[0].spans[0].text,
+            "Binary file. Full text is unavailable."
+        );
+    }
 
     fn text_patch() -> Vec<u8> {
         b"diff --git a/f b/f\nindex 1111111..2222222 100644\n--- a/f\n+++ b/f\n@@ -40 +40 @@\n-old\n+new\n@@ -80 +80 @@\n-before\n+after\n".to_vec()
