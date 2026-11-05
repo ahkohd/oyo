@@ -475,6 +475,67 @@ pub fn get_objects_batch(
         return Ok(objects);
     }
 
+    let mut metadata = Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .arg("cat-file")
+        .arg("--batch-check")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let mut metadata_stdin = metadata.stdin.take().ok_or_else(|| {
+        GitError::CommandFailed("git cat-file metadata stdin was unavailable".to_string())
+    })?;
+    let requests = batch_specs;
+    let writer = std::thread::spawn(move || -> std::io::Result<()> {
+        for spec in requests {
+            writeln!(metadata_stdin, "{spec}")?;
+        }
+        Ok(())
+    });
+    let output = metadata.wait_with_output()?;
+    writer
+        .join()
+        .map_err(|_| GitError::CommandFailed("git metadata writer failed".to_string()))??;
+    if !output.status.success() {
+        return Err(GitError::CommandFailed(
+            String::from_utf8_lossy(&output.stderr).to_string(),
+        ));
+    }
+    let headers = String::from_utf8_lossy(&output.stdout);
+    let headers = headers.lines().collect::<Vec<_>>();
+    if headers.len() != batch_indices.len() {
+        return Err(GitError::CommandFailed(
+            "Invalid git cat-file metadata count".to_string(),
+        ));
+    }
+    let mut batch_specs = Vec::new();
+    let mut content_indices = Vec::new();
+    for (index, header) in batch_indices.into_iter().zip(headers) {
+        if header.ends_with(" missing") {
+            continue;
+        }
+        let mut fields = header.split_whitespace();
+        let oid = fields.next().unwrap_or_default();
+        let size = fields
+            .last()
+            .and_then(|value| value.parse::<u64>().ok())
+            .ok_or_else(|| {
+                GitError::CommandFailed(format!("Invalid cat-file metadata: {header}"))
+            })?;
+        if size > max_bytes {
+            objects[index] = None;
+        } else {
+            batch_specs.push(oid.to_string());
+            content_indices.push(index);
+        }
+    }
+    let batch_indices = content_indices;
+    if batch_specs.is_empty() {
+        return Ok(objects);
+    }
+
     let mut child = Command::new("git")
         .arg("-C")
         .arg(repo_path)
@@ -794,6 +855,10 @@ mod tests {
         assert_eq!(objects[0].as_deref(), Some(b"one".as_slice()));
         assert_eq!(objects[1].as_deref(), Some(b"".as_slice()));
         assert_eq!(objects[2], None);
+
+        let oversized =
+            get_objects_batch(&root, &vec!["HEAD:large.txt".to_string(); 8], 4).unwrap();
+        assert_eq!(oversized, vec![None; 8]);
 
         let many = vec!["HEAD:small.txt".to_string(); 5_000];
         let objects = get_objects_batch(&root, &many, 4).unwrap();

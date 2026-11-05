@@ -471,13 +471,6 @@ impl MultiFileDiff {
         (diff.insertions, diff.deletions)
     }
 
-    fn git_numstat_for_mode(
-        repo_root: &Path,
-        mode: &GitDiffMode,
-    ) -> Option<std::collections::HashMap<PathBuf, (usize, usize)>> {
-        Self::git_numstat_for_mode_with_paths(repo_root, mode, None)
-    }
-
     fn git_numstat_for_file(
         repo_root: &Path,
         mode: &GitDiffMode,
@@ -2458,122 +2451,25 @@ impl MultiFileDiff {
             Ok(c) => c,
             Err(_) => return false,
         };
-        let Some(stats) = Self::git_numstat_for_mode(&repo_root, &mode) else {
+        let refreshed = match mode {
+            GitDiffMode::Uncommitted => Self::from_git_changes(repo_root, changes),
+            GitDiffMode::Staged => Self::from_git_staged(repo_root, changes),
+            GitDiffMode::Range { from, to } => Self::from_git_range(repo_root, changes, from, to),
+            GitDiffMode::IndexRange { from, to_index } => {
+                Self::from_git_index_range(repo_root, changes, from, to_index)
+            }
+        };
+        let Ok(refreshed) = refreshed else {
             return false;
         };
-
-        // Rebuild the entire diff state
-        let mut files = Vec::new();
-        let mut old_contents = Vec::new();
-        let mut new_contents = Vec::new();
-        let mut precomputed_diffs = Vec::new();
-        let mut diff_statuses = Vec::new();
-        for change in changes {
-            let old_path = change
-                .old_path
-                .clone()
-                .unwrap_or_else(|| change.path.clone());
-            let (old_content, old_binary, new_content, new_binary) = match mode {
-                GitDiffMode::Uncommitted => {
-                    let (old_content, old_binary) = match change.status {
-                        FileStatus::Added | FileStatus::Untracked => (String::new(), false),
-                        _ => Self::read_git_commit_or_binary(&repo_root, "HEAD", &old_path),
-                    };
-                    let (new_content, new_binary) = match change.status {
-                        FileStatus::Deleted => (String::new(), false),
-                        _ => {
-                            let full_path = repo_root.join(&change.path);
-                            Self::read_git_worktree_or_binary(&full_path)
-                        }
-                    };
-                    (old_content, old_binary, new_content, new_binary)
-                }
-                GitDiffMode::Staged => {
-                    let (old_content, old_binary) = match change.status {
-                        FileStatus::Added | FileStatus::Untracked => (String::new(), false),
-                        _ => Self::read_git_commit_or_binary(&repo_root, "HEAD", &old_path),
-                    };
-                    let (new_content, new_binary) = match change.status {
-                        FileStatus::Deleted => (String::new(), false),
-                        _ => Self::read_git_index_or_binary(&repo_root, &change.path),
-                    };
-                    (old_content, old_binary, new_content, new_binary)
-                }
-                GitDiffMode::Range { ref from, ref to } => {
-                    let (old_content, old_binary) = match change.status {
-                        FileStatus::Added | FileStatus::Untracked => (String::new(), false),
-                        _ => Self::read_git_commit_or_binary(&repo_root, from, &old_path),
-                    };
-                    let (new_content, new_binary) = match change.status {
-                        FileStatus::Deleted => (String::new(), false),
-                        _ => Self::read_git_commit_or_binary(&repo_root, to, &change.path),
-                    };
-                    (old_content, old_binary, new_content, new_binary)
-                }
-                GitDiffMode::IndexRange { ref from, to_index } => {
-                    if to_index {
-                        let (old_content, old_binary) = match change.status {
-                            FileStatus::Added | FileStatus::Untracked => (String::new(), false),
-                            _ => Self::read_git_commit_or_binary(&repo_root, from, &old_path),
-                        };
-                        let (new_content, new_binary) = match change.status {
-                            FileStatus::Deleted => (String::new(), false),
-                            _ => Self::read_git_index_or_binary(&repo_root, &change.path),
-                        };
-                        (old_content, old_binary, new_content, new_binary)
-                    } else {
-                        let (old_content, old_binary) = match change.status {
-                            FileStatus::Added | FileStatus::Untracked => (String::new(), false),
-                            _ => Self::read_git_index_or_binary(&repo_root, &old_path),
-                        };
-                        let (new_content, new_binary) = match change.status {
-                            FileStatus::Deleted => (String::new(), false),
-                            _ => Self::read_git_commit_or_binary(&repo_root, from, &change.path),
-                        };
-                        (old_content, old_binary, new_content, new_binary)
-                    }
-                }
-            };
-
-            let binary = old_binary || new_binary;
-            let (insertions, deletions) = stats.get(&change.path).copied().unwrap_or_else(|| {
-                if change.status == FileStatus::Untracked && !binary {
-                    (new_content.lines().count(), 0)
-                } else {
-                    (0, 0)
-                }
-            });
-            let (old_content, new_content, precomputed, diff_status) =
-                Self::maybe_defer_diff(old_content, new_content, binary);
-
-            files.push(FileEntry {
-                display_name: change.path.display().to_string(),
-                path: change.path,
-                old_path: change.old_path,
-                old_source_path: None,
-                new_source_path: None,
-                status: change.status,
-                insertions,
-                deletions,
-                binary,
-            });
-
-            old_contents.push(Arc::from(old_content));
-            new_contents.push(Arc::from(new_content));
-            precomputed_diffs.push(precomputed);
-            diff_statuses.push(diff_status);
-        }
-
-        // Update state
-        let navigators: Vec<Option<DiffNavigator>> = (0..files.len()).map(|_| None).collect();
-        let navigator_is_placeholder = vec![false; files.len()];
-        self.files = files;
-        self.old_contents = old_contents;
-        self.new_contents = new_contents;
-        self.precomputed_diffs = precomputed_diffs;
-        self.diff_statuses = diff_statuses;
-        self.navigators = navigators;
-        self.navigator_is_placeholder = navigator_is_placeholder;
+        self.files = refreshed.files;
+        self.old_contents = refreshed.old_contents;
+        self.new_contents = refreshed.new_contents;
+        self.precomputed_diffs = refreshed.precomputed_diffs;
+        self.diff_statuses = refreshed.diff_statuses;
+        self.navigators = refreshed.navigators;
+        self.navigator_is_placeholder = refreshed.navigator_is_placeholder;
+        self.pending_content = refreshed.pending_content;
 
         // Clamp selected index to valid range
         if self.selected_index >= self.files.len() {
@@ -3041,6 +2937,8 @@ mod tests {
         let lazy = MultiFileDiff::from_git_changes_lazy(root.clone(), changes).unwrap();
         assert_eq!(lazy.file_contents(0), Some(("a.txt", "b.txt")));
         assert_eq!(lazy.pending_content_count(), 0);
+        assert!(diff.refresh_all_from_git());
+        assert_eq!(diff.file_contents(0), Some(("a.txt", "b.txt")));
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -3088,6 +2986,71 @@ mod tests {
             (300, 300)
         );
 
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn git_refresh_replaces_pending_contents_and_reads_external_index_changes() {
+        let root = temp_dir("refresh-index");
+        std::fs::create_dir_all(&root).unwrap();
+        run_git(&root, &["init", "-q"]);
+        run_git(&root, &["config", "user.email", "test@example.com"]);
+        run_git(&root, &["config", "user.name", "Test"]);
+        write_file(&root.join("a.txt"), "base\n");
+        run_git(&root, &["add", "."]);
+        run_git(&root, &["commit", "-qm", "base"]);
+        write_file(&root.join("a.txt"), "staged\n");
+        run_git(&root, &["add", "."]);
+        let changes = crate::git::get_staged_changes(&root).unwrap();
+        let mut diff = MultiFileDiff::from_git_staged_lazy(root.clone(), changes).unwrap();
+        write_file(&root.join("a.txt"), "updated index\n");
+        run_git(&root, &["add", "."]);
+        assert!(diff.refresh_all_from_git());
+        assert_eq!(diff.file_contents(0), Some(("base\n", "updated index\n")));
+        assert!(diff.take_pending_content().is_empty());
+        write_file(&root.join("a.txt"), "worktree only\n");
+        assert!(diff.refresh_all_from_git());
+        assert_eq!(diff.file_contents(0), Some(("base\n", "updated index\n")));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn git_refresh_keeps_range_and_index_range_sides() {
+        let root = temp_dir("refresh-ranges");
+        std::fs::create_dir_all(&root).unwrap();
+        run_git(&root, &["init", "-q"]);
+        run_git(&root, &["config", "user.email", "test@example.com"]);
+        run_git(&root, &["config", "user.name", "Test"]);
+        write_file(&root.join("a.txt"), "base\n");
+        run_git(&root, &["add", "."]);
+        run_git(&root, &["commit", "-qm", "base"]);
+        run_git(&root, &["branch", "base"]);
+        write_file(&root.join("a.txt"), "next\n");
+        run_git(&root, &["commit", "-qam", "next"]);
+        write_file(&root.join("a.txt"), "index\n");
+        run_git(&root, &["add", "."]);
+        let changes = crate::git::get_changes_between(&root, "base", "HEAD").unwrap();
+        let mut range =
+            MultiFileDiff::from_git_range(root.clone(), changes, "base".into(), "HEAD".into())
+                .unwrap();
+        assert!(range.refresh_all_from_git());
+        assert_eq!(range.file_contents(0), Some(("base\n", "next\n")));
+        for to_index in [true, false] {
+            let changes = crate::git::get_changes_between_index(&root, "base", !to_index).unwrap();
+            let mut diff =
+                MultiFileDiff::from_git_index_range(root.clone(), changes, "base".into(), to_index)
+                    .unwrap();
+            assert!(diff.refresh_all_from_git());
+            let expected = if to_index {
+                ("base\n", "index\n")
+            } else {
+                ("index\n", "base\n")
+            };
+            assert_eq!(diff.file_contents(0), Some(expected));
+        }
+        run_git(&root, &["branch", "-f", "base", "HEAD"]);
+        assert!(range.refresh_all_from_git());
+        assert_eq!(range.file_count(), 0);
         let _ = std::fs::remove_dir_all(root);
     }
 
