@@ -1,3 +1,4 @@
+use super::identity::PreparedReview;
 use super::*;
 use oyo_core::patch::{read_patch, terminal_text, PatchRecord};
 use std::io::{BufReader, Read};
@@ -17,137 +18,11 @@ impl ValidatedSnapshot {
     }
 
     pub(super) fn legacy(descriptor: Value) -> Arc<Self> {
+        Self::verified(descriptor)
+    }
+
+    pub(super) fn verified(descriptor: Value) -> Arc<Self> {
         Arc::new(Self { descriptor })
-    }
-}
-
-#[derive(Clone)]
-struct GithubIdentity {
-    snapshot: Arc<Value>,
-    target: RemoteTarget,
-    before_repo: String,
-    after_repo: String,
-    before: String,
-    after: String,
-    base_tip: String,
-    expected: usize,
-    additions: usize,
-    deletions: usize,
-}
-
-impl GithubIdentity {
-    fn resolve(target: &RemoteTarget) -> Result<Self> {
-        let adapter = provider_adapter(target.provider)?;
-        let endpoint = format!("repos/{}/pulls/{}", target.repo, target.review_number()?);
-        let metadata = adapter.remote_json(&target.host, &endpoint)?;
-        let after = revision(&metadata, "/head/sha")?;
-        let base_tip = revision(&metadata, "/base/sha")?;
-        let comparison = adapter.remote_json(
-            &target.host,
-            &format!(
-                "repos/{}/compare/{base_tip}...{after}?per_page=1&page=2",
-                target.repo
-            ),
-        )?;
-        let before = revision(&comparison, "/merge_base_commit/sha")?;
-        let expected = usize::try_from(changed_file_count(&metadata)?)?;
-        let additions = metadata["additions"]
-            .as_u64()
-            .ok_or_else(|| anyhow!("Missing review addition count"))?
-            .try_into()?;
-        let deletions = metadata["deletions"]
-            .as_u64()
-            .ok_or_else(|| anyhow!("Missing review deletion count"))?
-            .try_into()?;
-        let before_repo = field(&metadata, "/base/repo/full_name")?;
-        let after_repo = field(&metadata, "/head/repo/full_name")?;
-        Ok(Self {
-            snapshot: Arc::new(metadata),
-            target: RemoteTarget {
-                repo: before_repo.clone(),
-                ..target.clone()
-            },
-            before_repo,
-            after_repo,
-            before,
-            after,
-            base_tip,
-            expected,
-            additions,
-            deletions,
-        })
-    }
-
-    fn descriptor(&self, files: &[FileEntry], state: &str) -> Value {
-        let manifest = files.iter().map(|file|serde_json::json!({"path":file.path,"oldPath":file.old_path,"status":format!("{:?}",file.status)})).collect::<Vec<_>>();
-        serde_json::json!({"version":1,"acquisition":"patch-v1","streamState":state,"expectedFiles":self.expected,"expectedAdditions":self.additions,"expectedDeletions":self.deletions,
-            "beforeRepositoryId":self.snapshot["base"]["repo"]["id"],"afterRepositoryId":self.snapshot["head"]["repo"]["id"],
-            "target":self.target.canonical_url(),"provider":self.target.provider.id(),"host":self.target.host,
-            "beforeRepository":self.before_repo,"afterRepository":self.after_repo,"beforeRevision":self.before,"afterRevision":self.after,
-            "files":manifest,"reviewVersion":{"baseTip":self.base_tip,"head":self.after}})
-    }
-
-    fn append(&self, diff: &mut MultiFileDiff, patch: PatchRecord) {
-        let source =
-            |repo: &str, revision: &str, path: &std::path::Path| ContentSource::RemoteBlob {
-                provider: self.target.provider.id().to_owned(),
-                host: self.target.host.clone(),
-                repo: repo.to_owned(),
-                revision: revision.to_owned(),
-                path: path.to_string_lossy().into_owned(),
-            };
-        let old = if patch.entry.status == FileStatus::Added {
-            ContentSource::Empty
-        } else {
-            source(
-                &self.before_repo,
-                &self.before,
-                patch.entry.old_path.as_deref().unwrap_or(&patch.entry.path),
-            )
-        };
-        let new = if patch.entry.status == FileStatus::Deleted {
-            ContentSource::Empty
-        } else {
-            source(&self.after_repo, &self.after, &patch.entry.path)
-        };
-        diff.append_patch(patch, old, new);
-    }
-
-    fn verify(&self, files: &[FileEntry]) -> Result<Arc<ValidatedSnapshot>> {
-        if files.len() != self.expected
-            || files.iter().map(|f| f.insertions).sum::<usize>() != self.additions
-            || files.iter().map(|f| f.deletions).sum::<usize>() != self.deletions
-        {
-            bail!("Provider patch is incomplete: expected {} files, {} additions and {} deletions; received {} files",self.expected,self.additions,self.deletions,files.len());
-        }
-        let endpoint = format!(
-            "repos/{}/pulls/{}",
-            self.target.repo,
-            self.target.review_number()?
-        );
-        let end =
-            provider_adapter(self.target.provider)?.remote_json(&self.target.host, &endpoint)?;
-        if [
-            "/head/sha",
-            "/base/sha",
-            "/head/repo/id",
-            "/base/repo/id",
-            "/head/repo/full_name",
-            "/base/repo/full_name",
-            "/head/ref",
-            "/base/ref",
-            "/changed_files",
-            "/additions",
-            "/deletions",
-        ]
-        .iter()
-        .any(|key| end.pointer(key) != self.snapshot.pointer(key))
-        {
-            bail!("Review changed while loading; refresh to load a consistent snapshot");
-        }
-        Ok(Arc::new(ValidatedSnapshot {
-            descriptor: self.descriptor(files, "complete"),
-        }))
     }
 }
 
@@ -166,7 +41,7 @@ struct EventEnvelope {
 pub(crate) struct PatchSession {
     rx: mpsc::Receiver<EventEnvelope>,
     context: loading::ReadContext,
-    identity: GithubIdentity,
+    identity: PreparedReview,
     generation: u64,
     sequence: u64,
 }
@@ -202,6 +77,10 @@ static PATCH_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicB
 
 pub(crate) fn set_patch_enabled(enabled: bool) {
     PATCH_ENABLED.store(enabled, Ordering::Relaxed);
+}
+
+pub(super) fn patch_enabled() -> bool {
+    PATCH_ENABLED.load(Ordering::Relaxed)
 }
 
 pub(crate) fn github_streaming(host: &str) -> bool {
@@ -240,20 +119,15 @@ fn send_event(
 }
 
 fn patch_transport(
-    identity: &GithubIdentity,
+    identity: &PreparedReview,
     tx: mpsc::SyncSender<EventEnvelope>,
     context: loading::ReadContext,
     generation: u64,
 ) -> Result<(Vec<FileEntry>, u64)> {
-    let (command, transport) = super::github::patch(
-        &identity.target.host,
-        &identity.target.repo,
-        &identity.base_tip,
-        &identity.after,
-    );
+    let (command, transport) = identity.request();
     patch_response_command(
         command,
-        identity.expected,
+        identity.expected_files(),
         tx,
         context,
         generation,
@@ -275,7 +149,7 @@ fn patch_command(
         tx,
         context,
         generation,
-        super::github::ReadTransport::AuthenticatedCli,
+        super::http::ResponseFormat::Body,
     )
 }
 
@@ -285,7 +159,7 @@ fn patch_response_command(
     tx: mpsc::SyncSender<EventEnvelope>,
     context: loading::ReadContext,
     generation: u64,
-    transport: super::github::ReadTransport,
+    transport: super::http::ResponseFormat,
 ) -> Result<(Vec<FileEntry>, u64)> {
     let _permit = loading::TransportPermit::acquire()?;
     #[cfg(unix)]
@@ -318,7 +192,7 @@ fn patch_response_command(
         let mut pending_bytes = 0usize;
         let mut useful_sent = false;
         read_patch(
-            &mut super::github::ResponseBody::new(BufReader::new(stdout), transport),
+            &mut super::http::ResponseBody::new(BufReader::new(stdout), transport),
             |patch| {
                 if files.len() >= expected_files || files.len() >= 100000 {
                     return Err(
@@ -410,12 +284,12 @@ pub(crate) fn start(
     context: loading::ReadContext,
 ) -> Result<(BuiltDiff, Option<PatchSession>)> {
     let target = RemoteTarget::parse(url)?;
-    if !matches!(target.kind, RemoteTargetKind::Review(_))
-        || !provider_adapter(target.provider)?.supports_patch_stream(&target.host)
-    {
+    if !matches!(target.kind, RemoteTargetKind::Review(_)) {
         return Ok((super::build_legacy(url)?, None));
     }
-    let identity = GithubIdentity::resolve(&target)?;
+    let Some(identity) = provider_adapter(target.provider)?.prepare_review_stream(&target)? else {
+        return Ok((super::build_legacy(url)?, None));
+    };
     static GENERATION: AtomicU64 = AtomicU64::new(1);
     let generation = GENERATION.fetch_add(1, Ordering::Relaxed);
     let (tx, rx) = mpsc::sync_channel(2);
@@ -534,33 +408,9 @@ pub(crate) fn apply_proof(diff: &mut MultiFileDiff, proof: &ValidatedSnapshot) {
     diff.remote_snapshot = Some(proof.descriptor.clone());
 }
 
-pub(crate) fn verify_github_identity(target: &RemoteTarget, descriptor: &Value) -> Result<bool> {
-    let metadata = provider_adapter(target.provider)?.remote_json(
-        &target.host,
-        &format!("repos/{}/pulls/{}", target.repo, target.review_number()?),
-    )?;
-    Ok(github_metadata_matches(&metadata, descriptor))
-}
-
-fn github_metadata_matches(metadata: &Value, descriptor: &Value) -> bool {
-    metadata["head"]["sha"] == descriptor["afterRevision"]
-        && metadata["base"]["sha"] == descriptor["reviewVersion"]["baseTip"]
-        && metadata["base"]["repo"]["full_name"] == descriptor["beforeRepository"]
-        && metadata["head"]["repo"]["full_name"] == descriptor["afterRepository"]
-        && (descriptor["beforeRepositoryId"].is_null()
-            || metadata["base"]["repo"]["id"] == descriptor["beforeRepositoryId"])
-        && (descriptor["afterRepositoryId"].is_null()
-            || metadata["head"]["repo"]["id"] == descriptor["afterRepositoryId"])
-        && (descriptor["expectedFiles"].is_null()
-            || metadata["changed_files"] == descriptor["expectedFiles"])
-        && (descriptor["expectedAdditions"].is_null()
-            || metadata["additions"] == descriptor["expectedAdditions"])
-        && (descriptor["expectedDeletions"].is_null()
-            || metadata["deletions"] == descriptor["expectedDeletions"])
-}
-
 #[cfg(test)]
 mod tests {
+    use super::super::identity::github_metadata_matches;
     use super::*;
     use serde_json::json;
 
@@ -576,7 +426,7 @@ mod tests {
             tx,
             loading::ReadContext::default(),
             1,
-            super::super::github::ReadTransport::PublicHttps,
+            super::super::http::ResponseFormat::Headers(ReviewProviderKind::GitHub),
         )
         .unwrap_err()
         .to_string();

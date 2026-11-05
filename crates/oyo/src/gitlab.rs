@@ -90,12 +90,28 @@ pub(crate) struct GlDiscussion {
 pub(crate) struct GitlabProvider;
 
 impl ReviewProviderAdapter for GitlabProvider {
+    fn prepare_review_stream(
+        &self,
+        target: &crate::remote::RemoteTarget,
+    ) -> Result<Option<crate::remote::identity::PreparedReview>> {
+        crate::remote::identity::PreparedReview::gitlab(target)
+    }
+    fn remote_snapshot_matches(
+        &self,
+        target: &crate::remote::RemoteTarget,
+        descriptor: &serde_json::Value,
+    ) -> Result<bool> {
+        if matches!(target.kind, crate::remote::RemoteTargetKind::Review(_))
+            && descriptor["acquisition"] == "patch-v1"
+        {
+            crate::remote::identity::verify_current(target, descriptor)
+        } else {
+            Ok(self.remote_snapshot(target)?.matches_descriptor(descriptor))
+        }
+    }
+
     fn remote_json(&self, host: &str, endpoint: &str) -> Result<serde_json::Value> {
-        let mut command = glab_api_command(host);
-        command.arg(endpoint);
-        Ok(serde_json::from_str(&crate::remote::run_command(
-            command, None,
-        )?)?)
+        crate::remote::gitlab::json(host, endpoint)
     }
     fn remote_snapshot(
         &self,

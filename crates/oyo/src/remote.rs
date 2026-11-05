@@ -1,4 +1,7 @@
 pub(crate) mod github;
+pub(crate) mod gitlab;
+pub(crate) mod http;
+pub(crate) mod identity;
 pub(crate) mod loading;
 pub(crate) mod stream;
 mod trees;
@@ -251,6 +254,16 @@ impl RemoteTarget {
         }
         let host = host.to_ascii_lowercase();
         let provider = known_provider
+            .or_else(|| crate::review_provider_for_configured_host(&host, false, false))
+            .or_else(|| {
+                if path.contains("/-/merge_requests/") {
+                    Some(ReviewProviderKind::GitLab)
+                } else if path.split('/').nth(2) == Some("pulls") {
+                    Some(ReviewProviderKind::Forgejo)
+                } else {
+                    None
+                }
+            })
             .or_else(|| review_provider_for_host(&host))
             .ok_or_else(|| anyhow!("Unsupported or unauthenticated review provider: {host}"))?;
         let marker = match provider {
@@ -878,17 +891,20 @@ pub(crate) fn load_pair(request: &PendingFileContent) -> Result<(Vec<u8>, Vec<u8
 }
 
 pub(crate) fn run_command(command: std::process::Command, input: Option<&str>) -> Result<String> {
-    run_command_response(command, input, false)
+    run_command_response(command, input, http::ResponseFormat::Body)
 }
 
-pub(super) fn run_public_http(command: std::process::Command) -> Result<String> {
-    run_command_response(command, None, true)
+pub(super) fn run_public_http(
+    command: std::process::Command,
+    provider: ReviewProviderKind,
+) -> Result<String> {
+    run_command_response(command, None, http::ResponseFormat::Headers(provider))
 }
 
 fn run_command_response(
     mut command: std::process::Command,
     input: Option<&str>,
-    public_http: bool,
+    response_format: http::ResponseFormat,
 ) -> Result<String> {
     use std::io::{Read, Write};
     use std::process::Stdio;
@@ -923,14 +939,7 @@ fn run_command_response(
         .take()
         .ok_or_else(|| anyhow!("Missing transport diagnostics"))?;
     let output_reader = std::thread::spawn(move || {
-        let reader: Box<dyn Read + Send> = if public_http {
-            Box::new(github::ResponseBody::new(
-                std::io::BufReader::new(stdout),
-                github::ReadTransport::PublicHttps,
-            ))
-        } else {
-            Box::new(stdout)
-        };
+        let reader = http::ResponseBody::new(std::io::BufReader::new(stdout), response_format);
         let mut bytes = Vec::new();
         reader
             .take(LIMIT + 1)
@@ -1018,7 +1027,13 @@ pub(crate) fn same_review_snapshot(left: &serde_json::Value, right: &serde_json:
         ] {
             object.remove(key);
         }
-        for key in ["beforeRepositoryId", "afterRepositoryId"] {
+        for key in [
+            "beforeRepositoryId",
+            "afterRepositoryId",
+            "sourceRepositoryPath",
+            "sourceBranch",
+            "targetBranch",
+        ] {
             if left.get(key).is_none() || right.get(key).is_none() {
                 object.remove(key);
             }
@@ -1049,6 +1064,9 @@ mod tests {
         patch["expectedDeletions"] = 1.into();
         patch["beforeRepositoryId"] = 1.into();
         patch["afterRepositoryId"] = 2.into();
+        patch["sourceRepositoryPath"] = "fork/r".into();
+        patch["sourceBranch"] = "topic".into();
+        patch["targetBranch"] = "main".into();
         patch["files"].as_array_mut().unwrap().reverse();
         assert!(same_review_snapshot(&legacy, &patch));
         for (key, value) in [
@@ -1064,6 +1082,11 @@ mod tests {
         let mut changed = patch.clone();
         changed["beforeRepositoryId"] = 99.into();
         assert!(!same_review_snapshot(&patch, &changed));
+        for key in ["sourceRepositoryPath", "sourceBranch", "targetBranch"] {
+            let mut changed = patch.clone();
+            changed[key] = "other".into();
+            assert!(!same_review_snapshot(&patch, &changed));
+        }
     }
 
     #[test]
