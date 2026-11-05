@@ -32,6 +32,7 @@ impl App {
             app.remote_validation = self.remote_validation;
             app.pending_remote_review = self.pending_remote_review;
             app.content_worker_rx = self.content_worker_rx;
+            app.content_session = self.content_session;
             app.content_generation = self.content_generation;
             app.content_loading = self.content_loading;
             app.review_revision = self.review_revision;

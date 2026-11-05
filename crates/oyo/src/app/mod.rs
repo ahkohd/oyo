@@ -66,8 +66,9 @@ pub(crate) use types::{
 };
 use types::{
     BlameCacheKey, BlamePrefetchKey, BlamePrefetchRange, BlameRequest, BlameResponse,
-    BlameStepHint, ContentResponse, DiffRequest, DiffResponse, FoldContextExpansion, HunkBounds,
-    HunkEdge, HunkEdgeHint, HunkStart, NoStepState, StepEdge, StepEdgeHint, SyntaxScopeCache,
+    BlameStepHint, ContentResponse, DiffJobKey, DiffRequest, DiffResponse, FoldContextExpansion,
+    HunkBounds, HunkEdge, HunkEdgeHint, HunkStart, NoStepState, StepEdge, StepEdgeHint,
+    SyntaxScopeCache,
 };
 use utils::{allow_overscroll_state, copy_to_clipboard, max_scroll};
 pub(crate) use utils::{display_metrics, fold_context_label, is_conflict_marker, is_fold_line};
@@ -253,11 +254,12 @@ struct OutdatedDiffView {
 struct OutdatedDiffWorkerState {
     valid: bool,
     diff_queue: VecDeque<usize>,
-    diff_inflight: Option<usize>,
+    diff_inflight: Option<DiffJobKey>,
     diff_refresh_restore_end: Option<usize>,
     diff_worker_tx: Option<mpsc::Sender<DiffRequest>>,
     diff_worker_rx: Option<mpsc::Receiver<DiffResponse>>,
     content_worker_rx: Option<content_worker::ContentWorker>,
+    content_session: Option<content_worker::ContentSession>,
     content_generation: u64,
     content_loading: FxHashMap<usize, oyo_core::multi::PendingFileContent>,
 }
@@ -738,13 +740,14 @@ pub struct App {
     /// Pending diff jobs (file indices)
     diff_queue: VecDeque<usize>,
     /// Currently computing diff (file index)
-    diff_inflight: Option<usize>,
+    diff_inflight: Option<DiffJobKey>,
     /// Refreshed file that should return to the no-step end state when ready.
     diff_refresh_restore_end: Option<usize>,
     /// Worker thread for diff computation
     diff_worker_tx: Option<mpsc::Sender<DiffRequest>>,
     diff_worker_rx: Option<mpsc::Receiver<DiffResponse>>,
     content_worker_rx: Option<content_worker::ContentWorker>,
+    content_session: Option<content_worker::ContentSession>,
     remote_refresh_rx: Option<crate::remote::loading::SnapshotWorker>,
     pub(crate) remote_stream: Option<crate::remote::stream::PatchSession>,
     pub(crate) remote_validation: Option<std::sync::Arc<crate::remote::stream::ValidatedSnapshot>>,
@@ -1454,6 +1457,7 @@ impl App {
             diff_worker_tx: None,
             diff_worker_rx: None,
             content_worker_rx: None,
+            content_session: None,
             remote_refresh_rx: None,
             remote_stream: None,
             remote_validation: None,
@@ -2570,10 +2574,12 @@ impl App {
     }
 
     pub(crate) fn current_file_diff_ready(&self) -> bool {
-        matches!(
-            self.multi_diff.current_file_diff_status(),
-            DiffStatus::Ready
-        )
+        self.multi_diff
+            .has_patch_display(self.multi_diff.selected_index)
+            || matches!(
+                self.multi_diff.current_file_diff_status(),
+                DiffStatus::Ready
+            )
     }
 
     fn view_cache_key(

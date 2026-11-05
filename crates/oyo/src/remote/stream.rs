@@ -75,6 +75,10 @@ pub(crate) struct PatchSession {
 }
 
 impl PatchSession {
+    pub(crate) fn content_context(&self) -> loading::ReadContext {
+        self.context.fork()
+    }
+
     pub(crate) fn try_recv(&mut self) -> std::result::Result<RemoteEvent, mpsc::TryRecvError> {
         let envelope = self.rx.try_recv()?;
         if envelope.generation != self.generation

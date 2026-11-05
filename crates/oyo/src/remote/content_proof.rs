@@ -165,15 +165,31 @@ impl PinnedRepository<'_> {
             ),
             ReviewProviderKind::GitHub => unreachable!(),
         };
-        let bytes = self
-            .request(&endpoint, "Accept: application/octet-stream")?
-            .execute()?
-            .body;
-        if bytes.len() > 32 * 1024 * 1024 {
-            bail!("Remote blob exceeds the 32 MiB loading limit");
-        }
-        id.verify(&bytes)
-            .map_err(|error| anyhow!(error.to_string()))?;
+        let provider = self.provider;
+        let host = self.host.to_owned();
+        let repo = self.repo.to_owned();
+        let revision = self.revision.to_owned();
+        let bytes = loading::current()
+            .source(source, Some(id), move || {
+                let repository = PinnedRepository {
+                    provider,
+                    host: &host,
+                    repo: &repo,
+                    revision: &revision,
+                };
+                let bytes = repository
+                    .request(&endpoint, "Accept: application/octet-stream")?
+                    .execute()?
+                    .body;
+                if bytes.len() > 32 * 1024 * 1024 {
+                    bail!("Remote blob exceeds the 32 MiB loading limit");
+                }
+                id.verify(&bytes)
+                    .map_err(|error| anyhow!(error.to_string()))?;
+                Ok(bytes)
+            })?
+            .as_ref()
+            .clone();
         Ok(bytes)
     }
 }
@@ -309,11 +325,15 @@ impl FileProof<'_> {
         } else if !new.is_empty() {
             bail!("Deleted patch leaves object bytes");
         }
-        if self.old.is_some() {
-            cache_content(before.source(old_path), old.to_vec());
+        if let Some(side) = self.old {
+            let source = before.source(old_path);
+            loading::current().publish(source.clone(), side.id, old.to_vec())?;
+            cache_content(source, old.to_vec());
         }
-        if self.new.is_some() {
-            cache_content(after.source(&patch.entry.path), new);
+        if let Some(side) = self.new {
+            let source = after.source(&patch.entry.path);
+            loading::current().publish(source.clone(), side.id, new.clone())?;
+            cache_content(source, new);
         }
         Ok(())
     }

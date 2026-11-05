@@ -1,19 +1,13 @@
-use anyhow::{anyhow, Result};
+#[cfg(test)]
+use anyhow::anyhow;
+use anyhow::Result;
 use serde_json::Value;
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc, Mutex, OnceLock,
+    atomic::{AtomicBool, AtomicU8, Ordering},
+    Arc, Mutex,
 };
-
-type TreePage = Arc<OnceLock<std::result::Result<Arc<Value>, String>>>;
-
-#[derive(Default)]
-struct TreeCache {
-    pages: HashMap<String, TreePage>,
-    bytes: usize,
-}
 
 #[derive(Default)]
 struct Cancellation {
@@ -38,12 +32,40 @@ fn stop_child(pid: u32) {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
+pub(super) struct CancellationHandle(Arc<Cancellation>);
+impl CancellationHandle {
+    pub fn cancel(&self) {
+        self.0.cancel();
+    }
+}
+
+#[derive(Clone)]
 pub(crate) struct ReadContext {
     cancelled: Arc<Cancellation>,
-    trees: Arc<Mutex<TreeCache>>,
     parent: Option<Arc<Cancellation>>,
-    foreground: bool,
+    priority: Arc<AtomicU8>,
+    pub(super) reads: Arc<super::shared::SessionReads>,
+    demands: Option<Arc<super::shared::Demands>>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum ReadPriority {
+    Selected,
+    Essential,
+    Prefetch,
+}
+
+impl Default for ReadContext {
+    fn default() -> Self {
+        Self {
+            cancelled: Arc::default(),
+            parent: None,
+            priority: Arc::new(AtomicU8::new(1)),
+            reads: Arc::default(),
+            demands: None,
+        }
+    }
 }
 
 thread_local! {
@@ -54,18 +76,77 @@ impl ReadContext {
     pub(crate) fn child(&self, foreground: bool) -> Self {
         Self {
             cancelled: Arc::default(),
-            trees: self.trees.clone(),
             parent: Some(self.cancelled.clone()),
-            foreground,
+            priority: Arc::new(AtomicU8::new(if foreground { 0 } else { 1 })),
+            reads: self.reads.clone(),
+            demands: None,
         }
+    }
+
+    pub(crate) fn fork(&self) -> Self {
+        Self {
+            reads: self.reads.clone(),
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn prefetch_child(&self) -> Self {
+        let context = self.child(false);
+        context.set_priority(ReadPriority::Prefetch);
+        context
+    }
+
+    pub(crate) fn set_priority(&self, priority: ReadPriority) {
+        self.priority.store(priority as u8, Ordering::Release);
+    }
+    pub(crate) fn priority(&self) -> ReadPriority {
+        if let Some(demands) = &self.demands {
+            return demands.priority().unwrap_or(ReadPriority::Prefetch);
+        }
+        match self.priority.load(Ordering::Acquire) {
+            0 => ReadPriority::Selected,
+            1 => ReadPriority::Essential,
+            _ => ReadPriority::Prefetch,
+        }
+    }
+    pub(super) fn producer(&self, demands: Arc<super::shared::Demands>) -> Self {
+        Self {
+            reads: self.reads.clone(),
+            demands: Some(demands),
+            ..Self::default()
+        }
+    }
+    pub(crate) fn source(
+        &self,
+        source: oyo_core::multi::ContentSource,
+        exact: Option<oyo_core::patch::BlobId>,
+        fetch: impl FnOnce() -> Result<Vec<u8>> + Send + 'static,
+    ) -> Result<Arc<Vec<u8>>> {
+        self.reads.source(self, source, exact, fetch)
+    }
+    pub(crate) fn publish(
+        &self,
+        source: oyo_core::multi::ContentSource,
+        id: oyo_core::patch::BlobId,
+        bytes: Vec<u8>,
+    ) -> Result<()> {
+        self.reads.publish(self, source, id, bytes)
+    }
+    pub(super) fn cancellation_handle(&self) -> CancellationHandle {
+        CancellationHandle(self.cancelled.clone())
     }
 
     pub(crate) fn cancel(&self) {
         self.cancelled.cancel();
+        self.reads.cancel_unneeded();
     }
 
     pub(crate) fn is_cancelled(&self) -> bool {
         self.cancelled.flag.load(Ordering::Acquire)
+            || self
+                .demands
+                .as_ref()
+                .is_some_and(|d| d.priority().is_none())
             || self
                 .parent
                 .as_ref()
@@ -98,64 +179,19 @@ pub(crate) fn cancelled() -> bool {
     })
 }
 
-pub(super) fn tree_page(key: String, fetch: impl FnOnce() -> Result<Value>) -> Result<Arc<Value>> {
-    let context = CONTEXT.with(|slot| slot.borrow().clone());
-    let Some(context) = context else {
-        return fetch().map(Arc::new);
-    };
-    if context.is_cancelled() {
-        return Err(anyhow!("Remote loading cancelled"));
-    }
-    let page = {
-        let mut cache = context.trees.lock().unwrap_or_else(|e| e.into_inner());
-        cache.pages.entry(key.clone()).or_default().clone()
-    };
-    let mut fetched_bytes = None;
-    let shared_context = ReadContext {
-        cancelled: context
-            .parent
-            .clone()
-            .unwrap_or_else(|| context.cancelled.clone()),
-        trees: context.trees.clone(),
-        parent: None,
-        foreground: context.foreground,
-    };
-    let result = page
-        .get_or_init(|| {
-            shared_context
-                .run(fetch)
-                .map(|value| {
-                    fetched_bytes = Some(value.to_string().len());
-                    Arc::new(value)
-                })
-                .map_err(|e| e.to_string())
-        })
-        .clone();
-    if fetched_bytes.is_some() || result.is_err() {
-        let mut cache = context.trees.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(bytes) = fetched_bytes {
-            cache.bytes = cache.bytes.saturating_add(bytes);
-            if cache.bytes > 64 * 1024 * 1024 {
-                cache.pages.retain(|_, page| page.get().is_none());
-                cache.bytes = 0;
-            }
-        } else {
-            if cache
-                .pages
-                .get(&key)
-                .is_some_and(|entry| Arc::ptr_eq(entry, &page))
-            {
-                cache.pages.remove(&key);
-            }
-        }
-    }
-    result.map_err(|error| anyhow!(error))
+pub(super) fn tree_page(
+    key: String,
+    fetch: impl FnOnce() -> Result<Value> + Send + 'static,
+) -> Result<Arc<Value>> {
+    let context = current();
+    context.reads.tree(&context, key, fetch)
 }
 
-static TRANSPORTS: Mutex<(usize, usize)> = Mutex::new((0, 0));
+static TRANSPORTS: Mutex<(usize, usize, usize)> = Mutex::new((0, 0, 0));
 
 pub(crate) struct TransportPermit {
     foreground: bool,
+    prefetch: bool,
     admitted: bool,
 }
 
@@ -165,21 +201,26 @@ impl TransportPermit {
         let Some(context) = context else {
             return Ok(Self {
                 foreground: false,
+                prefetch: false,
                 admitted: false,
             });
         };
-        let foreground = context.foreground;
         loop {
             if cancelled() {
-                return Err(anyhow!("Remote loading cancelled"));
+                return Err(super::shared::ReadFailure::cancelled().into());
             }
             {
                 let mut active = TRANSPORTS.lock().unwrap_or_else(|e| e.into_inner());
-                if active.0 < 6 && (foreground || active.1 < 4) {
+                let priority = context.priority();
+                let foreground = priority == ReadPriority::Selected;
+                let prefetch = priority == ReadPriority::Prefetch;
+                if active.0 < 6 && (foreground || active.1 < 4) && (!prefetch || active.2 < 2) {
                     active.0 += 1;
                     active.1 += usize::from(!foreground);
+                    active.2 += usize::from(prefetch);
                     return Ok(Self {
                         foreground,
+                        prefetch,
                         admitted: true,
                     });
                 }
@@ -197,6 +238,7 @@ impl Drop for TransportPermit {
         let mut active = TRANSPORTS.lock().unwrap_or_else(|e| e.into_inner());
         active.0 -= 1;
         active.1 -= usize::from(!self.foreground);
+        active.2 -= usize::from(self.prefetch);
     }
 }
 
@@ -224,7 +266,7 @@ impl RegisteredChild {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
             if context.is_cancelled() {
-                return Err(anyhow!("Remote loading cancelled"));
+                return Err(super::shared::ReadFailure::cancelled().into());
             }
             let child = spawn()?;
             children.insert(child.id());
@@ -349,14 +391,14 @@ mod tests {
     #[test]
     fn concurrent_tree_readers_share_one_fetch() {
         let context = ReadContext::default();
-        let fetches = AtomicUsize::new(0);
+        let fetches = Arc::new(AtomicUsize::new(0));
         std::thread::scope(|scope| {
             for _ in 0..6 {
                 let context = &context;
-                let fetches = &fetches;
+                let fetches = fetches.clone();
                 scope.spawn(move || {
                     context.run(|| {
-                        let page = tree_page("immutable-root".into(), || {
+                        let page = tree_page("immutable-root".into(), move || {
                             fetches.fetch_add(1, Ordering::SeqCst);
                             std::thread::sleep(std::time::Duration::from_millis(10));
                             Ok(serde_json::json!({"tree": []}))

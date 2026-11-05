@@ -63,7 +63,7 @@ pub(super) struct FilePromotion {
     step: Option<LogicalNavigation>,
     no_step: Option<LogicalNavigation>,
     tabs: Vec<(usize, LogicalNavigation)>,
-    horizontal: usize,
+    horizontal: Option<usize>,
 }
 
 fn source_for_change(diff: &DiffResult, id: usize) -> Option<SourceLine> {
@@ -468,20 +468,23 @@ impl App {
             step,
             no_step,
             tabs,
-            horizontal: self.horizontal_scroll,
+            horizontal: (index == self.multi_diff.selected_index).then_some(self.horizontal_scroll),
         })
     }
 
     pub(super) fn restore_file_promotion(&mut self, promotion: FilePromotion) {
         let index = promotion.index;
-        if self.multi_diff.has_patch_display(index) && !self.multi_diff.file_is_sparse(index) {
+        if self.multi_diff.has_patch_display(index)
+            && !self.multi_diff.file_is_sparse(index)
+            && self.multi_diff.diff_status(index) != oyo_core::multi::DiffStatus::Ready
+        {
             return;
         }
         self.multi_diff.ensure_full_navigator(index);
         let Some(nav) = self.multi_diff.navigator_for(index) else {
             return;
         };
-        let current = remap_navigation(promotion.current, nav);
+        let mut current = remap_navigation(promotion.current, nav);
         let step = promotion.step.map(|state| remap_navigation(state, nav));
         let no_step = promotion.no_step.map(|state| {
             let state = remap_navigation(state, nav);
@@ -496,6 +499,14 @@ impl App {
             .into_iter()
             .map(|(id, state)| (id, remap_navigation(state, nav)))
             .collect::<Vec<_>>();
+        if index == self.multi_diff.selected_index && promotion.horizontal.is_none() {
+            if let Some((_, state)) = tabs
+                .iter()
+                .find(|(id, _)| Some(*id) == self.active_topbar_tab)
+            {
+                current = state.clone();
+            }
+        }
         self.multi_diff.restore_navigator_state(index, current);
         self.step_state_snapshots[index] = step;
         self.no_step_state_snapshots[index] = no_step;
@@ -516,7 +527,9 @@ impl App {
             }
             self.clear_fold_context_caches();
             self.restore_remote_viewport();
-            self.horizontal_scroll = promotion.horizontal;
+            if let Some(horizontal) = promotion.horizontal {
+                self.horizontal_scroll = horizontal;
+            }
             self.needs_scroll_to_active = false;
         }
     }
@@ -695,6 +708,74 @@ mod tests {
         assert!(app.diff_selection.is_none());
         assert!(app.diff_selection_cursor.is_none());
         assert!(!app.selection_toolbar_visible());
+    }
+
+    #[test]
+    fn inactive_eviction_restores_the_returning_duplicate_tabs_cursor_and_horizontal() {
+        let mut app = app(ViewMode::UnifiedPane, false, true);
+        apply(&mut app, 0);
+        let first_tab = app.active_topbar_tab.unwrap();
+        let set_cursor = |app: &mut App, line| {
+            let nav = app.multi_diff.current_navigator();
+            let id = nav
+                .diff()
+                .changes
+                .iter()
+                .find(|change| change.spans.iter().any(|span| span.old_line == Some(line)))
+                .unwrap()
+                .id;
+            let mut state = nav.state().clone();
+            state.cursor_change = Some(id);
+            nav.set_state(state);
+        };
+        set_cursor(&mut app, 40);
+        app.horizontal_scroll = 30;
+        app.save_active_topbar_tab_state();
+        app.open_file_in_new_topbar_tab(0);
+        let second_tab = app.active_topbar_tab.unwrap();
+        set_cursor(&mut app, 80);
+        app.horizontal_scroll = 12;
+        app.save_active_topbar_tab_state();
+        app.open_file_in_new_topbar_tab(1);
+        app.horizontal_scroll = 0;
+        let saved = app.capture_file_promotion(0).unwrap();
+        assert!(saved.horizontal.is_none());
+        assert!(app.multi_diff.evict_remote_content(0));
+        app.step_state_snapshots[0] = None;
+        app.no_step_state_snapshots[0] = None;
+        for tab in app
+            .topbar_tabs
+            .iter_mut()
+            .filter(|tab| tab.content == TopbarTabContent::File(0))
+        {
+            tab.navigator_state = None;
+        }
+        app.select_topbar_tab(first_tab);
+        let (old, new) = contents();
+        app.multi_diff.request_full_content(0);
+        app.multi_diff.take_pending_content_for(0);
+        app.multi_diff.apply_prepared_content(
+            0,
+            MultiFileDiff::prepare_remote_file_content(old.into_bytes(), new.into_bytes()),
+        );
+        app.restore_file_promotion(saved);
+        let nav = app.multi_diff.current_navigator();
+        assert_eq!(
+            source_for_change(nav.diff(), nav.state().cursor_change.unwrap())
+                .unwrap()
+                .line,
+            40
+        );
+        assert_eq!(app.horizontal_scroll, 30);
+        app.select_topbar_tab(second_tab);
+        let nav = app.multi_diff.current_navigator();
+        assert_eq!(
+            source_for_change(nav.diff(), nav.state().cursor_change.unwrap())
+                .unwrap()
+                .line,
+            80
+        );
+        assert_eq!(app.horizontal_scroll, 12);
     }
 
     #[test]
