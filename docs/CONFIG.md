@@ -590,9 +590,9 @@ See [keybinding actions](./KEYBINDINGS.md).
 
 ## Category menus
 
-The category row appears above the tabs. Narrow terminals show Menu. Open a category with the mouse or press F10. Use Left and Right to change category, Up and Down to select a command, Enter to run it, and Esc to close. Click the arrows beside the popup title to change category with the mouse. Click outside to dismiss the menu.
+The category row appears above the tabs. Narrow terminals show Menu. Open a category with the mouse or press F10. Use Left and Right to change category, Up and Down to select a command, Enter to run it, and Esc to close. Point at another category to switch an open menu. In narrow terminals, click Menu to choose a category. Click Menu again to return to the category list. Click outside to dismiss the menu.
 
-An asterisk marks an active option. Dimmed commands are unavailable in the current context. Selecting one keeps the menu open. Review mutations require a validated live review.
+A bullet marks an active option. Dimmed commands are unavailable in the current context. Selecting one keeps the menu open. Review mutations require a validated live review.
 
 Set `ui.menu_bar = false` to hide the row. Use F10 or the palette's Open menu command to open it while hidden. Use Toggle menu bar in the palette or Menu bar in Settings to restore the row. The tab bar remains controlled by `ui.topbar`.
 

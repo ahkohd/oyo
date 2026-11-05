@@ -90,11 +90,17 @@ pub(crate) struct MenuState {
     categories: Vec<(Rect, usize)>,
     rows: Vec<(Rect, usize)>,
     popup: Option<Rect>,
-    previous: Option<Rect>,
-    next: Option<Rect>,
+    compact: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MenuPage {
+    Commands,
+    Categories,
 }
 
 pub(crate) struct MenuOpen {
+    page: MenuPage,
     category: usize,
     selected: usize,
 }
@@ -102,6 +108,7 @@ pub(crate) struct MenuOpen {
 impl App {
     pub(crate) fn menu_bar_frame_start(&mut self) {
         self.menu.categories.clear();
+        self.menu.compact = false;
     }
 
     pub(crate) fn menu_input_available(&self) -> bool {
@@ -137,7 +144,10 @@ impl App {
         self.review_delete_prefix = false;
         self.review_overflow_prefix = false;
         self.pr_reply_prefix = false;
+        self.menu.rows.clear();
+        self.menu.popup = None;
         self.menu.open = Some(MenuOpen {
+            page: MenuPage::Commands,
             category: category % 5,
             selected: 0,
         });
@@ -218,21 +228,47 @@ impl App {
 
     fn move_menu(&mut self, delta: isize) {
         if let Some(open) = &mut self.menu.open {
-            open.category = (open.category as isize + delta).rem_euclid(5) as usize;
+            let current = if open.page == MenuPage::Categories {
+                open.selected
+            } else {
+                open.category
+            };
+            open.category = (current as isize + delta).rem_euclid(5) as usize;
+            open.page = MenuPage::Commands;
             open.selected = 0;
         }
     }
 
     fn move_menu_selection(&mut self, delta: isize) {
         if let Some(open) = &self.menu.open {
-            let count = self.menu_entries(open.category).len();
+            let count = self.menu_item_count();
             self.menu.open.as_mut().unwrap().selected =
                 (open.selected as isize + delta).rem_euclid(count.max(1) as isize) as usize;
         }
     }
 
+    fn menu_item_count(&self) -> usize {
+        self.menu.open.as_ref().map_or(0, |open| match open.page {
+            MenuPage::Categories => Category::ALL.len(),
+            MenuPage::Commands => self.menu_entries(open.category).len(),
+        })
+    }
+
+    fn choose_menu_category(&mut self) {
+        let selected = self.menu.open.as_ref().map_or(0, |open| open.category);
+        self.open_menu(selected);
+        let open = self.menu.open.as_mut().unwrap();
+        open.page = MenuPage::Categories;
+        open.selected = selected;
+    }
+
     fn activate_menu(&mut self) {
         let Some(open) = &self.menu.open else { return };
+        if open.page == MenuPage::Categories {
+            let category = open.selected;
+            self.open_menu(category);
+            return;
+        }
         let entries = self.menu_entries(open.category);
         let Some(entry) = entries.get(open.selected) else {
             return;
@@ -257,9 +293,9 @@ impl App {
                 }
             }
             Dispatch::Matched(MenuAction::LastItem) => {
-                if let Some(open) = &self.menu.open {
-                    let last = self.menu_entries(open.category).len().saturating_sub(1);
-                    self.menu.open.as_mut().unwrap().selected = last;
+                let last = self.menu_item_count().saturating_sub(1);
+                if let Some(open) = &mut self.menu.open {
+                    open.selected = last;
                 }
             }
             Dispatch::Matched(MenuAction::Accept) => self.activate_menu(),
@@ -286,21 +322,21 @@ impl App {
         if self.menu.open.is_some() {
             match event.kind {
                 MouseEventKind::Down(MouseButton::Left) => {
-                    if self
-                        .menu
-                        .previous
-                        .is_some_and(|rect| rect.contains(position))
-                    {
-                        self.move_menu(-1);
-                    } else if self.menu.next.is_some_and(|rect| rect.contains(position)) {
-                        self.move_menu(1);
-                    } else if let Some(category) = category {
-                        if self
-                            .menu
-                            .open
-                            .as_ref()
-                            .is_some_and(|open| open.category == category)
-                        {
+                    if let Some(category) = category {
+                        if self.menu.compact {
+                            if self
+                                .menu
+                                .open
+                                .as_ref()
+                                .is_some_and(|open| open.page == MenuPage::Categories)
+                            {
+                                self.close_menu();
+                            } else {
+                                self.choose_menu_category();
+                            }
+                        } else if self.menu.open.as_ref().is_some_and(|open| {
+                            open.category == category && open.page == MenuPage::Commands
+                        }) {
                             self.close_menu();
                         } else {
                             self.open_menu(category);
@@ -320,11 +356,12 @@ impl App {
                 MouseEventKind::Down(_) => self.menu.open = None,
                 MouseEventKind::Moved => {
                     if let Some(category) = category {
-                        if self
-                            .menu
-                            .open
-                            .as_ref()
-                            .is_some_and(|open| open.category != category)
+                        if !self.menu.compact
+                            && self
+                                .menu
+                                .open
+                                .as_ref()
+                                .is_some_and(|open| open.category != category)
                         {
                             self.open_menu(category);
                         }
@@ -344,7 +381,11 @@ impl App {
             return true;
         }
         if let (MouseEventKind::Down(MouseButton::Left), Some(category)) = (event.kind, category) {
-            self.open_menu(category);
+            if self.menu.compact {
+                self.choose_menu_category();
+            } else {
+                self.open_menu(category);
+            }
             return true;
         }
         false
@@ -440,16 +481,35 @@ impl App {
     }
 }
 
+fn sidebar_style(app: &App) -> Style {
+    Style::default().fg(app.theme.text).bg(app
+        .theme
+        .background_panel
+        .or(app.theme.background)
+        .unwrap_or(ratatui::style::Color::Reset))
+}
+
+fn sidebar_selected_style(app: &App) -> Style {
+    sidebar_style(app)
+        .fg(app.theme.accent)
+        .bg(app
+            .theme
+            .background_element
+            .or(app.theme.background_panel)
+            .or(app.theme.background)
+            .unwrap_or(ratatui::style::Color::Reset))
+        .add_modifier(Modifier::BOLD)
+}
+
 pub(crate) fn draw_bar(frame: &mut Frame, app: &mut App, area: Rect) {
     app.menu.categories.clear();
     if area.is_empty() {
         return;
     }
-    let style = Style::default()
-        .fg(app.theme.text_muted)
-        .bg(app.theme.background.unwrap_or(ratatui::style::Color::Reset));
+    let style = sidebar_style(app);
     frame.render_widget(Paragraph::new("").style(style), area);
     let compact = area.width < 46;
+    app.menu.compact = compact;
     let mut x = area.x;
     let categories: Vec<_> = if compact {
         vec![(0, "Menu")]
@@ -471,25 +531,15 @@ pub(crate) fn draw_bar(frame: &mut Frame, app: &mut App, area: Rect) {
             .open
             .as_ref()
             .is_some_and(|open| compact || open.category == index);
-        let item_style = if active {
-            style
-                .fg(app.theme.background.unwrap_or(ratatui::style::Color::Reset))
-                .bg(app.theme.accent)
-        } else {
-            style.fg(app.theme.text)
-        };
         frame.render_widget(
-            Paragraph::new(format!("  {label}  ")).style(item_style),
+            Paragraph::new(format!("  {label}  ")).style(if active {
+                sidebar_selected_style(app)
+            } else {
+                style
+            }),
             rect,
         );
-        app.menu.categories.push((
-            rect,
-            if compact {
-                app.menu.open.as_ref().map_or(0, |open| open.category)
-            } else {
-                index
-            },
-        ));
+        app.menu.categories.push((rect, index));
         x = x.saturating_add(width);
     }
 }
@@ -497,40 +547,52 @@ pub(crate) fn draw_bar(frame: &mut Frame, app: &mut App, area: Rect) {
 pub(crate) fn draw_popup(frame: &mut Frame, app: &mut App) {
     app.menu.rows.clear();
     app.menu.popup = None;
-    app.menu.previous = None;
-    app.menu.next = None;
     if !app.menu_input_available() {
         app.menu.open = None;
         return;
     }
     let Some(open) = &app.menu.open else { return };
     let category = open.category;
+    let choosing = open.page == MenuPage::Categories;
     let entries = app.menu_entries(category);
-    let selected = open.selected.min(entries.len().saturating_sub(1));
+    let total = if choosing {
+        Category::ALL.len()
+    } else {
+        entries.len()
+    };
+    let selected = open.selected.min(total.saturating_sub(1));
     app.menu.open.as_mut().unwrap().selected = selected;
     let screen = frame.area();
     if screen.width < 4 || screen.height < 4 {
         return;
     }
-    let desired = entries
-        .iter()
-        .map(|entry| entry.label.width() + app.command_hint(entry.action).width() + 9)
-        .max()
-        .unwrap_or(20) as u16;
-    let enabled = entries
-        .get(selected)
-        .is_some_and(|entry| app.command_enabled(entry.action));
-    let footer_text = menu_footer(app, enabled);
+    let desired = if choosing {
+        28
+    } else {
+        entries
+            .iter()
+            .map(|entry| entry.label.width() + app.command_hint(entry.action).width() + 9)
+            .max()
+            .unwrap_or(20)
+            .min(u16::MAX as usize) as u16
+    };
+    let enabled = choosing
+        || entries
+            .get(selected)
+            .is_some_and(|entry| app.command_enabled(entry.action));
+    let footer = menu_footer_actions(app, enabled);
+    let footer_width: usize = footer.iter().map(|span| span.content.width()).sum();
     let width = desired
-        .max(footer_text.width().saturating_add(2).min(u16::MAX as usize) as u16)
+        .max(footer_width.saturating_add(4).min(u16::MAX as usize) as u16)
         .max(28)
         .min(screen.width);
-    let height = (entries.len() as u16 + 4).min(screen.height.saturating_sub(1));
+    let height = (total.saturating_add(2).min(u16::MAX as usize) as u16)
+        .min(screen.height.saturating_sub(1));
     let anchor = app
         .menu
         .categories
         .iter()
-        .find(|(_, index)| *index == category)
+        .find(|(_, index)| app.menu.compact || *index == category)
         .map(|(rect, _)| *rect);
     let x = anchor
         .map_or(screen.x, |rect| rect.x)
@@ -540,55 +602,41 @@ pub(crate) fn draw_popup(frame: &mut Frame, app: &mut App) {
         .min(screen.bottom().saturating_sub(height));
     let area = Rect::new(x, y, width, height);
     app.menu.popup = Some(area);
-    let style = Style::default()
-        .fg(app.theme.text)
-        .bg(app.theme.background.unwrap_or(ratatui::style::Color::Reset));
+    let style = sidebar_style(app);
+    let border = Style::default().fg(app.theme.border_active);
     frame.render_widget(Clear, area);
-    let count = height.saturating_sub(4) as usize;
-    let start = selected.saturating_sub(count.saturating_sub(1));
-    let title = format!(
-        " < {} > {}",
-        Category::ALL[category].label(),
-        if start > 0 || start + count < entries.len() {
-            "..."
-        } else {
-            ""
-        }
-    );
-    app.menu.previous = Some(Rect::new(
-        area.x + 1,
-        area.y,
-        3.min(width.saturating_sub(2)),
-        1,
-    ));
-    let next_x = area.x + 5 + Category::ALL[category].label().len() as u16;
-    if next_x < area.right().saturating_sub(1) {
-        app.menu.next = Some(Rect::new(
-            next_x,
-            area.y,
-            2.min(area.right() - 1 - next_x),
-            1,
-        ));
-    }
     frame.render_widget(
         Block::default()
             .borders(Borders::ALL)
-            .title(title)
-            .border_style(Style::default().fg(app.theme.border))
+            .border_type(ratatui::widgets::BorderType::Rounded)
+            .border_style(border)
             .style(style),
         area,
     );
-    for (offset, entry) in entries.iter().enumerate().skip(start).take(count) {
+    let count = height.saturating_sub(2) as usize;
+    let start = selected.saturating_sub(count.saturating_sub(1));
+    let items: Vec<_> = if choosing {
+        Category::ALL
+            .iter()
+            .map(|category| (category.label(), None))
+            .collect()
+    } else {
+        entries
+            .iter()
+            .map(|entry| (entry.label.as_str(), Some(entry.action)))
+            .collect()
+    };
+    for (offset, (label, action)) in items.into_iter().enumerate().skip(start).take(count) {
         let rect = Rect::new(
             area.x + 1,
             area.y + 1 + (offset - start) as u16,
             width - 2,
             1,
         );
-        let enabled = app.command_enabled(entry.action);
-        let hint = app.command_hint(entry.action);
-        let check = if app.command_checked(entry.action) {
-            "*"
+        let enabled = action.is_none_or(|action| app.command_enabled(action));
+        let hint = action.map_or_else(String::new, |action| app.command_hint(action));
+        let check = if action.is_some_and(|action| app.command_checked(action)) {
+            "•"
         } else {
             " "
         };
@@ -599,63 +647,90 @@ pub(crate) fn draw_popup(frame: &mut Frame, app: &mut App) {
             String::new()
         };
         let label_width = available.saturating_sub(hint.width() + usize::from(!hint.is_empty()));
-        let label = fit_label(&entry.label, label_width);
+        let label = fit_label(label, label_width);
         let padding = available.saturating_sub(label.width() + hint.width());
-        let selected = offset == selected;
-        let row_style = if selected {
-            style
-                .fg(app.theme.background.unwrap_or(ratatui::style::Color::Reset))
-                .bg(if enabled {
-                    app.theme.accent
-                } else {
-                    app.theme.text_muted
-                })
-        } else if enabled {
-            style
+        let mut row_style = if offset == selected {
+            sidebar_selected_style(app)
         } else {
-            style.fg(app.theme.text_muted).add_modifier(Modifier::DIM)
+            style
         };
+        if !enabled {
+            row_style = row_style
+                .fg(app.theme.text_muted)
+                .add_modifier(Modifier::DIM);
+        }
         frame.render_widget(
-            Paragraph::new(Line::from(vec![Span::raw(format!(
+            Paragraph::new(Line::from(Span::raw(format!(
                 " {check} {label}{}{} ",
                 " ".repeat(padding),
                 hint
-            ))]))
+            ))))
             .style(row_style),
             rect,
         );
         app.menu.rows.push((rect, offset));
     }
-    let footer = Rect::new(area.x + 1, area.bottom() - 2, width - 2, 1);
-    let hint = if footer_text.width() <= footer.width as usize {
-        footer_text
+    let actions = if footer_width + 4 <= width as usize {
+        footer
     } else {
-        let cancel = app.keybindings.menu_keys(MenuAction::Cancel);
-        let cancel = cancel.split(" / ").next().unwrap_or("");
-        let short = format!(" {cancel} close");
-        if short.width() <= footer.width as usize {
-            short
-        } else {
-            fit_label(cancel, footer.width as usize)
-        }
+        menu_cancel_actions(app, width as usize)
     };
     frame.render_widget(
-        Paragraph::new(hint).style(style.fg(app.theme.text_muted)),
-        footer,
+        Paragraph::new(crate::ui::modal_footer_line(
+            width as usize,
+            border,
+            actions,
+        ))
+        .style(style),
+        Rect::new(area.x, area.bottom() - 1, width, 1),
     );
 }
 
-fn menu_footer(app: &App, enabled: bool) -> String {
-    let cancel = app.keybindings.menu_keys(MenuAction::Cancel);
-    if enabled {
-        format!(
-            " {} select  {} close",
-            app.keybindings.menu_keys(MenuAction::Accept),
-            cancel
-        )
-    } else {
-        format!(" Unavailable  {cancel} close")
+fn primary_menu_key(app: &App, action: MenuAction) -> String {
+    app.keybindings
+        .menu_keys(action)
+        .split(" / ")
+        .next()
+        .unwrap_or("")
+        .to_string()
+}
+
+fn menu_footer_actions(app: &App, enabled: bool) -> Vec<Span<'static>> {
+    let key_style = Style::default()
+        .fg(app.theme.primary)
+        .add_modifier(Modifier::BOLD);
+    let accept = primary_menu_key(app, MenuAction::Accept);
+    let cancel = primary_menu_key(app, MenuAction::Cancel);
+    let mut actions = Vec::new();
+    if !enabled {
+        actions.push(Span::raw("Unavailable"));
+    } else if !accept.is_empty() {
+        actions.push(Span::styled(accept, key_style));
+        actions.push(Span::raw(" select"));
     }
+    if !cancel.is_empty() {
+        if !actions.is_empty() {
+            actions.push(Span::raw("    "));
+        }
+        actions.push(Span::styled(cancel, key_style));
+        actions.push(Span::raw(" cancel"));
+    }
+    actions
+}
+
+fn menu_cancel_actions(app: &App, width: usize) -> Vec<Span<'static>> {
+    let cancel = primary_menu_key(app, MenuAction::Cancel);
+    if cancel.is_empty() {
+        return Vec::new();
+    }
+    let key_style = Style::default()
+        .fg(app.theme.primary)
+        .add_modifier(Modifier::BOLD);
+    let mut actions = vec![Span::styled(cancel.clone(), key_style)];
+    if cancel.width() + 11 <= width {
+        actions.push(Span::raw(" cancel"));
+    }
+    actions
 }
 
 fn fit_label(label: &str, width: usize) -> String {
@@ -696,6 +771,111 @@ mod tests {
             false,
             None,
         )
+    }
+
+    #[test]
+    fn narrow_footer_does_not_advertise_an_unbound_cancel() {
+        let mut app = app();
+        let config: crate::config::Config =
+            toml::from_str("[keybindings.menu]\ncancel = []").unwrap();
+        app.keybindings = crate::keybindings::Keybindings::from_config(&config.keybindings);
+        for width in 11..=15 {
+            app.open_menu(0);
+            let mut terminal = Terminal::new(TestBackend::new(width, 12)).unwrap();
+            terminal
+                .draw(|frame| crate::ui::draw(frame, &mut app))
+                .unwrap();
+            let popup = app.menu.popup.unwrap();
+            let buffer = terminal.backend().buffer();
+            let footer: String = (popup.x..popup.right())
+                .map(|x| buffer[(x, popup.bottom() - 1)].symbol())
+                .collect();
+            assert!(!footer.contains("cancel"));
+        }
+    }
+
+    #[test]
+    fn menu_uses_sidebar_colors_bullets_and_the_modal_bottom_border() {
+        use ratatui::style::Color;
+        let mut app = app();
+        app.theme.background = Some(Color::Red);
+        app.theme.background_panel = Some(Color::Blue);
+        app.theme.background_element = Some(Color::Green);
+        app.theme.accent = Color::Yellow;
+        app.open_menu(1);
+        let mut terminal = Terminal::new(TestBackend::new(100, 25)).unwrap();
+        terminal
+            .draw(|frame| crate::ui::draw(frame, &mut app))
+            .unwrap();
+        let popup = app.menu.popup.unwrap();
+        let first = app.menu.rows[0].0;
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(0, 0)].bg, Color::Blue);
+        assert_eq!(buffer[(9, 0)].bg, Color::Green);
+        assert_eq!(buffer[(9, 0)].fg, Color::Yellow);
+        assert_eq!(buffer[(first.x + 1, first.y)].symbol(), "•");
+        let top: String = (popup.x..popup.right())
+            .map(|x| buffer[(x, popup.y)].symbol())
+            .collect();
+        assert!(!top.contains("View"));
+        let bottom: String = (popup.x..popup.right())
+            .map(|x| buffer[(x, popup.bottom() - 1)].symbol())
+            .collect();
+        assert!(bottom.starts_with("╰ "));
+        assert!(bottom.contains("enter select    esc cancel"));
+        assert!(!bottom.contains("space"));
+    }
+
+    #[test]
+    fn compact_category_chooser_keeps_mouse_switching_without_border_arrows() {
+        let mut app = app();
+        let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
+        terminal
+            .draw(|frame| crate::ui::draw(frame, &mut app))
+            .unwrap();
+        let click = |x, y| MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: x,
+            row: y,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(app.handle_menu_mouse(click(3, 0)));
+        terminal
+            .draw(|frame| crate::ui::draw(frame, &mut app))
+            .unwrap();
+        assert!(app.menu.open.as_ref().unwrap().page == MenuPage::Categories);
+        let review = app.menu.rows[3].0;
+        assert!(app.handle_menu_mouse(click(review.x, review.y)));
+        terminal
+            .draw(|frame| crate::ui::draw(frame, &mut app))
+            .unwrap();
+        assert_eq!(app.menu.open.as_ref().unwrap().category, 3);
+        assert!(app.menu.open.as_ref().unwrap().page == MenuPage::Commands);
+        assert!(app.handle_menu_mouse(click(3, 0)));
+        terminal
+            .draw(|frame| crate::ui::draw(frame, &mut app))
+            .unwrap();
+        let view = app.menu.rows[1].0;
+        assert!(app.handle_menu_mouse(click(view.x, view.y)));
+        terminal
+            .draw(|frame| crate::ui::draw(frame, &mut app))
+            .unwrap();
+        assert_eq!(app.menu.open.as_ref().unwrap().category, 1);
+    }
+
+    #[test]
+    fn category_bar_and_tabs_are_adjacent_without_an_unused_row() {
+        let mut app = app();
+        let mut terminal = Terminal::new(TestBackend::new(100, 25)).unwrap();
+        terminal
+            .draw(|frame| crate::ui::draw(frame, &mut app))
+            .unwrap();
+        assert_eq!(app.topbar_area.unwrap().1, 1);
+        app.menu_bar = false;
+        terminal
+            .draw(|frame| crate::ui::draw(frame, &mut app))
+            .unwrap();
+        assert_eq!(app.topbar_area.unwrap().1, 0);
     }
 
     #[test]
@@ -755,7 +935,7 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect();
-        assert!(text.contains("esc close"));
+        assert!(text.contains("esc cancel"));
     }
 
     #[test]
