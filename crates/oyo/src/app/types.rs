@@ -309,15 +309,25 @@ pub(crate) struct BlameResponse {
     pub(crate) entries: Vec<(usize, BlameInfo)>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DiffJobKey {
+    pub(crate) snapshot: u64,
+    pub(crate) revision: u64,
+    pub(crate) file_index: usize,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct DiffRequest {
-    pub(crate) file_index: usize,
+    pub(crate) key: DiffJobKey,
     pub(crate) old: Arc<str>,
     pub(crate) new: Arc<str>,
 }
 
 pub(crate) struct ContentResponse {
     pub generation: u64,
+    pub snapshot: u64,
+    pub background: bool,
+    pub failure: Option<crate::remote::shared::ReadFailure>,
     pub file_index: usize,
     pub identity: oyo_core::multi::PendingFileContent,
     pub content: oyo_core::multi::PreparedFileContent,
@@ -325,7 +335,7 @@ pub(crate) struct ContentResponse {
 
 #[derive(Clone, Debug)]
 pub(crate) struct DiffResponse {
-    pub(crate) file_index: usize,
+    pub(crate) key: DiffJobKey,
     pub(crate) old: Arc<str>,
     pub(crate) new: Arc<str>,
     pub(crate) diff: Result<DiffResult, String>,

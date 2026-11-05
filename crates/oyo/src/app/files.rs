@@ -2000,6 +2000,9 @@ impl App {
         if self.multi_diff.file_count() == 0 {
             return;
         }
+        self.prioritise_selected_content();
+        self.restore_evicted_content_position();
+        self.enforce_remote_retention();
         self.queue_current_file_diff();
         if !self.current_file_diff_ready() {
             return;
@@ -2810,12 +2813,10 @@ impl App {
         }
         self.invalidate_blame_cache();
         self.mark_diff_changed();
-        self.diff_worker_tx = None;
-        self.diff_worker_rx = None;
         self.content_generation = self.content_generation.wrapping_add(1);
         self.content_worker_rx = None;
+        self.content_session = None;
         self.content_loading.clear();
-        self.diff_inflight = None;
         self.diff_queue.clear();
         self.diff_refresh_restore_end = None;
         let file_count = self.multi_diff.file_count();

@@ -8326,6 +8326,7 @@ fn run_app(
             let draw_result = terminal.draw(|f| ui::draw(f, app)).map(|_| ());
             let _ = execute!(terminal.backend_mut(), EndSynchronizedUpdate);
             draw_result.map_err(|e| anyhow!("{e}"))?;
+            app.multi_diff.mark_content_presented();
             needs_draw = false;
             last_scroll_draw = Instant::now();
             update_mouse_scroll_block(

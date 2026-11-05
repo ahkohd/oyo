@@ -125,7 +125,16 @@ impl<R: BufRead> ResponseBody<R> {
                 continue;
             }
             if let Some(error) = response_failure(text, provider) {
-                return Err(io::Error::other(error));
+                use super::shared::{FailureKind, ReadFailure};
+                let kind = match status {
+                    401 | 403 | 429 => FailureKind::Blocked,
+                    404 => FailureKind::Missing,
+                    _ => FailureKind::Other,
+                };
+                return Err(io::Error::other(ReadFailure {
+                    kind,
+                    message: error,
+                }));
             }
             for line in text.lines().skip(1) {
                 if let Some((name, value)) = line.split_once(':') {

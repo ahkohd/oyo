@@ -1833,7 +1833,7 @@ impl App {
             .map_or(&self.multi_diff, |view| &view.live_backup)
     }
 
-    fn review_file_fingerprint(&self, file_index: usize) -> Option<String> {
+    pub(super) fn review_file_fingerprint(&self, file_index: usize) -> Option<String> {
         if !self.remote_manifest_complete() {
             return None;
         }
@@ -1864,7 +1864,17 @@ impl App {
         let Some(stored_fingerprint) = self.reviewed_files.get(&file.display_name) else {
             return false;
         };
-        self.review_file_fingerprint(file_index).as_ref() == Some(stored_fingerprint)
+        if !self.remote_manifest_complete() {
+            return false;
+        }
+        let fingerprint = self
+            .retained_remote_review_fingerprint(file_index)
+            .or_else(|| {
+                let fingerprint = self.review_file_fingerprint(file_index)?;
+                self.cache_remote_review_fingerprint(file_index, fingerprint.clone());
+                Some(fingerprint)
+            });
+        fingerprint.as_ref() == Some(stored_fingerprint)
     }
 
     pub(crate) fn toggle_current_file_reviewed(&mut self) -> bool {
@@ -1886,6 +1896,7 @@ impl App {
         let Some(fingerprint) = self.review_file_fingerprint(file_index) else {
             return false;
         };
+        self.cache_remote_review_fingerprint(file_index, fingerprint.clone());
         if self.reviewed_files.get(&file_path) == Some(&fingerprint) {
             self.reviewed_files.remove(&file_path);
             self.persist_reviewed_file(&file_path, None);
@@ -2721,6 +2732,7 @@ impl App {
             diff_worker_tx: self.diff_worker_tx.take(),
             diff_worker_rx: self.diff_worker_rx.take(),
             content_worker_rx: self.content_worker_rx.take(),
+            content_session: self.content_session.take(),
             content_generation: self.content_generation,
             content_loading: std::mem::take(&mut self.content_loading),
         };
@@ -2784,6 +2796,7 @@ impl App {
             self.diff_worker_rx = worker_state.diff_worker_rx;
             self.content_generation = worker_state.content_generation;
             self.content_worker_rx = worker_state.content_worker_rx;
+            self.content_session = worker_state.content_session;
             self.content_loading = worker_state.content_loading;
         }
         if self.content_loading.is_empty() {
@@ -8328,7 +8341,8 @@ impl App {
         let file = comment.anchor.file_path.clone();
         self.multi_diff.request_full_content(index);
         if let Some(request) = self.multi_diff.take_pending_content_for(index) {
-            let content = super::load_content_request_sync(request);
+            let context = self.selected_content_context();
+            let content = context.run(|| super::load_content_request_sync(request));
             self.multi_diff.apply_prepared_content(index, content);
         }
         let (old, new) = self
@@ -9947,6 +9961,55 @@ mod tests {
             }
             let _ = std::fs::remove_dir_all(base);
         }
+    }
+
+    #[test]
+    fn an_evicted_reviewed_badge_is_retained_without_authorizing_outdated_mutations() {
+        use oyo_core::multi::ContentSource;
+        use oyo_core::patch::PatchRecord;
+        let mut diff = MultiFileDiff::from_pending_files(None, Vec::new(), true);
+        for name in ["f", "g"] {
+            let patch=format!("diff --git a/{name} b/{name}\n--- a/{name}\n+++ b/{name}\n@@ -1 +1 @@\n-old\n+new\n");
+            let source = |revision: &str| ContentSource::RemoteBlob {
+                provider: "gitlab".into(),
+                host: "fixture".into(),
+                repo: "11".into(),
+                revision: revision.repeat(40),
+                path: name.into(),
+            };
+            diff.append_patch(
+                PatchRecord::parse(patch.into_bytes()).unwrap(),
+                source("1"),
+                source("2"),
+            );
+        }
+        diff.remote_snapshot =
+            Some(serde_json::json!({"acquisition":"legacy","streamState":"complete"}));
+        for index in 0..2 {
+            diff.request_full_content(index);
+            diff.take_pending_content_for(index);
+            diff.apply_prepared_content(
+                index,
+                MultiFileDiff::prepare_remote_file_content(b"old\n".to_vec(), b"new\n".to_vec()),
+            );
+        }
+        let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+        app.review_mode = true;
+        app.set_review_persist_enabled(false);
+        app.set_incremental_review_default(false);
+        app.ensure_content_session(None);
+        assert!(app.toggle_current_file_reviewed());
+        assert!(app.file_is_reviewed(0));
+        app.select_file(1);
+        assert!(app.multi_diff.evict_remote_content(0));
+        assert!(app.file_is_reviewed(0));
+        assert!(app.review_file_fingerprint(0).is_none());
+        app.multi_diff.select_file(0);
+        open_outdated_snapshot(&mut app);
+        assert!(app.file_is_reviewed(0));
+        let before = app.reviewed_files.clone();
+        assert!(!app.toggle_current_file_reviewed());
+        assert_eq!(app.reviewed_files, before);
     }
 
     #[test]

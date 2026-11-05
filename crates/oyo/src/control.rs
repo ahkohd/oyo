@@ -1086,6 +1086,10 @@ fn diff_response(app: &mut App, info: &ControlSessionInfo, include_patch: bool) 
                 "insertions": file.insertions,
                 "deletions": file.deletions,
                 "binary": file.binary,
+                "fullTextAvailable": app.multi_diff.file_contents(index).is_some(),
+                "contentBytes": app.multi_diff.remote_content_bytes(index),
+                "diffStatus": format!("{:?}",app.multi_diff.diff_status(index)),
+                "navigatorReady": app.multi_diff.navigator_for(index).is_some(),
             })
         })
         .collect::<Vec<_>>();
@@ -1093,6 +1097,7 @@ fn diff_response(app: &mut App, info: &ControlSessionInfo, include_patch: bool) 
         "session": info.name,
         "target": app.control_target_label(),
         "fileCount": app.multi_diff.file_count(),
+        "retainedContentBytes": app.multi_diff.remote_retained_bytes(),
         "manifestComplete": app.remote_manifest_complete(),
         "remoteStatus": app.remote_manifest_status(),
         "currentFile": app.current_file_path(),

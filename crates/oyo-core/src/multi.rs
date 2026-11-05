@@ -191,6 +191,40 @@ pub struct MultiFileDiff {
     pub remote_snapshot: Option<serde_json::Value>,
     remote_material: std::collections::HashMap<usize, RemoteMaterial>,
     remote_content_proof: Option<Arc<[ExpectedFileContent]>>,
+    remote_prefetch: RemotePrefetch,
+}
+
+const REMOTE_CLASS_BYTES: usize = 64 * 1024 * 1024;
+const REMOTE_NEARBY_FILES: usize = 8;
+const REMOTE_TAIL_FILES: usize = 1024;
+static CONTENT_SNAPSHOT: AtomicU64 = AtomicU64::new(1);
+
+struct RemotePrefetch {
+    snapshot: u64,
+    revisions: Vec<u64>,
+    swept: Vec<bool>,
+    nearby_attempted: std::collections::HashSet<usize>,
+    selection: Option<usize>,
+    cursor: usize,
+    resident: std::collections::VecDeque<usize>,
+    presented: bool,
+    suspended: bool,
+}
+
+impl Default for RemotePrefetch {
+    fn default() -> Self {
+        Self {
+            snapshot: CONTENT_SNAPSHOT.fetch_add(1, Ordering::Relaxed),
+            revisions: Vec::new(),
+            swept: Vec::new(),
+            nearby_attempted: std::collections::HashSet::new(),
+            selection: None,
+            cursor: 0,
+            resident: std::collections::VecDeque::new(),
+            presented: false,
+            suspended: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -213,6 +247,7 @@ pub enum BlameSource {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiffStatus {
     Loading,
+    Buffered,
     Ready,
     Deferred,
     Computing,
@@ -623,6 +658,7 @@ impl MultiFileDiff {
             remote_snapshot: None,
             remote_material: std::collections::HashMap::new(),
             remote_content_proof: None,
+            remote_prefetch: RemotePrefetch::default(),
         }
     }
 
@@ -682,6 +718,7 @@ impl MultiFileDiff {
             remote_snapshot: None,
             remote_material: std::collections::HashMap::new(),
             remote_content_proof: None,
+            remote_prefetch: RemotePrefetch::default(),
         }
     }
 
@@ -747,6 +784,7 @@ impl MultiFileDiff {
             remote_snapshot: None,
             remote_material: std::collections::HashMap::new(),
             remote_content_proof: None,
+            remote_prefetch: RemotePrefetch::default(),
         }
     }
 
@@ -1046,6 +1084,7 @@ impl MultiFileDiff {
             remote_snapshot: None,
             remote_material: std::collections::HashMap::new(),
             remote_content_proof: None,
+            remote_prefetch: RemotePrefetch::default(),
         })
     }
 
@@ -1130,6 +1169,7 @@ impl MultiFileDiff {
             remote_snapshot: None,
             remote_material: std::collections::HashMap::new(),
             remote_content_proof: None,
+            remote_prefetch: RemotePrefetch::default(),
         })
     }
 
@@ -1226,6 +1266,7 @@ impl MultiFileDiff {
             remote_snapshot: None,
             remote_material: std::collections::HashMap::new(),
             remote_content_proof: None,
+            remote_prefetch: RemotePrefetch::default(),
         })
     }
 
@@ -1312,6 +1353,7 @@ impl MultiFileDiff {
             remote_snapshot: None,
             remote_material: std::collections::HashMap::new(),
             remote_content_proof: None,
+            remote_prefetch: RemotePrefetch::default(),
         })
     }
 
@@ -1454,6 +1496,7 @@ impl MultiFileDiff {
             remote_snapshot: None,
             remote_material: std::collections::HashMap::new(),
             remote_content_proof: None,
+            remote_prefetch: RemotePrefetch::default(),
         })
     }
 
@@ -1553,6 +1596,7 @@ impl MultiFileDiff {
             remote_snapshot: None,
             remote_material: std::collections::HashMap::new(),
             remote_content_proof: None,
+            remote_prefetch: RemotePrefetch::default(),
         }
     }
 
@@ -1606,6 +1650,7 @@ impl MultiFileDiff {
             remote_snapshot: None,
             remote_material: std::collections::HashMap::new(),
             remote_content_proof: None,
+            remote_prefetch: RemotePrefetch::default(),
         }
     }
 
@@ -1773,6 +1818,194 @@ impl MultiFileDiff {
         true
     }
 
+    pub fn cancel_content_request(&mut self, index: usize) {
+        if let Some(RemoteMaterial::Patch { hydration, .. }) = self.remote_material.get_mut(&index)
+        {
+            if *hydration == HydrationState::Loading {
+                *hydration = HydrationState::Idle;
+            }
+        }
+        if let Some(pending) = self.pending_content.get_mut(index) {
+            *pending = None;
+        }
+    }
+
+    pub fn content_snapshot(&self) -> u64 {
+        self.remote_prefetch.snapshot
+    }
+
+    pub fn content_revision(&self, index: usize) -> u64 {
+        self.remote_prefetch
+            .revisions
+            .get(index)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    pub fn mark_content_presented(&mut self) {
+        if !self.files.is_empty() {
+            self.remote_prefetch.presented = true;
+        }
+    }
+
+    pub fn suspend_remote_prefetch(&mut self) -> bool {
+        !std::mem::replace(&mut self.remote_prefetch.suspended, true)
+    }
+
+    pub fn remote_prefetch_enabled(&self) -> bool {
+        self.remote_snapshot
+            .as_ref()
+            .is_some_and(|s| s["acquisition"] == "patch-v1")
+    }
+
+    pub fn remote_content_bytes(&self, index: usize) -> usize {
+        if self
+            .remote_material
+            .get(&index)
+            .is_some_and(|m| matches!(m, RemoteMaterial::Full { .. }))
+        {
+            self.old_contents[index].len() + self.new_contents[index].len()
+        } else {
+            0
+        }
+    }
+
+    pub fn remote_retained_bytes(&self) -> usize {
+        self.remote_prefetch
+            .resident
+            .iter()
+            .map(|i| self.remote_content_bytes(*i))
+            .sum()
+    }
+
+    pub fn next_remote_prefetch(&mut self) -> Option<usize> {
+        if !self.remote_prefetch_enabled()
+            || !self.remote_prefetch.presented
+            || self.remote_prefetch.suspended
+        {
+            return None;
+        }
+        let selected = self.selected_index;
+        if self.remote_prefetch.selection != Some(selected) {
+            if let Some(previous) = self.remote_prefetch.selection {
+                if self.remote_prefetch.resident.contains(&previous) {
+                    self.remote_prefetch.resident.retain(|i| *i != previous);
+                    self.remote_prefetch.resident.push_back(previous);
+                }
+            }
+            self.remote_prefetch.selection = Some(selected);
+            self.remote_prefetch.nearby_attempted.clear();
+        }
+        self.remote_prefetch.swept.resize(self.files.len(), false);
+        for index in selected.saturating_add(1)
+            ..self
+                .files
+                .len()
+                .min(selected.saturating_add(1 + REMOTE_NEARBY_FILES))
+        {
+            if self.remote_prefetch.nearby_attempted.insert(index) {
+                self.remote_prefetch.swept[index] = true;
+                if self.prefetch_eligible(index) {
+                    return Some(index);
+                }
+            }
+        }
+        while self.remote_prefetch.cursor < self.files.len() {
+            let index = self.remote_prefetch.cursor;
+            self.remote_prefetch.cursor += 1;
+            if !std::mem::replace(&mut self.remote_prefetch.swept[index], true)
+                && index != selected
+                && self.prefetch_eligible(index)
+            {
+                return Some(index);
+            }
+        }
+        None
+    }
+
+    fn prefetch_eligible(&self, index: usize) -> bool {
+        !self.files[index].binary
+            && matches!(
+                self.remote_material.get(&index),
+                Some(RemoteMaterial::Patch {
+                    hydration: HydrationState::Idle,
+                    ..
+                })
+            )
+    }
+
+    pub fn remote_retention_victims(&self) -> Vec<usize> {
+        let selected = self.selected_index;
+        let nearby = selected.saturating_add(1)..selected.saturating_add(1 + REMOTE_NEARBY_FILES);
+        let mut near_bytes = 0usize;
+        let mut keep = std::collections::HashSet::new();
+        let mut victims = Vec::new();
+        for index in nearby.clone().take(REMOTE_NEARBY_FILES) {
+            if !self.remote_prefetch.resident.contains(&index) {
+                continue;
+            }
+            let size = self.remote_content_bytes(index);
+            if near_bytes + size <= REMOTE_CLASS_BYTES {
+                near_bytes += size;
+                keep.insert(index);
+            } else {
+                victims.push(index);
+            }
+        }
+        let mut tail_bytes = 0usize;
+        let mut tail_count = 0usize;
+        for index in self.remote_prefetch.resident.iter().rev().copied() {
+            if index == selected || keep.contains(&index) || nearby.contains(&index) {
+                continue;
+            }
+            let size = self.remote_content_bytes(index);
+            if tail_bytes + size <= REMOTE_CLASS_BYTES && tail_count < REMOTE_TAIL_FILES {
+                tail_bytes += size;
+                tail_count += 1;
+            } else {
+                victims.push(index);
+            }
+        }
+        victims
+    }
+
+    pub fn evict_remote_content(&mut self, index: usize) -> bool {
+        if index == self.selected_index {
+            return false;
+        }
+        let Some(RemoteMaterial::Full {
+            original_patch,
+            request,
+            ..
+        }) = self.remote_material.get(&index)
+        else {
+            return false;
+        };
+        let patch = original_patch.clone();
+        let request = request.clone();
+        self.files[index] = patch.entry.clone();
+        self.remote_material.insert(
+            index,
+            RemoteMaterial::Patch {
+                patch,
+                request,
+                hydration: HydrationState::Idle,
+            },
+        );
+        self.old_contents[index] = Arc::from("");
+        self.new_contents[index] = Arc::from("");
+        self.precomputed_diffs[index] = None;
+        self.navigators[index] = None;
+        self.navigator_is_placeholder[index] = false;
+        self.pending_content[index] = None;
+        self.diff_statuses[index] = DiffStatus::Ready;
+        self.remote_prefetch.revisions.resize(self.files.len(), 0);
+        self.remote_prefetch.revisions[index] =
+            self.remote_prefetch.revisions[index].wrapping_add(1);
+        self.remote_prefetch.resident.retain(|i| *i != index);
+        true
+    }
+
     pub fn file_modes(&self, index: usize) -> Option<(u32, u32)> {
         match self.remote_material.get(&index)? {
             RemoteMaterial::Patch { patch, .. } => Some((patch.old_mode, patch.new_mode)),
@@ -1834,6 +2067,14 @@ impl MultiFileDiff {
     }
 
     pub fn prepare_remote_file_content(old: Vec<u8>, new: Vec<u8>) -> PreparedFileContent {
+        Self::prepare_remote_content(old, new, false)
+    }
+
+    pub fn prepare_buffered_remote_content(old: Vec<u8>, new: Vec<u8>) -> PreparedFileContent {
+        Self::prepare_remote_content(old, new, true)
+    }
+
+    fn prepare_remote_content(old: Vec<u8>, new: Vec<u8>, buffered: bool) -> PreparedFileContent {
         if old.len() > 32 * 1024 * 1024 || new.len() > 32 * 1024 * 1024 {
             return Self::failed_file_content("Remote file exceeds its loading limit");
         }
@@ -1850,7 +2091,18 @@ impl MultiFileDiff {
             || std::str::from_utf8(&new).is_err();
         let old = String::from_utf8(old).unwrap_or_default();
         let new = String::from_utf8(new).unwrap_or_default();
-        let (old, new, mut precomputed, status) = Self::maybe_defer_diff(old, new, binary);
+        let (old, new, mut precomputed, status) = if buffered && !binary {
+            {
+                let status = if Self::should_defer_diff(&old, &new) && !Self::diff_defer_enabled() {
+                    DiffStatus::Disabled
+                } else {
+                    DiffStatus::Buffered
+                };
+                (old, new, None, status)
+            }
+        } else {
+            Self::maybe_defer_diff(old, new, binary)
+        };
         if status == DiffStatus::Ready {
             precomputed = Some(PrecomputedDiff::Ready(Self::diff_strings(&old, &new)));
         }
@@ -1942,6 +2194,12 @@ impl MultiFileDiff {
         } else if self.diff_status(idx) != DiffStatus::Loading {
             return false;
         }
+        self.remote_prefetch.revisions.resize(self.files.len(), 0);
+        self.remote_prefetch.revisions[idx] = self.remote_prefetch.revisions[idx].wrapping_add(1);
+        if self.remote_material.contains_key(&idx) {
+            self.remote_prefetch.resident.retain(|index| *index != idx);
+            self.remote_prefetch.resident.push_back(idx);
+        }
         self.old_contents[idx] = content.old;
         self.new_contents[idx] = content.new;
         self.precomputed_diffs[idx] = content.precomputed;
@@ -2018,6 +2276,10 @@ impl MultiFileDiff {
                     ),
                 },
             );
+            self.remote_prefetch.revisions.resize(self.files.len(), 0);
+            self.remote_prefetch.revisions[*index] =
+                self.remote_prefetch.revisions[*index].wrapping_add(1);
+            self.remote_prefetch.resident.retain(|i| i != index);
             self.old_contents[*index] = Arc::from("");
             self.new_contents[*index] = Arc::from("");
             self.precomputed_diffs[*index] = None;
@@ -2131,6 +2393,7 @@ impl MultiFileDiff {
             self.diff_statuses.get(self.selected_index),
             Some(
                 DiffStatus::Loading
+                    | DiffStatus::Buffered
                     | DiffStatus::Deferred
                     | DiffStatus::Computing
                     | DiffStatus::Failed
@@ -2180,9 +2443,13 @@ impl MultiFileDiff {
     }
 
     pub fn apply_diff_result(&mut self, idx: usize, diff: DiffResult) {
-        if let Some(RemoteMaterial::Full { display_patch, .. }) = self.remote_material.get_mut(&idx)
+        if let Some(RemoteMaterial::Full {
+            display_patch,
+            original_patch,
+            ..
+        }) = self.remote_material.get_mut(&idx)
         {
-            if display_patch.take().is_some() {
+            if original_patch.has_changed_lines() && display_patch.take().is_some() {
                 self.navigator_is_placeholder[idx] = true;
             }
         }
@@ -2836,6 +3103,110 @@ mod tests {
             new: Some(BlobId::from_bytes(b"new\n").unwrap()),
         }];
         (diff, expected.into())
+    }
+
+    #[test]
+    fn remote_retention_protects_nearby_files_while_a_bounded_tail_advances() {
+        let mut diff = MultiFileDiff::from_pending_files(None, Vec::new(), true);
+        let padding = "same\n".repeat(800_000);
+        let old = format!("old\n{padding}");
+        let new = format!("new\n{padding}");
+        for index in 0..40 {
+            let name = format!("file{index}");
+            let patch=format!("diff --git a/{name} b/{name}\n--- a/{name}\n+++ b/{name}\n@@ -1 +1 @@\n-old\n+new\n");
+            diff.append_patch(
+                crate::patch::PatchRecord::parse(patch.into_bytes()).unwrap(),
+                ContentSource::Empty,
+                ContentSource::Empty,
+            );
+        }
+        diff.remote_snapshot =
+            Some(serde_json::json!({"acquisition":"patch-v1","streamState":"receiving"}));
+        diff.mark_content_presented();
+        for index in 0..40 {
+            assert!(diff.request_full_content(index));
+            diff.take_pending_content_for(index);
+            assert!(diff.apply_prepared_content(
+                index,
+                MultiFileDiff::prepare_buffered_remote_content(
+                    old.as_bytes().to_vec(),
+                    new.as_bytes().to_vec()
+                )
+            ));
+            for victim in diff.remote_retention_victims() {
+                assert!(diff.evict_remote_content(victim));
+            }
+            assert!(diff.remote_retained_bytes() <= 192 * 1024 * 1024);
+            assert!(diff.navigator_for(index).is_none());
+        }
+        assert!(diff.file_contents(0).is_some());
+        for index in 1..=8 {
+            assert!(diff.file_contents(index).is_some());
+        }
+        assert!(diff.file_is_sparse(9));
+        assert!(diff.file_contents(39).is_some());
+        assert_eq!(
+            diff.diff_status(39),
+            if MultiFileDiff::diff_defer_enabled() {
+                DiffStatus::Buffered
+            } else {
+                DiffStatus::Disabled
+            }
+        );
+    }
+
+    #[test]
+    fn buffered_remote_bytes_are_available_without_a_computed_diff_or_navigator() {
+        let (mut diff, expected) = proof_bound_patch();
+        assert!(diff.request_full_content(0));
+        diff.take_pending_content();
+        let content = super::MultiFileDiff::prepare_buffered_remote_content(
+            b"old\n".to_vec(),
+            b"new\n".to_vec(),
+        );
+        assert!(diff.apply_prepared_content(0, content));
+        assert_eq!(diff.diff_status(0), super::DiffStatus::Buffered);
+        assert!(diff.precomputed_diffs[0].is_none());
+        assert!(diff.navigators[0].is_none());
+        assert!(diff.has_patch_display(0));
+        assert_eq!(diff.file_contents(0), Some(("old\n", "new\n")));
+        assert!(diff.bind_remote_content_proof(expected).unwrap().is_empty());
+        assert_eq!(diff.remote_retained_bytes(), 8);
+    }
+
+    #[test]
+    fn prefetch_waits_for_presentation_and_sweeps_once_even_after_eviction() {
+        use super::*;
+        let (mut diff, _) = proof_bound_patch();
+        for index in 1..14 {
+            let patch = format!("diff --git a/f{index} b/f{index}\nindex 1111111..2222222 100644\n--- a/f{index}\n+++ b/f{index}\n@@ -1 +1 @@\n-old\n+new\n");
+            diff.append_patch(
+                crate::patch::PatchRecord::parse(patch.into_bytes()).unwrap(),
+                ContentSource::Empty,
+                ContentSource::Empty,
+            );
+        }
+        assert_eq!(diff.next_remote_prefetch(), None);
+        diff.mark_content_presented();
+        for index in 1..14 {
+            assert_eq!(diff.next_remote_prefetch(), Some(index));
+            assert!(diff.ensure_full_content(index));
+            diff.take_pending_content();
+            assert!(diff.apply_prepared_content(
+                index,
+                MultiFileDiff::prepare_buffered_remote_content(
+                    b"old\n".to_vec(),
+                    b"new\n".to_vec()
+                )
+            ));
+            assert!(diff.evict_remote_content(index));
+            assert!(diff.file_is_sparse(index));
+        }
+        assert_eq!(diff.next_remote_prefetch(), None);
+        diff.selected_index = 1;
+        assert_eq!(diff.next_remote_prefetch(), Some(2));
+        diff.suspend_remote_prefetch();
+        assert_eq!(diff.next_remote_prefetch(), None);
     }
 
     #[test]

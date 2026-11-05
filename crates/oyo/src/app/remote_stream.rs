@@ -72,6 +72,7 @@ impl App {
         let Some(mut session) = self.remote_stream.take() else {
             return false;
         };
+        self.ensure_content_session(Some(session.content_context()));
         let mut changed = false;
         let mut finished = false;
         let mut batch_bytes = 0usize;
@@ -123,6 +124,7 @@ impl App {
                     break;
                 }
                 Ok(RemoteEvent::Failed(error)) => {
+                    self.multi_diff.suspend_remote_prefetch();
                     if let Some(snapshot) = self.multi_diff.remote_snapshot.as_mut() {
                         snapshot["streamState"] = "failed".into();
                     }
@@ -135,6 +137,7 @@ impl App {
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => break,
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.multi_diff.suspend_remote_prefetch();
                     if let Some(snapshot) = self.multi_diff.remote_snapshot.as_mut() {
                         snapshot["streamState"] = "failed".into();
                     }

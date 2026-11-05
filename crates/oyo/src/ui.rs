@@ -8584,7 +8584,7 @@ fn draw_review_grep_popover(frame: &mut Frame, app: &mut App) {
             format!("{result_count} matches")
         };
         let pending_label = if pending > 0 {
-            format!("; indexing {pending} more...")
+            format!("; incomplete: {pending} files not searched")
         } else {
             String::new()
         };

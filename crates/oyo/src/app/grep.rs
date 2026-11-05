@@ -13,6 +13,10 @@ use std::ops::Range;
 use std::sync::{mpsc, Arc};
 use unicode_segmentation::UnicodeSegmentation;
 
+const REMOTE_GREP_BYTES: usize = 32 * 1024 * 1024;
+const REMOTE_GREP_FILES: usize = 1024;
+const REMOTE_GREP_LINES: usize = 200_000;
+
 const EXACT_REVIEW_GREP_SCORE: u16 = u16::MAX;
 const MAX_FUZZY_REVIEW_GREP_SCORE: u16 = u16::MAX - 1;
 
@@ -89,6 +93,7 @@ struct ReviewGrepRequest {
     scope: ReviewGrepScope,
     context_lines: usize,
     sources: Arc<Vec<ReviewGrepSource>>,
+    bounded: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -105,6 +110,7 @@ struct ReviewGrepResponse {
     query: String,
     scope: ReviewGrepScope,
     results: Vec<ReviewGrepMatch>,
+    skipped_files: usize,
 }
 
 pub(crate) struct ReviewGrepState {
@@ -119,7 +125,9 @@ pub(crate) struct ReviewGrepState {
     source_context_lines: Option<usize>,
     sources: Arc<Vec<ReviewGrepSource>>,
     pending_files: usize,
-    request_tx: Option<mpsc::Sender<ReviewGrepRequest>>,
+    source_pending_files: usize,
+    pending_request: Option<ReviewGrepRequest>,
+    request_tx: Option<mpsc::SyncSender<ReviewGrepRequest>>,
     response_rx: Option<mpsc::Receiver<ReviewGrepResponse>>,
     list_area: Option<(u16, u16, u16, u16)>,
     list_start: usize,
@@ -150,6 +158,8 @@ impl Default for ReviewGrepState {
             source_context_lines: None,
             sources: Arc::new(Vec::new()),
             pending_files: 0,
+            source_pending_files: 0,
+            pending_request: None,
             request_tx: None,
             response_rx: None,
             list_area: None,
@@ -259,9 +269,24 @@ fn push_content_lines(
 fn build_review_grep_corpus(
     sources: &[ReviewGrepSource],
     context_lines: usize,
-) -> Arc<Vec<ReviewGrepLine>> {
+    bounded: bool,
+) -> (Arc<Vec<ReviewGrepLine>>, usize) {
     let mut lines = Vec::new();
+    let mut input_lines = 0usize;
+    let mut skipped_files = 0;
     for source in sources {
+        if bounded {
+            let count = source
+                .old
+                .lines()
+                .count()
+                .saturating_add(source.new.lines().count());
+            if count > REMOTE_GREP_LINES.saturating_sub(input_lines) {
+                skipped_files += 1;
+                continue;
+            }
+            input_lines += count;
+        }
         if source.status == FileStatus::Deleted {
             let changed = (1..=source.old.lines().count()).collect::<HashSet<_>>();
             push_content_lines(
@@ -327,7 +352,7 @@ fn build_review_grep_corpus(
             );
         }
     }
-    Arc::new(lines)
+    (Arc::new(lines), skipped_files)
 }
 
 fn case_insensitive_substring_range(
@@ -415,6 +440,7 @@ fn run_review_grep(request: &ReviewGrepRequest, corpus: &[ReviewGrepLine]) -> Re
             query: request.query.clone(),
             scope: request.scope,
             results: Vec::new(),
+            skipped_files: 0,
         };
     }
 
@@ -539,6 +565,7 @@ fn run_review_grep(request: &ReviewGrepRequest, corpus: &[ReviewGrepLine]) -> Re
         query: request.query.clone(),
         scope: request.scope,
         results,
+        skipped_files: 0,
     }
 }
 
@@ -547,24 +574,33 @@ impl ReviewGrepState {
         if self.request_tx.is_some() {
             return;
         }
-        let (request_tx, request_rx) = mpsc::channel::<ReviewGrepRequest>();
-        let (response_tx, response_rx) = mpsc::channel::<ReviewGrepResponse>();
+        let (request_tx, request_rx) = mpsc::sync_channel::<ReviewGrepRequest>(1);
+        let (response_tx, response_rx) = mpsc::sync_channel::<ReviewGrepResponse>(1);
         std::thread::spawn(move || {
             let mut corpus_key = None;
             let mut corpus = Arc::new(Vec::new());
+            let mut skipped_files = 0;
             while let Ok(mut request) = request_rx.recv() {
                 while let Ok(newer) = request_rx.try_recv() {
                     request = newer;
                 }
+                if request.query.is_empty() {
+                    corpus_key = None;
+                    corpus = Arc::new(Vec::new());
+                    continue;
+                }
                 let key = (request.diff_revision, request.context_lines);
                 if corpus_key != Some(key) {
-                    corpus = build_review_grep_corpus(&request.sources, request.context_lines);
+                    (corpus, skipped_files) = build_review_grep_corpus(
+                        &request.sources,
+                        request.context_lines,
+                        request.bounded,
+                    );
                     corpus_key = Some(key);
                 }
-                if response_tx
-                    .send(run_review_grep(&request, &corpus))
-                    .is_err()
-                {
+                let mut response = run_review_grep(&request, &corpus);
+                response.skipped_files = skipped_files;
+                if response_tx.send(response).is_err() {
                     break;
                 }
             }
@@ -611,7 +647,14 @@ impl App {
                 .unwrap_or(usize::MAX)
                 .saturating_sub(self.multi_diff.file_count())
         };
-        for (file_index, file) in self.multi_diff.files.iter().enumerate() {
+        let mut bytes = 0usize;
+        let selected = self.multi_diff.selected_index;
+        let count = self.multi_diff.file_count();
+        for file_index in std::iter::once(selected)
+            .filter(|index| *index < count)
+            .chain((0..count).filter(|index| *index != selected))
+        {
+            let file = &self.multi_diff.files[file_index];
             if file.binary {
                 continue;
             }
@@ -619,6 +662,14 @@ impl App {
                 pending_files += 1;
                 continue;
             };
+            if self.multi_diff.remote_prefetch_enabled()
+                && (old.len().saturating_add(new.len()) > REMOTE_GREP_BYTES.saturating_sub(bytes)
+                    || sources.len() >= REMOTE_GREP_FILES)
+            {
+                pending_files += 1;
+                continue;
+            }
+            bytes = bytes.saturating_add(old.len()).saturating_add(new.len());
             sources.push(ReviewGrepSource {
                 file_index,
                 status: file.status,
@@ -631,7 +682,7 @@ impl App {
     }
 
     fn submit_review_grep(&mut self) {
-        if !self.review_grep.query.trim().is_empty() {
+        if !self.review_grep.query.trim().is_empty() && !self.multi_diff.remote_prefetch_enabled() {
             for index in 0..self.multi_diff.file_count() {
                 self.multi_diff.ensure_full_content(index);
             }
@@ -640,6 +691,11 @@ impl App {
         let query = self.review_grep.query.trim().to_string();
         self.review_grep.generation = self.review_grep.generation.wrapping_add(1);
         if query.is_empty() {
+            self.clear_review_grep_worker();
+            self.review_grep.sources = Arc::new(Vec::new());
+            self.review_grep.source_revision = None;
+            self.review_grep.pending_files = 0;
+            self.review_grep.source_pending_files = 0;
             self.review_grep.results.clear();
             self.review_grep.selection = 0;
             self.review_grep.searching = false;
@@ -655,6 +711,10 @@ impl App {
             let (sources, pending_files) = self.build_review_grep_sources();
             self.review_grep.sources = sources;
             self.review_grep.pending_files = pending_files;
+            self.review_grep.source_pending_files = pending_files;
+            if self.multi_diff.remote_prefetch_enabled() {
+                self.review_grep.results.clear();
+            }
             self.review_grep.source_revision = Some(revision);
             self.review_grep.source_context_lines = Some(context_lines);
         }
@@ -668,14 +728,39 @@ impl App {
             scope: self.review_grep.scope,
             context_lines,
             sources: Arc::clone(&self.review_grep.sources),
+            bounded: self.multi_diff.remote_prefetch_enabled(),
         };
-        if self
-            .review_grep
-            .request_tx
-            .as_ref()
-            .is_none_or(|tx| tx.send(request).is_err())
-        {
-            self.review_grep.searching = false;
+        self.review_grep.pending_request = Some(request);
+        self.flush_review_grep_request();
+    }
+
+    fn flush_review_grep_request(&mut self) {
+        let Some(request) = self.review_grep.pending_request.take() else {
+            return;
+        };
+        if let Some(tx) = &self.review_grep.request_tx {
+            match tx.try_send(request) {
+                Ok(()) => {}
+                Err(mpsc::TrySendError::Full(request)) => {
+                    self.review_grep.pending_request = Some(request)
+                }
+                Err(mpsc::TrySendError::Disconnected(_)) => self.review_grep.searching = false,
+            }
+        }
+    }
+
+    fn clear_review_grep_worker(&mut self) {
+        if self.review_grep.request_tx.is_some() {
+            self.review_grep.pending_request = Some(ReviewGrepRequest {
+                generation: self.review_grep.generation,
+                diff_revision: self.diff_revision(),
+                query: String::new(),
+                scope: self.review_grep.scope,
+                context_lines: self.fold_context_lines,
+                sources: Arc::new(Vec::new()),
+                bounded: self.multi_diff.remote_prefetch_enabled(),
+            });
+            self.flush_review_grep_request();
         }
     }
 
@@ -704,6 +789,7 @@ impl App {
     pub fn stop_review_grep(&mut self) {
         self.review_grep.active = false;
         self.review_grep.generation = self.review_grep.generation.wrapping_add(1);
+        self.clear_review_grep_worker();
         self.review_grep.requested_revision = None;
         self.review_grep.source_revision = None;
         self.review_grep.source_context_lines = None;
@@ -841,11 +927,15 @@ impl App {
                 self.review_grep.pending_jump = None;
                 true
             }
-            DiffStatus::Loading | DiffStatus::Deferred | DiffStatus::Computing => false,
+            DiffStatus::Loading
+            | DiffStatus::Buffered
+            | DiffStatus::Deferred
+            | DiffStatus::Computing => false,
         }
     }
 
     pub(crate) fn poll_review_grep(&mut self) -> bool {
+        self.flush_review_grep_request();
         let mut changed = false;
         if self.review_grep.active
             && (self.review_grep.requested_revision != Some(self.diff_revision())
@@ -871,6 +961,10 @@ impl App {
         {
             return changed;
         }
+        self.review_grep.pending_files = self
+            .review_grep
+            .source_pending_files
+            .saturating_add(response.skipped_files);
         self.review_grep.results = response.results;
         self.review_grep.selection = self
             .review_grep
@@ -1048,6 +1142,69 @@ mod tests {
     }
 
     #[test]
+    fn sparse_search_does_not_requeue_unavailable_or_evicted_content() {
+        use oyo_core::multi::ContentSource;
+        use oyo_core::patch::PatchRecord;
+        let mut diff = MultiFileDiff::from_pending_files(None, Vec::new(), true);
+        diff.append_patch(
+            PatchRecord::parse(
+                b"diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n-old\n+new\n".to_vec(),
+            )
+            .unwrap(),
+            ContentSource::Empty,
+            ContentSource::Empty,
+        );
+        diff.remote_snapshot = Some(
+            serde_json::json!({"acquisition":"patch-v1","streamState":"receiving","expectedFiles":1}),
+        );
+        let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+        app.review_grep.query = "needle".into();
+        for _ in 0..20 {
+            app.mark_diff_changed();
+            app.submit_review_grep();
+            assert!(app.multi_diff.take_pending_content().is_empty());
+            assert!(app.content_worker_rx.is_none());
+            assert_eq!(app.review_grep.pending_files, 1);
+        }
+        app.stop_review_grep();
+    }
+
+    #[test]
+    fn search_backpressure_retains_one_queued_and_one_latest_request() {
+        let diff = MultiFileDiff::from_file_pairs(vec![("f".into(), "old".into(), "new".into())]);
+        let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+        let (tx, rx) = mpsc::sync_channel(1);
+        app.review_grep.request_tx = Some(tx);
+        for index in 0..100 {
+            app.review_grep.query = format!("query{index}");
+            app.submit_review_grep();
+        }
+        assert_eq!(rx.try_recv().unwrap().query, "query0");
+        assert!(rx.try_recv().is_err());
+        assert_eq!(
+            app.review_grep.pending_request.as_ref().unwrap().query,
+            "query99"
+        );
+        app.flush_review_grep_request();
+        assert_eq!(rx.try_recv().unwrap().query, "query99");
+        assert!(app.review_grep.pending_request.is_none());
+    }
+
+    #[test]
+    fn sparse_search_line_budget_reports_unsearched_files_before_diff_building() {
+        let source = ReviewGrepSource {
+            file_index: 0,
+            status: FileStatus::Modified,
+            diff_status: DiffStatus::Buffered,
+            old: Arc::from("line\n".repeat(REMOTE_GREP_LINES + 1)),
+            new: Arc::from("line\n"),
+        };
+        let (lines, skipped) = build_review_grep_corpus(&[source], 3, true);
+        assert!(lines.is_empty());
+        assert_eq!(skipped, 1);
+    }
+
+    #[test]
     fn fuzzy_files_rank_typos_and_return_unicode_safe_indices() {
         let mut files = (0..100)
             .map(|index| file(&format!("src/generated/file_{index}.rs")))
@@ -1070,6 +1227,7 @@ mod tests {
             grep_line(1, 2, "pub STRUCT ARGS {"),
         ];
         let mut request = ReviewGrepRequest {
+            bounded: false,
             generation: 1,
             diff_revision: 1,
             query: "struct Args".to_string(),
@@ -1149,6 +1307,7 @@ mod tests {
             }
         }
         let request = ReviewGrepRequest {
+            bounded: false,
             generation: 1,
             diff_revision: 1,
             query: "needlz".to_string(),

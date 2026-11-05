@@ -4,6 +4,7 @@ pub(crate) mod gitlab;
 pub(crate) mod http;
 pub(crate) mod identity;
 pub(crate) mod loading;
+pub(crate) mod shared;
 pub(crate) mod stream;
 mod trees;
 use crate::{
@@ -727,8 +728,9 @@ fn git_blob(
         for page in 1..=1000 {
             let endpoint =
                 format!("{prefix}repos/{repo}/git/trees/{tree}?per_page=100&page={page}");
-            let value = loading::tree_page(format!("{kind:?}:{host}:{endpoint}"), || {
-                adapter.remote_json(host, &endpoint)
+            let owned_host = host.to_owned();
+            let value = loading::tree_page(format!("{kind:?}:{host}:{endpoint}"), move || {
+                provider_adapter(kind)?.remote_json(&owned_host, &endpoint)
             })?;
             if matches!(kind, ReviewProviderKind::GitHub)
                 && value["truncated"].as_bool() == Some(true)
@@ -762,7 +764,11 @@ fn git_blob(
                 .as_u64()
                 .is_some_and(|size| size > 32 * 1024 * 1024)
             {
-                bail!("File exceeds the 32 MiB loading limit");
+                return Err(shared::ReadFailure {
+                    kind: shared::FailureKind::TooLarge,
+                    message: "File exceeds the 32 MiB loading limit".into(),
+                }
+                .into());
             }
             let value =
                 adapter.remote_json(host, &format!("{prefix}repos/{repo}/git/blobs/{sha}"))?;
@@ -824,7 +830,11 @@ fn load_uncached(source: &ContentSource) -> Result<Vec<u8>> {
         };
         let bytes = request.execute()?.body;
         if bytes.len() > 32 * 1024 * 1024 {
-            bail!("File exceeds the 32 MiB loading limit");
+            return Err(shared::ReadFailure {
+                kind: shared::FailureKind::TooLarge,
+                message: "File exceeds the 32 MiB loading limit".into(),
+            }
+            .into());
         }
         return Ok(bytes);
     }
@@ -833,7 +843,11 @@ fn load_uncached(source: &ContentSource) -> Result<Vec<u8>> {
         .as_u64()
         .ok_or_else(|| anyhow!("Missing remote file size"))?;
     if size > 32 * 1024 * 1024 {
-        bail!("File exceeds the 32 MiB loading limit");
+        return Err(shared::ReadFailure {
+            kind: shared::FailureKind::TooLarge,
+            message: "File exceeds the 32 MiB loading limit".into(),
+        }
+        .into());
     }
     if value["type"]
         .as_str()
@@ -878,8 +892,9 @@ fn cached_content(source: &ContentSource) -> Option<Vec<u8>> {
 fn cache_content(source: ContentSource, bytes: Vec<u8>) {
     if let Ok(mut cache) = BLOB_CACHE.lock() {
         cache.retain(|(key, _)| key != &source);
-        while cache.iter().map(|(_, bytes)| bytes.len()).sum::<usize>() + bytes.len()
-            > 64 * 1024 * 1024
+        while cache.len() >= 1024
+            || cache.iter().map(|(_, bytes)| bytes.len()).sum::<usize>() + bytes.len()
+                > 64 * 1024 * 1024
         {
             if cache.pop_front().is_none() {
                 break;
@@ -893,11 +908,39 @@ fn load(source: &ContentSource) -> Result<Vec<u8>> {
     if let Some(bytes) = cached_content(source) {
         return Ok(bytes);
     }
-    let bytes = load_uncached(source)?;
+    let owned = source.clone();
+    let bytes = loading::current()
+        .source(source.clone(), None, move || load_uncached(&owned))?
+        .as_ref()
+        .clone();
     if !matches!(source,ContentSource::RemoteBlob {provider,..} if provider!="github") {
         cache_content(source.clone(), bytes.clone());
     }
     Ok(bytes)
+}
+
+fn combine_content_sides(old: Result<Vec<u8>>, new: Result<Vec<u8>>) -> Result<(Vec<u8>, Vec<u8>)> {
+    match (old, new) {
+        (Ok(old), Ok(new)) => Ok((old, new)),
+        (Err(old), Err(new)) => {
+            use shared::{FailureKind, ReadFailure};
+            let rank = |kind| match kind {
+                FailureKind::Blocked => 4,
+                FailureKind::Other => 3,
+                FailureKind::Missing | FailureKind::TooLarge => 2,
+                FailureKind::Cancelled => 1,
+            };
+            let old = ReadFailure::from_error(old);
+            let new = ReadFailure::from_error(new);
+            Err(if rank(new.kind) > rank(old.kind) {
+                new
+            } else {
+                old
+            }
+            .into())
+        }
+        (Err(error), _) | (_, Err(error)) => Err(error),
+    }
 }
 
 pub(crate) fn load_pair(request: &PendingFileContent) -> Result<(Vec<u8>, Vec<u8>)> {
@@ -915,7 +958,7 @@ pub(crate) fn load_pair(request: &PendingFileContent) -> Result<(Vec<u8>, Vec<u8
         let old = old
             .join()
             .map_err(|_| anyhow!("Remote content worker stopped"))?;
-        Ok((old?, new?))
+        combine_content_sides(old, new)
     })
 }
 
@@ -955,7 +998,7 @@ fn run_response(
         command.process_group(0);
     }
     if loading::cancelled() {
-        bail!("Remote loading cancelled");
+        return Err(shared::ReadFailure::cancelled().into());
     }
     if input.is_some_and(|input| input.len() > 65536) {
         bail!("Private transport configuration exceeds its loading limit");
@@ -1025,7 +1068,7 @@ fn run_response(
         if Instant::now() >= deadline || loading::cancelled() {
             child.stop();
             if loading::cancelled() {
-                bail!("Remote loading cancelled");
+                return Err(shared::ReadFailure::cancelled().into());
             }
             bail!("Remote request timed out after 30 seconds");
         }
@@ -1041,10 +1084,14 @@ fn run_response(
     }
     let status = status.ok_or_else(|| anyhow!("Remote request timed out after 30 seconds"))?;
     if !status.success() {
-        bail!(
-            "Remote request failed: {}",
-            oyo_core::patch::terminal_text(String::from_utf8_lossy(&errors).trim())
-        );
+        return Err(shared::ReadFailure {
+            kind: shared::FailureKind::Blocked,
+            message: format!(
+                "Remote request failed: {}",
+                oyo_core::patch::terminal_text(String::from_utf8_lossy(&errors).trim())
+            ),
+        }
+        .into());
     }
     Ok(response)
 }
@@ -1394,5 +1441,40 @@ mod tests {
             revision(&json!({"sha":"a".repeat(40)}), "/sha").unwrap(),
             "a".repeat(40)
         );
+    }
+}
+
+#[cfg(test)]
+mod pair_failure_tests {
+    use super::*;
+    use shared::{FailureKind, ReadFailure};
+
+    #[test]
+    fn paired_reads_preserve_access_and_uncertain_failures_over_skippable_ones() {
+        for skippable in [FailureKind::Missing, FailureKind::TooLarge] {
+            for severe in [FailureKind::Blocked, FailureKind::Other] {
+                for reverse in [false, true] {
+                    let low = Err(ReadFailure {
+                        kind: skippable,
+                        message: "skip".into(),
+                    }
+                    .into());
+                    let high = Err(ReadFailure {
+                        kind: severe,
+                        message: "keep quota details".into(),
+                    }
+                    .into());
+                    let error = if reverse {
+                        combine_content_sides(high, low)
+                    } else {
+                        combine_content_sides(low, high)
+                    }
+                    .unwrap_err();
+                    let failure = ReadFailure::from_error(error);
+                    assert_eq!(failure.kind, severe);
+                    assert_eq!(failure.message, "keep quota details");
+                }
+            }
+        }
     }
 }

@@ -3377,7 +3377,7 @@ fn test_refresh_current_file_queues_deferred_diff_and_restores_decorations() {
     app.refresh_current_file();
 
     assert!(app.diff_revision() > revision);
-    assert_eq!(app.diff_inflight, Some(0));
+    assert_eq!(app.diff_inflight.map(|key| key.file_index), Some(0));
     assert!(matches!(
         app.multi_diff.current_file_diff_status(),
         DiffStatus::Computing
@@ -3415,7 +3415,7 @@ fn test_refresh_current_file_queues_deferred_diff_and_restores_decorations() {
     )
     .expect("start another deferred refresh");
     app.refresh_current_file();
-    assert_eq!(app.diff_inflight, Some(0));
+    assert_eq!(app.diff_inflight.map(|key| key.file_index), Some(0));
 
     let immediate_content = "tiny\n";
     std::fs::write(&path, immediate_content).expect("replace with immediate diff");
