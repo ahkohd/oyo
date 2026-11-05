@@ -3,6 +3,7 @@
 use crate::change::{Change, ChangeSpan};
 use crate::diff::{DiffEngine, DiffResult};
 use crate::git::{ChangedFile, FileStatus};
+use crate::patch::BlobId;
 use crate::step::{DiffNavigator, StepDirection};
 use ignore::overrides::OverrideBuilder;
 use ignore::WalkBuilder;
@@ -83,6 +84,42 @@ pub struct PendingFileContent {
     pub new: ContentSource,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ObservedContent {
+    pub old: BlobId,
+    pub new: BlobId,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExpectedFileContent {
+    pub request: PendingFileContent,
+    pub old: Option<BlobId>,
+    pub new: Option<BlobId>,
+}
+
+impl ExpectedFileContent {
+    fn accepts(&self, request: &PendingFileContent, observed: Option<ObservedContent>) -> bool {
+        if request != &self.request {
+            return false;
+        }
+        let Some(observed) = observed else {
+            return false;
+        };
+        for (source, expected, actual) in [
+            (&request.old, self.old, observed.old),
+            (&request.new, self.new, observed.new),
+        ] {
+            match (source, expected) {
+                (ContentSource::Empty, None) if actual.verify(&[]).is_ok() => {}
+                (ContentSource::Empty, _) | (_, None) => return false,
+                (_, Some(expected)) if expected == actual => {}
+                _ => return false,
+            }
+        }
+        true
+    }
+}
+
 #[derive(Clone)]
 enum RemoteMaterial {
     Patch {
@@ -91,8 +128,9 @@ enum RemoteMaterial {
         hydration: HydrationState,
     },
     Full {
-        old_mode: u32,
-        new_mode: u32,
+        original_patch: Arc<crate::patch::PatchRecord>,
+        request: Box<PendingFileContent>,
+        observed: Option<ObservedContent>,
         display_patch: Option<Arc<crate::patch::PatchRecord>>,
     },
 }
@@ -105,6 +143,7 @@ pub enum HydrationState {
 }
 
 pub struct PreparedFileContent {
+    observed: Option<ObservedContent>,
     old: Arc<str>,
     new: Arc<str>,
     binary: bool,
@@ -151,6 +190,7 @@ pub struct MultiFileDiff {
     blame_sources_override: Option<(BlameSource, BlameSource)>,
     pub remote_snapshot: Option<serde_json::Value>,
     remote_material: std::collections::HashMap<usize, RemoteMaterial>,
+    remote_content_proof: Option<Arc<[ExpectedFileContent]>>,
 }
 
 #[derive(Debug, Clone)]
@@ -582,6 +622,7 @@ impl MultiFileDiff {
             blame_sources_override: None,
             remote_snapshot: None,
             remote_material: std::collections::HashMap::new(),
+            remote_content_proof: None,
         }
     }
 
@@ -640,6 +681,7 @@ impl MultiFileDiff {
             blame_sources_override: None,
             remote_snapshot: None,
             remote_material: std::collections::HashMap::new(),
+            remote_content_proof: None,
         }
     }
 
@@ -704,6 +746,7 @@ impl MultiFileDiff {
             blame_sources_override: None,
             remote_snapshot: None,
             remote_material: std::collections::HashMap::new(),
+            remote_content_proof: None,
         }
     }
 
@@ -1002,6 +1045,7 @@ impl MultiFileDiff {
             blame_sources_override: None,
             remote_snapshot: None,
             remote_material: std::collections::HashMap::new(),
+            remote_content_proof: None,
         })
     }
 
@@ -1085,6 +1129,7 @@ impl MultiFileDiff {
             blame_sources_override: None,
             remote_snapshot: None,
             remote_material: std::collections::HashMap::new(),
+            remote_content_proof: None,
         })
     }
 
@@ -1180,6 +1225,7 @@ impl MultiFileDiff {
             blame_sources_override: None,
             remote_snapshot: None,
             remote_material: std::collections::HashMap::new(),
+            remote_content_proof: None,
         })
     }
 
@@ -1265,6 +1311,7 @@ impl MultiFileDiff {
             blame_sources_override: None,
             remote_snapshot: None,
             remote_material: std::collections::HashMap::new(),
+            remote_content_proof: None,
         })
     }
 
@@ -1406,6 +1453,7 @@ impl MultiFileDiff {
             blame_sources_override: None,
             remote_snapshot: None,
             remote_material: std::collections::HashMap::new(),
+            remote_content_proof: None,
         })
     }
 
@@ -1504,6 +1552,7 @@ impl MultiFileDiff {
             blame_sources_override: None,
             remote_snapshot: None,
             remote_material: std::collections::HashMap::new(),
+            remote_content_proof: None,
         }
     }
 
@@ -1556,6 +1605,7 @@ impl MultiFileDiff {
             blame_sources_override: None,
             remote_snapshot: None,
             remote_material: std::collections::HashMap::new(),
+            remote_content_proof: None,
         }
     }
 
@@ -1726,9 +1776,9 @@ impl MultiFileDiff {
     pub fn file_modes(&self, index: usize) -> Option<(u32, u32)> {
         match self.remote_material.get(&index)? {
             RemoteMaterial::Patch { patch, .. } => Some((patch.old_mode, patch.new_mode)),
-            RemoteMaterial::Full {
-                old_mode, new_mode, ..
-            } => Some((*old_mode, *new_mode)),
+            RemoteMaterial::Full { original_patch, .. } => {
+                Some((original_patch.old_mode, original_patch.new_mode))
+            }
         }
     }
 
@@ -1762,6 +1812,7 @@ impl MultiFileDiff {
 
     pub fn failed_file_content(message: &str) -> PreparedFileContent {
         PreparedFileContent {
+            observed: None,
             old: Arc::from(""),
             new: Arc::from(""),
             binary: false,
@@ -1783,6 +1834,16 @@ impl MultiFileDiff {
     }
 
     pub fn prepare_remote_file_content(old: Vec<u8>, new: Vec<u8>) -> PreparedFileContent {
+        if old.len() > 32 * 1024 * 1024 || new.len() > 32 * 1024 * 1024 {
+            return Self::failed_file_content("Remote file exceeds its loading limit");
+        }
+        let (Ok(old_id), Ok(new_id)) = (BlobId::from_bytes(&old), BlobId::from_bytes(&new)) else {
+            return Self::failed_file_content("Remote file identity is unavailable");
+        };
+        let observed = ObservedContent {
+            old: old_id,
+            new: new_id,
+        };
         let binary = old.contains(&0)
             || new.contains(&0)
             || std::str::from_utf8(&old).is_err()
@@ -1794,6 +1855,7 @@ impl MultiFileDiff {
             precomputed = Some(PrecomputedDiff::Ready(Self::diff_strings(&old, &new)));
         }
         PreparedFileContent {
+            observed: Some(observed),
             old: Arc::from(old),
             new: Arc::from(new),
             binary,
@@ -1818,6 +1880,7 @@ impl MultiFileDiff {
             precomputed = Some(PrecomputedDiff::Ready(Self::diff_strings(&old, &new)));
         }
         PreparedFileContent {
+            observed: None,
             old: Arc::from(old),
             new: Arc::from(new),
             binary: old_binary || new_binary,
@@ -1826,9 +1889,23 @@ impl MultiFileDiff {
         }
     }
 
-    pub fn apply_prepared_content(&mut self, idx: usize, content: PreparedFileContent) -> bool {
+    pub fn apply_prepared_content(&mut self, idx: usize, mut content: PreparedFileContent) -> bool {
+        if let (Some(expected), Some(RemoteMaterial::Patch { request, .. })) =
+            (&self.remote_content_proof, self.remote_material.get(&idx))
+        {
+            if content.status != DiffStatus::Failed
+                && !expected
+                    .get(idx)
+                    .is_some_and(|expected| expected.accepts(request, content.observed))
+            {
+                content =
+                    Self::failed_file_content("Full contents do not match the validated snapshot");
+            }
+        }
         if let Some(RemoteMaterial::Patch {
-            patch, hydration, ..
+            patch,
+            request,
+            hydration,
         }) = self.remote_material.get_mut(&idx)
         {
             if *hydration != HydrationState::Loading {
@@ -1840,7 +1917,15 @@ impl MultiFileDiff {
                 );
                 return true;
             }
-            let modes = (patch.old_mode, patch.new_mode);
+            if patch.content_kind() == crate::patch::PatchContentKind::BinaryObjects {
+                content.old = Arc::from("");
+                content.new = Arc::from("");
+                content.binary = true;
+                content.precomputed = None;
+                content.status = DiffStatus::Disabled;
+            }
+            let original_patch = patch.clone();
+            let request = request.clone();
             let display_patch = ((!patch.has_changed_lines()
                 || content.status != DiffStatus::Ready)
                 && !content.binary)
@@ -1848,8 +1933,9 @@ impl MultiFileDiff {
             self.remote_material.insert(
                 idx,
                 RemoteMaterial::Full {
-                    old_mode: modes.0,
-                    new_mode: modes.1,
+                    original_patch,
+                    request,
+                    observed: content.observed,
                     display_patch,
                 },
             );
@@ -1866,6 +1952,81 @@ impl MultiFileDiff {
             self.navigator_is_placeholder[idx] = false;
         }
         true
+    }
+
+    pub fn remote_content_mismatches(
+        &self,
+        expected: &[ExpectedFileContent],
+    ) -> Result<Vec<usize>, &'static str> {
+        if expected.len() != self.files.len() {
+            return Err("Content proof has a different file manifest");
+        }
+        let mut mismatches = Vec::new();
+        for (index, expected) in expected.iter().enumerate() {
+            let (request, observed) = match self.remote_material.get(&index) {
+                Some(RemoteMaterial::Patch { request, .. }) => (request, None),
+                Some(RemoteMaterial::Full {
+                    request, observed, ..
+                }) => (request, *observed),
+                None => return Err("Content proof lacks a matching remote file"),
+            };
+            if expected.old.is_none() != matches!(request.old, ContentSource::Empty)
+                || expected.new.is_none() != matches!(request.new, ContentSource::Empty)
+            {
+                return Err("Content proof disagrees with object presence");
+            }
+            if expected.request.file_index != index || expected.request != **request {
+                return Err("Content proof belongs to a different immutable request");
+            }
+            if matches!(
+                self.remote_material.get(&index),
+                Some(RemoteMaterial::Full { .. })
+            ) && !expected.accepts(request, observed)
+            {
+                mismatches.push(index);
+            }
+        }
+        Ok(mismatches)
+    }
+
+    pub fn bind_remote_content_proof(
+        &mut self,
+        expected: Arc<[ExpectedFileContent]>,
+    ) -> Result<Vec<usize>, &'static str> {
+        let mismatches = self.remote_content_mismatches(&expected)?;
+        self.remote_content_proof = Some(expected);
+        for index in &mismatches {
+            let Some(RemoteMaterial::Full {
+                original_patch,
+                request,
+                ..
+            }) = self.remote_material.get(index)
+            else {
+                continue;
+            };
+            let patch = original_patch.clone();
+            let request = request.clone();
+            self.files[*index] = patch.entry.clone();
+            self.remote_material.insert(
+                *index,
+                RemoteMaterial::Patch {
+                    patch,
+                    request,
+                    hydration: HydrationState::Failed(
+                        "Full contents do not match the validated snapshot. The patch is retained."
+                            .to_owned(),
+                    ),
+                },
+            );
+            self.old_contents[*index] = Arc::from("");
+            self.new_contents[*index] = Arc::from("");
+            self.precomputed_diffs[*index] = None;
+            self.pending_content[*index] = None;
+            self.diff_statuses[*index] = DiffStatus::Ready;
+            self.navigators[*index] = None;
+            self.navigator_is_placeholder[*index] = false;
+        }
+        Ok(mismatches)
     }
 
     pub fn file_contents(&self, idx: usize) -> Option<(&str, &str)> {
@@ -2641,6 +2802,153 @@ fn shorten_hash(hash: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    fn proof_bound_patch() -> (
+        super::MultiFileDiff,
+        std::sync::Arc<[super::ExpectedFileContent]>,
+    ) {
+        use super::*;
+        let old = ContentSource::RemoteBlob {
+            provider: "gitlab".to_owned(),
+            host: "fixture.test".to_owned(),
+            repo: "11".to_owned(),
+            revision: "1".repeat(40),
+            path: "f".to_owned(),
+        };
+        let new = ContentSource::RemoteBlob {
+            provider: "gitlab".to_owned(),
+            host: "fixture.test".to_owned(),
+            repo: "22".to_owned(),
+            revision: "2".repeat(40),
+            path: "f".to_owned(),
+        };
+        let patch=crate::patch::PatchRecord::parse(b"diff --git a/f b/f\nindex 1111111..2222222 100644\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n-old\n+new\n".to_vec()).unwrap();
+        let mut diff = MultiFileDiff::from_pending_files(None, Vec::new(), true);
+        diff.append_patch(patch, old.clone(), new.clone());
+        diff.remote_snapshot =
+            Some(serde_json::json!({"acquisition":"patch-v1","streamState":"receiving"}));
+        let expected = vec![ExpectedFileContent {
+            request: PendingFileContent {
+                file_index: 0,
+                old,
+                new,
+            },
+            old: Some(BlobId::from_bytes(b"old\n").unwrap()),
+            new: Some(BlobId::from_bytes(b"new\n").unwrap()),
+        }];
+        (diff, expected.into())
+    }
+
+    #[test]
+    fn provider_binary_classification_survives_ascii_hydration() {
+        use super::*;
+        let (_, expected) = proof_bound_patch();
+        let patch = crate::patch::PatchRecord::parse(
+            format!(
+                "diff --git a/f b/f\nindex {}..{} 100644\nBinary files a/f and b/f differ\n",
+                expected[0].old.unwrap(),
+                expected[0].new.unwrap()
+            )
+            .into_bytes(),
+        )
+        .unwrap();
+        let mut diff = MultiFileDiff::from_pending_files(None, Vec::new(), true);
+        diff.append_patch(
+            patch,
+            expected[0].request.old.clone(),
+            expected[0].request.new.clone(),
+        );
+        diff.remote_snapshot = Some(serde_json::json!({"acquisition":"patch-v1"}));
+        assert!(diff.request_full_content(0));
+        diff.take_pending_content();
+        assert!(diff.apply_prepared_content(
+            0,
+            MultiFileDiff::prepare_remote_file_content(b"old\n".to_vec(), b"new\n".to_vec())
+        ));
+        assert!(diff.files[0].binary);
+        assert!(diff.file_contents(0).is_none());
+        assert!(diff.bind_remote_content_proof(expected).unwrap().is_empty());
+        assert!(diff.files[0].binary);
+    }
+
+    #[test]
+    fn content_proof_demotes_bad_installed_bytes_and_guards_every_later_installation() {
+        let (mut diff, expected) = proof_bound_patch();
+        assert!(diff.request_full_content(0));
+        diff.take_pending_content();
+        assert!(diff.apply_prepared_content(
+            0,
+            super::MultiFileDiff::prepare_remote_file_content(
+                b"old\n".to_vec(),
+                b"wrong\xff".to_vec()
+            )
+        ));
+        assert!(!diff.file_is_sparse(0));
+        assert!(diff.files[0].binary);
+        assert_eq!(diff.remote_content_mismatches(&expected).unwrap(), vec![0]);
+        assert_eq!(diff.bind_remote_content_proof(expected).unwrap(), vec![0]);
+        assert!(diff.file_is_sparse(0));
+        assert!(!diff.files[0].binary);
+        assert!(diff.file_contents(0).is_none());
+        assert!(diff.hydration_failure(0).is_some());
+        assert!(!diff.ensure_full_content(0));
+        let nav = diff.current_navigator();
+        assert!(nav
+            .diff()
+            .changes
+            .iter()
+            .any(|change| change.spans.iter().any(|span| span.text == "new")));
+        assert!(diff.request_full_content(0));
+        diff.take_pending_content();
+        assert!(diff.apply_prepared_content(
+            0,
+            super::MultiFileDiff::prepare_remote_file_content(
+                b"old\n".to_vec(),
+                b"wrong\n".to_vec()
+            )
+        ));
+        assert!(diff.file_is_sparse(0));
+        assert!(diff.hydration_failure(0).is_some());
+        assert!(diff.request_full_content(0));
+        diff.take_pending_content();
+        assert!(diff.apply_prepared_content(
+            0,
+            super::MultiFileDiff::prepare_remote_file_content(b"old\n".to_vec(), b"new\n".to_vec())
+        ));
+        assert_eq!(diff.file_contents(0), Some(("old\n", "new\n")));
+    }
+
+    #[test]
+    fn content_proof_binds_fork_request_and_distinguishes_absence_from_empty_blobs() {
+        use super::*;
+        let (mut diff, expected) = proof_bound_patch();
+        let mut wrong = expected.to_vec();
+        wrong[0].request.new = wrong[0].request.old.clone();
+        assert!(diff.bind_remote_content_proof(wrong.into()).is_err());
+        let empty = BlobId::from_bytes(&[]).unwrap();
+        let request = PendingFileContent {
+            file_index: 0,
+            old: ContentSource::Empty,
+            new: expected[0].request.new.clone(),
+        };
+        let present_empty = ExpectedFileContent {
+            request: request.clone(),
+            old: None,
+            new: Some(empty),
+        };
+        let bytes = Some(ObservedContent {
+            old: empty,
+            new: empty,
+        });
+        assert!(present_empty.accepts(&request, bytes));
+        let absent = ExpectedFileContent {
+            request: request.clone(),
+            old: None,
+            new: None,
+        };
+        assert!(!absent.accepts(&request, bytes));
+        assert!(!present_empty.accepts(&request, None));
+    }
+
     use super::*;
     use std::sync::Mutex;
     use std::time::{SystemTime, UNIX_EPOCH};

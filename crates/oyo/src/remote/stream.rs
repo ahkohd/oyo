@@ -1,15 +1,22 @@
 use super::identity::PreparedReview;
 use super::*;
 use oyo_core::patch::{read_patch, terminal_text, PatchRecord};
-use std::io::{BufReader, Read};
+use std::io::{BufReader, Read, Write};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{mpsc, Arc, OnceLock};
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
+
+#[derive(Clone)]
+enum ContentProof {
+    ExistingProviderContract,
+    ImmutableDelta(Arc<[oyo_core::multi::ExpectedFileContent]>),
+}
 
 #[derive(Clone)]
 pub(crate) struct ValidatedSnapshot {
     descriptor: Value,
+    content: ContentProof,
 }
 
 impl ValidatedSnapshot {
@@ -22,7 +29,28 @@ impl ValidatedSnapshot {
     }
 
     pub(super) fn verified(descriptor: Value) -> Arc<Self> {
-        Arc::new(Self { descriptor })
+        Arc::new(Self {
+            descriptor,
+            content: ContentProof::ExistingProviderContract,
+        })
+    }
+    pub(super) fn verified_delta(
+        descriptor: Value,
+        content: Vec<oyo_core::multi::ExpectedFileContent>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            descriptor,
+            content: ContentProof::ImmutableDelta(content.into()),
+        })
+    }
+
+    pub(crate) fn hydration_mismatches(&self, diff: &MultiFileDiff) -> Result<Vec<usize>> {
+        match &self.content {
+            ContentProof::ExistingProviderContract => Ok(Vec::new()),
+            ContentProof::ImmutableDelta(expected) => diff
+                .remote_content_mismatches(expected)
+                .map_err(|error| anyhow!(error)),
+        }
     }
 }
 
@@ -83,21 +111,6 @@ pub(super) fn patch_enabled() -> bool {
     PATCH_ENABLED.load(Ordering::Relaxed)
 }
 
-pub(crate) fn github_streaming(host: &str) -> bool {
-    if !PATCH_ENABLED.load(Ordering::Relaxed) {
-        return false;
-    }
-    if super::github::ReadTransport::for_host(host) == super::github::ReadTransport::PublicHttps {
-        return true;
-    }
-    static CAPABILITY: OnceLock<bool> = OnceLock::new();
-    *CAPABILITY.get_or_init(|| {
-        let mut command = Command::new("gh");
-        command.args(["api", "--help"]);
-        run_command(command, None).is_ok_and(|help| help.contains("--allow-escape-sequences"))
-    })
-}
-
 fn send_event(
     tx: &mpsc::SyncSender<EventEnvelope>,
     context: &loading::ReadContext,
@@ -123,15 +136,16 @@ fn patch_transport(
     tx: mpsc::SyncSender<EventEnvelope>,
     context: loading::ReadContext,
     generation: u64,
-) -> Result<(Vec<FileEntry>, u64)> {
-    let (command, transport) = identity.request();
+) -> Result<(Vec<PatchRecord>, u64)> {
+    let request = identity.request()?;
     patch_response_command(
-        command,
+        request.command,
         identity.expected_files(),
         tx,
         context,
         generation,
-        transport,
+        request.format,
+        request.input,
     )
 }
 
@@ -142,25 +156,27 @@ fn patch_command(
     tx: mpsc::SyncSender<EventEnvelope>,
     context: loading::ReadContext,
     generation: u64,
-) -> Result<(Vec<FileEntry>, u64)> {
+) -> Result<(Vec<PatchRecord>, u64)> {
     patch_response_command(
         command,
-        expected_files,
+        Some(expected_files),
         tx,
         context,
         generation,
         super::http::ResponseFormat::Body,
+        None,
     )
 }
 
 fn patch_response_command(
     mut command: Command,
-    expected_files: usize,
+    expected_files: Option<usize>,
     tx: mpsc::SyncSender<EventEnvelope>,
     context: loading::ReadContext,
     generation: u64,
     transport: super::http::ResponseFormat,
-) -> Result<(Vec<FileEntry>, u64)> {
+    input: Option<String>,
+) -> Result<(Vec<PatchRecord>, u64)> {
     let _permit = loading::TransportPermit::acquire()?;
     #[cfg(unix)]
     {
@@ -168,10 +184,19 @@ fn patch_response_command(
         command.process_group(0);
     }
     command
-        .stdin(Stdio::null())
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut child = loading::RegisteredChild::spawn(&mut command)?;
+    if let Some(input) = input {
+        if input.len() > 65536 {
+            bail!("Private transport configuration exceeds its loading limit");
+        }
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(input.as_bytes())?;
+        }
+    }
+    drop(child.stdin.take());
     let stdout = child
         .stdout
         .take()
@@ -185,7 +210,7 @@ fn patch_response_command(
         stderr.take(65537).read_to_end(&mut bytes).map(|_| bytes)
     });
     let parser_context = context.clone();
-    let parser = std::thread::spawn(move || -> Result<(Vec<FileEntry>, u64)> {
+    let parser = std::thread::spawn(move || -> Result<(Vec<PatchRecord>, u64)> {
         let mut files = Vec::new();
         let mut sequence = 0;
         let mut pending = Vec::new();
@@ -194,13 +219,15 @@ fn patch_response_command(
         read_patch(
             &mut super::http::ResponseBody::new(BufReader::new(stdout), transport),
             |patch| {
-                if files.len() >= expected_files || files.len() >= 100000 {
+                if expected_files.is_some_and(|expected| files.len() >= expected)
+                    || files.len() >= 100000
+                {
                     return Err(
                         "Remote patch exceeds its authoritative file count or loading limit".into(),
                     );
                 }
                 let first_useful = !useful_sent && patch.has_changed_lines();
-                files.push(patch.entry.clone());
+                files.push(patch.clone());
                 pending_bytes += patch.byte_len();
                 pending.push(patch);
                 if first_useful || pending.len() >= 64 || pending_bytes >= 1024 * 1024 {
@@ -358,7 +385,7 @@ pub(crate) fn start(
                 }
             }
             Ok(RemoteEvent::Complete(validated)) => {
-                diff.remote_snapshot = Some(validated.descriptor.clone());
+                apply_proof(&mut diff, &validated)?;
                 proof = Some(validated);
                 break;
             }
@@ -391,7 +418,7 @@ pub(crate) fn finish(url: &str) -> Result<BuiltDiff> {
                     }
                 }
                 Ok(RemoteEvent::Complete(proof)) => {
-                    built.multi_diff.remote_snapshot = Some(proof.descriptor.clone());
+                    apply_proof(&mut built.multi_diff, &proof)?;
                     built.remote_validation = Some(proof);
                     break;
                 }
@@ -404,8 +431,18 @@ pub(crate) fn finish(url: &str) -> Result<BuiltDiff> {
     Ok(built)
 }
 
-pub(crate) fn apply_proof(diff: &mut MultiFileDiff, proof: &ValidatedSnapshot) {
+pub(crate) fn apply_proof(
+    diff: &mut MultiFileDiff,
+    proof: &ValidatedSnapshot,
+) -> Result<Vec<usize>> {
+    let rejected = match &proof.content {
+        ContentProof::ExistingProviderContract => Vec::new(),
+        ContentProof::ImmutableDelta(expected) => diff
+            .bind_remote_content_proof(expected.clone())
+            .map_err(|error| anyhow!(error))?,
+    };
     diff.remote_snapshot = Some(proof.descriptor.clone());
+    Ok(rejected)
 }
 
 #[cfg(test)]
@@ -422,11 +459,12 @@ mod tests {
         let start = Instant::now();
         let error = patch_response_command(
             command,
-            1,
+            Some(1),
             tx,
             loading::ReadContext::default(),
             1,
             super::super::http::ResponseFormat::Headers(ReviewProviderKind::GitHub),
+            None,
         )
         .unwrap_err()
         .to_string();
@@ -466,6 +504,7 @@ mod tests {
         let descriptor = json!({"streamState":"complete","files":[{"path":"f"}]});
         let proof = ValidatedSnapshot {
             descriptor: descriptor.clone(),
+            content: ContentProof::ExistingProviderContract,
         };
         assert!(proof.matches(&descriptor));
         let mut changed = descriptor;
@@ -476,7 +515,7 @@ mod tests {
         "diff --git a/f b/f\nindex 1111111..2222222 100644\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n-old\n+new\n"
     }
 
-    fn controlled_transport(script: String, expected: usize) -> Result<(Vec<FileEntry>, u64)> {
+    fn controlled_transport(script: String, expected: usize) -> Result<(Vec<PatchRecord>, u64)> {
         let context = loading::ReadContext::default();
         let (tx, rx) = mpsc::sync_channel(2);
         let consumer = std::thread::spawn(move || while rx.recv().is_ok() {});

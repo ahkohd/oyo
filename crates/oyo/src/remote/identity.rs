@@ -1,11 +1,10 @@
 use super::stream::ValidatedSnapshot;
 use super::*;
-use std::process::Command;
 use std::sync::Arc;
 
 #[derive(Clone)]
 enum Coverage {
-    Files(usize),
+    ImmutableTrees,
     Changes {
         files: usize,
         additions: usize,
@@ -14,16 +13,17 @@ enum Coverage {
 }
 
 impl Coverage {
-    fn files(&self) -> usize {
+    fn files(&self) -> Option<usize> {
         match self {
-            Self::Files(files) | Self::Changes { files, .. } => *files,
+            Self::ImmutableTrees => None,
+            Self::Changes { files, .. } => Some(*files),
         }
     }
     fn verify(&self, files: &[FileEntry]) -> Result<()> {
-        if files.len() != self.files() {
+        if self.files().is_some_and(|expected| files.len() != expected) {
             bail!(
                 "Provider patch is incomplete: expected {} files; received {}",
-                self.files(),
+                self.files().unwrap(),
                 files.len()
             );
         }
@@ -53,6 +53,7 @@ impl Coverage {
 enum RawPatchSource {
     GithubCompare { base_tip: String },
     PublicComparison(String),
+    ReviewApi,
 }
 
 #[derive(Clone)]
@@ -100,36 +101,23 @@ fn metadata_endpoint(target: &RemoteTarget) -> Result<String> {
     })
 }
 
-fn raw_forgejo_profile(version: &str) -> bool {
-    matches!(
-        version.split('+').next(),
-        Some("16.0.0-dev-798-568c49e1" | "17.0.0-26-363f3dc30b")
-    )
-}
-
 impl PreparedReview {
     pub(crate) fn github(target: &RemoteTarget) -> Result<Option<Self>> {
-        if !super::stream::github_streaming(&target.host) {
+        if !super::stream::patch_enabled() {
             return Ok(None);
         }
         Self::resolve(target).map(Some)
     }
 
     pub(crate) fn gitlab(target: &RemoteTarget) -> Result<Option<Self>> {
-        if !super::stream::patch_enabled() || !super::gitlab::anonymous(&target.host) {
+        if !super::stream::patch_enabled() {
             return Ok(None);
         }
         Self::resolve(target).map(Some)
     }
 
     pub(crate) fn forgejo(target: &RemoteTarget) -> Result<Option<Self>> {
-        if !super::stream::patch_enabled()
-            || crate::forgejo::has_forgejo_configuration(&target.host)
-        {
-            return Ok(None);
-        }
-        let version = provider_adapter(target.provider)?.remote_json(&target.host, "/version")?;
-        if !version["version"].as_str().is_some_and(raw_forgejo_profile) {
+        if !super::stream::patch_enabled() {
             return Ok(None);
         }
         Self::resolve(target).map(Some)
@@ -203,7 +191,6 @@ impl PreparedReview {
                 let after = revision(&metadata, "/diff_refs/head_sha")?;
                 let before_id = repository_id(&metadata, "/target_project_id")?;
                 let after_id = repository_id(&metadata, "/source_project_id")?;
-                let files = metadata["changes_count"].as_str().filter(|value| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())).and_then(|value| value.parse::<usize>().ok()).ok_or_else(|| anyhow!("GitLab did not report an exact file count; capped or missing reviews cannot be validated"))?;
                 let project = adapter
                     .remote_json(&target.host, &format!("projects/{}", encode(&target.repo)))?;
                 if repository_id(&project, "/id")? != before_id {
@@ -229,8 +216,12 @@ impl PreparedReview {
                     before_id,
                     after_id,
                     metadata["diff_refs"].clone(),
-                    Coverage::Files(files),
-                    RawPatchSource::PublicComparison(url),
+                    Coverage::ImmutableTrees,
+                    if super::gitlab::anonymous(&target.host) {
+                        RawPatchSource::PublicComparison(url)
+                    } else {
+                        RawPatchSource::ReviewApi
+                    },
                     Some(source_path),
                 )
             }
@@ -242,17 +233,8 @@ impl PreparedReview {
                 let after_repo = field(&metadata, "/head/repo/full_name")?;
                 let before_id = repository_id(&metadata, "/base/repo/id")?;
                 let after_id = repository_id(&metadata, "/head/repo/id")?;
-                let url = format!(
-                    "https://{}/{}/compare/{before}..{after}.diff",
-                    target.host,
-                    web_path(&after_repo)
-                );
                 let version = serde_json::json!({"baseTip":metadata["base"]["sha"],"head":after});
-                let coverage = Coverage::Changes {
-                    files: count(&metadata, "/changed_files")?,
-                    additions: count(&metadata, "/additions")?,
-                    deletions: count(&metadata, "/deletions")?,
-                };
+                let coverage = Coverage::ImmutableTrees;
                 (
                     RemoteTarget {
                         repo: before_repo.clone(),
@@ -266,12 +248,12 @@ impl PreparedReview {
                     after_id,
                     version,
                     coverage,
-                    RawPatchSource::PublicComparison(url),
+                    RawPatchSource::ReviewApi,
                     None,
                 )
             }
         };
-        if coverage.files() > 100000 {
+        if coverage.files().is_some_and(|count| count > 100000) {
             bail!("Remote review exceeds the 100000-file loading limit");
         }
         let mut descriptor = serde_json::json!({"version":1,"acquisition":"patch-v1","streamState":"receiving","expectedFiles":coverage.files(),"beforeRepositoryId":before_id,"afterRepositoryId":after_id,"target":target.canonical_url(),"provider":target.provider.id(),"host":target.host,"beforeRepository":before_repo,"afterRepository":after_repo,"beforeRevision":before,"afterRevision":after,"reviewVersion":review_version,"files":[]});
@@ -283,6 +265,9 @@ impl PreparedReview {
         {
             descriptor["expectedAdditions"] = additions.into();
             descriptor["expectedDeletions"] = deletions.into();
+        }
+        if matches!(coverage, Coverage::ImmutableTrees) {
+            descriptor["coverage"] = "immutable-trees".into();
         }
         descriptor["sourceRepositoryPath"] = source_path.into();
         let (source_branch, target_branch) = match target.provider {
@@ -309,30 +294,62 @@ impl PreparedReview {
         })
     }
 
-    pub(super) fn expected_files(&self) -> usize {
+    pub(super) fn expected_files(&self) -> Option<usize> {
         self.coverage.files()
     }
 
-    pub(super) fn request(&self) -> (Command, super::http::ResponseFormat) {
-        match &self.source {
+    pub(super) fn request(&self) -> Result<super::http::ReadRequest> {
+        Ok(match &self.source {
             RawPatchSource::GithubCompare { base_tip } => {
-                super::github::patch(&self.target.host, &self.target.repo, base_tip, &self.after)
+                let (command, format) = super::github::patch(
+                    &self.target.host,
+                    &self.target.repo,
+                    base_tip,
+                    &self.after,
+                );
+                super::http::ReadRequest {
+                    command,
+                    input: None,
+                    format,
+                }
             }
-            RawPatchSource::PublicComparison(url) => (
-                super::http::request(url, "Accept: text/plain"),
-                super::http::ResponseFormat::Headers(self.target.provider),
-            ),
-        }
+            RawPatchSource::PublicComparison(url) => {
+                super::http::ReadRequest::public(url, "Accept: text/plain", self.target.provider)
+            }
+            RawPatchSource::ReviewApi => {
+                let endpoint = metadata_endpoint(&self.target)?;
+                match self.target.provider {
+                    ReviewProviderKind::GitLab => super::gitlab::request(
+                        &self.target.host,
+                        &format!("{endpoint}/raw_diffs"),
+                        "Accept: text/plain",
+                    ),
+                    ReviewProviderKind::Forgejo => crate::forgejo::read_request(
+                        &self.target.host,
+                        &format!("{endpoint}.diff?binary=true"),
+                        "Accept: text/plain",
+                    )?,
+                    ReviewProviderKind::GitHub => unreachable!(),
+                }
+            }
+        })
     }
 
     pub(super) fn descriptor(&self, files: &[FileEntry], state: &str) -> Value {
         let mut descriptor = self.descriptor.clone();
         descriptor["streamState"] = state.into();
+        if state == "complete" && matches!(self.coverage, Coverage::ImmutableTrees) {
+            descriptor["expectedFiles"] = files.len().into();
+        }
         descriptor["files"] = files.iter().map(|file|serde_json::json!({"path":file.path,"oldPath":file.old_path,"status":format!("{:?}",file.status)})).collect::<Vec<_>>().into();
         descriptor
     }
 
-    pub(super) fn append(&self, diff: &mut MultiFileDiff, patch: oyo_core::patch::PatchRecord) {
+    fn content_request(
+        &self,
+        index: usize,
+        patch: &oyo_core::patch::PatchRecord,
+    ) -> PendingFileContent {
         let source =
             |repo: &str, revision: &str, path: &std::path::Path| ContentSource::RemoteBlob {
                 provider: self.target.provider.id().to_owned(),
@@ -355,17 +372,57 @@ impl PreparedReview {
         } else {
             source(&self.after_repo, &self.after, &patch.entry.path)
         };
-        diff.append_patch(patch, old, new);
+        PendingFileContent {
+            file_index: index,
+            old,
+            new,
+        }
     }
 
-    pub(super) fn verify(&self, files: &[FileEntry]) -> Result<Arc<ValidatedSnapshot>> {
-        self.coverage.verify(files)?;
+    pub(super) fn append(&self, diff: &mut MultiFileDiff, patch: oyo_core::patch::PatchRecord) {
+        let request = self.content_request(diff.file_count(), &patch);
+        diff.append_patch(patch, request.old, request.new);
+    }
+
+    pub(super) fn verify(
+        &self,
+        patches: &[oyo_core::patch::PatchRecord],
+    ) -> Result<Arc<ValidatedSnapshot>> {
+        let files = patches
+            .iter()
+            .map(|patch| patch.entry.clone())
+            .collect::<Vec<_>>();
+        self.coverage.verify(&files)?;
+        let content = if matches!(self.coverage, Coverage::ImmutableTrees) {
+            let pinned = |repo, revision| super::content_proof::PinnedRepository {
+                provider: self.target.provider,
+                host: &self.target.host,
+                repo,
+                revision,
+            };
+            let requests = patches
+                .iter()
+                .enumerate()
+                .map(|(index, patch)| self.content_request(index, patch))
+                .collect::<Vec<_>>();
+            Some(super::content_proof::verify(
+                pinned(&self.before_repo, &self.before),
+                pinned(&self.after_repo, &self.after),
+                patches,
+                &requests,
+            )?)
+        } else {
+            None
+        };
         if !verify_current(&self.target, &self.descriptor)? {
             bail!("Review changed while loading; refresh to load a consistent snapshot");
         }
-        Ok(ValidatedSnapshot::verified(
-            self.descriptor(files, "complete"),
-        ))
+        let descriptor = self.descriptor(&files, "complete");
+        Ok(if let Some(content) = content {
+            ValidatedSnapshot::verified_delta(descriptor, content)
+        } else {
+            ValidatedSnapshot::verified(descriptor)
+        })
     }
 }
 
@@ -390,10 +447,11 @@ pub(crate) fn verify_current(target: &RemoteTarget, descriptor: &Value) -> Resul
             let mut valid = metadata["diff_refs"] == descriptor["reviewVersion"]
                 && metadata["source_project_id"] == descriptor["afterRepositoryId"]
                 && metadata["target_project_id"] == descriptor["beforeRepositoryId"]
-                && metadata["changes_count"]
-                    .as_str()
-                    .and_then(|value| value.parse::<u64>().ok())
-                    == descriptor["expectedFiles"].as_u64();
+                && (descriptor["coverage"] == "immutable-trees"
+                    || metadata["changes_count"]
+                        .as_str()
+                        .and_then(|value| value.parse::<u64>().ok())
+                        == descriptor["expectedFiles"].as_u64());
             if valid {
                 for (id, path) in [
                     (
@@ -434,7 +492,8 @@ pub(super) fn github_metadata_matches(metadata: &Value, descriptor: &Value) -> b
             || metadata["base"]["repo"]["id"] == descriptor["beforeRepositoryId"])
         && (descriptor["afterRepositoryId"].is_null()
             || metadata["head"]["repo"]["id"] == descriptor["afterRepositoryId"])
-        && (descriptor["expectedFiles"].is_null()
+        && (descriptor["coverage"] == "immutable-trees"
+            || descriptor["expectedFiles"].is_null()
             || metadata["changed_files"] == descriptor["expectedFiles"])
         && (descriptor["expectedAdditions"].is_null()
             || metadata["additions"] == descriptor["expectedAdditions"])

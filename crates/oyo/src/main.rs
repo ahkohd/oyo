@@ -3111,6 +3111,47 @@ fn configure_review_state_for_app(
     Ok(())
 }
 
+fn configure_remote_review_when_ready(
+    app: &mut App,
+    config: &std::sync::Arc<config::Config>,
+    args: &std::sync::Arc<Args>,
+    workspace: Option<PathBuf>,
+    url: &str,
+) -> Result<()> {
+    if app.remote_manifest_complete() {
+        return configure_review_state_for_app(
+            app,
+            config,
+            args,
+            workspace,
+            &InputMode::Remote {
+                url: url.to_owned(),
+            },
+            None,
+            None,
+            true,
+        );
+    }
+    let review_config = config.clone();
+    let review_args = args.clone();
+    let review_url = url.to_owned();
+    app.pending_remote_review = Some(Box::new(move |app| {
+        configure_review_state_for_app(
+            app,
+            &review_config,
+            &review_args,
+            workspace.clone(),
+            &InputMode::Remote {
+                url: review_url.clone(),
+            },
+            None,
+            None,
+            true,
+        )
+    }));
+    Ok(())
+}
+
 fn should_load_saved_review_fallback(input_mode: &InputMode) -> bool {
     if matches!(input_mode, InputMode::Remote { .. }) {
         return false;
@@ -8214,8 +8255,8 @@ fn run() -> Result<()> {
 fn run_app(
     terminal: &mut TuiTerminal,
     app: &mut App,
-    config: &config::Config,
-    args: &Args,
+    config: &std::sync::Arc<config::Config>,
+    args: &std::sync::Arc<Args>,
     control_last_applied_seq: u64,
     control_session_name: &mut Option<String>,
     prepared_control: Option<Result<control::ControlSession, String>>,
@@ -12852,12 +12893,17 @@ impl Drop for RemotePaste {
     }
 }
 
-fn poll_remote_open(app: &mut App, config: &config::Config, args: &Args) -> Option<App> {
+fn poll_remote_open(
+    app: &mut App,
+    config: &std::sync::Arc<config::Config>,
+    args: &std::sync::Arc<Args>,
+) -> Option<App> {
     use app::remote_open::RemoteOpenPhase;
     let mut entry = app.remote_open.take()?;
     if let Some(result) = entry.poll() {
         match result {
-            Ok(built) => {
+            Ok(opened) => {
+                let built = opened.built;
                 let mut candidate = App::new(
                     built.multi_diff,
                     app.view_mode,
@@ -12866,6 +12912,7 @@ fn poll_remote_open(app: &mut App, config: &config::Config, args: &Args) -> Opti
                     built.branch,
                 );
                 candidate.remote_validation = built.remote_validation;
+                candidate.remote_stream = opened.patch_session;
                 apply_config_to_app(&mut candidate, config, args, app.theme_is_light);
                 candidate.theme = app.theme.clone();
                 candidate.ui_theme_name = app.ui_theme_name.clone();
@@ -12881,6 +12928,9 @@ fn poll_remote_open(app: &mut App, config: &config::Config, args: &Args) -> Opti
         candidate.poll_diff_responses();
         candidate.queue_current_file_diff();
         let ready = candidate.multi_diff.file_count() == 0
+            || candidate
+                .multi_diff
+                .has_patch_display(candidate.multi_diff.selected_index)
             || !matches!(
                 candidate
                     .multi_diff
@@ -12906,11 +12956,12 @@ fn poll_remote_open(app: &mut App, config: &config::Config, args: &Args) -> Opti
                 app.remote_open = Some(entry);
                 return None;
             }
-            let mode = InputMode::Remote {
-                url: entry.text.trim().to_owned(),
-            };
-            match configure_review_state_for_app(
-                candidate, config, args, None, &mode, None, None, true,
+            match configure_remote_review_when_ready(
+                candidate,
+                config,
+                args,
+                None,
+                entry.text.trim(),
             ) {
                 Ok(()) => {
                     candidate.move_selection_off_hidden_reviewed_file();

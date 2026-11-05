@@ -16,14 +16,21 @@ pub(crate) enum RemoteOpenPhase {
     Preparing(Box<App>),
 }
 
+pub(crate) struct OpenedRemote {
+    pub(crate) built: BuiltDiff,
+    pub(crate) patch_session: Option<remote::stream::PatchSession>,
+}
+
 pub(crate) struct RemoteOpenWorker {
-    context: remote::loading::ReadContext,
-    rx: mpsc::Receiver<Result<BuiltDiff, String>>,
+    context: Option<remote::loading::ReadContext>,
+    rx: mpsc::Receiver<Result<OpenedRemote, String>>,
 }
 
 impl Drop for RemoteOpenWorker {
     fn drop(&mut self) {
-        self.context.cancel();
+        if let Some(context) = &self.context {
+            context.cancel();
+        }
     }
 }
 
@@ -64,18 +71,33 @@ impl RemoteOpen {
         let worker_context = context.clone();
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
-            let result = worker_context.run(|| remote::build(&url).map_err(|e| e.to_string()));
+            let result = worker_context.run(|| {
+                remote::stream::start(&url, worker_context.clone())
+                    .map(|(built, patch_session)| OpenedRemote {
+                        built,
+                        patch_session,
+                    })
+                    .map_err(|error| error.to_string())
+            });
             let _ = tx.send(result);
         });
-        self.phase = RemoteOpenPhase::Loading(RemoteOpenWorker { context, rx });
+        self.phase = RemoteOpenPhase::Loading(RemoteOpenWorker {
+            context: Some(context),
+            rx,
+        });
     }
 
-    pub(crate) fn poll(&mut self) -> Option<Result<BuiltDiff, String>> {
-        let RemoteOpenPhase::Loading(worker) = &self.phase else {
+    pub(crate) fn poll(&mut self) -> Option<Result<OpenedRemote, String>> {
+        let RemoteOpenPhase::Loading(worker) = &mut self.phase else {
             return None;
         };
         match worker.rx.try_recv() {
-            Ok(result) => Some(result),
+            Ok(result) => {
+                if result.is_ok() {
+                    worker.context.take();
+                }
+                Some(result)
+            }
             Err(mpsc::TryRecvError::Empty) => None,
             Err(mpsc::TryRecvError::Disconnected) => Some(Err("Remote loader stopped.".into())),
         }
@@ -182,7 +204,7 @@ mod tests {
         let context = remote::loading::ReadContext::default();
         let (tx, rx) = mpsc::channel();
         app.remote_open.as_mut().unwrap().phase = RemoteOpenPhase::Loading(RemoteOpenWorker {
-            context: context.clone(),
+            context: Some(context.clone()),
             rx,
         });
         app.remote_open = None;
@@ -196,6 +218,36 @@ mod tests {
     }
 
     #[test]
+    fn receiving_a_usable_review_transfers_cancellation_ownership() {
+        let mut entry = RemoteOpen::new();
+        let context = remote::loading::ReadContext::default();
+        let (tx, rx) = mpsc::channel();
+        entry.phase = RemoteOpenPhase::Loading(RemoteOpenWorker {
+            context: Some(context.clone()),
+            rx,
+        });
+        tx.send(Ok(OpenedRemote {
+            built: BuiltDiff {
+                multi_diff: MultiFileDiff::from_file_pairs(vec![(
+                    "f".into(),
+                    "old".into(),
+                    "new".into(),
+                )]),
+                branch: None,
+                workspace_root: None,
+                remote_validation: None,
+            },
+            patch_session: None,
+        }))
+        .ok()
+        .unwrap();
+        let opened = entry.poll().unwrap().ok().unwrap();
+        drop(entry);
+        assert!(!context.is_cancelled());
+        assert_eq!(opened.built.multi_diff.file_count(), 1);
+    }
+
+    #[test]
     fn load_errors_keep_the_url_editable_and_busy_input_cannot_start_another_worker() {
         let mut entry = RemoteOpen::new();
         entry.insert("bad-url");
@@ -205,7 +257,10 @@ mod tests {
         assert!(entry.error().is_none());
         let context = remote::loading::ReadContext::default();
         let (_tx, rx) = mpsc::channel();
-        entry.phase = RemoteOpenPhase::Loading(RemoteOpenWorker { context, rx });
+        entry.phase = RemoteOpenPhase::Loading(RemoteOpenWorker {
+            context: Some(context),
+            rx,
+        });
         entry.insert("ignored");
         entry.submit();
         assert_eq!(entry.text, "bad-ur");

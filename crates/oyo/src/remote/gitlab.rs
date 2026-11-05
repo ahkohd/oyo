@@ -95,15 +95,41 @@ pub(crate) fn anonymous(host: &str) -> bool {
     anonymous
 }
 
-pub(crate) fn json(host: &str, endpoint: &str) -> Result<Value> {
+pub(crate) fn request(host: &str, endpoint: &str, accept: &str) -> http::ReadRequest {
     if anonymous(host) {
-        http::json(
+        http::ReadRequest::public(
             &format!("https://{host}/api/v4/{endpoint}"),
+            accept,
             ReviewProviderKind::GitLab,
         )
     } else {
         let mut command = Command::new("glab");
-        command.args(["api", "--hostname", host, endpoint]);
-        Ok(serde_json::from_str(&run_command(command, None)?)?)
+        command
+            .env_remove("GLAB_DEBUG_HTTP")
+            .env("NO_COLOR", "1")
+            .env("GLAB_SEND_TELEMETRY", "false")
+            .env("GLAB_CHECK_UPDATE", "false");
+        command.args([
+            "api",
+            "--hostname",
+            host,
+            "--include",
+            "-H",
+            accept,
+            endpoint,
+        ]);
+        http::ReadRequest {
+            command,
+            input: None,
+            format: http::ResponseFormat::Headers(ReviewProviderKind::GitLab),
+        }
     }
+}
+
+pub(crate) fn json(host: &str, endpoint: &str) -> Result<Value> {
+    Ok(serde_json::from_slice(
+        &request(host, endpoint, "Accept: application/json")
+            .execute()?
+            .body,
+    )?)
 }

@@ -64,37 +64,13 @@ fn start(
                 app.remote_validation = built.remote_validation;
                 app.remote_stream = patch_session;
                 app.start_content_loading_with_context(worker_contents);
-                if app.remote_stream.is_some() {
-                    let review_config = config.clone();
-                    let review_args = args.clone();
-                    let review_url = url.clone();
-                    let workspace = built.workspace_root;
-                    app.pending_remote_review = Some(Box::new(move |app| {
-                        configure_review_state_for_app(
-                            app,
-                            &review_config,
-                            &review_args,
-                            workspace.clone(),
-                            &InputMode::Remote {
-                                url: review_url.clone(),
-                            },
-                            None,
-                            None,
-                            true,
-                        )
-                    }));
-                } else {
-                    configure_review_state_for_app(
-                        &mut app,
-                        &config,
-                        &args,
-                        built.workspace_root,
-                        &InputMode::Remote { url: url.clone() },
-                        None,
-                        None,
-                        true,
-                    )?;
-                }
+                configure_remote_review_when_ready(
+                    &mut app,
+                    &config,
+                    &args,
+                    built.workspace_root,
+                    &url,
+                )?;
                 if worker_context.is_cancelled() {
                     anyhow::bail!("Remote loading cancelled");
                 }
@@ -195,6 +171,9 @@ pub(crate) fn remote_app(
             app.move_selection_off_hidden_reviewed_file();
             app.queue_current_file_diff();
             if app.multi_diff.file_count() == 0
+                || app
+                    .multi_diff
+                    .has_patch_display(app.multi_diff.selected_index)
                 || !matches!(
                     app.multi_diff.diff_status(app.multi_diff.selected_index),
                     oyo_core::multi::DiffStatus::Loading

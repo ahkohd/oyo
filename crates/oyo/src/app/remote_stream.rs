@@ -26,16 +26,29 @@ impl App {
         }
         match snapshot["streamState"].as_str() {
             Some("receiving") => Some(format!(
-                "files {}/{} incomplete",
+                "files {}/{}; unverified, read-only",
                 self.multi_diff.file_count(),
-                snapshot["expectedFiles"].as_u64().unwrap_or(0)
+                snapshot["expectedFiles"]
+                    .as_u64()
+                    .map_or_else(|| "?".to_owned(), |count| count.to_string())
             )),
-            Some("failed") => Some("incomplete patch; refresh to retry".to_owned()),
+            Some("failed") => Some("unverified patch; refresh to retry".to_owned()),
             _ if self
                 .multi_diff
                 .file_is_sparse(self.multi_diff.selected_index) =>
             {
-                Some("patch context; F loads full contents".to_owned())
+                Some(
+                    if self
+                        .multi_diff
+                        .hydration_failure(self.multi_diff.selected_index)
+                        .is_some()
+                    {
+                        "full contents unavailable; refresh to retry"
+                    } else {
+                        "loading selected file contents"
+                    }
+                    .to_owned(),
+                )
             }
             _ if self
                 .multi_diff
@@ -78,8 +91,17 @@ impl App {
                     }
                 }
                 Ok(RemoteEvent::Complete(proof)) => {
-                    stream::apply_proof(&mut self.multi_diff, &proof);
-                    self.remote_validation = Some(proof);
+                    if let Err(error) = self.install_remote_proof(proof) {
+                        if let Some(snapshot) = self.multi_diff.remote_snapshot.as_mut() {
+                            snapshot["streamState"] = "failed".into();
+                        }
+                        self.notify(ToastEvent::SelectionActionFailed(format!(
+                            "Snapshot validation failed: {error}"
+                        )));
+                        finished = true;
+                        changed = true;
+                        break;
+                    }
                     let selected = self.multi_diff.selected_index;
                     let scroll = self.scroll_offset;
                     let horizontal = self.horizontal_scroll;
@@ -154,6 +176,43 @@ impl App {
         self.file_recently_changed_until.resize(count, None);
     }
 
+    fn install_remote_proof(
+        &mut self,
+        proof: std::sync::Arc<stream::ValidatedSnapshot>,
+    ) -> anyhow::Result<()> {
+        let mismatches = proof.hydration_mismatches(&self.multi_diff)?;
+        let positions = mismatches
+            .iter()
+            .filter_map(|index| self.capture_file_promotion(*index))
+            .collect::<Vec<_>>();
+        let rejected = stream::apply_proof(&mut self.multi_diff, &proof)?;
+        for index in &rejected {
+            if let Some(cache) = self.syntax_caches.get_mut(*index) {
+                *cache = None;
+            }
+            if let Some(cache) = self.fold_scope_caches.get_mut(*index) {
+                *cache = None;
+            }
+            if let Some(width) = self.max_line_widths_step.get_mut(*index) {
+                *width = 0;
+            }
+            if let Some(width) = self.max_line_widths_no_step.get_mut(*index) {
+                *width = 0;
+            }
+        }
+        for position in positions {
+            self.restore_file_promotion(position);
+        }
+        if !rejected.is_empty() {
+            self.clear_fold_context_caches();
+            self.syntax_scope_cache = None;
+            self.mark_diff_changed();
+            self.notify(ToastEvent::SelectionActionFailed("Full contents did not match the snapshot. The readable patch is retained; refresh to retry.".to_owned()));
+        }
+        self.remote_validation = Some(proof);
+        Ok(())
+    }
+
     pub(crate) fn ensure_remote_content(&mut self, index: usize) -> bool {
         if !self.multi_diff.ensure_full_content(index) {
             return false;
@@ -189,9 +248,9 @@ pub(super) fn with_unloaded_context(view: Vec<oyo_core::ViewLine>) -> Vec<oyo_co
     let mut old = 0usize;
     let mut new = 0usize;
     let gap = |next: usize| ViewLine {
-        content: "Unloaded context. Press F to fetch full contents.".to_owned(),
+        content: "Context is not loaded.".to_owned(),
         spans: vec![ViewSpan {
-            text: "Unloaded context. Press F to fetch full contents.".to_owned(),
+            text: "Context is not loaded.".to_owned(),
             kind: ViewSpanKind::Equal,
         }],
         kind: LineKind::Unloaded,

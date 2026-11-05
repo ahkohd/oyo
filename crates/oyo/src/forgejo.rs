@@ -107,17 +107,13 @@ impl ReviewProviderAdapter for ForgejoProvider {
     }
 
     fn remote_json(&self, host: &str, endpoint: &str) -> Result<serde_json::Value> {
-        if has_forgejo_configuration(host) {
-            Ok(serde_json::from_str(&cb_output(
-                host, "GET", endpoint, None,
-            )?)?)
-        } else {
-            crate::remote::http::json(
-                &format!("https://{host}/api/v1{endpoint}"),
-                ReviewProviderKind::Forgejo,
-            )
-        }
+        Ok(serde_json::from_slice(
+            &read_request(host, endpoint, "Accept: application/json")?
+                .execute()?
+                .body,
+        )?)
     }
+
     fn remote_snapshot(
         &self,
         target: &crate::remote::RemoteTarget,
@@ -800,6 +796,38 @@ fn forgejo_config_path(host: &str) -> Result<std::path::PathBuf> {
 }
 
 pub(crate) fn has_forgejo_configuration(host: &str) -> bool {
+    static HOSTS: std::sync::OnceLock<std::sync::Mutex<BTreeMap<String, bool>>> =
+        std::sync::OnceLock::new();
+    let mut hosts = HOSTS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    *hosts
+        .entry(host.to_owned())
+        .or_insert_with(|| configured_forgejo_host(host))
+}
+
+pub(crate) fn read_request(
+    host: &str,
+    endpoint: &str,
+    accept: &str,
+) -> Result<crate::remote::http::ReadRequest> {
+    let mut request = crate::remote::http::ReadRequest::public(
+        &format!("https://{host}/api/v1{endpoint}"),
+        accept,
+        ReviewProviderKind::Forgejo,
+    );
+    if has_forgejo_configuration(host) {
+        let token = forgejo_token(host)?;
+        request = request.with_curl_config(format!(
+            "header = \"Authorization: token {}\"\n",
+            curl_config_escape(&token)
+        ));
+    }
+    Ok(request)
+}
+
+fn configured_forgejo_host(host: &str) -> bool {
     forgejo_config_path(host).map_or(true, |path| match std::fs::metadata(&path) {
         Ok(_) if host == "codeberg.org" => true,
         Ok(_) => std::fs::read_to_string(path)
