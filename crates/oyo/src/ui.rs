@@ -7115,12 +7115,16 @@ fn draw_session_rename_modal(frame: &mut Frame, app: &mut App) {
     ]));
     lines.push(content_line(Vec::new()));
 
-    lines.push(modal_footer_line(total_width, border, vec![
-        Span::styled("enter", prompt_style),
-        Span::raw(" save    "),
-        Span::styled("esc", prompt_style),
-        Span::raw(" cancel"),
-    ]));
+    lines.push(modal_footer_line(
+        total_width,
+        border,
+        vec![
+            Span::styled("enter", prompt_style),
+            Span::raw(" save    "),
+            Span::styled("esc", prompt_style),
+            Span::raw(" cancel"),
+        ],
+    ));
 
     frame.render_widget(Paragraph::new(lines), popup_area);
 }
@@ -9683,8 +9687,13 @@ mod tests {
     #[test]
     fn modal_footer_preserves_corners_when_only_the_border_fits() {
         use ratatui::style::Style;
-        let text = |width| super::modal_footer_line(width, Style::default(), Vec::new())
-            .spans.iter().map(|span| span.content.as_ref()).collect::<String>();
+        let text = |width| {
+            super::modal_footer_line(width, Style::default(), Vec::new())
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        };
         assert_eq!(text(0), "");
         assert_eq!(text(1), "╯");
         assert_eq!(text(2), "╰╯");

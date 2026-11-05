@@ -40,7 +40,9 @@ pub(crate) fn handle_app_key(
         }
         match app.keybindings.goto(key) {
             Dispatch::Matched(LineInputAction::Cancel) => app.remote_open = None,
-            Dispatch::Matched(LineInputAction::Accept) => app.remote_open.as_mut().unwrap().submit(),
+            Dispatch::Matched(LineInputAction::Accept) => {
+                app.remote_open.as_mut().unwrap().submit()
+            }
             Dispatch::Matched(LineInputAction::Clear) => {
                 let entry = app.remote_open.as_mut().unwrap();
                 if !entry.busy() {
@@ -49,9 +51,12 @@ pub(crate) fn handle_app_key(
                     entry.phase = crate::app::remote_open::RemoteOpenPhase::Editing(None);
                 }
             }
-            Dispatch::Matched(LineInputAction::Backspace) => app.remote_open.as_mut().unwrap()
+            Dispatch::Matched(LineInputAction::Backspace) => app
+                .remote_open
+                .as_mut()
+                .unwrap()
                 .edit(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)),
-            Dispatch::Pending => {},
+            Dispatch::Pending => {}
             Dispatch::Unmatched => app.remote_open.as_mut().unwrap().edit(key),
         }
         return Ok(());
