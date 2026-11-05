@@ -9715,7 +9715,7 @@ mod tests {
                 .map(|cell| cell.symbol())
                 .collect::<String>()
         };
-        assert!(visible(&terminal).contains("❯ │Paste a review URL"));
+        assert!(visible(&terminal).contains("❯ │Review URL"));
         let entry = app.remote_open.as_mut().unwrap();
         entry.insert("bad");
         entry.fail("Remote URLs must use HTTPS".into());
@@ -11866,7 +11866,7 @@ fn draw_remote_open_modal(frame: &mut Frame, app: &App) {
             app,
             &entry.text,
             entry.cursor,
-            "Paste a review URL…",
+            "Review URL…",
             chunks[0].width,
         )),
         chunks[0],
