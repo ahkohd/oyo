@@ -1652,10 +1652,12 @@ fn draw_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
     ));
     right_spans.push(Span::raw(" "));
     if let Some(status) = app.remote_manifest_status() {
-        right_spans.push(Span::styled(
-            status,
-            Style::default().fg(app.theme.text_muted),
-        ));
+        if status != "loading selected file contents" {
+            right_spans.push(Span::styled(
+                status,
+                Style::default().fg(app.theme.text_muted),
+            ));
+        }
     } else if app.content_loading_count() > 0 {
         right_spans.push(Span::styled(
             format!("loading {} files…", app.content_loading_count()),
