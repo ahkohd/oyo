@@ -22,6 +22,7 @@ pub(crate) enum PaletteAction {
     ToggleAutoplay,
     ToggleAutoplayReverse,
     OpenDashboard,
+    OpenRemoteReview,
     NavigateBack,
     NavigateForward,
     OpenFileSearch,
@@ -202,7 +203,7 @@ impl App {
         self.pending_session_rename.take()
     }
 
-    pub(super) fn reset_picker_cursor(&mut self) {
+    pub(crate) fn reset_picker_cursor(&mut self) {
         self.file_filter_cursor_visible = true;
         self.file_filter_cursor_last_blink = std::time::Instant::now();
     }
@@ -401,6 +402,10 @@ impl App {
         }
 
         entries.push(PaletteEntry {
+            label: "Open remote review...".to_string(),
+            action: PaletteAction::OpenRemoteReview,
+        });
+        entries.push(PaletteEntry {
             label: "History...".to_string(),
             action: PaletteAction::OpenDashboard,
         });
@@ -565,6 +570,7 @@ impl App {
                 PaletteAction::ToggleHelp
                     | PaletteAction::OpenSettings
                     | PaletteAction::OpenDashboard
+                    | PaletteAction::OpenRemoteReview
                     | PaletteAction::NavigateBack
                     | PaletteAction::NavigateForward
                     | PaletteAction::OpenThemePicker
@@ -601,6 +607,7 @@ impl App {
             }
             PaletteAction::ToggleAutoplay => self.toggle_autoplay(),
             PaletteAction::ToggleAutoplayReverse => self.toggle_autoplay_reverse(),
+            PaletteAction::OpenRemoteReview => self.start_remote_open(),
             PaletteAction::OpenDashboard => self.open_dashboard = true,
             PaletteAction::NavigateBack => {
                 self.navigate_view_back();

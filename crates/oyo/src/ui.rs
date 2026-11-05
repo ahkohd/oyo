@@ -916,6 +916,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     draw_file_context_menu(frame, app);
     draw_review_comment_context_menu(frame, app);
     draw_status_mode_menu(frame, app);
+    if app.remote_open.is_some() {
+        draw_remote_open_modal(frame, app);
+    }
+
     if app.session_rename_active() {
         draw_session_rename_modal(frame, app);
     }
@@ -7005,6 +7009,23 @@ fn draw_review_remote_picker(frame: &mut Frame, app: &mut App) {
     frame.render_widget(Paragraph::new(lines), chunks[1]);
 }
 
+fn modal_footer_line(width: usize, border: Style, actions: Vec<Span<'static>>) -> Line<'static> {
+    if width < 4 {
+        let edge = match width {
+            0 => String::new(),
+            1 => "╯".to_owned(),
+            _ => format!("╰{}╯", "─".repeat(width - 2)),
+        };
+        return Line::from(Span::styled(edge, border));
+    }
+    let actions = clamp_spans_to_width(&actions, width.saturating_sub(4));
+    let footer_rule = "─".repeat(width.saturating_sub(spans_width(&actions).saturating_add(4)));
+    let mut spans = vec![Span::styled("╰ ", border)];
+    spans.extend(actions);
+    spans.push(Span::styled(format!(" {footer_rule}╯"), border));
+    Line::from(spans)
+}
+
 fn draw_session_rename_modal(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
     let title = "Rename session";
@@ -7094,16 +7115,16 @@ fn draw_session_rename_modal(frame: &mut Frame, app: &mut App) {
     ]));
     lines.push(content_line(Vec::new()));
 
-    let footer_width = text_width(footer_label);
-    let footer_rule = "─".repeat(total_width.saturating_sub(footer_width.saturating_add(4)));
-    lines.push(Line::from(vec![
-        Span::styled("╰ ".to_string(), border),
-        Span::styled("enter".to_string(), prompt_style),
-        Span::raw(" save    "),
-        Span::styled("esc".to_string(), prompt_style),
-        Span::raw(" cancel"),
-        Span::styled(format!(" {footer_rule}╯"), border),
-    ]));
+    lines.push(modal_footer_line(
+        total_width,
+        border,
+        vec![
+            Span::styled("enter", prompt_style),
+            Span::raw(" save    "),
+            Span::styled("esc", prompt_style),
+            Span::raw(" cancel"),
+        ],
+    ));
 
     frame.render_widget(Paragraph::new(lines), popup_area);
 }
@@ -8043,35 +8064,80 @@ fn draw_path_popup(frame: &mut Frame, app: &App) {
 }
 
 fn picker_input_line(app: &App, query: &str, placeholder: &str, width: u16) -> Line<'static> {
+    picker_input_line_at(app, query, query.len(), placeholder, width)
+}
+
+fn picker_input_line_at(
+    app: &App,
+    query: &str,
+    cursor: usize,
+    placeholder: &str,
+    width: u16,
+) -> Line<'static> {
+    use unicode_segmentation::UnicodeSegmentation;
     let prompt_style = Style::default()
         .fg(app.theme.primary)
         .add_modifier(Modifier::BOLD);
     let content_width = width.saturating_sub(3) as usize;
-    let (text, text_style) = if query.is_empty() {
-        (
-            truncate_text(placeholder, content_width),
-            Style::default().fg(app.theme.text_muted),
-        )
+    let before = truncate_text_from_start(&query[..cursor], content_width);
+    let mut remaining = content_width.saturating_sub(text_width(&before));
+    let after = if query.is_empty() {
+        truncate_text(placeholder, remaining)
     } else {
-        (
-            truncate_text_from_start(query, content_width),
-            Style::default().fg(app.theme.text),
-        )
+        query[cursor..]
+            .graphemes(true)
+            .take_while(|grapheme| {
+                let width = text_width(grapheme);
+                if width > remaining {
+                    return false;
+                }
+                remaining -= width;
+                true
+            })
+            .collect::<String>()
     };
-    let prompt = Span::styled("❯ ", prompt_style);
-    let text = Span::styled(text, text_style);
-    let cursor = Span::styled(
-        if app.file_filter_cursor_visible {
-            "│"
-        } else {
-            " "
-        },
-        prompt_style,
-    );
-    if query.is_empty() {
-        Line::from(vec![prompt, cursor, text])
+    Line::from(vec![
+        Span::styled("❯ ", prompt_style),
+        Span::styled(before, Style::default().fg(app.theme.text)),
+        Span::styled(
+            if app.file_filter_cursor_visible {
+                "│"
+            } else {
+                " "
+            },
+            prompt_style,
+        ),
+        Span::styled(
+            after,
+            Style::default().fg(if query.is_empty() {
+                app.theme.text_muted
+            } else {
+                app.theme.text
+            }),
+        ),
+    ])
+}
+
+fn draw_picker_popup(frame: &mut Frame, app: &App, area: Rect, title: &str) -> Rect {
+    frame.render_widget(Clear, area);
+    let mut block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(Style::default().fg(app.theme.border_active))
+        .title(title);
+    if let Some(bg) = app.theme.background {
+        block = block.style(Style::default().bg(bg));
+    }
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let padded = inner.inner(Margin {
+        vertical: 1,
+        horizontal: 1,
+    });
+    if padded.width > 0 && padded.height > 0 {
+        padded
     } else {
-        Line::from(vec![prompt, text, cursor])
+        inner
     }
 }
 
@@ -8101,25 +8167,7 @@ fn draw_command_palette_popover(frame: &mut Frame, app: &mut App) {
         .min(max_height);
     let popup_area = spotlight_popup_rect(area, popup_height);
 
-    frame.render_widget(Clear, popup_area);
-    let mut block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(ratatui::widgets::BorderType::Rounded);
-    block = block.border_style(Style::default().fg(app.theme.border_active));
-    if let Some(bg) = app.theme.background {
-        block = block.style(Style::default().bg(bg));
-    }
-    frame.render_widget(block.clone(), popup_area);
-    let inner = block.inner(popup_area);
-    let padded = inner.inner(Margin {
-        vertical: 1,
-        horizontal: 1,
-    });
-    let content = if padded.width > 0 && padded.height > 0 {
-        padded
-    } else {
-        inner
-    };
+    let content = draw_picker_popup(frame, app, popup_area, "");
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -9602,6 +9650,108 @@ mod tests {
         );
     }
 
+    #[test]
+    fn editable_picker_keeps_the_line_caret_at_the_insertion_point() {
+        let mut app = App::new(
+            MultiFileDiff::from_file_pairs(Vec::new()),
+            ViewMode::UnifiedPane,
+            0,
+            false,
+            None,
+        );
+        let text = |line: ratatui::text::Line<'_>| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        };
+        assert_eq!(
+            text(super::picker_input_line_at(&app, "abc", 1, "URL", 20)),
+            "❯ a│bc"
+        );
+        assert_eq!(
+            text(super::picker_input_line_at(&app, "abc", 0, "URL", 20)),
+            "❯ │abc"
+        );
+        assert_eq!(
+            text(super::picker_input_line_at(&app, "long-url", 8, "URL", 7)),
+            "❯ …url│"
+        );
+        app.file_filter_cursor_visible = false;
+        assert_eq!(
+            text(super::picker_input_line_at(&app, "abc", 1, "URL", 20)),
+            "❯ a bc"
+        );
+    }
+
+    #[test]
+    fn modal_footer_preserves_corners_when_only_the_border_fits() {
+        use ratatui::style::Style;
+        let text = |width| {
+            super::modal_footer_line(width, Style::default(), Vec::new())
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        };
+        assert_eq!(text(0), "");
+        assert_eq!(text(1), "╯");
+        assert_eq!(text(2), "╰╯");
+        assert_eq!(text(3), "╰─╯");
+    }
+
+    #[test]
+    fn remote_url_entry_uses_the_picker_prompt_and_inline_error_in_small_terminals() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut app = App::new(
+            MultiFileDiff::from_file_pairs(Vec::new()),
+            ViewMode::UnifiedPane,
+            0,
+            false,
+            None,
+        );
+        app.start_remote_open();
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|frame| super::draw_remote_open_modal(frame, &app))
+            .unwrap();
+        let visible = |terminal: &Terminal<TestBackend>| {
+            terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>()
+        };
+        assert!(visible(&terminal).contains("❯ │Review URL"));
+        let entry = app.remote_open.as_mut().unwrap();
+        entry.insert("bad");
+        entry.fail("Remote URLs must use HTTPS".into());
+        for (width, height) in [(32, 12), (10, 4), (4, 2)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal
+                .draw(|frame| super::draw_remote_open_modal(frame, &app))
+                .unwrap();
+            if width == 32 {
+                let text = visible(&terminal);
+                assert!(text.contains("❯ bad│"));
+                assert!(text.contains("HTTPS"));
+                assert!(text.contains("esc cancel"));
+                let rows = terminal
+                    .backend()
+                    .buffer()
+                    .content
+                    .chunks(usize::from(width))
+                    .map(|cells| cells.iter().map(|cell| cell.symbol()).collect::<String>())
+                    .collect::<Vec<_>>();
+                let footer = rows.iter().find(|row| row.contains("esc cancel")).unwrap();
+                assert!(footer.contains("╰ enter open    esc cancel ╯"));
+                assert!(!footer.contains("HTTPS"));
+                assert_eq!(text.matches("esc cancel").count(), 1);
+            }
+        }
+    }
     #[test]
     fn file_filter_active_text_uses_prompt_and_ibeam() {
         let multi = MultiFileDiff::from_file_pair(
@@ -11682,5 +11832,92 @@ mod tests {
             &lines[1] // the blank separator inside the quote
         ));
         assert!(!markdown_line_is_quote_border(lines.last().unwrap()));
+    }
+}
+
+fn draw_remote_open_modal(frame: &mut Frame, app: &App) {
+    use crate::app::remote_open::RemoteOpenPhase;
+    use ratatui::widgets::Wrap;
+    let Some(entry) = &app.remote_open else {
+        return;
+    };
+    let status = match &entry.phase {
+        RemoteOpenPhase::Editing(_) => entry.error().unwrap_or(""),
+        RemoteOpenPhase::Loading(_) => "Loading remote review...",
+        RemoteOpenPhase::Preparing(_) => "Preparing diff...",
+    };
+    let popup = spotlight_popup_rect(frame.area(), 6);
+    let status_width = if popup.width < 8 {
+        frame.area().width
+    } else {
+        popup.width
+    };
+    let status_rows = if status.is_empty() {
+        0
+    } else {
+        Paragraph::new(status)
+            .wrap(Wrap { trim: true })
+            .line_count(status_width.saturating_sub(4).max(1))
+            .clamp(1, 4) as u16
+    };
+    let popup = if popup.width < 8 {
+        frame.area()
+    } else {
+        spotlight_popup_rect(frame.area(), 6u16.saturating_add(status_rows))
+    };
+    let content = draw_picker_popup(frame, app, popup, " Open remote review ");
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(2), Constraint::Min(0)])
+        .split(content);
+    frame.render_widget(
+        Paragraph::new(picker_input_line_at(
+            app,
+            &entry.text,
+            entry.cursor,
+            "Review URL…",
+            chunks[0].width,
+        )),
+        chunks[0],
+    );
+    let status_color = if entry.error().is_some() {
+        app.theme.error
+    } else {
+        app.theme.text_muted
+    };
+    frame.render_widget(
+        Paragraph::new(status)
+            .style(Style::default().fg(status_color))
+            .wrap(Wrap { trim: true }),
+        chunks[1],
+    );
+    let key_style = Style::default()
+        .fg(app.theme.primary)
+        .add_modifier(Modifier::BOLD);
+    let accept = app
+        .keybindings
+        .goto_keys(crate::keybindings::LineInputAction::Accept);
+    let full_width = text_width(&accept)
+        .saturating_add(text_width(" open    esc cancel"))
+        .saturating_add(4);
+    let mut actions = Vec::new();
+    if !entry.busy() && usize::from(popup.width) >= full_width {
+        actions.push(Span::styled(accept, key_style));
+        actions.push(Span::raw(" open    "));
+    }
+    actions.push(Span::styled("esc", key_style));
+    if popup.width >= 14 {
+        actions.push(Span::raw(" cancel"));
+    }
+    if popup.height > 0 {
+        frame.render_widget(
+            Paragraph::new(modal_footer_line(
+                usize::from(popup.width),
+                Style::default().fg(app.theme.border_active),
+                actions,
+            ))
+            .style(Style::default().fg(app.theme.text)),
+            Rect::new(popup.x, popup.y + popup.height - 1, popup.width, 1),
+        );
     }
 }

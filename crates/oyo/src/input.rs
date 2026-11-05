@@ -32,6 +32,36 @@ pub(crate) fn handle_app_key(
         return Ok(());
     }
 
+    if app.remote_open.is_some() {
+        app.reset_picker_cursor();
+        if key.code == KeyCode::Esc {
+            app.remote_open = None;
+            return Ok(());
+        }
+        match app.keybindings.goto(key) {
+            Dispatch::Matched(LineInputAction::Cancel) => app.remote_open = None,
+            Dispatch::Matched(LineInputAction::Accept) => {
+                app.remote_open.as_mut().unwrap().submit()
+            }
+            Dispatch::Matched(LineInputAction::Clear) => {
+                let entry = app.remote_open.as_mut().unwrap();
+                if !entry.busy() {
+                    entry.text.clear();
+                    entry.cursor = 0;
+                    entry.phase = crate::app::remote_open::RemoteOpenPhase::Editing(None);
+                }
+            }
+            Dispatch::Matched(LineInputAction::Backspace) => app
+                .remote_open
+                .as_mut()
+                .unwrap()
+                .edit(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)),
+            Dispatch::Pending => {}
+            Dispatch::Unmatched => app.remote_open.as_mut().unwrap().edit(key),
+        }
+        return Ok(());
+    }
+
     if app.settings_leave_confirmation_active() {
         app.handle_settings_leave_key(key);
         return Ok(());

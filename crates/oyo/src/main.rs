@@ -46,9 +46,9 @@ use app::{
 use clap::{Parser, Subcommand, ValueEnum};
 use crossterm::{
     event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
-        KeyModifiers, KeyboardEnhancementFlags, MouseButton, MouseEventKind,
-        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
+        MouseButton, MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
     terminal::{
@@ -8267,7 +8267,9 @@ fn run_app(
     );
     carry_control_session_name(control_session_name, control_session.as_ref());
 
+    let mut remote_paste = RemotePaste::default();
     loop {
+        remote_paste.set(app.remote_open.is_some())?;
         if scroll_draw_pending && last_scroll_draw.elapsed() >= MOUSE_SCROLL_FRAME {
             needs_draw = true;
         }
@@ -8308,7 +8310,11 @@ fn run_app(
                 .checked_sub(last_scroll_draw.elapsed())
                 .unwrap_or_default()
         } else {
-            app.redraw_interval()
+            if app.remote_open.as_ref().is_some_and(|entry| entry.busy()) {
+                Duration::from_millis(16)
+            } else {
+                app.redraw_interval()
+            }
         };
         let event = if let Some(event) = pending_event.take() {
             Some(event)
@@ -8332,6 +8338,13 @@ fn run_app(
                 }
             }
             match event {
+                Event::Paste(text) => {
+                    if let Some(entry) = app.remote_open.as_mut() {
+                        entry.insert(&text);
+                        app.reset_picker_cursor();
+                    }
+                }
+                Event::Mouse(_) if app.remote_open.is_some() => {}
                 Event::Mouse(me) => {
                     if app.show_help || app.show_path_popup {
                         continue;
@@ -8899,6 +8912,18 @@ fn run_app(
         }
 
         if app.tick() && !(scroll_draw_pending && last_scroll_draw.elapsed() < MOUSE_SCROLL_FRAME) {
+            needs_draw = true;
+        }
+        if let Some(mut replacement) = poll_remote_open(app, config, args) {
+            if let Some(session) = control_session.as_mut() {
+                session.preempt(app);
+            }
+            review_sync_worker = None;
+            review_sync_pull_stats = None;
+            review_pr_lookup_worker = None;
+            replacement.retain_review_hook_warnings(app.take_review_hook_warnings());
+            replacement.set_control_session_name(app.control_session_name().map(str::to_owned));
+            *app = replacement;
             needs_draw = true;
         }
         if let Some(name) = app.take_pending_session_rename() {
@@ -12802,4 +12827,102 @@ mod tests {
         assert_eq!(fs::read_to_string(&path).unwrap(), "secret\n");
         fs::remove_dir_all(snapshot_dir).unwrap();
     }
+}
+
+#[derive(Default)]
+struct RemotePaste(bool);
+
+impl RemotePaste {
+    fn set(&mut self, enabled: bool) -> io::Result<()> {
+        if self.0 != enabled {
+            if enabled {
+                execute!(io::stderr(), EnableBracketedPaste)?;
+            } else {
+                execute!(io::stderr(), DisableBracketedPaste)?;
+            }
+            self.0 = enabled;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for RemotePaste {
+    fn drop(&mut self) {
+        let _ = self.set(false);
+    }
+}
+
+fn poll_remote_open(app: &mut App, config: &config::Config, args: &Args) -> Option<App> {
+    use app::remote_open::RemoteOpenPhase;
+    let mut entry = app.remote_open.take()?;
+    if let Some(result) = entry.poll() {
+        match result {
+            Ok(built) => {
+                let mut candidate = App::new(
+                    built.multi_diff,
+                    app.view_mode,
+                    app.animation_speed,
+                    false,
+                    built.branch,
+                );
+                candidate.remote_validation = built.remote_validation;
+                apply_config_to_app(&mut candidate, config, args, app.theme_is_light);
+                candidate.theme = app.theme.clone();
+                candidate.ui_theme_name = app.ui_theme_name.clone();
+                candidate.set_image_picker(ratatui_image::picker::Picker::halfblocks());
+                candidate.start_content_loading();
+                entry.phase = RemoteOpenPhase::Preparing(Box::new(candidate));
+            }
+            Err(error) => entry.fail(error),
+        }
+    }
+    if let RemoteOpenPhase::Preparing(candidate) = &mut entry.phase {
+        candidate.poll_content_responses();
+        candidate.poll_diff_responses();
+        candidate.queue_current_file_diff();
+        let ready = candidate.multi_diff.file_count() == 0
+            || !matches!(
+                candidate
+                    .multi_diff
+                    .diff_status(candidate.multi_diff.selected_index),
+                oyo_core::multi::DiffStatus::Loading
+                    | oyo_core::multi::DiffStatus::Deferred
+                    | oyo_core::multi::DiffStatus::Computing
+            );
+        if ready
+            && candidate.multi_diff.file_count() > 0
+            && candidate
+                .multi_diff
+                .diff_status(candidate.multi_diff.selected_index)
+                == oyo_core::multi::DiffStatus::Failed
+        {
+            entry.fail("Unable to load the remote diff. Your current review is still open.".into());
+            app.remote_open = Some(entry);
+            return None;
+        }
+        if ready {
+            if let Err(error) = app.save_review_for_switch() {
+                entry.fail(error.to_string());
+                app.remote_open = Some(entry);
+                return None;
+            }
+            let mode = InputMode::Remote {
+                url: entry.text.trim().to_owned(),
+            };
+            match configure_review_state_for_app(
+                candidate, config, args, None, &mode, None, None, true,
+            ) {
+                Ok(()) => {
+                    candidate.move_selection_off_hidden_reviewed_file();
+                    let RemoteOpenPhase::Preparing(candidate) = entry.phase else {
+                        unreachable!()
+                    };
+                    return Some(*candidate);
+                }
+                Err(error) => entry.fail(error.to_string()),
+            }
+        }
+    }
+    app.remote_open = Some(entry);
+    None
 }

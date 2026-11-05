@@ -7467,6 +7467,38 @@ impl App {
         Ok(conn)
     }
 
+    pub(crate) fn save_review_for_switch(&mut self) -> anyhow::Result<()> {
+        if !self.review_mode || !self.review_persist_enabled {
+            return Ok(());
+        }
+        self.persist_review_session();
+        if self.review_session_baseline != self.review_comments {
+            anyhow::bail!("Unable to save this review. Cancel and try again.");
+        }
+        let path = self
+            .review_db_path
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Review storage is unavailable."))?;
+        let conn = Self::review_db(path)?;
+        let stored: Option<String> = conn.query_row(
+            "SELECT editor_json FROM reviews WHERE review_key = ?1",
+            params![self.review_db_key()],
+            |row| row.get(0),
+        )?;
+        let expected = self
+            .review_editor
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
+        if stored != expected {
+            anyhow::bail!("Unable to save the current draft. Cancel and try again.");
+        }
+        Ok(())
+    }
+
+    pub(crate) fn retain_review_hook_warnings(&mut self, warnings: Vec<String>) {
+        self.review_hook_warnings.extend(warnings);
+    }
     fn persist_review_session(&mut self) {
         if !self.review_mode || !self.review_persist_enabled {
             return;

@@ -39,6 +39,7 @@ mod playback;
 mod remote_position;
 mod remote_stream;
 pub(crate) use remote_position::RemoteRowGeometry;
+pub(crate) mod remote_open;
 pub(crate) mod review;
 mod review_queue;
 pub(crate) mod startup;
@@ -837,6 +838,7 @@ pub struct App {
     command_palette_query: String,
     /// True when command palette is active
     command_palette_active: bool,
+    pub(crate) remote_open: Option<remote_open::RemoteOpen>,
     /// Selected command palette entry
     command_palette_selection: usize,
     /// Command palette list area (x, y, width, height)
@@ -1502,6 +1504,7 @@ impl App {
             search_clear_hover: false,
             command_palette_query: String::new(),
             command_palette_active: false,
+            remote_open: None,
             command_palette_selection: 0,
             command_palette_list_area: None,
             command_palette_list_start: 0,
@@ -3191,7 +3194,8 @@ impl App {
             }
         }
 
-        let text_cursor_active = self.file_filter_active
+        let text_cursor_active = self.remote_open.is_some()
+            || self.file_filter_active
             || self.command_palette_active
             || self.file_search_active
             || self.review_grep_active()
