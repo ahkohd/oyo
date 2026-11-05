@@ -5283,8 +5283,11 @@ pub(crate) fn usable_sync_pr_target(target: &str) -> Option<&str> {
 }
 
 trait ReviewProviderAdapter: Send + Sync {
-    fn supports_patch_stream(&self, _host: &str) -> bool {
-        false
+    fn prepare_review_stream(
+        &self,
+        _target: &remote::RemoteTarget,
+    ) -> Result<Option<remote::identity::PreparedReview>> {
+        Ok(None)
     }
     fn remote_snapshot_matches(
         &self,
@@ -5309,8 +5312,11 @@ trait ReviewProviderAdapter: Send + Sync {
 struct GithubProvider;
 
 impl ReviewProviderAdapter for GithubProvider {
-    fn supports_patch_stream(&self, host: &str) -> bool {
-        remote::stream::github_streaming(host)
+    fn prepare_review_stream(
+        &self,
+        target: &remote::RemoteTarget,
+    ) -> Result<Option<remote::identity::PreparedReview>> {
+        remote::identity::PreparedReview::github(target)
     }
     fn remote_snapshot_matches(
         &self,
@@ -5318,7 +5324,7 @@ impl ReviewProviderAdapter for GithubProvider {
         descriptor: &serde_json::Value,
     ) -> Result<bool> {
         if matches!(target.kind, remote::RemoteTargetKind::Review(_)) {
-            remote::stream::verify_github_identity(target, descriptor)
+            remote::identity::verify_current(target, descriptor)
         } else {
             Ok(self.remote_snapshot(target)?.matches_descriptor(descriptor))
         }

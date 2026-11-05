@@ -86,10 +86,37 @@ pub(crate) struct FjReviewComments {
 pub(crate) struct ForgejoProvider;
 
 impl ReviewProviderAdapter for ForgejoProvider {
+    fn prepare_review_stream(
+        &self,
+        target: &crate::remote::RemoteTarget,
+    ) -> Result<Option<crate::remote::identity::PreparedReview>> {
+        crate::remote::identity::PreparedReview::forgejo(target)
+    }
+    fn remote_snapshot_matches(
+        &self,
+        target: &crate::remote::RemoteTarget,
+        descriptor: &serde_json::Value,
+    ) -> Result<bool> {
+        if matches!(target.kind, crate::remote::RemoteTargetKind::Review(_))
+            && descriptor["acquisition"] == "patch-v1"
+        {
+            crate::remote::identity::verify_current(target, descriptor)
+        } else {
+            Ok(self.remote_snapshot(target)?.matches_descriptor(descriptor))
+        }
+    }
+
     fn remote_json(&self, host: &str, endpoint: &str) -> Result<serde_json::Value> {
-        Ok(serde_json::from_str(&cb_output(
-            host, "GET", endpoint, None,
-        )?)?)
+        if has_forgejo_configuration(host) {
+            Ok(serde_json::from_str(&cb_output(
+                host, "GET", endpoint, None,
+            )?)?)
+        } else {
+            crate::remote::http::json(
+                &format!("https://{host}/api/v1{endpoint}"),
+                ReviewProviderKind::Forgejo,
+            )
+        }
     }
     fn remote_snapshot(
         &self,
@@ -760,15 +787,39 @@ fn cb_output(
     crate::remote::run_command(command, Some(&config))
 }
 
+fn forgejo_config_path(host: &str) -> Result<std::path::PathBuf> {
+    if host == "codeberg.org" {
+        Ok(dirs::config_dir()
+            .ok_or_else(|| anyhow!("No config directory found."))?
+            .join("codeberg-cli/config.toml"))
+    } else {
+        Ok(dirs::data_local_dir()
+            .ok_or_else(|| anyhow!("No local data directory found."))?
+            .join("forgejo-cli/keys.json"))
+    }
+}
+
+pub(crate) fn has_forgejo_configuration(host: &str) -> bool {
+    forgejo_config_path(host).map_or(true, |path| match std::fs::metadata(&path) {
+        Ok(_) if host == "codeberg.org" => true,
+        Ok(_) => std::fs::read_to_string(path)
+            .ok()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+            .is_none_or(|keys| {
+                keys.pointer(&format!("/hosts/{}", json_pointer_escape(host)))
+                    .is_some()
+            }),
+        Err(error) => error.kind() != std::io::ErrorKind::NotFound,
+    })
+}
+
 pub(crate) fn has_forgejo_token(host: &str) -> bool {
     forgejo_token(host).is_ok()
 }
 
 fn forgejo_token(host: &str) -> Result<String> {
+    let path = forgejo_config_path(host)?;
     let token = if host == "codeberg.org" {
-        let path = dirs::config_dir()
-            .ok_or_else(|| anyhow!("No config directory found."))?
-            .join("codeberg-cli/config.toml");
         let config: toml::Value = toml::from_str(
             &std::fs::read_to_string(&path)
                 .with_context(|| format!("Failed to read {}", path.display()))?,
@@ -778,9 +829,6 @@ fn forgejo_token(host: &str) -> Result<String> {
             .and_then(toml::Value::as_str)
             .map(str::to_string)
     } else {
-        let path = dirs::data_local_dir()
-            .ok_or_else(|| anyhow!("No local data directory found."))?
-            .join("forgejo-cli/keys.json");
         let keys: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(&path)
                 .with_context(|| format!("Failed to read {}", path.display()))?,
