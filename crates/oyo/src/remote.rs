@@ -54,6 +54,21 @@ impl RemoteSnapshot {
     }
 }
 
+fn split_remote_route<'a>(
+    path: &'a str,
+    marker: &str,
+    provider: ReviewProviderKind,
+) -> Option<(&'a str, &'a str)> {
+    if matches!(provider, ReviewProviderKind::GitHub) {
+        let repo_end = path.match_indices('/').nth(1)?.0;
+        path[repo_end..]
+            .strip_prefix(marker)
+            .map(|target| (&path[..repo_end], target))
+    } else {
+        path.split_once(marker)
+    }
+}
+
 fn validate_ref(value: &str) -> Result<()> {
     if value.is_empty()
         || value.contains("..")
@@ -217,6 +232,10 @@ impl RemoteTarget {
         url: &str,
         known_provider: Option<ReviewProviderKind>,
     ) -> Result<Self> {
+        let url = url.split_once('#').map_or(url, |(url, _)| url);
+        let (url, query) = url
+            .split_once('?')
+            .map_or((url, None), |(url, query)| (url, Some(query)));
         let rest = url
             .strip_prefix("https://")
             .ok_or_else(|| anyhow!("Remote URLs must use HTTPS"))?;
@@ -234,17 +253,27 @@ impl RemoteTarget {
         let provider = known_provider
             .or_else(|| review_provider_for_host(&host))
             .ok_or_else(|| anyhow!("Unsupported or unauthenticated review provider: {host}"))?;
-        let path = path
-            .split(['?', '#'])
-            .next()
-            .unwrap_or_default()
-            .trim_end_matches('/');
         let marker = match provider {
             ReviewProviderKind::GitHub => "/pull/",
             ReviewProviderKind::GitLab => "/-/merge_requests/",
             ReviewProviderKind::Forgejo => "/pulls/",
         };
-        let (repo, kind) = if let Some((repo, number)) = path.split_once(marker) {
+        let review_route = split_remote_route(path, marker, provider);
+        let (repo, kind) = if let Some((repo, number)) = review_route {
+            let number = if matches!(provider, ReviewProviderKind::GitHub) {
+                let route = number.strip_suffix('/').unwrap_or(number);
+                let number = match route.split_once('/') {
+                    Some((number, "changes" | "files" | "commits" | "checks")) => number,
+                    None => route,
+                    _ => bail!("Unsupported GitHub pull request subpage"),
+                };
+                if !number.bytes().all(|byte| byte.is_ascii_digit()) {
+                    bail!("Expected a review number");
+                }
+                number
+            } else {
+                number.trim_end_matches('/')
+            };
             let number = number
                 .parse::<u64>()
                 .ok()
@@ -252,6 +281,7 @@ impl RemoteTarget {
                 .ok_or_else(|| anyhow!("Expected a review number without a subpage"))?;
             (repo, RemoteTargetKind::Review(number))
         } else {
+            let path = path.trim_end_matches('/');
             let commit_marker = if matches!(provider, ReviewProviderKind::GitLab) {
                 "/-/commit/"
             } else {
@@ -262,10 +292,10 @@ impl RemoteTarget {
             } else {
                 "/compare/"
             };
-            if let Some((repo, revision)) = path.split_once(commit_marker) {
+            if let Some((repo, revision)) = split_remote_route(path, commit_marker, provider) {
                 validate_ref(revision)?;
                 (repo, RemoteTargetKind::Commit(revision.to_owned()))
-            } else if let Some((repo, range)) = path.split_once(compare_marker) {
+            } else if let Some((repo, range)) = split_remote_route(path, compare_marker, provider) {
                 let (before, after, merge_base) =
                     if let Some((before, after)) = range.split_once("...") {
                         (before, after, true)
@@ -291,7 +321,7 @@ impl RemoteTarget {
                 bail!("Unsupported remote target URL");
             }
         };
-        if matches!(kind, RemoteTargetKind::Compare { .. }) && url.contains('?') {
+        if matches!(kind, RemoteTargetKind::Compare { .. }) && query.is_some() {
             bail!("Comparison URL query options are unsupported; use explicit two-dot or three-dot semantics");
         }
         if repo.split('/').count() < 2
@@ -1034,6 +1064,151 @@ mod tests {
         let mut changed = patch.clone();
         changed["beforeRepositoryId"] = 99.into();
         assert!(!same_review_snapshot(&patch, &changed));
+    }
+
+    #[test]
+    fn github_review_subpages_preserve_the_review_identity() {
+        let base = RemoteTarget::parse("https://github.com/ahkohd/oyo/pull/170").unwrap();
+        for suffix in [
+            "",
+            "/",
+            "/changes",
+            "/files",
+            "/commits",
+            "/checks",
+            "/changes/",
+        ] {
+            for decoration in ["", "?diff=split#diff-123", "#anchor?part=2"] {
+                let url = format!("https://github.com/ahkohd/oyo/pull/170{suffix}{decoration}");
+                let target =
+                    RemoteTarget::parse(&url).unwrap_or_else(|error| panic!("{url}: {error}"));
+                assert_eq!(target.canonical_url(), base.canonical_url());
+                assert_eq!(target.provider, base.provider);
+                assert_eq!(target.host, base.host);
+                assert_eq!(target.repo, base.repo);
+                assert_eq!(target.kind, base.kind);
+            }
+        }
+        let named_pull = RemoteTarget::parse("https://github.com/o/pull/pull/170/changes").unwrap();
+        assert_eq!(named_pull.repo, "o/pull");
+        assert_eq!(named_pull.kind, RemoteTargetKind::Review(170));
+        let enterprise = RemoteTarget::parse_with_provider(
+            "https://github.example.com/o/r/pull/170/files",
+            Some(ReviewProviderKind::GitHub),
+        )
+        .unwrap();
+        assert_eq!(
+            enterprise.canonical_url(),
+            "https://github.example.com/o/r/pull/170"
+        );
+    }
+
+    #[test]
+    fn github_review_subpages_reject_malformed_or_unrecognized_routes() {
+        for tail in [
+            "170/unknown",
+            "170/changes/extra",
+            "170/files/extra",
+            "170//changes",
+            "170/changes//",
+            "170//",
+            "+170/changes",
+            "0/changes",
+            "-1/files",
+            "18446744073709551616/checks",
+            "170%2Fchanges",
+            "170/files%2Fextra",
+        ] {
+            let url = format!("https://github.com/ahkohd/oyo/pull/{tail}");
+            assert!(RemoteTarget::parse(&url).is_err(), "{url}");
+        }
+        assert!(RemoteTarget::parse("https://github.com/o/r/nested/pull/170/changes").is_err());
+        for url in [
+            "https://github.com/o/r/pull/170/commit/topic/pull/171/files",
+            "https://github.com/o/r/pull/170/compare/base...head",
+            "https://github.com/o/r/pull/170/commit/topic",
+        ] {
+            assert!(RemoteTarget::parse(url).is_err(), "{url}");
+        }
+
+        for (url, provider) in [
+            (
+                "https://gitlab.com/g/r/-/merge_requests/170/files",
+                ReviewProviderKind::GitLab,
+            ),
+            (
+                "https://codeberg.org/o/r/pulls/170/changes",
+                ReviewProviderKind::Forgejo,
+            ),
+        ] {
+            assert!(RemoteTarget::parse_with_provider(url, Some(provider)).is_err());
+        }
+    }
+
+    #[test]
+    fn review_subpage_normalization_does_not_rewrite_revision_paths() {
+        let commit =
+            RemoteTarget::parse("https://github.com/o/r/commit/topic/changes?view=split#L1")
+                .unwrap();
+        assert_eq!(
+            commit.kind,
+            RemoteTargetKind::Commit("topic/changes".to_owned())
+        );
+        let comparison =
+            RemoteTarget::parse("https://github.com/o/r/compare/base...topic/files#anchor?part=2")
+                .unwrap();
+        assert_eq!(
+            comparison.kind,
+            RemoteTargetKind::Compare {
+                before: "base".to_owned(),
+                after: "topic/files".to_owned(),
+                merge_base: true
+            }
+        );
+        let commit =
+            RemoteTarget::parse("https://github.com/o/r/commit/topic/pull/170/changes").unwrap();
+        assert_eq!(commit.repo, "o/r");
+        assert_eq!(
+            commit.kind,
+            RemoteTargetKind::Commit("topic/pull/170/changes".to_owned())
+        );
+        let comparison =
+            RemoteTarget::parse("https://github.com/o/r/compare/base...topic/pull/170/files")
+                .unwrap();
+        assert_eq!(comparison.repo, "o/r");
+        assert_eq!(
+            comparison.kind,
+            RemoteTargetKind::Compare {
+                before: "base".to_owned(),
+                after: "topic/pull/170/files".to_owned(),
+                merge_base: true
+            }
+        );
+        let comparison =
+            RemoteTarget::parse("https://github.com/o/r/compare/base...topic/commit/ref").unwrap();
+        assert_eq!(comparison.repo, "o/r");
+        assert_eq!(
+            comparison.kind,
+            RemoteTargetKind::Compare {
+                before: "base".to_owned(),
+                after: "topic/commit/ref".to_owned(),
+                merge_base: true
+            }
+        );
+        for repo in ["o/pull", "o/commit", "o/compare"] {
+            let commit =
+                RemoteTarget::parse(&format!("https://github.com/{repo}/commit/ref")).unwrap();
+            assert_eq!(commit.repo, repo);
+            assert_eq!(commit.kind, RemoteTargetKind::Commit("ref".to_owned()));
+        }
+        assert!(RemoteTarget::parse(
+            "https://github.com/o/r/compare/base...topic/pull/170/files?expand=1"
+        )
+        .is_err());
+        assert!(
+            RemoteTarget::parse("https://github.com/o/r/compare/base...head?expand=1#anchor")
+                .is_err()
+        );
     }
 
     #[test]
