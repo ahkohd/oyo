@@ -1,0 +1,42 @@
+[ui]
+zen = false
+auto_center = true
+view_mode = "unified"
+gutter_signs = true
+topbar = true
+stepping = false
+overscroll = false
+
+[ui.blame]
+enabled = true
+
+[ui.diff]
+fg = "syntax"
+bg = true
+highlight = "word"
+extent_marker = "diff"
+extent_marker_scope = "hunk"
+max_bytes = 2097152
+
+[ui.theme]
+name = "tokyonight"
+
+[ui.syntax]
+mode = "on"
+theme = "tokyonight"
+
+[ui.evo]
+syntax = "full"
+
+[ui.split]
+align_lines = true
+
+[playback]
+speed = 200
+animation = true
+animation_duration = 150
+autoplay = false
+
+[files]
+panel_width = 30
+panel_position = "right"

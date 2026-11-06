@@ -4,6 +4,10 @@ Use this page when a human and an AI agent work in the same Oyo review.
 
 Oyo uses a Git-shaped and jj-shaped CLI, so humans and agents can use the same targets and commands. Most coding agents already understand Git commands. Oyo builds on that model instead of adding a new review workflow.
 
+## Install and configure Oyo
+
+Use [Set up Oyo with an agent](./SETUP.md) to install Oyo and safely merge the optional Tokyo Night starter preset.
+
 ## Start with the Oyo skill
 
 Ask the agent to read the installed Oyo skill first:

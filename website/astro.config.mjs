@@ -8,10 +8,8 @@ import basicSsl from "@vitejs/plugin-basic-ssl";
 // context. The clipboard API (Agentation's copy, the install button) needs it.
 const isDev = process.argv.includes("dev");
 
-// Deployed to Netlify at the domain root. Update `site` to your actual Netlify
-// URL (or custom domain) — it only affects canonical URLs and the sitemap.
 export default defineConfig({
-  site: "https://oyo.netlify.app",
+  site: "https://oyo.victorare.mu",
   base: "/",
   vite: {
     // HTTPS on the dev server only; harmless / unused in the static build.
@@ -67,6 +65,7 @@ export default defineConfig({
             {
               label: "Working with agents",
               items: [
+                { label: "Set up Oyo", slug: "setup" },
                 { label: "Overview", slug: "agents" },
                 { label: "Review", slug: "review-skill" },
                 { label: "Walkthrough", slug: "walkthrough-skill" },

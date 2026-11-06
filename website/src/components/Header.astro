@@ -12,6 +12,7 @@ const home = base.endsWith("/") ? base : `${base}/`;
 <div class="oy-header">
   <SiteTitle />
   <div class="oy-search"><Search /></div>
+  <a href="https://github.com/ahkohd/oyo" class="oy-link">GitHub</a>
   <nav class="oy-nav">
     <a href={`${home}#features`} class="oy-link">Features</a>
     <a href={`${home}#install`} class="oy-link">Install</a>
@@ -29,7 +30,7 @@ const home = base.endsWith("/") ? base : `${base}/`;
 <style>
   .oy-header {
     display: grid;
-    grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-columns: auto minmax(0, 1fr) auto auto;
     align-items: center;
     gap: 1.4rem;
     width: 100%;
@@ -98,14 +99,12 @@ const home = base.endsWith("/") ? base : `${base}/`;
      theme control into the mobile menu, so hide the links and the toggle, leave
      room on the right for the hamburger, and let search sit compact at the end. */
   @media (max-width: 50rem) {
-    /* Hide the whole nav group (links + toggle live in the mobile menu), so the
-       grid is just brand + search in one row — otherwise the empty nav wraps to
-       a second row and shoves the content to the top, off the hamburger's line. */
     .oy-nav {
       display: none;
     }
     .oy-header {
-      grid-template-columns: auto 1fr;
+      gap: .75rem;
+      grid-template-columns: auto 1fr auto;
       padding-inline-end: calc(
         var(--sl-nav-pad-x) + var(--sl-menu-button-size, 2rem) + 0.75rem
       );
