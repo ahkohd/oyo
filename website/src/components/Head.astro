@@ -1,0 +1,11 @@
+---
+import DefaultHead from "@astrojs/starlight/components/Head.astro";
+import { pages, markdownPath } from "../../scripts/docs.mjs";
+
+const base = `${import.meta.env.BASE_URL.replace(/\/$/, "")}/`;
+const page = pages.find((page) => page.slug === Astro.locals.starlightRoute.id);
+---
+
+<DefaultHead />
+<link rel="describedby" href={new URL(`${base}llms.txt`, Astro.site)} />
+{page && <link rel="alternate" type="text/markdown" href={new URL(`${base}${markdownPath(page)}`, Astro.site)} />}

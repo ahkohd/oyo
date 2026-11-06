@@ -32,6 +32,7 @@ export default defineConfig({
       ],
       // Inject the dev-only Agentation toolbar on every docs page.
       components: {
+        Head: "./src/components/Head.astro",
         Footer: "./src/components/Footer.astro",
         SiteTitle: "./src/components/SiteTitle.astro",
         Header: "./src/components/Header.astro",
@@ -59,6 +60,7 @@ export default defineConfig({
               label: "CLI",
               items: [
                 { label: "Review", slug: "review" },
+                { label: "Remote diffs", slug: "remote-diffs" },
                 { label: "Control", slug: "control" },
               ],
             },
