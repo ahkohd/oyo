@@ -678,10 +678,6 @@ impl Keybindings {
         dispatch_mode(&mut self.active_sequence_mode, &mut self.menu, key)
     }
 
-    pub(crate) fn menu_keys(&self, action: MenuAction) -> String {
-        self.menu.keys_label(action)
-    }
-
     pub(crate) fn normal(&mut self, key: KeyEvent) -> Dispatch<NormalAction> {
         self.prepare_mode(KeybindingMode::Normal);
         dispatch_mode(&mut self.active_sequence_mode, &mut self.normal, key)
@@ -1251,7 +1247,10 @@ mod tests {
                         .any(|warning| warning.contains("reserved force-quit")),
                     "{mode} {binding}: {warnings:?}"
                 );
-                assert!(!bindings.menu_keys(MenuAction::Cancel).contains("ctrl-c"));
+                assert!(!bindings
+                    .menu
+                    .keys_label(MenuAction::Cancel)
+                    .contains("ctrl-c"));
                 assert!(!bindings
                     .menu_normal_keys(NormalAction::ToggleLineWrap)
                     .contains("ctrl-c"));

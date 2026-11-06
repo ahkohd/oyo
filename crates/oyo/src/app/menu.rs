@@ -1,6 +1,5 @@
 use super::{palette::PaletteAction, App};
 use crate::config::{FoldContextMode, ResolvedTheme};
-use crate::footer::{FooterAction, FooterHit};
 use crate::keybindings::Keybindings;
 use crate::keybindings::{Dispatch, GlobalAction, MenuAction, NormalAction};
 use crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
@@ -92,7 +91,6 @@ pub(crate) struct MenuState {
     categories: Vec<(Rect, usize)>,
     rows: Vec<(Rect, usize)>,
     popup: Option<Rect>,
-    footer_hits: Vec<FooterHit<MenuAction>>,
     compact: bool,
 }
 
@@ -101,7 +99,6 @@ impl MenuState {
         self.categories.clear();
         self.rows.clear();
         self.popup = None;
-        self.footer_hits.clear();
     }
 }
 
@@ -122,7 +119,6 @@ pub(crate) trait MenuHost {
     fn menu(&self) -> &MenuState;
     fn menu_mut(&mut self) -> &mut MenuState;
     fn keybindings_mut(&mut self) -> &mut Keybindings;
-    fn keybindings(&self) -> &Keybindings;
     fn theme(&self) -> &ResolvedTheme;
     fn command_entries(&self) -> Vec<super::palette::PaletteEntry>;
     fn command_enabled(&self, action: PaletteAction) -> bool;
@@ -141,7 +137,6 @@ pub(crate) trait MenuHost {
         self.reset_menu_input();
         self.menu_mut().rows.clear();
         self.menu_mut().popup = None;
-        self.menu_mut().footer_hits.clear();
         self.menu_mut().open = Some(MenuOpen {
             page: MenuPage::Commands,
             category: category % 5,
@@ -320,7 +315,6 @@ pub(crate) trait MenuHost {
 
     fn close_menu(&mut self) {
         self.menu_mut().open = None;
-        self.menu_mut().footer_hits.clear();
         self.keybindings_mut().clear_sequence();
     }
 
@@ -338,11 +332,7 @@ pub(crate) trait MenuHost {
         if self.menu().open.is_some() {
             match event.kind {
                 MouseEventKind::Down(MouseButton::Left) => {
-                    if let Some(action) =
-                        crate::footer::action_at(&self.menu().footer_hits, event.column, event.row)
-                    {
-                        self.apply_menu_action(action);
-                    } else if let Some(category) = category {
+                    if let Some(category) = category {
                         if self.menu().compact {
                             if self
                                 .menu()
@@ -425,9 +415,6 @@ impl MenuHost for App {
     }
     fn keybindings_mut(&mut self) -> &mut Keybindings {
         &mut self.keybindings
-    }
-    fn keybindings(&self) -> &Keybindings {
-        &self.keybindings
     }
     fn theme(&self) -> &ResolvedTheme {
         &self.theme
@@ -631,7 +618,6 @@ pub(crate) fn draw_bar(frame: &mut Frame, app: &mut impl MenuHost, area: Rect) {
 pub(crate) fn draw_popup(frame: &mut Frame, app: &mut impl MenuHost) {
     app.menu_mut().rows.clear();
     app.menu_mut().popup = None;
-    app.menu_mut().footer_hits.clear();
     if !app.menu_input_available() {
         app.menu_mut().open = None;
         return;
@@ -678,26 +664,7 @@ pub(crate) fn draw_popup(frame: &mut Frame, app: &mut impl MenuHost) {
             .unwrap_or(20)
             .min(u16::MAX as usize) as u16
     };
-    let enabled = choosing
-        || entries
-            .get(selected)
-            .is_some_and(|entry| app.command_enabled(entry.action));
-    let footer = menu_footer_actions(app, enabled);
-    let footer_width: usize = footer
-        .iter()
-        .map(|action| {
-            action
-                .spans
-                .iter()
-                .map(|span| span.content.width())
-                .sum::<usize>()
-        })
-        .sum::<usize>()
-        + footer.len().saturating_sub(1) * 4;
-    let width = desired
-        .max(footer_width.saturating_add(4).min(u16::MAX as usize) as u16)
-        .max(28)
-        .min(screen.width);
+    let width = desired.max(28).min(screen.width);
     let height = (items.len().saturating_add(2).min(u16::MAX as usize) as u16)
         .min(screen.height.saturating_sub(1));
     let anchor = app
@@ -768,73 +735,16 @@ pub(crate) fn draw_popup(frame: &mut Frame, app: &mut impl MenuHost) {
                 .add_modifier(Modifier::DIM);
         }
         frame.render_widget(
-            Paragraph::new(Line::from(Span::raw(format!(
-                " {check} {label}{}{} ",
-                " ".repeat(padding),
-                hint
-            ))))
+            Paragraph::new(Line::from(vec![
+                Span::raw(format!(" {check} {label}{}", " ".repeat(padding))),
+                Span::styled(hint, Style::default().fg(app.theme().text_muted)),
+                Span::raw(" "),
+            ]))
             .style(row_style),
             rect,
         );
         app.menu_mut().rows.push((rect, index));
     }
-    let actions = if footer_width + 4 <= width as usize {
-        footer
-    } else {
-        menu_cancel_actions(app, width as usize)
-    };
-    let footer_area = Rect::new(area.x, area.bottom() - 1, width, 1);
-    let (line, hits) = crate::footer::footer_line(footer_area, border, actions);
-    app.menu_mut().footer_hits = hits;
-    frame.render_widget(Paragraph::new(line).style(style), footer_area);
-}
-
-fn primary_menu_key(app: &impl MenuHost, action: MenuAction) -> String {
-    app.keybindings()
-        .menu_keys(action)
-        .split(" / ")
-        .next()
-        .unwrap_or("")
-        .to_string()
-}
-
-fn menu_footer_actions(app: &impl MenuHost, enabled: bool) -> Vec<FooterAction<MenuAction>> {
-    let key_style = Style::default()
-        .fg(app.theme().primary)
-        .add_modifier(Modifier::BOLD);
-    let accept = primary_menu_key(app, MenuAction::Accept);
-    let cancel = primary_menu_key(app, MenuAction::Cancel);
-    let mut actions = Vec::new();
-    if !enabled {
-        actions.push(FooterAction::new(None, vec![Span::raw("Unavailable")]));
-    } else if !accept.is_empty() {
-        actions.push(FooterAction::new(
-            Some(MenuAction::Accept),
-            vec![Span::styled(accept, key_style), Span::raw(" select")],
-        ));
-    }
-    if !cancel.is_empty() {
-        actions.push(FooterAction::new(
-            Some(MenuAction::Cancel),
-            vec![Span::styled(cancel, key_style), Span::raw(" cancel")],
-        ));
-    }
-    actions
-}
-
-fn menu_cancel_actions(app: &impl MenuHost, width: usize) -> Vec<FooterAction<MenuAction>> {
-    let cancel = primary_menu_key(app, MenuAction::Cancel);
-    if cancel.is_empty() {
-        return Vec::new();
-    }
-    let key_style = Style::default()
-        .fg(app.theme().primary)
-        .add_modifier(Modifier::BOLD);
-    let mut spans = vec![Span::styled(cancel.clone(), key_style)];
-    if cancel.width() + 11 <= width {
-        spans.push(Span::raw(" cancel"));
-    }
-    vec![FooterAction::new(Some(MenuAction::Cancel), spans)]
 }
 
 fn menu_group(action: PaletteAction) -> u8 {
@@ -910,42 +820,15 @@ mod tests {
     }
 
     #[test]
-    fn footer_select_and_cancel_use_guarded_menu_actions() {
+    fn keyboard_accept_and_cancel_use_guarded_menu_actions() {
         let mut app = app();
         app.open_menu(1);
         app.menu.open.as_mut().unwrap().selected = 1;
-        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
-        terminal
-            .draw(|frame| crate::ui::draw(frame, &mut app))
-            .unwrap();
-        let hit = app
-            .menu
-            .footer_hits
-            .iter()
-            .find(|hit| hit.action == MenuAction::Accept)
-            .copied()
-            .unwrap();
-        let mouse = |hit: FooterHit<MenuAction>| MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column: hit.area.x,
-            row: hit.area.y,
-            modifiers: KeyModifiers::NONE,
-        };
-        assert!(app.handle_menu_mouse(mouse(hit)));
+        app.handle_menu_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(app.view_mode, ViewMode::Split);
         assert!(app.menu.open.is_none());
         app.open_menu(0);
-        terminal
-            .draw(|frame| crate::ui::draw(frame, &mut app))
-            .unwrap();
-        let hit = app
-            .menu
-            .footer_hits
-            .iter()
-            .find(|hit| hit.action == MenuAction::Cancel)
-            .copied()
-            .unwrap();
-        assert!(app.handle_menu_mouse(mouse(hit)));
+        app.handle_menu_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(app.menu.open.is_none());
         assert_eq!(app.view_mode, ViewMode::Split);
     }
@@ -976,7 +859,7 @@ mod tests {
     }
 
     #[test]
-    fn narrow_footer_does_not_advertise_an_unbound_cancel() {
+    fn narrow_category_border_has_no_action_labels() {
         let mut app = app();
         let config: crate::config::Config =
             toml::from_str("[keybindings.menu]\ncancel = []").unwrap();
@@ -997,7 +880,7 @@ mod tests {
     }
 
     #[test]
-    fn menu_uses_sidebar_colors_bullets_and_the_modal_bottom_border() {
+    fn menu_uses_sidebar_colors_bullets_and_a_plain_bottom_border() {
         use ratatui::style::Color;
         let mut app = app();
         app.theme.background = Some(Color::Red);
@@ -1023,8 +906,9 @@ mod tests {
         let bottom: String = (popup.x..popup.right())
             .map(|x| buffer[(x, popup.bottom() - 1)].symbol())
             .collect();
-        assert!(bottom.starts_with("╰ "));
-        assert!(bottom.contains("enter select    esc cancel"));
+        assert!(bottom.starts_with("╰─"));
+        assert!(!bottom.contains("select"));
+        assert!(!bottom.contains("cancel"));
         assert!(!bottom.contains("space"));
     }
 
@@ -1118,7 +1002,7 @@ mod tests {
     }
 
     #[test]
-    fn checked_toggles_and_footer_fit_the_available_popup_width() {
+    fn checked_toggles_render_without_category_footer_actions() {
         let mut app = app();
         assert!(app.command_checked(PaletteAction::ToggleSyntax));
         app.autoplay = true;
@@ -1137,7 +1021,8 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect();
-        assert!(text.contains("esc cancel"));
+        assert!(!text.contains("esc cancel"));
+        assert!(!text.contains("enter select"));
     }
 
     #[test]

@@ -299,7 +299,10 @@ impl Toasts {
             toast
                 .expires
                 .get_or_insert_with(|| Instant::now() + Duration::from_secs(2));
-            let bg = theme.background.unwrap_or(Color::Reset);
+            let bg = theme
+                .background_panel
+                .or(theme.background)
+                .unwrap_or(Color::Reset);
             Clear.render(rect, buffer);
             Block::default()
                 .borders(Borders::ALL)
