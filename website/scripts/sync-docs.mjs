@@ -18,6 +18,7 @@ const outDir = path.resolve(here, "..", "src", "content", "docs");
 // Curated, user-facing docs. Internal notes (DEBUG, PERF, PROFILING) and the
 // MARKDOWN preview fixture are intentionally left off the public site.
 const PAGES = [
+  { file: "SETUP.md",         slug: "setup",         title: "Set up Oyo with an agent", group: "guide", order: 0 },
   { file: "CONFIG.md",        slug: "config",        title: "Configure",             group: "guide", order: 1 },
   { file: "THEME.md",         slug: "theming",       title: "Theming",               group: "guide", order: 2 },
   { file: "KEYBINDINGS.md",   slug: "keybindings",   title: "Keybindings",           group: "guide", order: 3 },
@@ -51,8 +52,9 @@ function rewrite(md) {
   return md;
 }
 
-function frontmatter({ title }) {
-  return `---\ntitle: "${title.replace(/"/g, '\\"')}"\nbanner:\n  content: 'Oyo is under active development. Expect rough edges and bugs in current 0.1 releases. Feel free to <a href="https://github.com/ahkohd/oyo/issues/new">open an issue on GitHub.</a>'\n---\n\n`;
+function frontmatter({ title, file, source }) {
+  const editPath = path.posix.normalize(`docs/${source ?? file}`);
+  return `---\ntitle: "${title.replace(/"/g, '\\"')}"\neditUrl: "https://github.com/ahkohd/oyo/edit/main/${editPath}"\nbanner:\n  content: 'Oyo is under active development. Expect rough edges and bugs in current 0.1 releases. Feel free to <a href="https://github.com/ahkohd/oyo/issues/new">open an issue on GitHub.</a>'\n---\n\n`;
 }
 
 // Clean previous output, then rebuild.
@@ -109,3 +111,6 @@ if (fs.existsSync(playerDist)) {
   console.log("sync-docs: vendored asciinema-player bundle to public/vendor/");
 }
 
+for (const [source, target] of [["SETUP.md", "setup.md"], ["STARTER.toml", "starter.toml"]]) {
+  fs.copyFileSync(path.join(docsDir, source), path.resolve(here, "..", "public", target));
+}

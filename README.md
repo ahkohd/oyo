@@ -92,6 +92,8 @@ Oyo helps you complete a review without leaving the terminal. You can:
 
 ## Install
 
+For agent-assisted installation and configuration, use the [setup guide](./docs/SETUP.md) or [copy the setup prompt](https://oyo.victorare.mu/#install).
+
 ### npm
 
 ```sh

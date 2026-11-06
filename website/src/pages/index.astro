@@ -2,6 +2,7 @@
 import "@fontsource-variable/geist-mono";
 import "../styles/landing.css";
 import DevTools from "../components/DevTools.astro";
+import SetupPrompt from "../components/SetupPrompt.astro";
 
 const rawBase = import.meta.env.BASE_URL; // "/oyo" (no trailing slash)
 const base = rawBase.endsWith("/") ? rawBase : `${rawBase}/`;
@@ -262,6 +263,7 @@ const demoReviewAgent = `<span class="cur">$</span> agent reviewing your diff â€
             <code><span class="dollar">$</span><span id="cmd-text">brew install ahkohd/oyo/oy</span></code>
             <button class="copy" id="copy-btn" type="button">copy</button>
           </div>
+          <SetupPrompt />
         </div>
       </section>
 
@@ -306,6 +308,7 @@ d = [<span class="str">"diff"</span>, <span class="str">"--tool"</span>, <span c
         </div>
         <div class="foot-col">
           <h4>Docs</h4>
+          <a href={docs("setup")}>Set up with an agent</a>
           <a href={docs("config")}>Configuration</a>
           <a href={docs("theming")}>Theming</a>
           <a href={docs("keybindings")}>Keybindings</a>

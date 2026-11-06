@@ -1,0 +1,53 @@
+---
+const base = import.meta.env.BASE_URL;
+const setup = `${base.replace(/\/$/, "")}/setup/`;
+const guide = new URL("setup.md", Astro.site).href;
+const prompt = `Install and configure Oyo, the terminal code review tool whose executable is oy. First read ${guide} and follow its setup instructions. Inspect my OS, architecture, package managers, existing oy installation, and active config before changing anything. Use only the project's documented installation methods. Offer the guide's optional Tokyo Night starter preset with a unified view and right file panel. Preserve intentional settings and unrelated config, back up before editing, and show the config diff. Ask before replacing existing preferences or changing Git, Jujutsu, or global machine settings. Do not require authentication for local or public read-only reviews. Verify the installed command and effective config, then report what changed and what you checked.`;
+---
+
+<div class="setup-prompt">
+  <div class="setup-actions">
+    <button type="button" class="copy" id="copy-setup-prompt">Copy setup prompt</button>
+    <a href={setup}>Read setup guide</a>
+    <span id="setup-copy-status" role="status"></span>
+  </div>
+  <details id="setup-prompt-details">
+    <summary>View prompt</summary>
+    <textarea id="setup-prompt-text" aria-label="Oyo setup prompt" readonly rows="7">{prompt}</textarea>
+  </details>
+</div>
+
+<style>
+  .setup-prompt { margin-top: 1.5rem; font-family: var(--mono); font-size: .82rem; }
+  .setup-actions { display: flex; align-items: center; flex-wrap: wrap; gap: .75rem 1rem; }
+  .setup-actions button { font: inherit; padding: .5rem .75rem; }
+  .setup-actions a { color: var(--accent); text-underline-offset: .2em; }
+  [role="status"] { color: var(--muted); }
+  details { margin-top: .75rem; color: var(--muted); }
+  summary { width: fit-content; cursor: pointer; }
+  textarea {
+    display: block; width: 100%; margin-top: .75rem; padding: .9rem;
+    background: var(--bg-inset); color: var(--fg); border: 1px solid var(--border);
+    border-radius: 0; font: inherit; line-height: 1.6; resize: vertical;
+  }
+</style>
+
+<script>
+  const button = document.getElementById("copy-setup-prompt");
+  const text = document.getElementById("setup-prompt-text");
+  const details = document.getElementById("setup-prompt-details");
+  const status = document.getElementById("setup-copy-status");
+  if (button && text instanceof HTMLTextAreaElement && details instanceof HTMLDetailsElement && status) {
+    button.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(text.value);
+        status.textContent = "Copied. Paste into your assistant.";
+      } catch {
+        details.open = true;
+        text.focus();
+        text.select();
+        status.textContent = "Select and copy the prompt below.";
+      }
+    });
+  }
+</script>
