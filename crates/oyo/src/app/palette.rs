@@ -1,4 +1,5 @@
 use super::{App, ViewMode};
+use crate::app::menu::MenuHost;
 use crate::app::utils::copy_to_clipboard;
 use crate::config::{list_ui_themes, ThemeConfig};
 use crate::syntax::list_syntax_themes;
@@ -59,7 +60,75 @@ pub(crate) struct PaletteEntry {
     pub action: PaletteAction,
 }
 
+pub(crate) fn standard_command_entries() -> Vec<PaletteEntry> {
+    use PaletteAction::*;
+    let entries: Vec<_> = [
+        ("Toggle menu bar", ToggleMenuBar),
+        ("Open menu", OpenMenu),
+        ("Command palette...", OpenCommandPalette),
+        ("Toggle step mode", ToggleStepping),
+        ("Step forward", NextStep),
+        ("Step backward", PreviousStep),
+        ("Cycle view modes", ToggleViewMode),
+        ("View: Unified", SetViewMode(ViewMode::UnifiedPane)),
+        ("View: Split", SetViewMode(ViewMode::Split)),
+        ("View: Evolution", SetViewMode(ViewMode::Evolution)),
+        ("View: Preview", SetViewMode(ViewMode::Preview)),
+        ("Toggle line wrap", ToggleLineWrap),
+        ("Cycle context folding", ToggleFoldContext),
+        ("Toggle syntax highlight", ToggleSyntax),
+        ("Toggle help", ToggleHelp),
+        ("Open settings", OpenSettings),
+        ("Toggle zen mode", ToggleZen),
+        ("Toggle file panel", ToggleFilePanel),
+        ("Refresh all files", RefreshAllFiles),
+        ("Open remote review...", OpenRemoteReview),
+        ("History...", OpenDashboard),
+        ("Navigate back", NavigateBack),
+        ("Navigate forward", NavigateForward),
+        ("Files...", OpenFileSearch),
+        ("Find in files\u{2026}", OpenReviewGrep),
+        ("Find in files: changes\u{2026}", OpenReviewGrepChanges),
+        ("Find in files: all\u{2026}", OpenReviewGrepEverything),
+        ("Copy file path", CopyFilePath),
+        ("Copy file path and position", CopyFilePosition),
+        ("Copy absolute file path", CopyAbsoluteFilePath),
+        (
+            "Copy absolute file path and position",
+            CopyAbsoluteFilePosition,
+        ),
+        ("Copy file path and cursor position", CopyFileCursorPosition),
+        (
+            "Copy absolute file path and cursor position",
+            CopyAbsoluteFileCursorPosition,
+        ),
+        ("Themes...", OpenThemePicker),
+        ("Refresh current file", RefreshCurrentFile),
+        ("Copy session name", CopySessionName),
+        ("Rename session", RenameSession),
+        ("Toggle autoplay", ToggleAutoplay),
+        ("Toggle autoplay (reverse)", ToggleAutoplayReverse),
+        ("Comments...", OpenCommentPicker),
+        ("Outdated comments", OpenOutdatedComments),
+        ("Sync review", SyncReview),
+        ("Quit", Quit),
+    ]
+    .into_iter()
+    .map(|(label, action)| PaletteEntry {
+        label: label.to_string(),
+        action,
+    })
+    .collect();
+    entries
+}
+
 impl App {
+    pub(crate) fn start_history(&mut self) {
+        if !self.request_settings_leave(super::settings::SettingsLeaveTarget::OpenHistory) {
+            self.open_dashboard = true;
+        }
+    }
+
     pub(crate) fn set_control_session_name(&mut self, name: Option<String>) {
         self.control_session_name = name;
     }
@@ -370,63 +439,7 @@ impl App {
 
     pub(super) fn command_entries(&self) -> Vec<PaletteEntry> {
         use PaletteAction::*;
-        let mut entries: Vec<_> = [
-            ("Toggle menu bar", ToggleMenuBar),
-            ("Open menu", OpenMenu),
-            ("Command palette...", OpenCommandPalette),
-            ("Toggle step mode", ToggleStepping),
-            ("Step forward", NextStep),
-            ("Step backward", PreviousStep),
-            ("Cycle view modes", ToggleViewMode),
-            ("View: Unified", SetViewMode(ViewMode::UnifiedPane)),
-            ("View: Split", SetViewMode(ViewMode::Split)),
-            ("View: Evolution", SetViewMode(ViewMode::Evolution)),
-            ("View: Preview", SetViewMode(ViewMode::Preview)),
-            ("Toggle line wrap", ToggleLineWrap),
-            ("Cycle context folding", ToggleFoldContext),
-            ("Toggle syntax highlight", ToggleSyntax),
-            ("Toggle help", ToggleHelp),
-            ("Open settings", OpenSettings),
-            ("Toggle zen mode", ToggleZen),
-            ("Toggle file panel", ToggleFilePanel),
-            ("Refresh all files", RefreshAllFiles),
-            ("Open remote review...", OpenRemoteReview),
-            ("History...", OpenDashboard),
-            ("Navigate back", NavigateBack),
-            ("Navigate forward", NavigateForward),
-            ("Files...", OpenFileSearch),
-            ("Find in files\u{2026}", OpenReviewGrep),
-            ("Find in files: changes\u{2026}", OpenReviewGrepChanges),
-            ("Find in files: all\u{2026}", OpenReviewGrepEverything),
-            ("Copy file path", CopyFilePath),
-            ("Copy file path and position", CopyFilePosition),
-            ("Copy absolute file path", CopyAbsoluteFilePath),
-            (
-                "Copy absolute file path and position",
-                CopyAbsoluteFilePosition,
-            ),
-            ("Copy file path and cursor position", CopyFileCursorPosition),
-            (
-                "Copy absolute file path and cursor position",
-                CopyAbsoluteFileCursorPosition,
-            ),
-            ("Themes...", OpenThemePicker),
-            ("Refresh current file", RefreshCurrentFile),
-            ("Copy session name", CopySessionName),
-            ("Rename session", RenameSession),
-            ("Toggle autoplay", ToggleAutoplay),
-            ("Toggle autoplay (reverse)", ToggleAutoplayReverse),
-            ("Comments...", OpenCommentPicker),
-            ("Outdated comments", OpenOutdatedComments),
-            ("Sync review", SyncReview),
-            ("Quit", Quit),
-        ]
-        .into_iter()
-        .map(|(label, action)| PaletteEntry {
-            label: label.to_string(),
-            action,
-        })
-        .collect();
+        let mut entries = standard_command_entries();
         if self.blame_enabled {
             entries.push(PaletteEntry {
                 label: "View: Blame".into(),
@@ -579,7 +592,7 @@ impl App {
             PaletteAction::ToggleAutoplay => self.toggle_autoplay(),
             PaletteAction::ToggleAutoplayReverse => self.toggle_autoplay_reverse(),
             PaletteAction::OpenRemoteReview => self.start_remote_open(),
-            PaletteAction::OpenDashboard => self.open_dashboard = true,
+            PaletteAction::OpenDashboard => self.start_history(),
             PaletteAction::NavigateBack => {
                 self.navigate_view_back();
             }

@@ -416,6 +416,8 @@ pub(super) enum SettingsLeaveTarget {
     OutdatedCommentsCurrent(Option<u64>),
     OutdatedCommentsTab(Option<u64>),
     History(bool),
+    OpenHistory,
+    OpenRemote,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1400,8 +1402,13 @@ impl App {
         }
         let target = confirmation.target;
         self.cancel_settings_leave_confirmation();
-        self.settings_open_state = None;
-        self.settings_saved_state = None;
+        if !matches!(
+            target,
+            SettingsLeaveTarget::OpenHistory | SettingsLeaveTarget::OpenRemote
+        ) {
+            self.settings_open_state = None;
+            self.settings_saved_state = None;
+        }
         self.settings_leave_replaying = true;
         match target {
             SettingsLeaveTarget::SelectTab(tab_id) => self.select_topbar_tab(tab_id),
@@ -1421,6 +1428,8 @@ impl App {
             SettingsLeaveTarget::OutdatedCommentsTab(focus) => {
                 self.open_outdated_comments_tab(focus)
             }
+            SettingsLeaveTarget::OpenHistory => self.start_history(),
+            SettingsLeaveTarget::OpenRemote => self.start_remote_open(),
             SettingsLeaveTarget::History(backward) => {
                 self.navigate_view_history(backward);
             }
@@ -1604,6 +1613,58 @@ mod tests {
         }
         app.settings_config_path_override = Some(path);
         app
+    }
+
+    #[test]
+    fn transient_open_destinations_preserve_settings_edit_save_and_revert() {
+        for remote in [false, true] {
+            for action in [SettingsLeaveAction::Save, SettingsLeaveAction::Discard] {
+                let dir = std::env::temp_dir().join(format!(
+                    "oyo-transient-settings-{}-{remote}-{action:?}",
+                    std::process::id()
+                ));
+                std::fs::create_dir_all(&dir).unwrap();
+                let path = dir.join("config.toml");
+                std::fs::write(&path, "[ui]\nline_wrap = false\n").unwrap();
+                let mut app = test_app(path.clone());
+                app.open_settings_tab();
+                app.line_wrap = true;
+                if remote {
+                    app.start_remote_open();
+                } else {
+                    app.start_history();
+                }
+                assert!(app.settings_leave_confirmation_active());
+                app.resolve_settings_leave(action);
+                app.remote_open = None;
+                app.open_dashboard = false;
+                assert!(app.settings_open_state.is_some());
+                assert!(app.settings_saved_state.is_some());
+                app.line_wrap = !app.line_wrap;
+                assert!(app.settings_dirty());
+                assert!(app.save_settings());
+                let saved = Config::load_from_path(&path).unwrap();
+                assert_eq!(saved.ui.line_wrap, app.line_wrap);
+                app.line_wrap = !app.line_wrap;
+                if remote {
+                    app.start_remote_open();
+                } else {
+                    app.start_history();
+                }
+                assert!(app.settings_leave_confirmation_active());
+                app.resolve_settings_leave(SettingsLeaveAction::Cancel);
+                app.revert_settings();
+                assert_eq!(
+                    app.line_wrap,
+                    app.settings_open_state
+                        .as_ref()
+                        .unwrap()
+                        .get(SettingItem::LineWrap)
+                        .bool()
+                );
+                let _ = std::fs::remove_dir_all(dir);
+            }
+        }
     }
 
     #[test]

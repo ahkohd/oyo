@@ -1,5 +1,6 @@
 //! UI rendering for the TUI
 
+use crate::app::menu::MenuHost;
 use crate::app::{
     diff_scrollbar_thumb,
     review::{
@@ -8075,9 +8076,27 @@ fn picker_input_line_at(
     placeholder: &str,
     width: u16,
 ) -> Line<'static> {
+    picker_input_line_for_theme(
+        &app.theme,
+        app.file_filter_cursor_visible,
+        query,
+        cursor,
+        placeholder,
+        width,
+    )
+}
+
+fn picker_input_line_for_theme(
+    theme: &crate::config::ResolvedTheme,
+    cursor_visible: bool,
+    query: &str,
+    cursor: usize,
+    placeholder: &str,
+    width: u16,
+) -> Line<'static> {
     use unicode_segmentation::UnicodeSegmentation;
     let prompt_style = Style::default()
-        .fg(app.theme.primary)
+        .fg(theme.primary)
         .add_modifier(Modifier::BOLD);
     let content_width = width.saturating_sub(3) as usize;
     let before = truncate_text_from_start(&query[..cursor], content_width);
@@ -8099,34 +8118,36 @@ fn picker_input_line_at(
     };
     Line::from(vec![
         Span::styled("❯ ", prompt_style),
-        Span::styled(before, Style::default().fg(app.theme.text)),
-        Span::styled(
-            if app.file_filter_cursor_visible {
-                "│"
-            } else {
-                " "
-            },
-            prompt_style,
-        ),
+        Span::styled(before, Style::default().fg(theme.text)),
+        Span::styled(if cursor_visible { "│" } else { " " }, prompt_style),
         Span::styled(
             after,
             Style::default().fg(if query.is_empty() {
-                app.theme.text_muted
+                theme.text_muted
             } else {
-                app.theme.text
+                theme.text
             }),
         ),
     ])
 }
 
 fn draw_picker_popup(frame: &mut Frame, app: &App, area: Rect, title: &str) -> Rect {
+    draw_picker_popup_for_theme(frame, &app.theme, area, title)
+}
+
+fn draw_picker_popup_for_theme(
+    frame: &mut Frame,
+    theme: &crate::config::ResolvedTheme,
+    area: Rect,
+    title: &str,
+) -> Rect {
     frame.render_widget(Clear, area);
     let mut block = Block::default()
         .borders(Borders::ALL)
         .border_type(ratatui::widgets::BorderType::Rounded)
-        .border_style(Style::default().fg(app.theme.border_active))
+        .border_style(Style::default().fg(theme.border_active))
         .title(title);
-    if let Some(bg) = app.theme.background {
+    if let Some(bg) = theme.background {
         block = block.style(Style::default().bg(bg));
     }
     let inner = block.inner(area);
@@ -11837,11 +11858,26 @@ mod tests {
 }
 
 fn draw_remote_open_modal(frame: &mut Frame, app: &App) {
+    if let Some(entry) = &app.remote_open {
+        draw_remote_open_picker(
+            frame,
+            entry,
+            &app.theme,
+            &app.keybindings,
+            app.file_filter_cursor_visible,
+        );
+    }
+}
+
+pub(crate) fn draw_remote_open_picker(
+    frame: &mut Frame,
+    entry: &crate::app::remote_open::RemoteOpen,
+    theme: &crate::config::ResolvedTheme,
+    keybindings: &crate::keybindings::Keybindings,
+    cursor_visible: bool,
+) {
     use crate::app::remote_open::RemoteOpenPhase;
     use ratatui::widgets::Wrap;
-    let Some(entry) = &app.remote_open else {
-        return;
-    };
     let status = match &entry.phase {
         RemoteOpenPhase::Editing(_) => entry.error().unwrap_or(""),
         RemoteOpenPhase::Loading(_) => "Loading remote review...",
@@ -11866,14 +11902,15 @@ fn draw_remote_open_modal(frame: &mut Frame, app: &App) {
     } else {
         spotlight_popup_rect(frame.area(), 6u16.saturating_add(status_rows))
     };
-    let content = draw_picker_popup(frame, app, popup, " Open remote review ");
+    let content = draw_picker_popup_for_theme(frame, theme, popup, " Open remote review ");
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(2), Constraint::Min(0)])
         .split(content);
     frame.render_widget(
-        Paragraph::new(picker_input_line_at(
-            app,
+        Paragraph::new(picker_input_line_for_theme(
+            theme,
+            cursor_visible,
             &entry.text,
             entry.cursor,
             "Review URL…",
@@ -11882,9 +11919,9 @@ fn draw_remote_open_modal(frame: &mut Frame, app: &App) {
         chunks[0],
     );
     let status_color = if entry.error().is_some() {
-        app.theme.error
+        theme.error
     } else {
-        app.theme.text_muted
+        theme.text_muted
     };
     frame.render_widget(
         Paragraph::new(status)
@@ -11893,11 +11930,9 @@ fn draw_remote_open_modal(frame: &mut Frame, app: &App) {
         chunks[1],
     );
     let key_style = Style::default()
-        .fg(app.theme.primary)
+        .fg(theme.primary)
         .add_modifier(Modifier::BOLD);
-    let accept = app
-        .keybindings
-        .goto_keys(crate::keybindings::LineInputAction::Accept);
+    let accept = keybindings.goto_keys(crate::keybindings::LineInputAction::Accept);
     let full_width = text_width(&accept)
         .saturating_add(text_width(" open    esc cancel"))
         .saturating_add(4);
@@ -11914,10 +11949,10 @@ fn draw_remote_open_modal(frame: &mut Frame, app: &App) {
         frame.render_widget(
             Paragraph::new(modal_footer_line(
                 usize::from(popup.width),
-                Style::default().fg(app.theme.border_active),
+                Style::default().fg(theme.border_active),
                 actions,
             ))
-            .style(Style::default().fg(app.theme.text)),
+            .style(Style::default().fg(theme.text)),
             Rect::new(popup.x, popup.y + popup.height - 1, popup.width, 1),
         );
     }

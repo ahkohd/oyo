@@ -1,5 +1,7 @@
 //! Git history picker for oy view
 
+use crate::app::menu::{self, MenuHost, MenuState};
+use crate::app::palette::{standard_command_entries, PaletteAction, PaletteEntry};
 use crate::color;
 use crate::config::ResolvedTheme;
 use crate::keybindings::{DashboardAction, Keybindings};
@@ -36,6 +38,12 @@ pub enum DashboardSelection {
 pub struct DashboardState {
     selection: DashboardSelection,
     pinned_from: Option<String>,
+}
+
+impl DashboardState {
+    pub(crate) fn selection(&self) -> &DashboardSelection {
+        &self.selection
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -103,8 +111,11 @@ pub(crate) enum DashboardContextMenuResult {
     Open(DashboardSelection),
 }
 
-#[derive(Debug)]
 pub struct Dashboard {
+    pub(crate) menu: MenuState,
+    pub(crate) menu_bar: bool,
+    pub(crate) remote_open: Option<crate::app::remote_open::RemoteOpen>,
+    pub(crate) quit_requested: bool,
     repo_root: PathBuf,
     branch: Option<String>,
     head_meta: Option<HeadMeta>,
@@ -147,6 +158,64 @@ pub struct DashboardConfig {
     pub extent_marker: String,
     pub time_format: TimeFormatter,
     pub keybindings: Keybindings,
+}
+
+impl MenuHost for Dashboard {
+    fn menu(&self) -> &MenuState {
+        &self.menu
+    }
+    fn menu_mut(&mut self) -> &mut MenuState {
+        &mut self.menu
+    }
+    fn keybindings_mut(&mut self) -> &mut Keybindings {
+        &mut self.keybindings
+    }
+    fn keybindings(&self) -> &Keybindings {
+        &self.keybindings
+    }
+    fn theme(&self) -> &ResolvedTheme {
+        &self.theme
+    }
+    fn command_entries(&self) -> Vec<PaletteEntry> {
+        standard_command_entries()
+    }
+    fn command_enabled(&self, action: PaletteAction) -> bool {
+        matches!(
+            action,
+            PaletteAction::OpenDashboard
+                | PaletteAction::OpenRemoteReview
+                | PaletteAction::ToggleMenuBar
+                | PaletteAction::Quit
+        )
+    }
+    fn command_hint(&self, action: PaletteAction) -> String {
+        if matches!(action, PaletteAction::Quit) {
+            self.keybindings.dashboard_menu_keys(DashboardAction::Quit)
+        } else {
+            String::new()
+        }
+    }
+    fn command_checked(&self, action: PaletteAction) -> bool {
+        matches!(action, PaletteAction::ToggleMenuBar) && self.menu_bar
+    }
+    fn menu_input_available(&self) -> bool {
+        !self.filter_active && !self.context_menu_open() && self.remote_open.is_none()
+    }
+    fn execute_palette_action(&mut self, action: PaletteAction) {
+        if !self.command_enabled(action) {
+            return;
+        }
+        match action {
+            PaletteAction::OpenDashboard => {}
+            PaletteAction::OpenRemoteReview => {
+                self.remote_open = Some(crate::app::remote_open::RemoteOpen::new());
+                self.reset_filter_cursor();
+            }
+            PaletteAction::ToggleMenuBar => self.menu_bar = !self.menu_bar,
+            PaletteAction::Quit => self.quit_requested = true,
+            _ => {}
+        }
+    }
 }
 
 struct RenderLineContext<'a> {
@@ -192,6 +261,10 @@ impl Dashboard {
         }
         let filtered = (0..entries.len()).collect();
         Self {
+            menu: MenuState::default(),
+            menu_bar: true,
+            remote_open: None,
+            quit_requested: false,
             repo_root: config.repo_root,
             branch: config.branch,
             head_meta,
@@ -485,7 +558,13 @@ impl Dashboard {
     }
 
     pub fn draw(&mut self, frame: &mut Frame) {
-        let area = frame.area();
+        let mut area = frame.area();
+        self.menu_bar_frame_start();
+        if self.menu_bar && area.height > 2 {
+            menu::draw_bar(frame, self, Rect::new(area.x, area.y, area.width, 1));
+            area.y += 1;
+            area.height -= 1;
+        }
         if let Some(bg) = self.theme.background {
             let block = Block::default().style(Style::default().bg(bg));
             frame.render_widget(block, area);
@@ -505,6 +584,16 @@ impl Dashboard {
         self.draw_list(frame, chunks[1]);
         self.draw_footer(frame, chunks[2]);
         self.draw_context_menu(frame);
+        menu::draw_popup(frame, self);
+        if let Some(entry) = &self.remote_open {
+            crate::ui::draw_remote_open_picker(
+                frame,
+                entry,
+                &self.theme,
+                &self.keybindings,
+                self.filter_cursor_visible,
+            );
+        }
     }
 
     pub fn list_height(&self, height: u16) -> usize {
@@ -858,7 +947,7 @@ impl Dashboard {
     }
 
     fn dashboard_footer_key(&self, action: DashboardAction) -> String {
-        let keys = self.keybindings.dashboard_keys(action);
+        let keys = self.keybindings.dashboard_menu_keys(action);
         if action == DashboardAction::Quit && keys.split(" / ").any(|key| key == "q") {
             "q".to_string()
         } else {
@@ -1649,6 +1738,37 @@ mod tests {
             time_format: TimeFormatter::default(),
             keybindings: Keybindings::default(),
         })
+    }
+
+    #[test]
+    fn history_menu_reuses_commands_without_a_diff_and_preserves_pin() {
+        use crate::app::menu::MenuHost;
+        use crate::app::palette::PaletteAction;
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut history = dashboard();
+        history.move_selection(2, 20);
+        history.toggle_pin();
+        let before = history.state().unwrap();
+        assert!(history.command_enabled(PaletteAction::OpenDashboard));
+        assert!(history.command_enabled(PaletteAction::OpenRemoteReview));
+        assert!(!history.command_enabled(PaletteAction::RefreshAllFiles));
+        assert!(!history.command_enabled(PaletteAction::OpenFileSearch));
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        history.open_menu(0);
+        terminal.draw(|frame| history.draw(frame)).unwrap();
+        history.execute_palette_action(PaletteAction::OpenDashboard);
+        assert_eq!(history.state().unwrap().selection, before.selection);
+        assert_eq!(history.state().unwrap().pinned_from, before.pinned_from);
+        history.execute_palette_action(PaletteAction::OpenRemoteReview);
+        assert!(history.remote_open.is_some());
+        history.remote_open = None;
+        assert_eq!(history.state().unwrap().pinned_from, before.pinned_from);
+        history.execute_palette_action(PaletteAction::ToggleMenuBar);
+        terminal.draw(|frame| history.draw(frame)).unwrap();
+        assert!(!history.menu_bar);
+        history.open_menu(0);
+        terminal.draw(|frame| history.draw(frame)).unwrap();
+        assert!(history.menu.open.is_some());
     }
 
     #[test]

@@ -35,7 +35,7 @@ pub(crate) mod grep;
 mod history;
 pub(crate) mod menu;
 mod navigation;
-mod palette;
+pub(crate) mod palette;
 mod playback;
 mod remote_position;
 mod remote_stream;

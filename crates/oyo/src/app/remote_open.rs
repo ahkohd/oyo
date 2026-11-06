@@ -35,6 +35,32 @@ impl Drop for RemoteOpenWorker {
 }
 
 impl RemoteOpen {
+    pub(crate) fn handle_key(
+        &mut self,
+        key: KeyEvent,
+        bindings: &mut crate::keybindings::Keybindings,
+    ) -> bool {
+        use crate::keybindings::{Dispatch, LineInputAction};
+        if key.code == KeyCode::Esc {
+            return true;
+        }
+        match bindings.goto(key) {
+            Dispatch::Matched(LineInputAction::Cancel) => return true,
+            Dispatch::Matched(LineInputAction::Accept) => self.submit(),
+            Dispatch::Matched(LineInputAction::Clear) if !self.busy() => {
+                self.text.clear();
+                self.cursor = 0;
+                self.phase = RemoteOpenPhase::Editing(None);
+            }
+            Dispatch::Matched(LineInputAction::Backspace) => {
+                self.edit(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))
+            }
+            Dispatch::Pending | Dispatch::Matched(_) => {}
+            Dispatch::Unmatched => self.edit(key),
+        }
+        false
+    }
+
     pub(crate) fn new() -> Self {
         Self {
             text: String::new(),
@@ -164,6 +190,9 @@ impl RemoteOpen {
 
 impl App {
     pub(crate) fn start_remote_open(&mut self) {
+        if self.request_settings_leave(super::settings::SettingsLeaveTarget::OpenRemote) {
+            return;
+        }
         self.stop_command_palette();
         self.reset_picker_cursor();
         self.remote_open = Some(RemoteOpen::new());

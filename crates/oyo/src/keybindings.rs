@@ -7,6 +7,7 @@ use std::hash::Hash;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum KeybindingMode {
     Global,
+    DashboardMenu,
     Menu,
     Normal,
     Help,
@@ -27,7 +28,7 @@ pub(crate) enum KeybindingMode {
 impl KeybindingMode {
     fn id(self) -> &'static str {
         match self {
-            Self::Global => "global",
+            Self::Global | Self::DashboardMenu => "global",
             Self::Menu => "menu",
             Self::Normal => "normal",
             Self::Help => "help",
@@ -240,6 +241,7 @@ pub(crate) enum FileFilterAction {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum DashboardAction {
+    Cancel,
     Quit,
     StartFilter,
     ClearPin,
@@ -484,7 +486,8 @@ binding_action!(SelectionAction, [
 ]);
 
 binding_action!(DashboardAction, [
-    Quit => ("quit", "Quit history", ["esc", "q"]),
+    Cancel => ("cancel", "Return from history", ["esc"]),
+    Quit => ("quit", "Quit history", ["q"]),
     StartFilter => ("start_filter", "Filter commits", ["/"]),
     ClearPin => ("clear_pin", "Clear range", ["r"]),
     TogglePin => ("toggle_pin", "Mark range start", ["space"]),
@@ -514,6 +517,7 @@ binding_action!(DashboardFilterAction, [
 #[derive(Debug)]
 pub(crate) struct Keybindings {
     global: ModeBindings<GlobalAction>,
+    dashboard_menu: ModeBindings<GlobalAction>,
     menu: ModeBindings<MenuAction>,
     normal: ModeBindings<NormalAction>,
     help: ModeBindings<HelpAction>,
@@ -565,8 +569,20 @@ impl Keybindings {
         warnings: &mut Vec<String>,
     ) -> Self {
         warn_unknown_modes(config, warnings);
+        let global: ModeBindings<GlobalAction> =
+            ModeBindings::build(KeybindingMode::Global, config, warnings);
+        let dashboard_menu = ModeBindings::from_effective(
+            KeybindingMode::DashboardMenu,
+            global
+                .effective
+                .iter()
+                .filter(|(id, _)| **id == GlobalAction::OpenMenu.id())
+                .map(|(id, keys)| (*id, keys.clone()))
+                .collect(),
+        );
         Self {
-            global: ModeBindings::build(KeybindingMode::Global, config, warnings),
+            global,
+            dashboard_menu,
             menu: ModeBindings::build(KeybindingMode::Menu, config, warnings),
             normal: ModeBindings::build(KeybindingMode::Normal, config, warnings),
             help: ModeBindings::build(KeybindingMode::Help, config, warnings),
@@ -590,6 +606,41 @@ impl Keybindings {
         }
     }
 
+    pub(crate) fn dashboard_menu(&mut self, key: KeyEvent) -> Dispatch<GlobalAction> {
+        self.prepare_mode(KeybindingMode::DashboardMenu);
+        dispatch_mode(
+            &mut self.active_sequence_mode,
+            &mut self.dashboard_menu,
+            key,
+        )
+    }
+
+    pub(crate) fn dashboard_menu_keys(&self, action: DashboardAction) -> String {
+        self.dashboard
+            .effective
+            .get(action.id())
+            .into_iter()
+            .flatten()
+            .filter(|key| {
+                let sequence = parse_seq(key).unwrap();
+                !self
+                    .dashboard_menu
+                    .effective
+                    .values()
+                    .flatten()
+                    .any(|global| {
+                        parse_seq(global).is_ok_and(|prefix| prefix.first() == sequence.first())
+                    })
+            })
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" / ")
+    }
+
+    pub(crate) fn dashboard_sequence_pending(&self) -> bool {
+        self.active_sequence_mode == Some(KeybindingMode::Dashboard)
+    }
+
     pub(crate) fn normal_sequence_pending(&self) -> bool {
         self.active_sequence_mode == Some(KeybindingMode::Normal)
     }
@@ -597,6 +648,7 @@ impl Keybindings {
     pub(crate) fn clear_sequence(&mut self) {
         match self.active_sequence_mode.take() {
             Some(KeybindingMode::Global) => self.global.clear_sequence(),
+            Some(KeybindingMode::DashboardMenu) => self.dashboard_menu.clear_sequence(),
             Some(KeybindingMode::Menu) => self.menu.clear_sequence(),
             Some(KeybindingMode::Normal) => self.normal.clear_sequence(),
             Some(KeybindingMode::Help) => self.help.clear_sequence(),
@@ -850,6 +902,13 @@ impl<A: BindingAction + 'static> ModeBindings<A> {
             effective = default_bindings::<A>();
         }
 
+        Self::from_effective(mode, effective)
+    }
+
+    fn from_effective(
+        mode: KeybindingMode,
+        effective: BTreeMap<&'static str, Vec<String>>,
+    ) -> Self {
         let items = A::all()
             .iter()
             .map(|action| {
@@ -1093,6 +1152,37 @@ mod tests {
 
     fn shift(ch: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(ch), KeyModifiers::SHIFT)
+    }
+
+    #[test]
+    fn history_only_matches_admitted_global_menu_bindings_and_filters_hints() {
+        let config: crate::config::Config = toml::from_str(
+            "[keybindings.global]\nopen_theme_picker = [\"g q\"]\nopen_menu = [\"v m\"]",
+        )
+        .unwrap();
+        let mut bindings = Keybindings::from_config(&config.keybindings);
+        assert_eq!(
+            bindings.dashboard_menu(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE)),
+            Dispatch::Unmatched
+        );
+        assert_eq!(
+            bindings.dashboard(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE)),
+            Dispatch::Matched(DashboardAction::SelectFirst)
+        );
+        assert_eq!(
+            bindings.dashboard_menu(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE)),
+            Dispatch::Pending
+        );
+        assert_eq!(
+            bindings.dashboard_menu(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE)),
+            Dispatch::Matched(GlobalAction::OpenMenu)
+        );
+        let config: crate::config::Config =
+            toml::from_str("[keybindings.global]\nopen_menu = [\"q\"]").unwrap();
+        let bindings = Keybindings::from_config(&config.keybindings);
+        assert!(bindings
+            .dashboard_menu_keys(DashboardAction::Quit)
+            .is_empty());
     }
 
     #[test]

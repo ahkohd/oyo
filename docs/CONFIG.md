@@ -597,3 +597,7 @@ A bullet marks an active option. Dimmed commands are unavailable in the current 
 Set `ui.menu_bar = false` to hide the row. Use F10 or the palette's Open menu command to open it while hidden. Use Toggle menu bar in the palette or Menu bar in Settings to restore the row. The tab bar remains controlled by `ui.topbar`.
 
 Remap activation with `keybindings.global.open_menu`. Remap menu controls in `[keybindings.menu]` using `cancel`, `accept`, `next_item`, `previous_item`, `next_category`, `previous_category`, `first_item`, and `last_item`. Shortcut hints use effective runtime bindings. A command without a reachable shortcut shows no hint.
+
+The category menu is also available on History, including initial `oy log` and History opened from a diff. File's Open… focuses the existing History picker. Open remote review… uses the same URL editor from either view. Diff-dependent commands stay disabled on History. Escape returns from History to an already open review; Quit uses the review's existing quit confirmation. Cancelling a remote open leaves the History selection and explicit range start intact.
+
+Menu bar visibility changes carry between History and the current review for the session. The configuration option still supplies the startup preference. History uses the same category cycling, compact chooser and `[keybindings.menu]` controls. `[keybindings.dashboard].cancel` defaults to Escape and `quit` defaults to q.

@@ -1,3 +1,4 @@
+use crate::app::menu::MenuHost;
 use crate::app::{App, FilePanelMode, FoldContextDirection, TopbarTabContent, ViewMode};
 use crate::config;
 use crate::keybindings::{
@@ -34,30 +35,13 @@ pub(crate) fn handle_app_key(
 
     if app.remote_open.is_some() {
         app.reset_picker_cursor();
-        if key.code == KeyCode::Esc {
+        if app
+            .remote_open
+            .as_mut()
+            .unwrap()
+            .handle_key(key, &mut app.keybindings)
+        {
             app.remote_open = None;
-            return Ok(());
-        }
-        match app.keybindings.goto(key) {
-            Dispatch::Matched(LineInputAction::Cancel) => app.remote_open = None,
-            Dispatch::Matched(LineInputAction::Accept) => {
-                app.remote_open.as_mut().unwrap().submit()
-            }
-            Dispatch::Matched(LineInputAction::Clear) => {
-                let entry = app.remote_open.as_mut().unwrap();
-                if !entry.busy() {
-                    entry.text.clear();
-                    entry.cursor = 0;
-                    entry.phase = crate::app::remote_open::RemoteOpenPhase::Editing(None);
-                }
-            }
-            Dispatch::Matched(LineInputAction::Backspace) => app
-                .remote_open
-                .as_mut()
-                .unwrap()
-                .edit(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)),
-            Dispatch::Pending => {}
-            Dispatch::Unmatched => app.remote_open.as_mut().unwrap().edit(key),
         }
         return Ok(());
     }
@@ -1196,7 +1180,7 @@ fn dispatch_normal_action(
         }
         NormalAction::OpenDashboard => {
             app.reset_count();
-            app.open_dashboard = true;
+            app.start_history();
         }
         NormalAction::NavigateBack => {
             app.reset_count();

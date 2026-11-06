@@ -1,5 +1,6 @@
 use super::{palette::PaletteAction, App};
-use crate::config::FoldContextMode;
+use crate::config::{FoldContextMode, ResolvedTheme};
+use crate::keybindings::Keybindings;
 use crate::keybindings::{Dispatch, GlobalAction, MenuAction, NormalAction};
 use crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{
@@ -43,7 +44,9 @@ impl PaletteAction {
     fn category(self) -> Category {
         use PaletteAction::*;
         match self {
-            OpenFileSearch
+            OpenDashboard
+            | OpenRemoteReview
+            | OpenFileSearch
             | CopyFilePath
             | CopyFilePosition
             | CopyAbsoluteFilePath
@@ -59,8 +62,7 @@ impl PaletteAction {
             | ToggleFoldContext | ToggleSyntax | ToggleZen | ToggleFilePanel | OpenThemePicker => {
                 Category::View
             }
-            OpenDashboard
-            | NavigateBack
+            NavigateBack
             | NavigateForward
             | OpenReviewGrep
             | OpenReviewGrepChanges
@@ -70,8 +72,7 @@ impl PaletteAction {
             | PreviousStep
             | ToggleAutoplay
             | ToggleAutoplayReverse => Category::Navigate,
-            OpenRemoteReview
-            | ToggleFileReviewed
+            ToggleFileReviewed
             | ToggleReviewedFilesVisibility
             | ToggleIncrementalReview
             | OpenCommentPicker
@@ -84,7 +85,7 @@ impl PaletteAction {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub(crate) struct MenuState {
     pub(crate) open: Option<MenuOpen>,
     categories: Vec<(Rect, usize)>,
@@ -93,60 +94,43 @@ pub(crate) struct MenuState {
     compact: bool,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum MenuPage {
     Commands,
     Categories,
 }
 
+#[derive(Debug)]
 pub(crate) struct MenuOpen {
     page: MenuPage,
     category: usize,
     selected: usize,
 }
 
-impl App {
-    pub(crate) fn menu_bar_frame_start(&mut self) {
-        self.menu.categories.clear();
-        self.menu.compact = false;
+pub(crate) trait MenuHost {
+    fn menu(&self) -> &MenuState;
+    fn menu_mut(&mut self) -> &mut MenuState;
+    fn keybindings_mut(&mut self) -> &mut Keybindings;
+    fn keybindings(&self) -> &Keybindings;
+    fn theme(&self) -> &ResolvedTheme;
+    fn command_entries(&self) -> Vec<super::palette::PaletteEntry>;
+    fn command_enabled(&self, action: PaletteAction) -> bool;
+    fn command_hint(&self, action: PaletteAction) -> String;
+    fn command_checked(&self, action: PaletteAction) -> bool;
+    fn execute_palette_action(&mut self, action: PaletteAction);
+    fn menu_input_available(&self) -> bool;
+    fn reset_menu_input(&mut self) {
+        self.keybindings_mut().clear_sequence();
     }
-
-    pub(crate) fn menu_input_available(&self) -> bool {
-        !self.command_palette_active()
-            && !self.file_search_active()
-            && !self.review_grep_active()
-            && !self.comment_picker_active()
-            && !self.theme_picker_active()
-            && !self.review_editor_active()
-            && !self.review_remote_picker_active()
-            && self.remote_open.is_none()
-            && !self.session_rename_active()
-            && !self.settings_leave_confirmation_active()
-            && !self.settings_reset_confirmation_active()
-            && !self.quit_confirmation_active()
-            && !self.review_delete_confirmation_active()
-            && !self.show_help
-            && !self.show_path_popup
-            && self.file_context_menu.is_none()
-            && self.review_comment_context_menu.is_none()
-            && !self.status_mode_menu_open()
-            && !self.file_filter_active
-            && !self.search_active
-            && !self.goto_active
+    fn menu_bar_frame_start(&mut self) {
+        self.menu_mut().categories.clear();
+        self.menu_mut().compact = false;
     }
-
-    pub(crate) fn open_menu(&mut self, category: usize) {
-        self.keybindings.clear_sequence();
-        self.reset_count();
-        self.review_edit_prefix = false;
-        self.review_reply_prefix = false;
-        self.review_resolve_prefix = false;
-        self.review_delete_prefix = false;
-        self.review_overflow_prefix = false;
-        self.pr_reply_prefix = false;
-        self.menu.rows.clear();
-        self.menu.popup = None;
-        self.menu.open = Some(MenuOpen {
+    fn open_menu(&mut self, category: usize) {
+        self.reset_menu_input();
+        self.menu_mut().rows.clear();
+        self.menu_mut().popup = None;
+        self.menu_mut().open = Some(MenuOpen {
             page: MenuPage::Commands,
             category: category % 5,
             selected: 0,
@@ -157,6 +141,8 @@ impl App {
         use PaletteAction::*;
         let order: &[PaletteAction] = match Category::ALL[category] {
             Category::File => &[
+                OpenDashboard,
+                OpenRemoteReview,
                 OpenFileSearch,
                 CopyFilePath,
                 CopyFilePosition,
@@ -185,7 +171,6 @@ impl App {
                 OpenThemePicker,
             ],
             Category::Navigate => &[
-                OpenDashboard,
                 NavigateBack,
                 NavigateForward,
                 OpenReviewGrep,
@@ -198,7 +183,6 @@ impl App {
                 ToggleAutoplayReverse,
             ],
             Category::Review => &[
-                OpenRemoteReview,
                 ToggleFileReviewed,
                 OpenCommentPicker,
                 OpenPrComments,
@@ -217,6 +201,14 @@ impl App {
                     && !matches!(entry.action, OpenMenu | ToggleViewMode)
             })
             .collect();
+        for entry in &mut entries {
+            if entry.action == PaletteAction::OpenDashboard {
+                entry.label = "Open…".into();
+            }
+            if entry.action == PaletteAction::OpenRemoteReview {
+                entry.label = "Open remote review…".into();
+            }
+        }
         entries.sort_by_key(|entry| {
             order
                 .iter()
@@ -227,7 +219,7 @@ impl App {
     }
 
     fn move_menu(&mut self, delta: isize) {
-        if let Some(open) = &mut self.menu.open {
+        if let Some(open) = &mut self.menu_mut().open {
             let current = if open.page == MenuPage::Categories {
                 open.selected
             } else {
@@ -240,30 +232,32 @@ impl App {
     }
 
     fn move_menu_selection(&mut self, delta: isize) {
-        if let Some(open) = &self.menu.open {
+        if let Some(open) = &self.menu().open {
             let count = self.menu_item_count();
-            self.menu.open.as_mut().unwrap().selected =
+            self.menu_mut().open.as_mut().unwrap().selected =
                 (open.selected as isize + delta).rem_euclid(count.max(1) as isize) as usize;
         }
     }
 
     fn menu_item_count(&self) -> usize {
-        self.menu.open.as_ref().map_or(0, |open| match open.page {
+        self.menu().open.as_ref().map_or(0, |open| match open.page {
             MenuPage::Categories => Category::ALL.len(),
             MenuPage::Commands => self.menu_entries(open.category).len(),
         })
     }
 
     fn choose_menu_category(&mut self) {
-        let selected = self.menu.open.as_ref().map_or(0, |open| open.category);
+        let selected = self.menu().open.as_ref().map_or(0, |open| open.category);
         self.open_menu(selected);
-        let open = self.menu.open.as_mut().unwrap();
+        let open = self.menu_mut().open.as_mut().unwrap();
         open.page = MenuPage::Categories;
         open.selected = selected;
     }
 
     fn activate_menu(&mut self) {
-        let Some(open) = &self.menu.open else { return };
+        let Some(open) = &self.menu().open else {
+            return;
+        };
         if open.page == MenuPage::Categories {
             let category = open.selected;
             self.open_menu(category);
@@ -280,21 +274,21 @@ impl App {
         }
     }
 
-    pub(crate) fn handle_menu_key(&mut self, key: KeyEvent) {
-        match self.keybindings.menu(key) {
+    fn handle_menu_key(&mut self, key: KeyEvent) {
+        match self.keybindings_mut().menu(key) {
             Dispatch::Matched(MenuAction::Cancel) => self.close_menu(),
             Dispatch::Matched(MenuAction::PreviousCategory) => self.move_menu(-1),
             Dispatch::Matched(MenuAction::NextCategory) => self.move_menu(1),
             Dispatch::Matched(MenuAction::NextItem) => self.move_menu_selection(1),
             Dispatch::Matched(MenuAction::PreviousItem) => self.move_menu_selection(-1),
             Dispatch::Matched(MenuAction::FirstItem) => {
-                if let Some(open) = &mut self.menu.open {
+                if let Some(open) = &mut self.menu_mut().open {
                     open.selected = 0;
                 }
             }
             Dispatch::Matched(MenuAction::LastItem) => {
                 let last = self.menu_item_count().saturating_sub(1);
-                if let Some(open) = &mut self.menu.open {
+                if let Some(open) = &mut self.menu_mut().open {
                     open.selected = last;
                 }
             }
@@ -304,28 +298,28 @@ impl App {
     }
 
     fn close_menu(&mut self) {
-        self.menu.open = None;
-        self.keybindings.clear_sequence();
+        self.menu_mut().open = None;
+        self.keybindings_mut().clear_sequence();
     }
 
-    pub(crate) fn handle_menu_mouse(&mut self, event: MouseEvent) -> bool {
+    fn handle_menu_mouse(&mut self, event: MouseEvent) -> bool {
         if !self.menu_input_available() {
             return false;
         }
         let position = (event.column, event.row).into();
         let category = self
-            .menu
+            .menu()
             .categories
             .iter()
             .find(|(rect, _)| rect.contains(position))
             .map(|(_, index)| *index);
-        if self.menu.open.is_some() {
+        if self.menu().open.is_some() {
             match event.kind {
                 MouseEventKind::Down(MouseButton::Left) => {
                     if let Some(category) = category {
-                        if self.menu.compact {
+                        if self.menu().compact {
                             if self
-                                .menu
+                                .menu()
                                 .open
                                 .as_ref()
                                 .is_some_and(|open| open.page == MenuPage::Categories)
@@ -334,7 +328,7 @@ impl App {
                             } else {
                                 self.choose_menu_category();
                             }
-                        } else if self.menu.open.as_ref().is_some_and(|open| {
+                        } else if self.menu().open.as_ref().is_some_and(|open| {
                             open.category == category && open.page == MenuPage::Commands
                         }) {
                             self.close_menu();
@@ -342,23 +336,27 @@ impl App {
                             self.open_menu(category);
                         }
                     } else if let Some((_, index)) = self
-                        .menu
+                        .menu()
                         .rows
                         .iter()
                         .find(|(rect, _)| rect.contains(position))
                     {
-                        self.menu.open.as_mut().unwrap().selected = *index;
+                        self.menu_mut().open.as_mut().unwrap().selected = *index;
                         self.activate_menu();
-                    } else if !self.menu.popup.is_some_and(|rect| rect.contains(position)) {
+                    } else if !self
+                        .menu()
+                        .popup
+                        .is_some_and(|rect| rect.contains(position))
+                    {
                         self.close_menu();
                     }
                 }
-                MouseEventKind::Down(_) => self.menu.open = None,
+                MouseEventKind::Down(_) => self.menu_mut().open = None,
                 MouseEventKind::Moved => {
                     if let Some(category) = category {
-                        if !self.menu.compact
+                        if !self.menu().compact
                             && self
-                                .menu
+                                .menu()
                                 .open
                                 .as_ref()
                                 .is_some_and(|open| open.category != category)
@@ -366,12 +364,12 @@ impl App {
                             self.open_menu(category);
                         }
                     } else if let Some((_, index)) = self
-                        .menu
+                        .menu()
                         .rows
                         .iter()
                         .find(|(rect, _)| rect.contains(position))
                     {
-                        self.menu.open.as_mut().unwrap().selected = *index;
+                        self.menu_mut().open.as_mut().unwrap().selected = *index;
                     }
                 }
                 MouseEventKind::ScrollDown => self.move_menu_selection(1),
@@ -381,7 +379,7 @@ impl App {
             return true;
         }
         if let (MouseEventKind::Down(MouseButton::Left), Some(category)) = (event.kind, category) {
-            if self.menu.compact {
+            if self.menu().compact {
                 self.choose_menu_category();
             } else {
                 self.open_menu(category);
@@ -389,6 +387,66 @@ impl App {
             return true;
         }
         false
+    }
+}
+
+impl MenuHost for App {
+    fn menu(&self) -> &MenuState {
+        &self.menu
+    }
+    fn menu_mut(&mut self) -> &mut MenuState {
+        &mut self.menu
+    }
+    fn keybindings_mut(&mut self) -> &mut Keybindings {
+        &mut self.keybindings
+    }
+    fn keybindings(&self) -> &Keybindings {
+        &self.keybindings
+    }
+    fn theme(&self) -> &ResolvedTheme {
+        &self.theme
+    }
+    fn command_entries(&self) -> Vec<super::palette::PaletteEntry> {
+        App::command_entries(self)
+    }
+    fn command_enabled(&self, action: PaletteAction) -> bool {
+        App::command_enabled(self, action)
+    }
+    fn execute_palette_action(&mut self, action: PaletteAction) {
+        App::execute_palette_action(self, action);
+    }
+    fn reset_menu_input(&mut self) {
+        self.keybindings.clear_sequence();
+        self.reset_count();
+        self.review_edit_prefix = false;
+        self.review_reply_prefix = false;
+        self.review_resolve_prefix = false;
+        self.review_delete_prefix = false;
+        self.review_overflow_prefix = false;
+        self.pr_reply_prefix = false;
+    }
+    fn menu_input_available(&self) -> bool {
+        !self.command_palette_active()
+            && !self.file_search_active()
+            && !self.review_grep_active()
+            && !self.comment_picker_active()
+            && !self.theme_picker_active()
+            && !self.review_editor_active()
+            && !self.review_remote_picker_active()
+            && self.remote_open.is_none()
+            && !self.session_rename_active()
+            && !self.settings_leave_confirmation_active()
+            && !self.settings_reset_confirmation_active()
+            && !self.quit_confirmation_active()
+            && !self.review_delete_confirmation_active()
+            && !self.show_help
+            && !self.show_path_popup
+            && self.file_context_menu.is_none()
+            && self.review_comment_context_menu.is_none()
+            && !self.status_mode_menu_open()
+            && !self.file_filter_active
+            && !self.search_active
+            && !self.goto_active
     }
 
     fn command_hint(&self, action: PaletteAction) -> String {
@@ -481,35 +539,35 @@ impl App {
     }
 }
 
-fn sidebar_style(app: &App) -> Style {
-    Style::default().fg(app.theme.text).bg(app
-        .theme
+fn sidebar_style(app: &impl MenuHost) -> Style {
+    Style::default().fg(app.theme().text).bg(app
+        .theme()
         .background_panel
-        .or(app.theme.background)
+        .or(app.theme().background)
         .unwrap_or(ratatui::style::Color::Reset))
 }
 
-fn sidebar_selected_style(app: &App) -> Style {
+fn sidebar_selected_style(app: &impl MenuHost) -> Style {
     sidebar_style(app)
-        .fg(app.theme.accent)
+        .fg(app.theme().accent)
         .bg(app
-            .theme
+            .theme()
             .background_element
-            .or(app.theme.background_panel)
-            .or(app.theme.background)
+            .or(app.theme().background_panel)
+            .or(app.theme().background)
             .unwrap_or(ratatui::style::Color::Reset))
         .add_modifier(Modifier::BOLD)
 }
 
-pub(crate) fn draw_bar(frame: &mut Frame, app: &mut App, area: Rect) {
-    app.menu.categories.clear();
+pub(crate) fn draw_bar(frame: &mut Frame, app: &mut impl MenuHost, area: Rect) {
+    app.menu_mut().categories.clear();
     if area.is_empty() {
         return;
     }
     let style = sidebar_style(app);
     frame.render_widget(Paragraph::new("").style(style), area);
     let compact = area.width < 46;
-    app.menu.compact = compact;
+    app.menu_mut().compact = compact;
     let mut x = area.x;
     let categories: Vec<_> = if compact {
         vec![(0, "Menu")]
@@ -527,7 +585,7 @@ pub(crate) fn draw_bar(frame: &mut Frame, app: &mut App, area: Rect) {
         }
         let rect = Rect::new(x, area.y, width, 1);
         let active = app
-            .menu
+            .menu()
             .open
             .as_ref()
             .is_some_and(|open| compact || open.category == index);
@@ -539,19 +597,19 @@ pub(crate) fn draw_bar(frame: &mut Frame, app: &mut App, area: Rect) {
             }),
             rect,
         );
-        app.menu.categories.push((rect, index));
+        app.menu_mut().categories.push((rect, index));
         x = x.saturating_add(width);
     }
 }
 
-pub(crate) fn draw_popup(frame: &mut Frame, app: &mut App) {
-    app.menu.rows.clear();
-    app.menu.popup = None;
+pub(crate) fn draw_popup(frame: &mut Frame, app: &mut impl MenuHost) {
+    app.menu_mut().rows.clear();
+    app.menu_mut().popup = None;
     if !app.menu_input_available() {
-        app.menu.open = None;
+        app.menu_mut().open = None;
         return;
     }
-    let Some(open) = &app.menu.open else { return };
+    let Some(open) = &app.menu().open else { return };
     let category = open.category;
     let choosing = open.page == MenuPage::Categories;
     let entries = app.menu_entries(category);
@@ -561,11 +619,36 @@ pub(crate) fn draw_popup(frame: &mut Frame, app: &mut App) {
         entries.len()
     };
     let selected = open.selected.min(total.saturating_sub(1));
-    app.menu.open.as_mut().unwrap().selected = selected;
+    app.menu_mut().open.as_mut().unwrap().selected = selected;
     let screen = frame.area();
     if screen.width < 4 || screen.height < 4 {
         return;
     }
+    let mut items = Vec::new();
+    if choosing {
+        for (index, category) in Category::ALL.iter().enumerate() {
+            items.push((Some(index), category.label(), None));
+        }
+    } else {
+        for (index, entry) in entries.iter().enumerate() {
+            if category == 0
+                && matches!(
+                    entry.action,
+                    PaletteAction::OpenFileSearch
+                        | PaletteAction::RefreshCurrentFile
+                        | PaletteAction::CopySessionName
+                        | PaletteAction::Quit
+                )
+            {
+                items.push((None, "", None));
+            }
+            items.push((Some(index), entry.label.as_str(), Some(entry.action)));
+        }
+    }
+    let selected_row = items
+        .iter()
+        .position(|(index, _, _)| *index == Some(selected))
+        .unwrap_or(0);
     let desired = if choosing {
         28
     } else {
@@ -586,13 +669,13 @@ pub(crate) fn draw_popup(frame: &mut Frame, app: &mut App) {
         .max(footer_width.saturating_add(4).min(u16::MAX as usize) as u16)
         .max(28)
         .min(screen.width);
-    let height = (total.saturating_add(2).min(u16::MAX as usize) as u16)
+    let height = (items.len().saturating_add(2).min(u16::MAX as usize) as u16)
         .min(screen.height.saturating_sub(1));
     let anchor = app
-        .menu
+        .menu()
         .categories
         .iter()
-        .find(|(_, index)| app.menu.compact || *index == category)
+        .find(|(_, index)| app.menu().compact || *index == category)
         .map(|(rect, _)| *rect);
     let x = anchor
         .map_or(screen.x, |rect| rect.x)
@@ -601,9 +684,9 @@ pub(crate) fn draw_popup(frame: &mut Frame, app: &mut App) {
         .map_or(screen.y, |rect| rect.bottom())
         .min(screen.bottom().saturating_sub(height));
     let area = Rect::new(x, y, width, height);
-    app.menu.popup = Some(area);
+    app.menu_mut().popup = Some(area);
     let style = sidebar_style(app);
-    let border = Style::default().fg(app.theme.border_active);
+    let border = Style::default().fg(app.theme().border_active);
     frame.render_widget(Clear, area);
     frame.render_widget(
         Block::default()
@@ -614,25 +697,21 @@ pub(crate) fn draw_popup(frame: &mut Frame, app: &mut App) {
         area,
     );
     let count = height.saturating_sub(2) as usize;
-    let start = selected.saturating_sub(count.saturating_sub(1));
-    let items: Vec<_> = if choosing {
-        Category::ALL
-            .iter()
-            .map(|category| (category.label(), None))
-            .collect()
-    } else {
-        entries
-            .iter()
-            .map(|entry| (entry.label.as_str(), Some(entry.action)))
-            .collect()
-    };
-    for (offset, (label, action)) in items.into_iter().enumerate().skip(start).take(count) {
+    let start = selected_row.saturating_sub(count.saturating_sub(1));
+    for (offset, (index, label, action)) in items.into_iter().enumerate().skip(start).take(count) {
         let rect = Rect::new(
             area.x + 1,
             area.y + 1 + (offset - start) as u16,
             width - 2,
             1,
         );
+        let Some(index) = index else {
+            frame.render_widget(
+                Paragraph::new("─".repeat(rect.width as usize)).style(style.fg(app.theme().border)),
+                rect,
+            );
+            continue;
+        };
         let enabled = action.is_none_or(|action| app.command_enabled(action));
         let hint = action.map_or_else(String::new, |action| app.command_hint(action));
         let check = if action.is_some_and(|action| app.command_checked(action)) {
@@ -649,14 +728,14 @@ pub(crate) fn draw_popup(frame: &mut Frame, app: &mut App) {
         let label_width = available.saturating_sub(hint.width() + usize::from(!hint.is_empty()));
         let label = fit_label(label, label_width);
         let padding = available.saturating_sub(label.width() + hint.width());
-        let mut row_style = if offset == selected {
+        let mut row_style = if index == selected {
             sidebar_selected_style(app)
         } else {
             style
         };
         if !enabled {
             row_style = row_style
-                .fg(app.theme.text_muted)
+                .fg(app.theme().text_muted)
                 .add_modifier(Modifier::DIM);
         }
         frame.render_widget(
@@ -668,7 +747,7 @@ pub(crate) fn draw_popup(frame: &mut Frame, app: &mut App) {
             .style(row_style),
             rect,
         );
-        app.menu.rows.push((rect, offset));
+        app.menu_mut().rows.push((rect, index));
     }
     let actions = if footer_width + 4 <= width as usize {
         footer
@@ -686,8 +765,8 @@ pub(crate) fn draw_popup(frame: &mut Frame, app: &mut App) {
     );
 }
 
-fn primary_menu_key(app: &App, action: MenuAction) -> String {
-    app.keybindings
+fn primary_menu_key(app: &impl MenuHost, action: MenuAction) -> String {
+    app.keybindings()
         .menu_keys(action)
         .split(" / ")
         .next()
@@ -695,9 +774,9 @@ fn primary_menu_key(app: &App, action: MenuAction) -> String {
         .to_string()
 }
 
-fn menu_footer_actions(app: &App, enabled: bool) -> Vec<Span<'static>> {
+fn menu_footer_actions(app: &impl MenuHost, enabled: bool) -> Vec<Span<'static>> {
     let key_style = Style::default()
-        .fg(app.theme.primary)
+        .fg(app.theme().primary)
         .add_modifier(Modifier::BOLD);
     let accept = primary_menu_key(app, MenuAction::Accept);
     let cancel = primary_menu_key(app, MenuAction::Cancel);
@@ -718,13 +797,13 @@ fn menu_footer_actions(app: &App, enabled: bool) -> Vec<Span<'static>> {
     actions
 }
 
-fn menu_cancel_actions(app: &App, width: usize) -> Vec<Span<'static>> {
+fn menu_cancel_actions(app: &impl MenuHost, width: usize) -> Vec<Span<'static>> {
     let cancel = primary_menu_key(app, MenuAction::Cancel);
     if cancel.is_empty() {
         return Vec::new();
     }
     let key_style = Style::default()
-        .fg(app.theme.primary)
+        .fg(app.theme().primary)
         .add_modifier(Modifier::BOLD);
     let mut actions = vec![Span::styled(cancel.clone(), key_style)];
     if cancel.width() + 11 <= width {
