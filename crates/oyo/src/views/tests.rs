@@ -206,6 +206,7 @@ fn fold_scope_hint_needs_room_for_text_and_ellipsis() {
 #[test]
 fn fold_context_band_drops_scope_hint_before_controls() {
     let mut app = make_fold_scope_app(ViewMode::UnifiedPane);
+    app.wait_for_current_fold_scopes();
     let fold_line = app
         .current_view_with_frame(AnimationFrame::Idle)
         .iter()
@@ -243,6 +244,7 @@ fn fold_context_band_drops_scope_hint_before_controls() {
 fn fold_context_scope_hint_renders_in_unified_and_split_views() {
     for mode in [ViewMode::UnifiedPane, ViewMode::Split] {
         let mut app = make_fold_scope_app(mode);
+        app.wait_for_current_fold_scopes();
         let buffer = render_buffer(&mut app, 120, 20);
         let text = buffer
             .content

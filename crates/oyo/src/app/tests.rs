@@ -383,6 +383,8 @@ fn fold_context_scope_hints_are_cached_and_use_innermost_definition() {
     app.next_step();
 
     let _ = app.current_view_with_frame(AnimationFrame::Idle);
+    app.wait_for_current_fold_scopes();
+    let _ = app.current_view_with_frame(AnimationFrame::Idle);
     let hints = app
         .fold_context_regions
         .iter()
@@ -390,12 +392,12 @@ fn fold_context_scope_hints_are_cached_and_use_innermost_definition() {
         .collect::<Vec<_>>();
     assert!(hints.contains(&"fn outer() {"));
     assert!(hints.contains(&"fn inner() {"));
-    app.fold_scope_caches[0].as_mut().unwrap()[0].definition = "cached_scope".to_string();
+    app.fold_scope_caches[0].as_mut().unwrap().ranges[0].definition = "cached_scope".to_string();
 
     app.invalidate_fold_context_view();
     let _ = app.current_view_with_frame(AnimationFrame::Idle);
     assert_eq!(
-        app.fold_scope_caches[0].as_ref().unwrap()[0].definition,
+        app.fold_scope_caches[0].as_ref().unwrap().ranges[0].definition,
         "cached_scope"
     );
 

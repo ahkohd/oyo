@@ -10,7 +10,7 @@ use crate::config::{
 use crate::csv_preview::CsvPreviewState;
 use crate::keybindings::Keybindings;
 use crate::structured_preview::StructuredPreviewState;
-use crate::syntax::{EnclosingScopeRange, SyntaxCache, SyntaxEngine};
+use crate::syntax::{SyntaxCache, SyntaxEngine};
 use crate::time_format::TimeFormatter;
 use crate::toasts::{ToastEvent, ToastInteraction, ToastMouseButton, Toasts};
 use oyo_core::{
@@ -803,7 +803,8 @@ pub struct App {
     /// Per-file syntax cache (old/new spans)
     syntax_caches: Vec<Option<SyntaxCache>>,
     /// Per-file named syntax scopes used by folded context bands
-    fold_scope_caches: Vec<Option<Vec<EnclosingScopeRange>>>,
+    fold_scope_caches: Vec<Option<syntax::FoldScopeCache>>,
+    fold_scope_worker: Option<syntax::FoldScopeWorker>,
     /// Show syntax scope debug label in the status bar
     show_syntax_scopes: bool,
     /// Cached syntax scope label for the active line
@@ -1496,6 +1497,7 @@ impl App {
             syntax_engine_rx: None,
             syntax_caches: vec![None; file_count],
             fold_scope_caches: vec![None; file_count],
+            fold_scope_worker: None,
             show_syntax_scopes: false,
             syntax_scope_cache: None,
             peek_state: None,
@@ -2918,7 +2920,7 @@ impl App {
             if let Some(ranges) = self
                 .fold_scope_caches
                 .get(self.multi_diff.selected_index)
-                .and_then(|cache| cache.as_deref())
+                .and_then(|cache| cache.as_ref().map(|cache| cache.ranges.as_slice()))
             {
                 for region in &mut fold_context_regions {
                     region.scope_hint = region.scope_line.and_then(|line| {
@@ -3246,6 +3248,7 @@ impl App {
         dirty |= self.poll_remote_refresh();
         let mut reviewed_state_inputs_changed = self.poll_content_responses();
         dirty |= reviewed_state_inputs_changed;
+        dirty |= self.poll_fold_scope_results();
         dirty |= self.poll_review_grep();
         dirty |= self.poll_diff_responses();
         dirty |= self.poll_review_grep_jump();

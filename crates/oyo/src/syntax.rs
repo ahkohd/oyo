@@ -381,6 +381,7 @@ const EMBEDDED_TMTHEMES: &[EmbeddedTmTheme] = &[
     },
 ];
 
+#[derive(Clone)]
 pub struct SyntaxEngine {
     syntax_set: std::sync::Arc<SyntaxSet>,
     theme: std::sync::Arc<Theme>,
@@ -388,6 +389,10 @@ pub struct SyntaxEngine {
 }
 
 impl SyntaxEngine {
+    pub(crate) fn shares_syntax_with(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.syntax_set, &other.syntax_set)
+    }
+
     pub fn new(syntax_theme: &str, light_mode: bool) -> Self {
         let syntax_set = std::sync::Arc::new(syntax_set_with_dirs(config_syntax_dirs()));
         let (syntax_theme, plain) = resolve_syntax_theme(syntax_theme, light_mode);

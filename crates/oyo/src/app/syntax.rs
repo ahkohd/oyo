@@ -5,6 +5,70 @@ use oyo_core::{LineKind, ViewLine};
 use ratatui::text::Span;
 use std::time::Instant;
 
+#[derive(Clone)]
+struct FoldScopeRequest {
+    file_index: usize,
+    snapshot: u64,
+    revision: u64,
+    file_name: String,
+    content: std::sync::Arc<str>,
+    engine: SyntaxEngine,
+}
+
+impl FoldScopeRequest {
+    fn matches(&self, app: &App) -> bool {
+        self.snapshot == app.multi_diff.content_snapshot()
+            && self.revision == app.multi_diff.content_revision(self.file_index)
+            && app
+                .multi_diff
+                .files
+                .get(self.file_index)
+                .is_some_and(|file| file.display_name == self.file_name)
+            && app
+                .multi_diff
+                .file_contents_arc(self.file_index)
+                .is_some_and(|(_, new)| std::sync::Arc::ptr_eq(&self.content, &new))
+            && app
+                .syntax_engine
+                .as_ref()
+                .is_some_and(|engine| engine.shares_syntax_with(&self.engine))
+    }
+}
+
+#[derive(Clone)]
+pub(super) struct FoldScopeCache {
+    request: FoldScopeRequest,
+    pub(super) ranges: Vec<crate::syntax::EnclosingScopeRange>,
+}
+
+pub(super) struct FoldScopeWorker {
+    tx: std::sync::mpsc::SyncSender<FoldScopeRequest>,
+    rx: std::sync::mpsc::Receiver<FoldScopeCache>,
+    busy: bool,
+}
+
+impl FoldScopeWorker {
+    fn new(
+        parse: impl Fn(&FoldScopeRequest) -> Vec<crate::syntax::EnclosingScopeRange> + Send + 'static,
+    ) -> Self {
+        let (tx, requests) = std::sync::mpsc::sync_channel::<FoldScopeRequest>(1);
+        let (responses, rx) = std::sync::mpsc::sync_channel(1);
+        std::thread::spawn(move || {
+            while let Ok(request) = requests.recv() {
+                let ranges = parse(&request);
+                if responses.send(FoldScopeCache { request, ranges }).is_err() {
+                    break;
+                }
+            }
+        });
+        Self {
+            tx,
+            rx,
+            busy: false,
+        }
+    }
+}
+
 impl App {
     pub fn syntax_enabled(&self) -> bool {
         if self.multi_diff.file_count() == 0 || self.multi_diff.current_file_is_binary() {
@@ -24,6 +88,8 @@ impl App {
         self.syntax_engine = None;
         self.syntax_engine_rx = None;
         self.syntax_caches = vec![None; self.multi_diff.file_count()];
+        self.fold_scope_caches = vec![None; self.multi_diff.file_count()];
+        self.clear_fold_context_caches();
         self.unified_render_cache = None;
         self.start_syntax_engine_load();
     }
@@ -484,6 +550,52 @@ impl App {
         }
     }
 
+    fn poll_scope_syntax_engine(&mut self) -> bool {
+        if self.syntax_engine.is_some() {
+            return false;
+        }
+        let Some(rx) = self.syntax_engine_rx.as_ref() else {
+            return false;
+        };
+        match rx.try_recv() {
+            Ok(engine) => {
+                self.syntax_engine = Some(engine);
+                self.syntax_engine_rx = None;
+                self.clear_fold_context_caches();
+                true
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.syntax_engine_rx = None;
+                false
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => false,
+        }
+    }
+
+    pub(crate) fn poll_fold_scope_results(&mut self) -> bool {
+        let engine_ready = self.poll_scope_syntax_engine();
+        let Some(worker) = self.fold_scope_worker.as_mut() else {
+            return engine_ready;
+        };
+        let result = match worker.rx.try_recv() {
+            Ok(result) => result,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return engine_ready,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.fold_scope_worker = None;
+                return true;
+            }
+        };
+        worker.busy = false;
+        if result.request.matches(self) {
+            let index = result.request.file_index;
+            if let Some(cache) = self.fold_scope_caches.get_mut(index) {
+                *cache = Some(result);
+            }
+        }
+        self.clear_fold_context_caches();
+        true
+    }
+
     pub(crate) fn ensure_current_fold_scope_cache(&mut self) {
         let idx = self.multi_diff.selected_index;
         if idx >= self.multi_diff.file_count() {
@@ -492,10 +604,14 @@ impl App {
         if self.fold_scope_caches.len() != self.multi_diff.file_count() {
             self.fold_scope_caches = vec![None; self.multi_diff.file_count()];
         }
-        if self.fold_scope_caches[idx].is_some() {
+        self.poll_fold_scope_results();
+        if self.fold_scope_caches[idx]
+            .as_ref()
+            .is_some_and(|cache| cache.request.matches(self))
+        {
             return;
         }
-
+        self.fold_scope_caches[idx] = None;
         let Some(file_name) = self
             .multi_diff
             .current_file()
@@ -503,18 +619,56 @@ impl App {
         else {
             return;
         };
-        let Some((_, new_content)) = self.multi_diff.file_contents_arc(idx) else {
+        let Some((_, content)) = self.multi_diff.file_contents_arc(idx) else {
             return;
         };
-        if !self.ensure_syntax_engine() {
+        if self.syntax_engine.is_none() {
+            if self.syntax_engine_rx.is_none() {
+                let theme = self.syntax_theme.clone();
+                let light = self.theme_is_light;
+                let (tx, rx) = std::sync::mpsc::channel();
+                std::thread::spawn(move || {
+                    let _ = tx.send(SyntaxEngine::new(&theme, light));
+                });
+                self.syntax_engine_rx = Some(rx);
+            }
             return;
         }
-        let ranges = self
-            .syntax_engine
-            .as_ref()
-            .map(|engine| engine.enclosing_scope_ranges(new_content.as_ref(), &file_name))
-            .unwrap_or_default();
-        self.fold_scope_caches[idx] = Some(ranges);
+        let worker = self.fold_scope_worker.get_or_insert_with(|| {
+            FoldScopeWorker::new(|request| {
+                request
+                    .engine
+                    .enclosing_scope_ranges(&request.content, &request.file_name)
+            })
+        });
+        if worker.busy {
+            return;
+        }
+        let request = FoldScopeRequest {
+            file_index: idx,
+            snapshot: self.multi_diff.content_snapshot(),
+            revision: self.multi_diff.content_revision(idx),
+            file_name,
+            content,
+            engine: self.syntax_engine.as_ref().unwrap().clone(),
+        };
+        if worker.tx.try_send(request).is_ok() {
+            worker.busy = true;
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn wait_for_current_fold_scopes(&mut self) {
+        let index = self.multi_diff.selected_index;
+        let until = Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            self.ensure_current_fold_scope_cache();
+            if self.fold_scope_caches[index].is_some() {
+                break;
+            }
+            assert!(Instant::now() < until, "scope parsing did not complete");
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
     }
 
     pub(crate) fn ensure_syntax_cache(&mut self) -> Option<&mut SyntaxCache> {
@@ -638,6 +792,122 @@ fn update_warmup_range(range: &mut Option<super::WarmupRange>, line_idx: usize) 
                 start: line_idx,
                 end: line_idx,
             });
+        }
+    }
+}
+
+#[cfg(test)]
+mod fold_scope_tests {
+    use super::*;
+    use oyo_core::{AnimationFrame, MultiFileDiff};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    fn app() -> App {
+        let old = format!(
+            "fn old_scope() {{\n{}\n}}\n",
+            "    let value = 1;\n".repeat(50)
+        );
+        let new = old.replacen("value = 1", "value = 2", 1);
+        let mut app = App::new(
+            MultiFileDiff::from_file_pairs(
+                (0..3)
+                    .map(|i| (format!("file{i}.rs").into(), old.clone(), new.clone()))
+                    .collect(),
+            ),
+            ViewMode::UnifiedPane,
+            0,
+            false,
+            None,
+        );
+        app.syntax_engine = Some(SyntaxEngine::new("ansi", false));
+        app.stepping = false;
+        app.multi_diff.current_navigator().goto_end();
+        app
+    }
+
+    fn finish(app: &mut App) {
+        let until = Instant::now() + Duration::from_secs(5);
+        while app
+            .fold_scope_worker
+            .as_ref()
+            .is_some_and(|worker| worker.busy)
+            && Instant::now() < until
+        {
+            app.poll_fold_scope_results();
+            std::thread::yield_now();
+        }
+        assert!(!app.fold_scope_worker.as_ref().unwrap().busy);
+    }
+
+    #[test]
+    fn gated_scope_parse_leaves_navigation_responsive_and_only_scans_latest_selection() {
+        let mut app = app();
+        let (started, starts) = mpsc::channel();
+        let (release, permits) = mpsc::channel();
+        let ui = std::thread::current().id();
+        app.fold_scope_worker = Some(FoldScopeWorker::new(move |request| {
+            assert_ne!(std::thread::current().id(), ui);
+            started.send(request.file_index).unwrap();
+            permits.recv_timeout(Duration::from_secs(5)).unwrap();
+            request
+                .engine
+                .enclosing_scope_ranges(&request.content, &request.file_name)
+        }));
+        let _ = app.current_view_with_frame(AnimationFrame::Idle);
+        assert_eq!(starts.recv_timeout(Duration::from_secs(5)).unwrap(), 0);
+        app.select_file(1);
+        let _ = app.current_view_with_frame(AnimationFrame::Idle);
+        app.select_file(2);
+        let _ = app.current_view_with_frame(AnimationFrame::Idle);
+        assert_eq!(app.multi_diff.selected_index, 2);
+        assert!(starts.try_recv().is_err());
+        release.send(()).unwrap();
+        finish(&mut app);
+        let _ = app.current_view_with_frame(AnimationFrame::Idle);
+        assert_eq!(starts.recv_timeout(Duration::from_secs(5)).unwrap(), 2);
+        app.scroll_offset = 3;
+        app.needs_scroll_to_active = false;
+        app.centered_once = true;
+        app.search_query = "retained search".to_owned();
+        release.send(()).unwrap();
+        finish(&mut app);
+        assert_eq!(app.scroll_offset, 3);
+        assert!(!app.needs_scroll_to_active);
+        assert!(app.centered_once);
+        assert_eq!(app.search_query, "retained search");
+        let _ = app.current_view_with_frame(AnimationFrame::Idle);
+        assert!(app.fold_scope_caches[2].is_some());
+        assert!(starts.try_recv().is_err());
+    }
+
+    #[test]
+    fn scope_completion_rejects_replaced_contents_and_reloaded_engine() {
+        for reload_engine in [false, true] {
+            let mut app = app();
+            let (started, starts) = mpsc::channel();
+            let (release, permits) = mpsc::channel();
+            app.fold_scope_worker = Some(FoldScopeWorker::new(move |request| {
+                started.send(()).unwrap();
+                permits.recv_timeout(Duration::from_secs(5)).unwrap();
+                request
+                    .engine
+                    .enclosing_scope_ranges(&request.content, &request.file_name)
+            }));
+            let _ = app.current_view_with_frame(AnimationFrame::Idle);
+            starts.recv_timeout(Duration::from_secs(5)).unwrap();
+            if reload_engine {
+                app.set_syntax_theme("github".to_owned());
+            } else {
+                app.multi_diff = MultiFileDiff::from_file_pairs(vec![(
+                    "file0.rs".into(),
+                    "old".into(),
+                    "new".into(),
+                )]);
+            }
+            release.send(()).unwrap();
+            finish(&mut app);
+            assert!(app.fold_scope_caches.iter().all(Option::is_none));
         }
     }
 }
