@@ -77,7 +77,7 @@ pub(crate) fn standard_command_entries() -> Vec<PaletteEntry> {
         ("Toggle line wrap", ToggleLineWrap),
         ("Cycle context folding", ToggleFoldContext),
         ("Toggle syntax highlight", ToggleSyntax),
-        ("Toggle help", ToggleHelp),
+        ("Open help", ToggleHelp),
         ("Open settings", OpenSettings),
         ("Toggle zen mode", ToggleZen),
         ("Toggle file panel", ToggleFilePanel),

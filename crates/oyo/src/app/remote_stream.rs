@@ -245,50 +245,6 @@ impl App {
     }
 }
 
-pub(super) fn with_unloaded_context(view: Vec<oyo_core::ViewLine>) -> Vec<oyo_core::ViewLine> {
-    use oyo_core::{LineKind, ViewLine, ViewSpan, ViewSpanKind};
-    let mut result = Vec::with_capacity(view.len() + 8);
-    let mut old = 0usize;
-    let mut new = 0usize;
-    let gap = |next: usize| ViewLine {
-        content: "Context is not loaded.".to_owned(),
-        spans: vec![ViewSpan {
-            text: "Context is not loaded.".to_owned(),
-            kind: ViewSpanKind::Equal,
-        }],
-        kind: LineKind::Unloaded,
-        old_line: None,
-        new_line: None,
-        is_active: false,
-        is_active_change: false,
-        is_primary_active: false,
-        show_hunk_extent: false,
-        change_id: next,
-        hunk_index: None,
-        has_changes: false,
-    };
-    for line in view {
-        if line.old_line.is_some_and(|n| n > old.saturating_add(1))
-            || line.new_line.is_some_and(|n| n > new.saturating_add(1))
-        {
-            result.push(gap(line.change_id));
-        }
-        if let Some(n) = line.old_line {
-            old = n;
-        }
-        if let Some(n) = line.new_line {
-            new = n;
-        }
-        result.push(line);
-    }
-    if let Some(last) = result.last() {
-        if old > 0 || new > 0 {
-            result.push(gap(last.change_id));
-        }
-    }
-    result
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -404,18 +360,30 @@ mod tests {
     }
 
     #[test]
-    fn unloaded_context_has_no_original_line_or_blame_location() {
-        let mut app = sparse_app();
-        let view = app.current_view_with_frame(AnimationFrame::Idle);
-        let gaps = view
-            .iter()
-            .filter(|line| line.kind == oyo_core::LineKind::Unloaded)
-            .collect::<Vec<_>>();
-        assert!(!gaps.is_empty());
-        assert!(gaps
-            .iter()
-            .all(|line| line.old_line.is_none() && line.new_line.is_none() && !line.has_changes));
-        assert!(view.iter().any(|line| line.old_line == Some(40)));
-        assert!(view.iter().any(|line| line.old_line == Some(80)));
+    fn sparse_views_contain_only_patch_rows_including_real_blank_lines() {
+        for mode in [ViewMode::UnifiedPane, ViewMode::Split] {
+            let patch = PatchRecord::parse(b"diff --git a/f b/f\nindex 1111111..2222222 100644\n--- a/f\n+++ b/f\n@@ -39,2 +39,2 @@\n \n-old\n+new\n@@ -80 +80 @@\n-before\n+after\n".to_vec()).unwrap();
+            let mut diff = MultiFileDiff::from_pending_files(None, Vec::new(), true);
+            diff.append_patch(patch, ContentSource::Empty, ContentSource::Empty);
+            let mut app = App::new(diff, mode, 0, false, None);
+            app.stepping = false;
+            app.multi_diff.current_navigator().goto_end();
+            let view = app.current_view_with_frame(AnimationFrame::Idle);
+            let rows = view
+                .iter()
+                .map(|line| (line.old_line, line.new_line, line.content.as_str()))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                rows,
+                vec![
+                    (Some(39), Some(39), ""),
+                    (Some(40), None, "old"),
+                    (None, Some(40), "new"),
+                    (Some(80), None, "before"),
+                    (None, Some(80), "after"),
+                ],
+                "{mode:?}"
+            );
+        }
     }
 }
