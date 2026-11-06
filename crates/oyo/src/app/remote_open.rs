@@ -8,6 +8,7 @@ pub(crate) struct RemoteOpen {
     pub(crate) text: String,
     pub(crate) cursor: usize,
     pub(crate) phase: RemoteOpenPhase,
+    pub(crate) footer_hits: Vec<crate::footer::FooterHit<crate::keybindings::LineInputAction>>,
 }
 
 pub(crate) enum RemoteOpenPhase {
@@ -42,23 +43,45 @@ impl RemoteOpen {
     ) -> bool {
         use crate::keybindings::{Dispatch, LineInputAction};
         if key.code == KeyCode::Esc {
-            return true;
+            bindings.clear_sequence();
+            return self.handle_action(LineInputAction::Cancel);
         }
         match bindings.goto(key) {
-            Dispatch::Matched(LineInputAction::Cancel) => return true,
-            Dispatch::Matched(LineInputAction::Accept) => self.submit(),
-            Dispatch::Matched(LineInputAction::Clear) if !self.busy() => {
+            Dispatch::Matched(action) => return self.handle_action(action),
+            Dispatch::Pending => {}
+            Dispatch::Unmatched => self.edit(key),
+        }
+        false
+    }
+
+    pub(crate) fn handle_action(&mut self, action: crate::keybindings::LineInputAction) -> bool {
+        use crate::keybindings::LineInputAction;
+        self.footer_hits.clear();
+        match action {
+            LineInputAction::Cancel => return true,
+            LineInputAction::Accept => self.submit(),
+            LineInputAction::Clear if !self.busy() => {
                 self.text.clear();
                 self.cursor = 0;
                 self.phase = RemoteOpenPhase::Editing(None);
             }
-            Dispatch::Matched(LineInputAction::Backspace) => {
+            LineInputAction::Backspace => {
                 self.edit(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))
             }
-            Dispatch::Pending | Dispatch::Matched(_) => {}
-            Dispatch::Unmatched => self.edit(key),
+            _ => {}
         }
         false
+    }
+
+    pub(crate) fn mouse_action(
+        &self,
+        event: crossterm::event::MouseEvent,
+    ) -> Option<crate::keybindings::LineInputAction> {
+        if event.kind == crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left)
+        {
+            return crate::footer::action_at(&self.footer_hits, event.column, event.row);
+        }
+        None
     }
 
     pub(crate) fn new() -> Self {
@@ -66,6 +89,7 @@ impl RemoteOpen {
             text: String::new(),
             cursor: 0,
             phase: RemoteOpenPhase::Editing(None),
+            footer_hits: Vec::new(),
         }
     }
 
@@ -81,10 +105,12 @@ impl RemoteOpen {
     }
 
     pub(crate) fn fail(&mut self, error: String) {
+        self.footer_hits.clear();
         self.phase = RemoteOpenPhase::Editing(Some(error));
     }
 
     pub(crate) fn submit(&mut self) {
+        self.footer_hits.clear();
         if self.busy() {
             return;
         }
@@ -130,6 +156,7 @@ impl RemoteOpen {
     }
 
     pub(crate) fn insert(&mut self, text: &str) {
+        self.footer_hits.clear();
         if self.busy() {
             return;
         }
@@ -154,6 +181,7 @@ impl RemoteOpen {
     }
 
     pub(crate) fn edit(&mut self, key: KeyEvent) {
+        self.footer_hits.clear();
         if self.busy() {
             return;
         }

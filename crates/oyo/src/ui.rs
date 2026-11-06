@@ -1,5 +1,7 @@
 //! UI rendering for the TUI
 
+use crate::footer::{footer_line, FooterAction};
+
 use crate::app::menu::MenuHost;
 use crate::app::{
     diff_scrollbar_thumb,
@@ -813,6 +815,7 @@ fn draw_all_reviewed_tab(
 
 /// Main drawing function
 pub fn draw(frame: &mut Frame, app: &mut App) {
+    app.session_rename_footer_hits.clear();
     app.restore_remote_viewport();
     app.begin_remote_position_frame(frame.area());
     app.clear_review_preview_boxes();
@@ -7007,38 +7010,23 @@ fn draw_review_remote_picker(frame: &mut Frame, app: &mut App) {
     frame.render_widget(Paragraph::new(lines), chunks[1]);
 }
 
-pub(crate) fn modal_footer_line(
-    width: usize,
-    border: Style,
-    actions: Vec<Span<'static>>,
-) -> Line<'static> {
-    if width < 4 {
-        let edge = match width {
-            0 => String::new(),
-            1 => "╯".to_owned(),
-            _ => format!("╰{}╯", "─".repeat(width - 2)),
-        };
-        return Line::from(Span::styled(edge, border));
-    }
-    let actions = clamp_spans_to_width(&actions, width.saturating_sub(4));
-    let footer_rule = "─".repeat(width.saturating_sub(spans_width(&actions).saturating_add(4)));
-    let mut spans = vec![Span::styled("╰ ", border)];
-    spans.extend(actions);
-    spans.push(Span::styled(format!(" {footer_rule}╯"), border));
-    Line::from(spans)
-}
-
 fn draw_session_rename_modal(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
     let title = "Rename session";
     let body = "Enter a session name.";
-    let footer_label = "enter save    esc cancel";
+    let footer_label = format!(
+        "{} save    {} cancel",
+        app.keybindings
+            .goto_keys(crate::keybindings::LineInputAction::Accept),
+        app.keybindings
+            .goto_keys(crate::keybindings::LineInputAction::Cancel)
+    );
     let query = app.session_rename_query();
     let content_width = [
         text_width(title),
         text_width(body),
         text_width(query).max(text_width("Session name")),
-        text_width(footer_label),
+        text_width(&footer_label),
     ]
     .into_iter()
     .max()
@@ -7058,6 +7046,12 @@ fn draw_session_rename_modal(frame: &mut Frame, app: &mut App) {
     let popup_area = Rect::new(popup_x, popup_y, popup_width, popup_height);
 
     frame.render_widget(Clear, popup_area);
+    if let Some(background) = app.theme.background {
+        frame.render_widget(
+            Block::default().style(Style::default().bg(background)),
+            popup_area,
+        );
+    }
 
     let border = Style::default().fg(app.theme.accent);
     let title_style = Style::default()
@@ -7117,18 +7111,46 @@ fn draw_session_rename_modal(frame: &mut Frame, app: &mut App) {
     ]));
     lines.push(content_line(Vec::new()));
 
-    lines.push(modal_footer_line(
-        total_width,
-        border,
-        vec![
-            Span::styled("enter", prompt_style),
-            Span::raw(" save    "),
-            Span::styled("esc", prompt_style),
-            Span::raw(" cancel"),
-        ],
-    ));
-
     frame.render_widget(Paragraph::new(lines), popup_area);
+    let footer_area = Rect::new(
+        popup_area.x,
+        popup_area.bottom().saturating_sub(1),
+        popup_area.width,
+        u16::from(popup_area.height > 0),
+    )
+    .intersection(frame.area());
+    let accept = app
+        .keybindings
+        .goto_keys(crate::keybindings::LineInputAction::Accept);
+    let cancel = app
+        .keybindings
+        .goto_keys(crate::keybindings::LineInputAction::Cancel);
+    let actions = [
+        (crate::keybindings::LineInputAction::Accept, accept, "save"),
+        (
+            crate::keybindings::LineInputAction::Cancel,
+            cancel,
+            "cancel",
+        ),
+    ]
+    .into_iter()
+    .filter(|(_, key, _)| !key.is_empty())
+    .map(|(action, key, label)| {
+        FooterAction::new(
+            Some(action),
+            vec![
+                Span::styled(key, prompt_style),
+                Span::raw(format!(" {label}")),
+            ],
+        )
+    })
+    .collect();
+    let (line, hits) = footer_line(footer_area, border, actions);
+    app.session_rename_footer_hits = hits;
+    frame.render_widget(
+        Paragraph::new(line).style(Style::default().fg(app.theme.text)),
+        footer_area,
+    );
 }
 
 fn draw_settings_reset_confirmation(frame: &mut Frame, app: &mut App) {
@@ -7417,45 +7439,48 @@ fn draw_confirmation(frame: &mut Frame, app: &mut App, quit: bool) {
     let (confirm_key, confirm_text) = confirm_label
         .split_once(' ')
         .unwrap_or((confirm_label.as_str(), ""));
-    let confirm_width = text_width(&confirm_label) as u16;
-    let cancel_label = "esc cancel";
-    let footer_width = text_width(&confirm_label) + 4 + text_width(cancel_label);
-    let footer_rule = "─".repeat(total_width.saturating_sub(footer_width.saturating_add(4)));
-    lines.push(Line::from(vec![
-        Span::styled("╰ ".to_string(), border),
-        Span::styled(confirm_key.to_string(), confirm_key_style),
-        Span::raw(" "),
-        Span::styled(confirm_text.to_string(), confirm_label_style),
-        Span::raw("    "),
-        Span::styled("esc".to_string(), key_style),
-        Span::raw(" "),
-        Span::styled("cancel".to_string(), cancel_label_style),
-        Span::styled(format!(" {footer_rule}╯"), border),
-    ]));
-
     frame.render_widget(Paragraph::new(lines), popup_area);
-
-    let action_y = popup_area
-        .y
-        .saturating_add(popup_area.height.saturating_sub(1));
-    let confirm_x = popup_area.x.saturating_add(2);
-    let cancel_x = confirm_x.saturating_add(confirm_width).saturating_add(4);
-    app.set_review_delete_confirmation_hits(vec![
-        ReviewDeleteConfirmationHit {
-            x: confirm_x,
-            y: action_y,
-            width: confirm_width,
-            height: 1,
-            action: ReviewDeleteConfirmationAction::Confirm,
-        },
-        ReviewDeleteConfirmationHit {
-            x: cancel_x,
-            y: action_y,
-            width: text_width(cancel_label) as u16,
-            height: 1,
-            action: ReviewDeleteConfirmationAction::Cancel,
-        },
-    ]);
+    let footer_area = Rect::new(
+        popup_area.x,
+        popup_area.bottom().saturating_sub(1),
+        popup_area.width,
+        u16::from(popup_area.height > 0),
+    )
+    .intersection(frame.area());
+    let (line, hits) = footer_line(
+        footer_area,
+        border,
+        vec![
+            FooterAction::new(
+                Some(ReviewDeleteConfirmationAction::Confirm),
+                vec![
+                    Span::styled(confirm_key.to_owned(), confirm_key_style),
+                    Span::raw(" "),
+                    Span::styled(confirm_text.to_owned(), confirm_label_style),
+                ],
+            ),
+            FooterAction::new(
+                Some(ReviewDeleteConfirmationAction::Cancel),
+                vec![
+                    Span::styled("esc", key_style),
+                    Span::raw(" "),
+                    Span::styled("cancel", cancel_label_style),
+                ],
+            ),
+        ],
+    );
+    frame.render_widget(Paragraph::new(line), footer_area);
+    app.set_review_delete_confirmation_hits(
+        hits.into_iter()
+            .map(|hit| ReviewDeleteConfirmationHit {
+                x: hit.area.x,
+                y: hit.area.y,
+                width: hit.area.width,
+                height: hit.area.height,
+                action: hit.action,
+            })
+            .collect(),
+    );
 }
 
 fn draw_help_popover(frame: &mut Frame, app: &mut App) {
@@ -9710,11 +9735,16 @@ mod tests {
     fn modal_footer_preserves_corners_when_only_the_border_fits() {
         use ratatui::style::Style;
         let text = |width| {
-            super::modal_footer_line(width, Style::default(), Vec::new())
-                .spans
-                .iter()
-                .map(|span| span.content.as_ref())
-                .collect::<String>()
+            crate::footer::footer_line::<()>(
+                ratatui::layout::Rect::new(0, 0, width, 1),
+                Style::default(),
+                Vec::new(),
+            )
+            .0
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>()
         };
         assert_eq!(text(0), "");
         assert_eq!(text(1), "╯");
@@ -9735,7 +9765,7 @@ mod tests {
         app.start_remote_open();
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         terminal
-            .draw(|frame| super::draw_remote_open_modal(frame, &app))
+            .draw(|frame| super::draw_remote_open_modal(frame, &mut app))
             .unwrap();
         let visible = |terminal: &Terminal<TestBackend>| {
             terminal
@@ -9753,7 +9783,7 @@ mod tests {
         for (width, height) in [(32, 12), (10, 4), (4, 2)] {
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
             terminal
-                .draw(|frame| super::draw_remote_open_modal(frame, &app))
+                .draw(|frame| super::draw_remote_open_modal(frame, &mut app))
                 .unwrap();
             if width == 32 {
                 let text = visible(&terminal);
@@ -9774,6 +9804,118 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn remote_footer_clicks_validate_and_busy_open_keeps_cancel_in_place() {
+        use crate::app::remote_open::RemoteOpenPhase;
+        use crate::keybindings::LineInputAction;
+        let make_app = || {
+            App::new(
+                MultiFileDiff::from_file_pairs(Vec::new()),
+                ViewMode::UnifiedPane,
+                0,
+                false,
+                None,
+            )
+        };
+        let mut app = make_app();
+        app.start_remote_open();
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|frame| super::draw_remote_open_modal(frame, &mut app))
+            .unwrap();
+        let entry = app.remote_open.as_mut().unwrap();
+        let accept = entry
+            .footer_hits
+            .iter()
+            .find(|hit| hit.action == LineInputAction::Accept)
+            .copied()
+            .unwrap();
+        assert!(!entry.handle_action(accept.action));
+        assert_eq!(entry.error(), Some("Enter a remote review URL."));
+        assert!(entry.footer_hits.is_empty());
+        terminal
+            .draw(|frame| super::draw_remote_open_modal(frame, &mut app))
+            .unwrap();
+        let cancel = app
+            .remote_open
+            .as_ref()
+            .unwrap()
+            .footer_hits
+            .iter()
+            .find(|hit| hit.action == LineInputAction::Cancel)
+            .copied()
+            .unwrap();
+        app.remote_open.as_mut().unwrap().phase = RemoteOpenPhase::Preparing(Box::new(make_app()));
+        terminal
+            .draw(|frame| super::draw_remote_open_modal(frame, &mut app))
+            .unwrap();
+        let entry = app.remote_open.as_mut().unwrap();
+        assert!(!entry
+            .footer_hits
+            .iter()
+            .any(|hit| hit.action == LineInputAction::Accept));
+        assert_eq!(
+            entry
+                .footer_hits
+                .iter()
+                .find(|hit| hit.action == LineInputAction::Cancel)
+                .unwrap()
+                .area,
+            cancel.area
+        );
+        assert!(entry.handle_action(LineInputAction::Cancel));
+    }
+
+    #[test]
+    fn short_rename_footer_has_only_rendered_action_hits() {
+        let multi = MultiFileDiff::from_file_pairs(Vec::new());
+        let mut app = App::new(multi, ViewMode::UnifiedPane, 0, false, None);
+        app.set_control_session_name(Some("original".into()));
+        app.start_session_rename();
+        for (width, height) in [(80, 24), (20, 4), (10, 2), (4, 1)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal
+                .draw(|frame| super::draw_session_rename_modal(frame, &mut app))
+                .unwrap();
+            for hit in &app.session_rename_footer_hits {
+                assert!(hit.area.right() <= width && hit.area.bottom() <= height);
+                let text = (hit.area.x..hit.area.right())
+                    .map(|x| terminal.backend().buffer()[(x, hit.area.y)].symbol())
+                    .collect::<String>();
+                assert!(text.ends_with("save") || text.ends_with("cancel"));
+            }
+        }
+    }
+
+    #[test]
+    fn rename_footer_uses_the_current_theme_background_and_text() {
+        use crate::keybindings::LineInputAction;
+        let mut app = App::new(
+            MultiFileDiff::from_file_pairs(Vec::new()),
+            ViewMode::UnifiedPane,
+            0,
+            false,
+            None,
+        );
+        app.set_control_session_name(Some("original".into()));
+        app.start_session_rename();
+        app.theme.background = Some(Color::White);
+        app.theme.text = Color::Black;
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|frame| super::draw_session_rename_modal(frame, &mut app))
+            .unwrap();
+        let accept = app
+            .session_rename_footer_hits
+            .iter()
+            .find(|hit| hit.action == LineInputAction::Accept)
+            .unwrap();
+        let label = &terminal.backend().buffer()[(accept.area.x + 6, accept.area.y)];
+        assert_eq!(label.symbol(), "s");
+        assert_eq!(label.fg, Color::Black);
+        assert_eq!(label.bg, Color::White);
+    }
+
     #[test]
     fn file_filter_active_text_uses_prompt_and_ibeam() {
         let multi = MultiFileDiff::from_file_pair(
@@ -11857,8 +11999,8 @@ mod tests {
     }
 }
 
-fn draw_remote_open_modal(frame: &mut Frame, app: &App) {
-    if let Some(entry) = &app.remote_open {
+fn draw_remote_open_modal(frame: &mut Frame, app: &mut App) {
+    if let Some(entry) = &mut app.remote_open {
         draw_remote_open_picker(
             frame,
             entry,
@@ -11871,7 +12013,7 @@ fn draw_remote_open_modal(frame: &mut Frame, app: &App) {
 
 pub(crate) fn draw_remote_open_picker(
     frame: &mut Frame,
-    entry: &crate::app::remote_open::RemoteOpen,
+    entry: &mut crate::app::remote_open::RemoteOpen,
     theme: &crate::config::ResolvedTheme,
     keybindings: &crate::keybindings::Keybindings,
     cursor_visible: bool,
@@ -11937,23 +12079,46 @@ pub(crate) fn draw_remote_open_picker(
         .saturating_add(text_width(" open    esc cancel"))
         .saturating_add(4);
     let mut actions = Vec::new();
-    if !entry.busy() && usize::from(popup.width) >= full_width {
-        actions.push(Span::styled(accept, key_style));
-        actions.push(Span::raw(" open    "));
+    if !accept.is_empty() && usize::from(popup.width) >= full_width {
+        let enabled = !entry.busy();
+        let label_style = if enabled {
+            Style::default()
+        } else {
+            Style::default()
+                .fg(theme.text_muted)
+                .add_modifier(Modifier::DIM)
+        };
+        let accept_style = if enabled { key_style } else { label_style };
+        actions.push(FooterAction::new(
+            enabled.then_some(crate::keybindings::LineInputAction::Accept),
+            vec![
+                Span::styled(accept, accept_style),
+                Span::styled(" open", label_style),
+            ],
+        ));
     }
-    actions.push(Span::styled("esc", key_style));
-    if popup.width >= 14 {
-        actions.push(Span::raw(" cancel"));
-    }
-    if popup.height > 0 {
-        frame.render_widget(
-            Paragraph::new(modal_footer_line(
-                usize::from(popup.width),
-                Style::default().fg(theme.border_active),
-                actions,
-            ))
-            .style(Style::default().fg(theme.text)),
-            Rect::new(popup.x, popup.y + popup.height - 1, popup.width, 1),
-        );
-    }
+    actions.push(FooterAction::new(
+        Some(crate::keybindings::LineInputAction::Cancel),
+        vec![
+            Span::styled("esc", key_style),
+            Span::raw(if popup.width >= 14 { " cancel" } else { "" }),
+        ],
+    ));
+    let footer_area = Rect::new(
+        popup.x,
+        popup.bottom().saturating_sub(1),
+        popup.width,
+        u16::from(popup.height > 0),
+    )
+    .intersection(frame.area());
+    let (line, hits) = footer_line(
+        footer_area,
+        Style::default().fg(theme.border_active),
+        actions,
+    );
+    entry.footer_hits = hits;
+    frame.render_widget(
+        Paragraph::new(line).style(Style::default().fg(theme.text)),
+        footer_area,
+    );
 }

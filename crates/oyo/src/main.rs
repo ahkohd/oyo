@@ -9,6 +9,7 @@ mod config;
 mod control;
 mod csv_preview;
 mod dashboard;
+mod footer;
 mod forgejo;
 mod gitlab;
 mod input;
@@ -8400,7 +8401,15 @@ fn run_app(terminal: &mut TuiTerminal, app: &mut App, context: RunContext<'_>) -
                         app.reset_picker_cursor();
                     }
                 }
-                Event::Mouse(_) if app.remote_open.is_some() => {}
+                Event::Mouse(mouse) if app.remote_open.is_some() => {
+                    app.reset_picker_cursor();
+                    if let Some(action) = app.remote_open.as_ref().unwrap().mouse_action(mouse) {
+                        if app.remote_open.as_mut().unwrap().handle_action(action) {
+                            app.remote_open = None;
+                        }
+                        app.keybindings.clear_sequence();
+                    }
+                }
                 Event::Mouse(me) => {
                     if app.show_help || app.show_path_popup {
                         continue;
@@ -8628,6 +8637,9 @@ fn run_app(terminal: &mut TuiTerminal, app: &mut App, context: RunContext<'_>) -
                         continue;
                     }
                     if app.session_rename_active() {
+                        if me.kind == MouseEventKind::Down(MouseButton::Left) {
+                            app.handle_session_rename_click(me.column, me.row);
+                        }
                         continue;
                     }
                     if app.review_remote_picker_active() {
@@ -8959,6 +8971,14 @@ fn run_app(terminal: &mut TuiTerminal, app: &mut App, context: RunContext<'_>) -
                         _ => {}
                     }
                 }
+                Event::Resize(_, _) => {
+                    app.menu.clear_geometry();
+                    app.session_rename_footer_hits.clear();
+                    app.set_review_delete_confirmation_hits(Vec::new());
+                    if let Some(entry) = &mut app.remote_open {
+                        entry.footer_hits.clear();
+                    }
+                }
                 Event::Key(key)
                     if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
                 {
@@ -8973,7 +8993,9 @@ fn run_app(terminal: &mut TuiTerminal, app: &mut App, context: RunContext<'_>) -
         if app.tick() && !(scroll_draw_pending && last_scroll_draw.elapsed() < MOUSE_SCROLL_FRAME) {
             needs_draw = true;
         }
-        if let Some(mut replacement) = poll_remote_open(app, config, args) {
+        let (replacement, remote_redraw) = poll_remote_open(app, config, args);
+        needs_draw |= remote_redraw;
+        if let Some(mut replacement) = replacement {
             if let Some(session) = control_session.as_mut() {
                 session.preempt(app);
             }
@@ -9981,12 +10003,30 @@ fn run_dashboard<B: Backend>(
                     Dispatch::Pending | Dispatch::Unmatched => {}
                 }
             }
+            Event::Resize(_, _) => {
+                dashboard.menu.clear_geometry();
+                if let Some(entry) = &mut dashboard.remote_open {
+                    entry.footer_hits.clear();
+                }
+            }
             Event::Paste(text) => {
                 if let Some(entry) = &mut dashboard.remote_open {
                     entry.insert(&text);
                 }
             }
-            Event::Mouse(_) if dashboard.remote_open.is_some() => {}
+            Event::Mouse(mouse) if dashboard.remote_open.is_some() => {
+                if let Some(action) = dashboard.remote_open.as_ref().unwrap().mouse_action(mouse) {
+                    if dashboard
+                        .remote_open
+                        .as_mut()
+                        .unwrap()
+                        .handle_action(action)
+                    {
+                        dashboard.remote_open = None;
+                    }
+                    dashboard.keybindings_mut().clear_sequence();
+                }
+            }
             Event::Mouse(mouse) => {
                 if dashboard.handle_menu_mouse(mouse) {
                     continue;
@@ -10351,6 +10391,41 @@ mod tests {
         assert_eq!(slot.as_ref().unwrap().text, "https://github.com/o/r/pull/1");
         assert_eq!(slot.as_ref().unwrap().error(), Some("save failed"));
         assert!(!slot.as_ref().unwrap().busy());
+    }
+
+    #[test]
+    fn remote_failure_requests_redraw_and_keeps_the_current_review() {
+        let diff = || {
+            oyo_core::MultiFileDiff::from_file_pair(
+                "file".into(),
+                "file".into(),
+                "old\n".into(),
+                "new\n".into(),
+            )
+        };
+        let mut app =
+            crate::app::App::new(diff(), crate::app::ViewMode::UnifiedPane, 0, false, None);
+        let mut candidate =
+            crate::app::App::new(diff(), crate::app::ViewMode::Split, 0, false, None);
+        candidate.multi_diff.mark_diff_failed(0);
+        app.start_remote_open();
+        let entry = app.remote_open.as_mut().unwrap();
+        entry.text = "https://github.com/o/r/pull/1".into();
+        entry.phase = crate::app::remote_open::RemoteOpenPhase::Preparing(Box::new(candidate));
+        let config = std::sync::Arc::new(crate::config::Config::default());
+        let args = std::sync::Arc::new(<super::Args as clap::Parser>::parse_from(["oy"]));
+        let (replacement, redraw) = super::poll_remote_open(&mut app, &config, &args);
+        assert!(replacement.is_none());
+        assert!(redraw);
+        assert_eq!(app.view_mode, crate::app::ViewMode::UnifiedPane);
+        assert!(app.remote_open.as_ref().unwrap().error().is_some());
+        assert_eq!(
+            app.remote_open.as_ref().unwrap().text,
+            "https://github.com/o/r/pull/1"
+        );
+        let (replacement, redraw) = super::poll_remote_open(&mut app, &config, &args);
+        assert!(replacement.is_none());
+        assert!(!redraw);
     }
 
     #[test]
@@ -13111,14 +13186,21 @@ fn poll_remote_open(
     app: &mut App,
     config: &std::sync::Arc<config::Config>,
     args: &std::sync::Arc<Args>,
-) -> Option<App> {
+) -> (Option<App>, bool) {
     let context = RemoteOpenContext::from_app(app);
     let mut entry = app.remote_open.take();
+    let phase = entry
+        .as_ref()
+        .map(|entry| std::mem::discriminant(&entry.phase));
     let result = poll_remote_candidate(&mut entry, &context, config, args, || {
         app.save_review_for_switch()
     });
+    let redraw = phase
+        != entry
+            .as_ref()
+            .map(|entry| std::mem::discriminant(&entry.phase));
     app.remote_open = entry;
-    result
+    (result, redraw)
 }
 
 fn poll_remote_candidate(

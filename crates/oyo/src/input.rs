@@ -558,14 +558,7 @@ fn handle_file_filter_key(app: &mut App, key: KeyEvent) {
 
 fn handle_session_rename_key(app: &mut App, key: KeyEvent) {
     match app.keybindings.goto(key) {
-        Dispatch::Matched(LineInputAction::Cancel) => app.cancel_session_rename(),
-        Dispatch::Matched(LineInputAction::Accept) => app.submit_session_rename(),
-        Dispatch::Matched(LineInputAction::Backspace) => {
-            if !app.session_rename_query().is_empty() {
-                app.pop_session_rename_char();
-            }
-        }
-        Dispatch::Matched(LineInputAction::Clear) => app.clear_session_rename_text(),
+        Dispatch::Matched(action) => app.apply_session_rename_action(action),
         Dispatch::Pending => {}
         Dispatch::Unmatched => {
             if let Some(c) = printable_char(key) {
