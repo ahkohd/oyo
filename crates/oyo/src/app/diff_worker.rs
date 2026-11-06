@@ -7,7 +7,6 @@ use std::time::Instant;
 
 impl App {
     pub(crate) fn mark_user_input(&mut self) {
-        self.release_remote_scroll();
         self.diff_last_input = Instant::now();
         self.diff_refresh_restore_end = None;
         self.scroll_to_render_end = false;

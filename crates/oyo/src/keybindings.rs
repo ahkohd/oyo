@@ -397,7 +397,7 @@ binding_action!(NormalAction, [
     ClearComments => ("clear_comments", "Clear all comments", ["ctrl-x"]),
     RemoveLineComment => ("remove_line_comment", "Remove line comment", ["x"]),
     RemoveHunkComment => ("remove_hunk_comment", "Remove hunk comment", ["X"]),
-    ToggleHelp => ("toggle_help", "Toggle help", ["?"]),
+    ToggleHelp => ("toggle_help", "Open help", ["?"]),
     OpenCommandPalette => ("open_command_palette", "Command palette", ["ctrl-p"]),
     OpenFileSearch => ("open_file_search", "Quick file search", ["ctrl-shift-p", "g f"]),
     OpenReviewGrep => ("open_review_grep", "Find in files", ["ctrl-shift-f"]),

@@ -206,10 +206,6 @@ impl App {
             })
     }
 
-    pub(super) fn release_remote_scroll(&mut self) {
-        self.remote_positions.preserved_scroll = None;
-    }
-
     pub(crate) fn begin_remote_position_frame(&mut self, area: Rect) {
         self.remote_positions.frame = Some((area.width, area.height));
         if self.remote_positions.measuring {
@@ -850,6 +846,38 @@ mod tests {
                 line: 80
             })
         );
+    }
+
+    #[test]
+    fn ordinary_input_keeps_promoted_viewport_until_scroll_changes() {
+        for mode in [ViewMode::UnifiedPane, ViewMode::Split] {
+            let mut app = app(mode, false, true);
+            draw(&mut app);
+            let source = SourceLine {
+                side: ReviewSide::Old,
+                line: 40,
+            };
+            let screen_row = |app: &App| {
+                app.remote_positions
+                    .visible
+                    .iter()
+                    .find(|anchor| anchor.source == source)
+                    .unwrap()
+                    .screen_row
+            };
+            let row = screen_row(&app);
+            apply(&mut app, 0);
+            draw(&mut app);
+            assert_eq!(screen_row(&app), row, "{mode:?} after promotion");
+            app.mark_user_input();
+            draw(&mut app);
+            assert_eq!(screen_row(&app), row, "{mode:?} after ordinary input");
+            let scroll = app.scroll_offset;
+            assert!(scroll > 0);
+            app.scroll_up();
+            draw(&mut app);
+            assert!(app.scroll_offset < scroll, "{mode:?} explicit scroll");
+        }
     }
 
     #[test]

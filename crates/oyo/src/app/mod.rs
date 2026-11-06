@@ -2891,12 +2891,6 @@ impl App {
                 }
             }
         }
-        if self
-            .multi_diff
-            .has_patch_display(self.multi_diff.selected_index)
-        {
-            view = remote_stream::with_unloaded_context(view);
-        }
         if self.is_remote_session() {
             for line in &mut view {
                 line.content = oyo_core::patch::terminal_text(&line.content);
