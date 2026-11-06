@@ -170,9 +170,6 @@ impl MenuHost for Dashboard {
     fn keybindings_mut(&mut self) -> &mut Keybindings {
         &mut self.keybindings
     }
-    fn keybindings(&self) -> &Keybindings {
-        &self.keybindings
-    }
     fn theme(&self) -> &ResolvedTheme {
         &self.theme
     }

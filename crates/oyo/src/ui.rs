@@ -2177,7 +2177,7 @@ fn topbar_tab_spans(app: &mut App, area: Rect, max_width: usize) -> Vec<Span<'st
         col = col.saturating_add(width);
         rendered_until = tab_pos.saturating_add(1);
         if col < render_max {
-            spans.push(Span::raw(" "));
+            spans.push(Span::styled(" ", topbar_tab_style(app, false, false)));
             col = col.saturating_add(1);
         }
     }
@@ -2757,6 +2757,7 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect) {
     let header_lines = if app.file_panel_mode == FilePanelMode::Comments {
         let comment_count = app.review_comment_count();
         let comments_label = match comment_count {
+            0 => String::new(),
             1 => "1 comment".to_string(),
             n => format!("{n} comments"),
         };
