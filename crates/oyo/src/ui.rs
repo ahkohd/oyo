@@ -2177,7 +2177,12 @@ fn topbar_tab_spans(app: &mut App, area: Rect, max_width: usize) -> Vec<Span<'st
         col = col.saturating_add(width);
         rendered_until = tab_pos.saturating_add(1);
         if col < render_max {
-            spans.push(Span::styled(" ", topbar_tab_style(app, false, false)));
+            let spacer_style = if tab_pos + 1 == app.topbar_tabs.len() {
+                Style::default()
+            } else {
+                topbar_tab_style(app, false, false)
+            };
+            spans.push(Span::styled(" ", spacer_style));
             col = col.saturating_add(1);
         }
     }
