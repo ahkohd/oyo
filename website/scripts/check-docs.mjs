@@ -27,8 +27,16 @@ assert.equal(read("starter.toml"), fs.readFileSync(path.resolve("../docs/STARTER
 function content(node) {
   if (Array.isArray(node)) return node.map(content);
   if (node && typeof node === "object") {
-    return Object.fromEntries(Object.entries(node).filter(([key]) => !["position", "url"].includes(key))
+    const normalized = Object.fromEntries(Object.entries(node).filter(([key]) => !["position", "url"].includes(key))
       .map(([key, value]) => [key, content(value)]));
+    if (normalized.type === "table") {
+      for (const row of normalized.children) {
+        while (row.children.length < normalized.align.length) {
+          row.children.push({ type: "tableCell", children: [] });
+        }
+      }
+    }
+    return normalized;
   }
   return node;
 }
