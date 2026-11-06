@@ -463,7 +463,7 @@ footer {
 @media (max-width: 860px) {
   .modes-grid, .feat-grid, .int-grid { grid-template-columns: 1fr; }
   .foot-in { grid-template-columns: 1fr 1fr; }
-  .nav-links a:not(.nav-cta):not(.theme-toggle) { display: none; }
+  .nav-links a:not(.nav-cta):not(.theme-toggle):not(.nav-github) { display: none; }
 }
 @media (max-width: 520px) {
   .foot-in { grid-template-columns: 1fr; }
