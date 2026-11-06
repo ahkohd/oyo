@@ -18,6 +18,7 @@ pub(crate) enum SettingItem {
     GutterSigns,
     Watch,
     Topbar,
+    MenuBar,
     AutoCenter,
     Overscroll,
     ConfirmQuit,
@@ -47,7 +48,7 @@ pub(crate) enum SettingItem {
 }
 
 impl SettingItem {
-    pub(crate) const ALL: [Self; 34] = [
+    pub(crate) const ALL: [Self; 35] = [
         Self::ViewMode,
         Self::FoldContext,
         Self::LineWrap,
@@ -56,6 +57,7 @@ impl SettingItem {
         Self::GutterSigns,
         Self::Watch,
         Self::Topbar,
+        Self::MenuBar,
         Self::AutoCenter,
         Self::Overscroll,
         Self::ConfirmQuit,
@@ -134,7 +136,7 @@ pub(crate) enum SettingsEntry {
     Item(SettingItem),
 }
 
-pub(crate) const SETTINGS_ENTRIES: [SettingsEntry; 47] = [
+pub(crate) const SETTINGS_ENTRIES: [SettingsEntry; 48] = [
     SettingsEntry::Section("General"),
     SettingsEntry::Item(SettingItem::ViewMode),
     SettingsEntry::Item(SettingItem::FoldContext),
@@ -144,6 +146,7 @@ pub(crate) const SETTINGS_ENTRIES: [SettingsEntry; 47] = [
     SettingsEntry::Item(SettingItem::GutterSigns),
     SettingsEntry::Item(SettingItem::Watch),
     SettingsEntry::Item(SettingItem::Topbar),
+    SettingsEntry::Item(SettingItem::MenuBar),
     SettingsEntry::Item(SettingItem::AutoCenter),
     SettingsEntry::Item(SettingItem::Overscroll),
     SettingsEntry::Item(SettingItem::ConfirmQuit),
@@ -286,6 +289,7 @@ impl SettingsSnapshot {
                     SettingItem::GutterSigns => bool_value(config.ui.gutter_signs),
                     SettingItem::Watch => bool_value(config.ui.watch),
                     SettingItem::Topbar => bool_value(config.ui.topbar),
+                    SettingItem::MenuBar => bool_value(config.ui.menu_bar),
                     SettingItem::AutoCenter => bool_value(config.ui.auto_center),
                     SettingItem::Overscroll => bool_value(config.ui.overscroll),
                     SettingItem::ConfirmQuit => bool_value(config.ui.confirm_quit),
@@ -617,6 +621,7 @@ impl App {
             ),
             SettingItem::Watch => ("Watch", on_off(self.watch), "refresh changed files"),
             SettingItem::Topbar => ("Top bar", on_off(self.topbar), "show file tabs"),
+            SettingItem::MenuBar => ("Menu bar", on_off(self.menu_bar), "show category menus"),
             SettingItem::AutoCenter => (
                 "Auto-center",
                 on_off(self.auto_center),
@@ -863,6 +868,7 @@ impl App {
             SettingItem::GutterSigns => bool_value(self.gutter_signs),
             SettingItem::Watch => bool_value(self.watch),
             SettingItem::Topbar => bool_value(self.topbar),
+            SettingItem::MenuBar => bool_value(self.menu_bar),
             SettingItem::AutoCenter => bool_value(self.auto_center),
             SettingItem::Overscroll => bool_value(self.overscroll),
             SettingItem::ConfirmQuit => bool_value(self.confirm_quit),
@@ -912,6 +918,7 @@ impl App {
             | SettingItem::GutterSigns
             | SettingItem::Watch
             | SettingItem::Topbar
+            | SettingItem::MenuBar
             | SettingItem::AutoCenter
             | SettingItem::Overscroll
             | SettingItem::ConfirmQuit
@@ -1002,6 +1009,7 @@ impl App {
             SettingItem::GutterSigns => self.gutter_signs = value.bool(),
             SettingItem::Watch => self.watch = value.bool(),
             SettingItem::Topbar => self.topbar = value.bool(),
+            SettingItem::MenuBar => self.menu_bar = value.bool(),
             SettingItem::AutoCenter => self.auto_center = value.bool(),
             SettingItem::Overscroll => self.overscroll = value.bool(),
             SettingItem::ConfirmQuit => self.confirm_quit = value.bool(),
@@ -1547,6 +1555,7 @@ fn setting_config_path(item: SettingItem) -> &'static [&'static str] {
         SettingItem::GutterSigns => &["ui", "gutter_signs"],
         SettingItem::Watch => &["ui", "watch"],
         SettingItem::Topbar => &["ui", "topbar"],
+        SettingItem::MenuBar => &["ui", "menu_bar"],
         SettingItem::AutoCenter => &["ui", "auto_center"],
         SettingItem::Overscroll => &["ui", "overscroll"],
         SettingItem::ConfirmQuit => &["ui", "confirm_quit"],
@@ -1841,7 +1850,7 @@ mod tests {
         app.ensure_topbar_tabs();
         app.open_settings_tab();
 
-        assert_eq!(SettingItem::ALL.len(), 34);
+        assert_eq!(SettingItem::ALL.len(), 35);
         assert!(SETTINGS_ENTRIES.contains(&SettingsEntry::Item(SettingItem::FilePanelPosition)));
         assert_eq!(app.file_panel_position, FilePanelPosition::Right);
         assert_eq!(
