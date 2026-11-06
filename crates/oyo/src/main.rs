@@ -1817,7 +1817,7 @@ fn apply_config_to_app(app: &mut App, config: &config::Config, args: &Args, ligh
         .ui
         .extent_marker_right
         .clone()
-        .unwrap_or_else(|| "▐".to_string());
+        .unwrap_or_else(|| "┃".to_string());
     app.extent_marker_deleted = config.ui.extent_marker_deleted.clone();
     app.theme = config.ui.theme.resolve(light_mode);
     app.ui_theme_name = config.ui.theme.name.clone();

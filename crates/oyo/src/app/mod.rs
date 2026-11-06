@@ -1418,7 +1418,7 @@ impl App {
             primary_marker: "▶".to_string(),
             primary_marker_right: "◀".to_string(),
             extent_marker: "┃".to_string(),
-            extent_marker_right: "▐".to_string(),
+            extent_marker_right: "┃".to_string(),
             extent_marker_deleted: "╏".to_string(),
             clear_active_on_next_render: false,
             theme: ResolvedTheme::default(),
