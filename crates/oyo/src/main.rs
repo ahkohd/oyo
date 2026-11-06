@@ -1,5 +1,6 @@
 //! Oyo CLI - terminal diff viewer TUI
 
+use crate::app::menu::MenuHost;
 mod app;
 mod avatars;
 mod blame;
@@ -939,7 +940,7 @@ enum InputMode {
 #[derive(Debug)]
 enum AppExit {
     Quit,
-    OpenDashboard,
+    HistorySelection(InputMode),
     Reload(InputMode, u64),
 }
 
@@ -7886,20 +7887,29 @@ fn run() -> Result<()> {
 
     let config = std::sync::Arc::new(config);
     let mut dashboard_state = None;
+    let mut menu_bar = config.ui.menu_bar;
+    let history_runtime = HistoryRuntime {
+        config: &config,
+        args: &args,
+        light: light_mode,
+        theme_name: config.ui.theme.name.as_deref(),
+        remote: None,
+    };
     if let Some(limit) = view_limit {
         let mut terminal = setup_terminal()?;
         let image_picker = setup_image_picker();
-        let mut input_mode = match run_commit_picker(
+        let (mut input_mode, mut history_app) = match run_commit_picker(
             &mut terminal,
-            &config,
-            light_mode,
+            &history_runtime,
             limit,
             None,
             None,
             &mut dashboard_state,
+            &mut menu_bar,
         )? {
-            Some(mode) => mode,
-            None => {
+            HistoryOutcome::Selected(selection) => (history_input(selection), None),
+            HistoryOutcome::Remote { url, app } => (InputMode::Remote { url }, Some(app)),
+            HistoryOutcome::Cancel | HistoryOutcome::Quit => {
                 restore_terminal(&mut terminal)?;
                 return Ok(());
             }
@@ -7920,7 +7930,9 @@ fn run() -> Result<()> {
                 _ => Some("No changes found.".to_string()),
             };
             let mut prepared_control = None;
-            let mut app = if let InputMode::Remote { url } = &input_mode {
+            let mut app = if let Some(app) = history_app.take() {
+                *app
+            } else if let InputMode::Remote { url } = &input_mode {
                 match startup::remote_app(
                     &mut terminal,
                     url,
@@ -7999,14 +8011,20 @@ fn run() -> Result<()> {
                 app.ui_theme_name = name.clone();
             }
 
+            app.menu_bar = menu_bar;
             let exit = run_app(
                 &mut terminal,
                 &mut app,
-                &config,
-                &args,
-                control_last_applied_seq,
-                &mut control_session_name,
-                prepared_control,
+                RunContext {
+                    config: &config,
+                    args: &args,
+                    control_last_applied_seq,
+                    control_session_name: &mut control_session_name,
+                    prepared_control,
+                    input_mode: &input_mode,
+                    dashboard_state: &mut dashboard_state,
+                    menu_bar: &mut menu_bar,
+                },
             )?;
             review_hook_warnings.extend(app.take_review_hook_warnings());
             runtime_theme = Some((app.theme.clone(), app.ui_theme_name.clone()));
@@ -8017,19 +8035,7 @@ fn run() -> Result<()> {
                     input_mode = mode;
                     control_last_applied_seq = seq;
                 }
-                AppExit::OpenDashboard => {
-                    let Some(mode) = run_commit_picker(
-                        &mut terminal,
-                        &config,
-                        light_mode,
-                        limit,
-                        Some(&input_mode),
-                        runtime_theme.as_ref().map(|(theme, _)| theme),
-                        &mut dashboard_state,
-                    )?
-                    else {
-                        break;
-                    };
+                AppExit::HistorySelection(mode) => {
                     input_mode = mode;
                 }
             }
@@ -8099,7 +8105,6 @@ fn run() -> Result<()> {
         setup_image_picker()
     };
     let mut image_picker_remote_fallback = matches!(input_mode, InputMode::Remote { .. });
-    let dashboard_limit = view_limit.unwrap_or(200);
 
     let mut exit_message: Option<String> = None;
     let mut review_hook_warnings = Vec::new();
@@ -8204,14 +8209,20 @@ fn run() -> Result<()> {
             app.ui_theme_name = name.clone();
         }
 
+        app.menu_bar = menu_bar;
         let exit = run_app(
             &mut terminal,
             &mut app,
-            &config,
-            &args,
-            control_last_applied_seq,
-            &mut control_session_name,
-            prepared_control,
+            RunContext {
+                config: &config,
+                args: &args,
+                control_last_applied_seq,
+                control_session_name: &mut control_session_name,
+                prepared_control,
+                input_mode: &input_mode,
+                dashboard_state: &mut dashboard_state,
+                menu_bar: &mut menu_bar,
+            },
         )?;
         review_hook_warnings.extend(app.take_review_hook_warnings());
         runtime_theme = Some((app.theme.clone(), app.ui_theme_name.clone()));
@@ -8223,19 +8234,7 @@ fn run() -> Result<()> {
                 pending_diff = None;
                 control_last_applied_seq = seq;
             }
-            AppExit::OpenDashboard => {
-                let Some(mode) = run_commit_picker(
-                    &mut terminal,
-                    &config,
-                    light_mode,
-                    dashboard_limit,
-                    Some(&input_mode),
-                    runtime_theme.as_ref().map(|(theme, _)| theme),
-                    &mut dashboard_state,
-                )?
-                else {
-                    break;
-                };
+            AppExit::HistorySelection(mode) => {
                 input_mode = mode;
                 pending_diff = None;
             }
@@ -8253,15 +8252,28 @@ fn run() -> Result<()> {
     Ok(())
 }
 
-fn run_app(
-    terminal: &mut TuiTerminal,
-    app: &mut App,
-    config: &std::sync::Arc<config::Config>,
-    args: &std::sync::Arc<Args>,
+struct RunContext<'a> {
+    config: &'a std::sync::Arc<config::Config>,
+    args: &'a std::sync::Arc<Args>,
     control_last_applied_seq: u64,
-    control_session_name: &mut Option<String>,
+    control_session_name: &'a mut Option<String>,
     prepared_control: Option<Result<control::ControlSession, String>>,
-) -> Result<AppExit> {
+    input_mode: &'a InputMode,
+    dashboard_state: &'a mut Option<DashboardState>,
+    menu_bar: &'a mut bool,
+}
+
+fn run_app(terminal: &mut TuiTerminal, app: &mut App, context: RunContext<'_>) -> Result<AppExit> {
+    let RunContext {
+        config,
+        args,
+        control_last_applied_seq,
+        control_session_name,
+        prepared_control,
+        input_mode,
+        dashboard_state,
+        menu_bar,
+    } = context;
     let editor_config = &config.editor;
     let mut pending_event: Option<Event> = None;
     let mut needs_draw = true;
@@ -8311,6 +8323,7 @@ fn run_app(
 
     let mut remote_paste = RemotePaste::default();
     loop {
+        *menu_bar = app.menu_bar;
         remote_paste.set(app.remote_open.is_some())?;
         if scroll_draw_pending && last_scroll_draw.elapsed() >= MOUSE_SCROLL_FRAME {
             needs_draw = true;
@@ -9236,14 +9249,68 @@ fn run_app(
 
         if app.open_dashboard {
             app.open_dashboard = false;
-            if app.is_remote_session() {
+            if !oyo_core::git::is_git_repo(&std::env::current_dir().unwrap_or_default()) {
                 app.notify(ToastEvent::SelectionActionFailed(
                     "Commit history requires a local checkout".to_owned(),
                 ));
                 needs_draw = true;
                 continue;
             }
-            return Ok(AppExit::OpenDashboard);
+            if let Err(error) = app.save_review_for_switch() {
+                app.notify(ToastEvent::SelectionActionFailed(error.to_string()));
+                needs_draw = true;
+                continue;
+            }
+            let runtime = HistoryRuntime {
+                config,
+                args,
+                light: app.theme_is_light,
+                theme_name: app.ui_theme_name.as_deref(),
+                remote: Some(RemoteOpenContext::from_app(app)),
+            };
+            match run_commit_picker(
+                terminal,
+                &runtime,
+                match args.command {
+                    Some(Command::Log { limit }) => limit,
+                    _ => 200,
+                },
+                (!app.is_remote_session()).then_some(input_mode),
+                Some(&app.theme),
+                dashboard_state,
+                &mut app.menu_bar,
+            )? {
+                HistoryOutcome::Cancel => {
+                    needs_draw = true;
+                    continue;
+                }
+                HistoryOutcome::Quit => {
+                    app.request_quit();
+                    needs_draw = true;
+                    continue;
+                }
+                HistoryOutcome::Selected(selection) => {
+                    *menu_bar = app.menu_bar;
+                    return Ok(AppExit::HistorySelection(history_input(selection)));
+                }
+                HistoryOutcome::Remote {
+                    app: mut replacement,
+                    ..
+                } => {
+                    if let Some(session) = control_session.as_mut() {
+                        session.preempt(app);
+                    }
+                    review_sync_worker = None;
+                    review_sync_pull_stats = None;
+                    review_pr_lookup_worker = None;
+                    replacement.retain_review_hook_warnings(app.take_review_hook_warnings());
+                    replacement
+                        .set_control_session_name(app.control_session_name().map(str::to_owned));
+                    *app = *replacement;
+                    needs_draw = true;
+                    continue;
+                }
+            }
         }
         if app.should_quit {
             return Ok(AppExit::Quit);
@@ -9715,14 +9782,73 @@ fn apply_mouse_scroll(app: &mut App, scroll: PendingMouseScroll) {
     }
 }
 
+fn history_input(selection: DashboardSelection) -> InputMode {
+    match selection {
+        DashboardSelection::Uncommitted => InputMode::GitUncommitted,
+        DashboardSelection::Staged => InputMode::GitStaged,
+        DashboardSelection::Range { from, to } => InputMode::GitRange { from, to },
+    }
+}
+
+enum HistoryOutcome {
+    Cancel,
+    Quit,
+    Selected(DashboardSelection),
+    Remote { url: String, app: Box<App> },
+}
+
+struct HistoryRuntime<'a> {
+    config: &'a std::sync::Arc<config::Config>,
+    args: &'a std::sync::Arc<Args>,
+    light: bool,
+    theme_name: Option<&'a str>,
+    remote: Option<RemoteOpenContext>,
+}
+
 fn run_dashboard<B: Backend>(
     terminal: &mut Terminal<B>,
     dashboard: &mut Dashboard,
-) -> Result<Option<DashboardSelection>> {
-    let tick_rate = Duration::from_millis(250);
+    runtime: &HistoryRuntime<'_>,
+) -> Result<HistoryOutcome> {
+    let tick_rate = Duration::from_millis(100);
     let mut needs_draw = true;
+    let mut paste = RemotePaste::default();
 
     loop {
+        paste.set(dashboard.remote_open.is_some())?;
+        let mut context = runtime.remote.clone().unwrap_or_else(|| RemoteOpenContext {
+            view_mode: resolve_view_mode(runtime.args.view, runtime.config),
+            speed: if runtime.args.speed != 200 {
+                runtime.args.speed
+            } else {
+                runtime.config.playback.speed
+            },
+            theme: dashboard.theme().clone(),
+            light: runtime.light,
+            theme_name: runtime.theme_name.map(str::to_owned),
+            menu_bar: dashboard.menu_bar,
+        });
+        context.menu_bar = dashboard.menu_bar;
+        let remote_url = dashboard
+            .remote_open
+            .as_ref()
+            .map(|entry| entry.text.trim().to_owned())
+            .unwrap_or_default();
+        if let Some(app) = poll_remote_candidate(
+            &mut dashboard.remote_open,
+            &context,
+            runtime.config,
+            runtime.args,
+            || Ok(()),
+        ) {
+            return Ok(HistoryOutcome::Remote {
+                url: remote_url,
+                app: Box::new(app),
+            });
+        }
+        if dashboard.quit_requested {
+            return Ok(HistoryOutcome::Quit);
+        }
         if needs_draw {
             terminal
                 .draw(|f| dashboard.draw(f))
@@ -9731,13 +9857,36 @@ fn run_dashboard<B: Backend>(
         }
 
         if !event::poll(tick_rate)? {
-            needs_draw |= dashboard.tick();
+            needs_draw |= dashboard.tick() || dashboard.remote_open.is_some();
             continue;
         }
 
         needs_draw = true;
         match event::read()? {
             Event::Key(key) if key.kind == KeyEventKind::Press => {
+                if let Some(mut entry) = dashboard.remote_open.take() {
+                    if !entry.handle_key(key, dashboard.keybindings_mut()) {
+                        dashboard.remote_open = Some(entry);
+                    }
+                    continue;
+                }
+                if dashboard.menu.open.is_some() {
+                    dashboard.handle_menu_key(key);
+                    continue;
+                }
+                if !dashboard.filter_active()
+                    && !dashboard.context_menu_open()
+                    && !dashboard.keybindings_mut().dashboard_sequence_pending()
+                {
+                    match dashboard.keybindings_mut().dashboard_menu(key) {
+                        Dispatch::Matched(crate::keybindings::GlobalAction::OpenMenu) => {
+                            dashboard.open_menu(0);
+                            continue;
+                        }
+                        Dispatch::Pending => continue,
+                        _ => {}
+                    }
+                }
                 let list_height =
                     dashboard.list_height(terminal.size().map_err(|e| anyhow!("{e}"))?.height);
                 if dashboard.context_menu_open() {
@@ -9753,7 +9902,7 @@ fn run_dashboard<B: Backend>(
                         }
                         Dispatch::Matched(DashboardFilterAction::Accept) => {
                             if let Some(selection) = dashboard.selection() {
-                                return Ok(Some(selection));
+                                return Ok(HistoryOutcome::Selected(selection));
                             }
                         }
                         Dispatch::Matched(DashboardFilterAction::Clear) => {
@@ -9790,7 +9939,10 @@ fn run_dashboard<B: Backend>(
                     continue;
                 }
                 match dashboard.keybindings_mut().dashboard(key) {
-                    Dispatch::Matched(DashboardAction::Quit) => return Ok(None),
+                    Dispatch::Matched(DashboardAction::Cancel) => {
+                        return Ok(HistoryOutcome::Cancel)
+                    }
+                    Dispatch::Matched(DashboardAction::Quit) => return Ok(HistoryOutcome::Quit),
                     Dispatch::Matched(DashboardAction::StartFilter) => {
                         dashboard.start_filter();
                     }
@@ -9805,7 +9957,7 @@ fn run_dashboard<B: Backend>(
                     }
                     Dispatch::Matched(DashboardAction::Accept) => {
                         if let Some(selection) = dashboard.selection() {
-                            return Ok(Some(selection));
+                            return Ok(HistoryOutcome::Selected(selection));
                         }
                     }
                     Dispatch::Matched(DashboardAction::SelectNext) => {
@@ -9829,7 +9981,16 @@ fn run_dashboard<B: Backend>(
                     Dispatch::Pending | Dispatch::Unmatched => {}
                 }
             }
+            Event::Paste(text) => {
+                if let Some(entry) = &mut dashboard.remote_open {
+                    entry.insert(&text);
+                }
+            }
+            Event::Mouse(_) if dashboard.remote_open.is_some() => {}
             Event::Mouse(mouse) => {
+                if dashboard.handle_menu_mouse(mouse) {
+                    continue;
+                }
                 let list_height =
                     dashboard.list_height(terminal.size().map_err(|e| anyhow!("{e}"))?.height);
                 if dashboard.context_menu_open() {
@@ -9837,7 +9998,7 @@ fn run_dashboard<B: Backend>(
                         MouseEventKind::Down(MouseButton::Left) => {
                             match dashboard.handle_context_menu_click(mouse.column, mouse.row) {
                                 Some(DashboardContextMenuResult::Open(selection)) => {
-                                    return Ok(Some(selection));
+                                    return Ok(HistoryOutcome::Selected(selection));
                                 }
                                 Some(DashboardContextMenuResult::Handled) => {}
                                 None => {}
@@ -9882,10 +10043,10 @@ fn run_dashboard<B: Backend>(
                         }
                         if let Some(action) = dashboard.footer_action_at(mouse.column, mouse.row) {
                             match action {
-                                DashboardAction::Quit => return Ok(None),
+                                DashboardAction::Quit => return Ok(HistoryOutcome::Quit),
                                 DashboardAction::Accept => {
                                     if let Some(selection) = dashboard.selection() {
-                                        return Ok(Some(selection));
+                                        return Ok(HistoryOutcome::Selected(selection));
                                     }
                                 }
                                 DashboardAction::TogglePin => dashboard.toggle_hovered_pin(),
@@ -9903,7 +10064,7 @@ fn run_dashboard<B: Backend>(
                         }
                         if dashboard.select_at_mouse(mouse.column, mouse.row).is_some() {
                             if let Some(selection) = dashboard.selection() {
-                                return Ok(Some(selection));
+                                return Ok(HistoryOutcome::Selected(selection));
                             }
                         }
                     }
@@ -9945,13 +10106,15 @@ fn dashboard_selection_for_input(input_mode: &InputMode) -> Option<DashboardSele
 
 fn run_commit_picker<B: Backend>(
     terminal: &mut Terminal<B>,
-    config: &config::Config,
-    light_mode: bool,
+    runtime: &HistoryRuntime<'_>,
     limit: usize,
     initial: Option<&InputMode>,
     theme_override: Option<&config::ResolvedTheme>,
     previous: &mut Option<DashboardState>,
-) -> Result<Option<InputMode>> {
+    menu_bar: &mut bool,
+) -> Result<HistoryOutcome> {
+    let config = runtime.config;
+    let light_mode = runtime.light;
     let cwd = std::env::current_dir().unwrap_or_default();
     if !oyo_core::git::is_git_repo(&cwd) {
         anyhow::bail!("Not in a git repository.");
@@ -9983,20 +10146,18 @@ fn run_commit_picker<B: Backend>(
         time_format,
         keybindings: Keybindings::from_config(&config.keybindings),
     });
-    if let Some(selection) = initial.and_then(dashboard_selection_for_input) {
+    if let Some(selection) = initial
+        .and_then(dashboard_selection_for_input)
+        .or_else(|| previous.as_ref().map(|state| state.selection().clone()))
+    {
         dashboard.restore_selection(&selection, previous.as_ref());
     }
 
-    let selection = run_dashboard(terminal, &mut dashboard)?;
+    dashboard.menu_bar = *menu_bar;
+    let outcome = run_dashboard(terminal, &mut dashboard, runtime)?;
+    *menu_bar = dashboard.menu_bar;
     *previous = dashboard.state();
-    let input_mode = match selection {
-        None => return Ok(None),
-        Some(DashboardSelection::Uncommitted) => InputMode::GitUncommitted,
-        Some(DashboardSelection::Staged) => InputMode::GitStaged,
-        Some(DashboardSelection::Range { from, to }) => InputMode::GitRange { from, to },
-    };
-
-    Ok(Some(input_mode))
+    Ok(outcome)
 }
 
 #[cfg(test)]
@@ -10165,6 +10326,31 @@ mod tests {
             created_at: 1,
             updated_at: 1,
         }
+    }
+
+    #[test]
+    fn remote_preparation_save_failure_retains_editable_url_without_replacement() {
+        let diff = oyo_core::MultiFileDiff::from_file_pair(
+            "file".into(),
+            "file".into(),
+            "old\n".into(),
+            "new\n".into(),
+        );
+        let app = crate::app::App::new(diff, crate::app::ViewMode::UnifiedPane, 0, false, None);
+        let context = super::RemoteOpenContext::from_app(&app);
+        let mut remote = crate::app::remote_open::RemoteOpen::new();
+        remote.text = "https://github.com/o/r/pull/1".into();
+        remote.phase = crate::app::remote_open::RemoteOpenPhase::Preparing(Box::new(app));
+        let mut slot = Some(remote);
+        let config = std::sync::Arc::new(crate::config::Config::default());
+        let args = std::sync::Arc::new(<super::Args as clap::Parser>::parse_from(["oy"]));
+        let result = super::poll_remote_candidate(&mut slot, &context, &config, &args, || {
+            anyhow::bail!("save failed")
+        });
+        assert!(result.is_none());
+        assert_eq!(slot.as_ref().unwrap().text, "https://github.com/o/r/pull/1");
+        assert_eq!(slot.as_ref().unwrap().error(), Some("save failed"));
+        assert!(!slot.as_ref().unwrap().busy());
     }
 
     #[test]
@@ -12898,37 +13084,77 @@ impl Drop for RemotePaste {
     }
 }
 
+#[derive(Clone)]
+struct RemoteOpenContext {
+    view_mode: app::ViewMode,
+    speed: u64,
+    theme: config::ResolvedTheme,
+    light: bool,
+    theme_name: Option<String>,
+    menu_bar: bool,
+}
+
+impl RemoteOpenContext {
+    fn from_app(app: &App) -> Self {
+        Self {
+            view_mode: app.view_mode,
+            speed: app.animation_speed,
+            theme: app.theme.clone(),
+            light: app.theme_is_light,
+            theme_name: app.ui_theme_name.clone(),
+            menu_bar: app.menu_bar,
+        }
+    }
+}
+
 fn poll_remote_open(
     app: &mut App,
     config: &std::sync::Arc<config::Config>,
     args: &std::sync::Arc<Args>,
 ) -> Option<App> {
+    let context = RemoteOpenContext::from_app(app);
+    let mut entry = app.remote_open.take();
+    let result = poll_remote_candidate(&mut entry, &context, config, args, || {
+        app.save_review_for_switch()
+    });
+    app.remote_open = entry;
+    result
+}
+
+fn poll_remote_candidate(
+    entry: &mut Option<app::remote_open::RemoteOpen>,
+    context: &RemoteOpenContext,
+    config: &std::sync::Arc<config::Config>,
+    args: &std::sync::Arc<Args>,
+    mut save_previous: impl FnMut() -> Result<()>,
+) -> Option<App> {
     use app::remote_open::RemoteOpenPhase;
-    let mut entry = app.remote_open.take()?;
-    if let Some(result) = entry.poll() {
+    let mut remote_entry = entry.take()?;
+    if let Some(result) = remote_entry.poll() {
         match result {
             Ok(opened) => {
                 let built = opened.built;
                 let mut candidate = App::new(
                     built.multi_diff,
-                    app.view_mode,
-                    app.animation_speed,
+                    context.view_mode,
+                    context.speed,
                     false,
                     built.branch,
                 );
                 candidate.remote_validation = built.remote_validation;
                 candidate.remote_stream = opened.patch_session;
-                apply_config_to_app(&mut candidate, config, args, app.theme_is_light);
-                candidate.theme = app.theme.clone();
-                candidate.ui_theme_name = app.ui_theme_name.clone();
+                apply_config_to_app(&mut candidate, config, args, context.light);
+                candidate.theme = context.theme.clone();
+                candidate.ui_theme_name = context.theme_name.clone();
+                candidate.menu_bar = context.menu_bar;
                 candidate.set_image_picker(ratatui_image::picker::Picker::halfblocks());
                 candidate.start_content_loading();
-                entry.phase = RemoteOpenPhase::Preparing(Box::new(candidate));
+                remote_entry.phase = RemoteOpenPhase::Preparing(Box::new(candidate));
             }
-            Err(error) => entry.fail(error),
+            Err(error) => remote_entry.fail(error),
         }
     }
-    if let RemoteOpenPhase::Preparing(candidate) = &mut entry.phase {
+    if let RemoteOpenPhase::Preparing(candidate) = &mut remote_entry.phase {
         candidate.poll_content_responses();
         candidate.poll_diff_responses();
         candidate.queue_current_file_diff();
@@ -12951,14 +13177,15 @@ fn poll_remote_open(
                 .diff_status(candidate.multi_diff.selected_index)
                 == oyo_core::multi::DiffStatus::Failed
         {
-            entry.fail("Unable to load the remote diff. Your current review is still open.".into());
-            app.remote_open = Some(entry);
+            remote_entry
+                .fail("Unable to load the remote diff. Your current review is still open.".into());
+            *entry = Some(remote_entry);
             return None;
         }
         if ready {
-            if let Err(error) = app.save_review_for_switch() {
-                entry.fail(error.to_string());
-                app.remote_open = Some(entry);
+            if let Err(error) = save_previous() {
+                remote_entry.fail(error.to_string());
+                *entry = Some(remote_entry);
                 return None;
             }
             match configure_remote_review_when_ready(
@@ -12966,19 +13193,19 @@ fn poll_remote_open(
                 config,
                 args,
                 None,
-                entry.text.trim(),
+                remote_entry.text.trim(),
             ) {
                 Ok(()) => {
                     candidate.move_selection_off_hidden_reviewed_file();
-                    let RemoteOpenPhase::Preparing(candidate) = entry.phase else {
+                    let RemoteOpenPhase::Preparing(candidate) = remote_entry.phase else {
                         unreachable!()
                     };
                     return Some(*candidate);
                 }
-                Err(error) => entry.fail(error.to_string()),
+                Err(error) => remote_entry.fail(error.to_string()),
             }
         }
     }
-    app.remote_open = Some(entry);
+    *entry = Some(remote_entry);
     None
 }
