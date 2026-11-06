@@ -1191,7 +1191,8 @@ fn render_old_pane(
                             app.record_syntax_warmup_line(SyntaxSide::Old, line_num);
                         }
                     }
-                    if let Some(spans) = app.syntax_spans_for_line(SyntaxSide::Old, syntax_line_num)
+                    if let Some(spans) =
+                        app.cached_syntax_spans_for_line(SyntaxSide::Old, syntax_line_num)
                     {
                         content_spans = spans;
                         used_syntax = true;
@@ -1333,7 +1334,8 @@ fn render_old_pane(
                 if used_syntax {
                     italic_line = super::line_is_italic(&content_spans);
                 } else if in_syntax_window {
-                    if let Some(spans) = app.syntax_spans_for_line(SyntaxSide::Old, syntax_line_num)
+                    if let Some(spans) =
+                        app.cached_syntax_spans_for_line(SyntaxSide::Old, syntax_line_num)
                     {
                         italic_line = super::line_is_italic(&spans);
                     }
@@ -2263,7 +2265,7 @@ fn render_new_pane(
                             app.record_syntax_warmup_line(side, line_num);
                         }
                     }
-                    if let Some(spans) = app.syntax_spans_for_line(side, line_num) {
+                    if let Some(spans) = app.cached_syntax_spans_for_line(side, line_num) {
                         content_spans = spans;
                         used_syntax = true;
                     }
@@ -2404,7 +2406,7 @@ fn render_new_pane(
                     } else {
                         syntax_line_num
                     };
-                    if let Some(spans) = app.syntax_spans_for_line(side, line_num) {
+                    if let Some(spans) = app.cached_syntax_spans_for_line(side, line_num) {
                         italic_line = super::line_is_italic(&spans);
                     }
                 }

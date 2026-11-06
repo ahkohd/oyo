@@ -626,7 +626,7 @@ pub fn render_evolution(frame: &mut Frame, app: &mut App, area: Rect) {
                     app.record_syntax_warmup_line(side, line_num);
                 }
             }
-            if let Some(spans) = app.syntax_spans_for_line(side, line_num) {
+            if let Some(spans) = app.cached_syntax_spans_for_line(side, line_num) {
                 content_spans = spans;
                 used_syntax = true;
             }
