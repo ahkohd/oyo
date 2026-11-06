@@ -1,5 +1,6 @@
 use super::{palette::PaletteAction, App};
 use crate::config::{FoldContextMode, ResolvedTheme};
+use crate::footer::{FooterAction, FooterHit};
 use crate::keybindings::Keybindings;
 use crate::keybindings::{Dispatch, GlobalAction, MenuAction, NormalAction};
 use crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
@@ -91,7 +92,17 @@ pub(crate) struct MenuState {
     categories: Vec<(Rect, usize)>,
     rows: Vec<(Rect, usize)>,
     popup: Option<Rect>,
+    footer_hits: Vec<FooterHit<MenuAction>>,
     compact: bool,
+}
+
+impl MenuState {
+    pub(crate) fn clear_geometry(&mut self) {
+        self.categories.clear();
+        self.rows.clear();
+        self.popup = None;
+        self.footer_hits.clear();
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -123,13 +134,14 @@ pub(crate) trait MenuHost {
         self.keybindings_mut().clear_sequence();
     }
     fn menu_bar_frame_start(&mut self) {
-        self.menu_mut().categories.clear();
+        self.menu_mut().clear_geometry();
         self.menu_mut().compact = false;
     }
     fn open_menu(&mut self, category: usize) {
         self.reset_menu_input();
         self.menu_mut().rows.clear();
         self.menu_mut().popup = None;
+        self.menu_mut().footer_hits.clear();
         self.menu_mut().open = Some(MenuOpen {
             page: MenuPage::Commands,
             category: category % 5,
@@ -276,29 +288,39 @@ pub(crate) trait MenuHost {
 
     fn handle_menu_key(&mut self, key: KeyEvent) {
         match self.keybindings_mut().menu(key) {
-            Dispatch::Matched(MenuAction::Cancel) => self.close_menu(),
-            Dispatch::Matched(MenuAction::PreviousCategory) => self.move_menu(-1),
-            Dispatch::Matched(MenuAction::NextCategory) => self.move_menu(1),
-            Dispatch::Matched(MenuAction::NextItem) => self.move_menu_selection(1),
-            Dispatch::Matched(MenuAction::PreviousItem) => self.move_menu_selection(-1),
-            Dispatch::Matched(MenuAction::FirstItem) => {
+            Dispatch::Matched(action) => self.apply_menu_action(action),
+            Dispatch::Pending | Dispatch::Unmatched => {}
+        }
+    }
+
+    fn apply_menu_action(&mut self, action: MenuAction) {
+        if self.menu().open.is_none() {
+            return;
+        }
+        match action {
+            MenuAction::Cancel => self.close_menu(),
+            MenuAction::PreviousCategory => self.move_menu(-1),
+            MenuAction::NextCategory => self.move_menu(1),
+            MenuAction::NextItem => self.move_menu_selection(1),
+            MenuAction::PreviousItem => self.move_menu_selection(-1),
+            MenuAction::FirstItem => {
                 if let Some(open) = &mut self.menu_mut().open {
                     open.selected = 0;
                 }
             }
-            Dispatch::Matched(MenuAction::LastItem) => {
+            MenuAction::LastItem => {
                 let last = self.menu_item_count().saturating_sub(1);
                 if let Some(open) = &mut self.menu_mut().open {
                     open.selected = last;
                 }
             }
-            Dispatch::Matched(MenuAction::Accept) => self.activate_menu(),
-            Dispatch::Pending | Dispatch::Unmatched => {}
+            MenuAction::Accept => self.activate_menu(),
         }
     }
 
     fn close_menu(&mut self) {
         self.menu_mut().open = None;
+        self.menu_mut().footer_hits.clear();
         self.keybindings_mut().clear_sequence();
     }
 
@@ -316,7 +338,11 @@ pub(crate) trait MenuHost {
         if self.menu().open.is_some() {
             match event.kind {
                 MouseEventKind::Down(MouseButton::Left) => {
-                    if let Some(category) = category {
+                    if let Some(action) =
+                        crate::footer::action_at(&self.menu().footer_hits, event.column, event.row)
+                    {
+                        self.apply_menu_action(action);
+                    } else if let Some(category) = category {
                         if self.menu().compact {
                             if self
                                 .menu()
@@ -605,6 +631,7 @@ pub(crate) fn draw_bar(frame: &mut Frame, app: &mut impl MenuHost, area: Rect) {
 pub(crate) fn draw_popup(frame: &mut Frame, app: &mut impl MenuHost) {
     app.menu_mut().rows.clear();
     app.menu_mut().popup = None;
+    app.menu_mut().footer_hits.clear();
     if !app.menu_input_available() {
         app.menu_mut().open = None;
         return;
@@ -631,15 +658,7 @@ pub(crate) fn draw_popup(frame: &mut Frame, app: &mut impl MenuHost) {
         }
     } else {
         for (index, entry) in entries.iter().enumerate() {
-            if category == 0
-                && matches!(
-                    entry.action,
-                    PaletteAction::OpenFileSearch
-                        | PaletteAction::RefreshCurrentFile
-                        | PaletteAction::CopySessionName
-                        | PaletteAction::Quit
-                )
-            {
+            if index > 0 && menu_group(entry.action) != menu_group(entries[index - 1].action) {
                 items.push((None, "", None));
             }
             items.push((Some(index), entry.label.as_str(), Some(entry.action)));
@@ -664,7 +683,17 @@ pub(crate) fn draw_popup(frame: &mut Frame, app: &mut impl MenuHost) {
             .get(selected)
             .is_some_and(|entry| app.command_enabled(entry.action));
     let footer = menu_footer_actions(app, enabled);
-    let footer_width: usize = footer.iter().map(|span| span.content.width()).sum();
+    let footer_width: usize = footer
+        .iter()
+        .map(|action| {
+            action
+                .spans
+                .iter()
+                .map(|span| span.content.width())
+                .sum::<usize>()
+        })
+        .sum::<usize>()
+        + footer.len().saturating_sub(1) * 4;
     let width = desired
         .max(footer_width.saturating_add(4).min(u16::MAX as usize) as u16)
         .max(28)
@@ -754,15 +783,10 @@ pub(crate) fn draw_popup(frame: &mut Frame, app: &mut impl MenuHost) {
     } else {
         menu_cancel_actions(app, width as usize)
     };
-    frame.render_widget(
-        Paragraph::new(crate::ui::modal_footer_line(
-            width as usize,
-            border,
-            actions,
-        ))
-        .style(style),
-        Rect::new(area.x, area.bottom() - 1, width, 1),
-    );
+    let footer_area = Rect::new(area.x, area.bottom() - 1, width, 1);
+    let (line, hits) = crate::footer::footer_line(footer_area, border, actions);
+    app.menu_mut().footer_hits = hits;
+    frame.render_widget(Paragraph::new(line).style(style), footer_area);
 }
 
 fn primary_menu_key(app: &impl MenuHost, action: MenuAction) -> String {
@@ -774,7 +798,7 @@ fn primary_menu_key(app: &impl MenuHost, action: MenuAction) -> String {
         .to_string()
 }
 
-fn menu_footer_actions(app: &impl MenuHost, enabled: bool) -> Vec<Span<'static>> {
+fn menu_footer_actions(app: &impl MenuHost, enabled: bool) -> Vec<FooterAction<MenuAction>> {
     let key_style = Style::default()
         .fg(app.theme().primary)
         .add_modifier(Modifier::BOLD);
@@ -782,22 +806,23 @@ fn menu_footer_actions(app: &impl MenuHost, enabled: bool) -> Vec<Span<'static>>
     let cancel = primary_menu_key(app, MenuAction::Cancel);
     let mut actions = Vec::new();
     if !enabled {
-        actions.push(Span::raw("Unavailable"));
+        actions.push(FooterAction::new(None, vec![Span::raw("Unavailable")]));
     } else if !accept.is_empty() {
-        actions.push(Span::styled(accept, key_style));
-        actions.push(Span::raw(" select"));
+        actions.push(FooterAction::new(
+            Some(MenuAction::Accept),
+            vec![Span::styled(accept, key_style), Span::raw(" select")],
+        ));
     }
     if !cancel.is_empty() {
-        if !actions.is_empty() {
-            actions.push(Span::raw("    "));
-        }
-        actions.push(Span::styled(cancel, key_style));
-        actions.push(Span::raw(" cancel"));
+        actions.push(FooterAction::new(
+            Some(MenuAction::Cancel),
+            vec![Span::styled(cancel, key_style), Span::raw(" cancel")],
+        ));
     }
     actions
 }
 
-fn menu_cancel_actions(app: &impl MenuHost, width: usize) -> Vec<Span<'static>> {
+fn menu_cancel_actions(app: &impl MenuHost, width: usize) -> Vec<FooterAction<MenuAction>> {
     let cancel = primary_menu_key(app, MenuAction::Cancel);
     if cancel.is_empty() {
         return Vec::new();
@@ -805,11 +830,43 @@ fn menu_cancel_actions(app: &impl MenuHost, width: usize) -> Vec<Span<'static>> 
     let key_style = Style::default()
         .fg(app.theme().primary)
         .add_modifier(Modifier::BOLD);
-    let mut actions = vec![Span::styled(cancel.clone(), key_style)];
+    let mut spans = vec![Span::styled(cancel.clone(), key_style)];
     if cancel.width() + 11 <= width {
-        actions.push(Span::raw(" cancel"));
+        spans.push(Span::raw(" cancel"));
     }
-    actions
+    vec![FooterAction::new(Some(MenuAction::Cancel), spans)]
+}
+
+fn menu_group(action: PaletteAction) -> u8 {
+    use PaletteAction::*;
+    match action {
+        OpenDashboard | OpenRemoteReview => 0,
+        OpenFileSearch
+        | CopyFilePath
+        | CopyFilePosition
+        | CopyAbsoluteFilePath
+        | CopyAbsoluteFilePosition
+        | CopyFileCursorPosition
+        | CopyAbsoluteFileCursorPosition => 1,
+        RefreshCurrentFile | RefreshAllFiles => 2,
+        CopySessionName | RenameSession => 3,
+        Quit => 4,
+        SetViewMode(_) => 0,
+        ToggleLineWrap | ToggleFoldContext | ToggleSyntax => 1,
+        ToggleFilePanel | ToggleMenuBar | ToggleZen => 2,
+        OpenThemePicker => 3,
+        NavigateBack | NavigateForward => 0,
+        OpenReviewGrep | OpenReviewGrepChanges | OpenReviewGrepEverything => 1,
+        PreviousStep | NextStep | ToggleStepping => 2,
+        ToggleAutoplay | ToggleAutoplayReverse => 3,
+        ToggleFileReviewed => 0,
+        OpenCommentPicker | OpenPrComments | OpenOutdatedComments => 1,
+        ToggleIncrementalReview | ToggleReviewedFilesVisibility => 2,
+        ReviewAction(_) | SyncReview => 3,
+        ToggleHelp | OpenCommandPalette => 0,
+        OpenSettings => 1,
+        OpenMenu | ToggleViewMode => 0,
+    }
 }
 
 fn fit_label(label: &str, width: usize) -> String {
@@ -850,6 +907,72 @@ mod tests {
             false,
             None,
         )
+    }
+
+    #[test]
+    fn footer_select_and_cancel_use_guarded_menu_actions() {
+        let mut app = app();
+        app.open_menu(1);
+        app.menu.open.as_mut().unwrap().selected = 1;
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal
+            .draw(|frame| crate::ui::draw(frame, &mut app))
+            .unwrap();
+        let hit = app
+            .menu
+            .footer_hits
+            .iter()
+            .find(|hit| hit.action == MenuAction::Accept)
+            .copied()
+            .unwrap();
+        let mouse = |hit: FooterHit<MenuAction>| MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: hit.area.x,
+            row: hit.area.y,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(app.handle_menu_mouse(mouse(hit)));
+        assert_eq!(app.view_mode, ViewMode::Split);
+        assert!(app.menu.open.is_none());
+        app.open_menu(0);
+        terminal
+            .draw(|frame| crate::ui::draw(frame, &mut app))
+            .unwrap();
+        let hit = app
+            .menu
+            .footer_hits
+            .iter()
+            .find(|hit| hit.action == MenuAction::Cancel)
+            .copied()
+            .unwrap();
+        assert!(app.handle_menu_mouse(mouse(hit)));
+        assert!(app.menu.open.is_none());
+        assert_eq!(app.view_mode, ViewMode::Split);
+    }
+
+    #[test]
+    fn separators_are_visible_and_inert_in_every_category() {
+        let mut app = app();
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        for category in 0..5 {
+            app.open_menu(category);
+            terminal
+                .draw(|frame| crate::ui::draw(frame, &mut app))
+                .unwrap();
+            let popup = app.menu.popup.unwrap();
+            let separator_y = (popup.y + 1..popup.bottom() - 1)
+                .find(|y| terminal.backend().buffer()[(popup.x + 1, *y)].symbol() == "─")
+                .unwrap();
+            let selected = app.menu.open.as_ref().unwrap().selected;
+            assert!(app.handle_menu_mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: popup.x + 2,
+                row: separator_y,
+                modifiers: KeyModifiers::NONE
+            }));
+            assert_eq!(app.menu.open.as_ref().unwrap().selected, selected);
+            assert_eq!(app.menu.rows.len(), app.menu_entries(category).len());
+        }
     }
 
     #[test]

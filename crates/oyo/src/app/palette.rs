@@ -220,6 +220,7 @@ impl App {
     }
 
     pub(crate) fn start_session_rename(&mut self) {
+        self.session_rename_footer_hits.clear();
         let Some(name) = self.control_session_name.clone() else {
             return;
         };
@@ -243,6 +244,7 @@ impl App {
     }
 
     pub(crate) fn cancel_session_rename(&mut self) {
+        self.session_rename_footer_hits.clear();
         self.session_rename_active = false;
         self.session_rename_query.clear();
     }
@@ -263,6 +265,7 @@ impl App {
     }
 
     pub(crate) fn submit_session_rename(&mut self) {
+        self.session_rename_footer_hits.clear();
         let name = self.session_rename_query.trim();
         if name.is_empty() {
             self.notify(ToastEvent::SelectionActionFailed(
@@ -272,6 +275,32 @@ impl App {
         }
         self.pending_session_rename = Some(name.to_string());
         self.session_rename_active = false;
+    }
+
+    pub(crate) fn apply_session_rename_action(
+        &mut self,
+        action: crate::keybindings::LineInputAction,
+    ) {
+        use crate::keybindings::LineInputAction;
+        if !self.session_rename_active() {
+            return;
+        }
+        self.session_rename_footer_hits.clear();
+        match action {
+            LineInputAction::Cancel => self.cancel_session_rename(),
+            LineInputAction::Accept => self.submit_session_rename(),
+            LineInputAction::Backspace => self.pop_session_rename_char(),
+            LineInputAction::Clear => self.clear_session_rename_text(),
+        }
+    }
+
+    pub(crate) fn handle_session_rename_click(&mut self, column: u16, row: u16) {
+        if let Some(action) =
+            crate::footer::action_at(&self.session_rename_footer_hits, column, row)
+        {
+            self.keybindings.clear_sequence();
+            self.apply_session_rename_action(action);
+        }
     }
 
     pub(crate) fn take_pending_session_rename(&mut self) -> Option<String> {

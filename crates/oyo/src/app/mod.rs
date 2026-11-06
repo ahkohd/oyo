@@ -912,6 +912,8 @@ pub struct App {
     session_rename_query: String,
     /// True when session rename input is active.
     session_rename_active: bool,
+    pub(crate) session_rename_footer_hits:
+        Vec<crate::footer::FooterHit<crate::keybindings::LineInputAction>>,
     /// Pending session name to apply to the control session.
     pending_session_rename: Option<String>,
     /// Comment capture state enabled for the current app session
@@ -1549,6 +1551,7 @@ impl App {
             control_session_name: None,
             session_rename_query: String::new(),
             session_rename_active: false,
+            session_rename_footer_hits: Vec::new(),
             pending_session_rename: None,
             review_mode: false,
             review_comments: Vec::new(),

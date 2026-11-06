@@ -585,7 +585,7 @@ impl Dashboard {
         self.draw_footer(frame, chunks[2]);
         self.draw_context_menu(frame);
         menu::draw_popup(frame, self);
-        if let Some(entry) = &self.remote_open {
+        if let Some(entry) = &mut self.remote_open {
             crate::ui::draw_remote_open_picker(
                 frame,
                 entry,
