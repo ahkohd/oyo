@@ -1557,3 +1557,58 @@ fn test_extent_markers_skip_context_by_default() {
         "context lines should not show extent markers by default"
     );
 }
+
+#[test]
+fn extent_marker_defaults_match_across_rendered_panes() {
+    use clap::Parser;
+
+    let old = format!(
+        "start\nold value {}\nold second\nend\n",
+        "shared_".repeat(18)
+    );
+    let new = format!(
+        "start\nnew value {}\nnew second\nend\n",
+        "shared_".repeat(18)
+    );
+    for view in [ViewMode::Split, ViewMode::UnifiedPane, ViewMode::Evolution] {
+        for wrap in [false, true] {
+            for configured in [false, true] {
+                let mut app = make_app(&old, &new, view);
+                if configured {
+                    crate::apply_config_to_app(
+                        &mut app,
+                        &crate::config::Config::default(),
+                        &crate::Args::parse_from(["oy"]),
+                        false,
+                    );
+                }
+                app.stepping = false;
+                app.enter_no_step_mode();
+                app.line_wrap = wrap;
+                let buffer = render_buffer(&mut app, 100, 25);
+                let markers: Vec<_> = buffer
+                    .content
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, cell)| matches!(cell.symbol(), "┃" | "▐"))
+                    .collect();
+                assert!(
+                    !markers.is_empty(),
+                    "{view:?} wrap={wrap} configured={configured}"
+                );
+                for (_, cell) in &markers {
+                    assert_eq!(
+                        cell.symbol(),
+                        "┃",
+                        "{view:?} wrap={wrap} configured={configured}"
+                    );
+                    assert!(!cell.modifier.contains(Modifier::BOLD));
+                }
+                if view == ViewMode::Split {
+                    assert!(markers.iter().any(|(index, _)| index % 100 < 50));
+                    assert!(markers.iter().any(|(index, _)| index % 100 >= 50));
+                }
+            }
+        }
+    }
+}

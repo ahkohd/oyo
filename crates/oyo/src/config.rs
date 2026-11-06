@@ -21,7 +21,7 @@
 //! primary_marker = "▶"
 //! primary_marker_right = "◀"
 //! extent_marker_left = "┃"
-//! extent_marker_right = "▐"
+//! extent_marker_right = "┃"
 //! extent_marker_deleted = "╏"
 //! # [navigation.wrap]
 //! # step = "none"
@@ -841,7 +841,7 @@ pub struct UiConfig {
     pub extent_marker: String,
     /// Marker for hunk extent lines (left pane / unified pane)
     pub extent_marker_left: Option<String>,
-    /// Marker for right pane extent lines (defaults to ▐)
+    /// Marker for right pane extent lines (defaults to ┃)
     pub extent_marker_right: Option<String>,
     /// Marker for deleted hunk extent lines
     pub extent_marker_deleted: String,

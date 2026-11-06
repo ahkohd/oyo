@@ -103,7 +103,7 @@ strikethrough_deletions = false
 gutter_signs = true
 stepping = false
 extent_marker_left = "┃"
-extent_marker_right = "▐"
+extent_marker_right = "┃"
 extent_marker_deleted = "╏"
 
 # Use "off" to show full context by default.
