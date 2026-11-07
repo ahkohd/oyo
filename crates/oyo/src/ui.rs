@@ -1658,8 +1658,13 @@ fn draw_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
             ));
         }
     } else if app.content_loading_count() > 0 {
+        let count = app.content_loading_count();
         right_spans.push(Span::styled(
-            format!("loading {} files…", app.content_loading_count()),
+            format!(
+                "loading {} file{}…",
+                count,
+                if count == 1 { "" } else { "s" }
+            ),
             Style::default().fg(app.theme.text_muted),
         ));
     } else if diff_pending && !stats_known {
