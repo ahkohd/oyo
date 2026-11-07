@@ -23,6 +23,24 @@ fn syntax_cache_creation_invalidates_plain_render_cache() {
     assert_eq!(app.syntax_cache_epoch(), 1);
 }
 
+fn highlighted_line_when_ready(app: &mut App, line: usize) -> Vec<ratatui::text::Span<'static>> {
+    let until = Instant::now() + Duration::from_secs(10);
+    loop {
+        app.begin_syntax_warmup_frame();
+        let spans = app.cached_syntax_spans_for_line(crate::syntax::SyntaxSide::New, Some(line));
+        app.commit_syntax_warmup_frame();
+        app.maybe_warm_syntax_cache();
+        if let Some(spans) = spans {
+            return spans;
+        }
+        assert!(
+            Instant::now() < until,
+            "highlighted line did not become available"
+        );
+        std::thread::yield_now();
+    }
+}
+
 fn run_git(repo: &std::path::Path, args: &[&str]) {
     assert!(std::process::Command::new("git")
         .arg("-C")
@@ -368,6 +386,7 @@ fn full_context_watch_refresh_keeps_new_eof_change_and_comment_visible() {
 
 #[test]
 fn fold_context_scope_hints_are_cached_and_use_innermost_definition() {
+    let _guard = DiffSettingsGuard::default();
     let mut lines = vec!["fn outer() {".to_string()];
     lines.extend((0..12).map(|idx| format!("    let outer_{idx} = {idx};")));
     lines.push("    fn inner() {".to_string());
@@ -380,6 +399,10 @@ fn fold_context_scope_hints_are_cached_and_use_innermost_definition() {
     let new = format!("{}\n", lines.join("\n"));
     let diff = MultiFileDiff::from_file_pair("scope.rs".into(), "scope.rs".into(), old, new);
     let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+    app.syntax_engine = Some(crate::syntax::SyntaxEngine::new(
+        &app.syntax_theme,
+        app.theme_is_light,
+    ));
     app.next_step();
 
     let _ = app.current_view_with_frame(AnimationFrame::Idle);
@@ -2504,11 +2527,15 @@ fn test_tick_watch_refreshes_changed_files_on_disk() {
         Some("new changed on disk\n")
     );
     assert!(!app.multi_diff.current_navigator().diff().hunks.is_empty());
-    assert!(app.syntax_caches[0].is_some());
     assert!(app.view_cache.is_none());
-    assert!(app
-        .syntax_spans_for_line(crate::syntax::SyntaxSide::New, Some(1))
-        .is_some());
+    let spans = highlighted_line_when_ready(&mut app, 1);
+    assert_eq!(
+        spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>(),
+        "new changed on disk"
+    );
 
     let backend = ratatui::backend::TestBackend::new(80, 20);
     let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
@@ -2558,6 +2585,10 @@ fn test_tick_watch_adds_new_untracked_file() {
     let changes = oyo_core::git::get_uncommitted_changes(&repo).expect("changes");
     let diff = MultiFileDiff::from_git_changes(repo.clone(), changes).expect("diff");
     let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+    app.syntax_engine = Some(crate::syntax::SyntaxEngine::new(
+        &app.syntax_theme,
+        app.theme_is_light,
+    ));
     assert_eq!(app.multi_diff.file_count(), 0);
 
     std::fs::write(repo.join("new.txt"), "new\n").expect("write new file");
@@ -2570,8 +2601,15 @@ fn test_tick_watch_adds_new_untracked_file() {
         app.multi_diff.file_contents(0).map(|(_, new)| new),
         Some("new\n")
     );
-    assert!(app.syntax_caches[0].is_some());
     assert!(app.view_cache.is_none());
+    let spans = highlighted_line_when_ready(&mut app, 1);
+    assert_eq!(
+        spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>(),
+        "new"
+    );
 
     let _ = std::fs::remove_dir_all(repo);
 }

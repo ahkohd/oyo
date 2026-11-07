@@ -795,16 +795,15 @@ pub fn read_patch(
 }
 
 pub fn terminal_text(value: &str) -> String {
-    value
-        .chars()
-        .flat_map(|c| {
-            if c.is_control() && c != '\t' {
-                c.escape_debug().collect::<Vec<_>>()
-            } else {
-                vec![c]
-            }
-        })
-        .collect()
+    let mut text = String::with_capacity(value.len());
+    for c in value.chars() {
+        if c.is_control() && c != '\t' {
+            text.extend(c.escape_debug());
+        } else {
+            text.push(c);
+        }
+    }
+    text
 }
 
 pub fn terminal_document_text(value: &str) -> String {
@@ -1095,6 +1094,35 @@ mod tests {
         assert!(record.entry.binary);
         assert!(!record.has_changed_lines());
         assert!(record.display_diff().is_ok());
+    }
+
+    #[test]
+    fn terminal_text_preserves_printable_scalars_and_escapes_controls() {
+        assert_eq!(terminal_text(""), "");
+        assert_eq!(
+            terminal_text("plain\\n\t'\" café e\u{301} 日本語 🦀"),
+            "plain\\n\t'\" café e\u{301} 日本語 🦀"
+        );
+        assert_eq!(
+            terminal_text("\0\u{7}\u{1b}\n\r\u{7f}\u{85}\u{9b}"),
+            "\\0\\u{7}\\u{1b}\\n\\r\\u{7f}\\u{85}\\u{9b}"
+        );
+        let controls: String = (0..=0x9f)
+            .filter_map(char::from_u32)
+            .filter(|c| c.is_control())
+            .collect();
+        let text = terminal_text(&controls);
+        assert!(!text.chars().any(|c| c.is_control() && c != '\t'));
+        assert_eq!(terminal_text(&text), text);
+    }
+
+    #[test]
+    fn terminal_document_preserves_line_structure_and_terminal_safe_text() {
+        assert_eq!(
+            terminal_document_text("first\r\nsecond\n\u{1b}\tthird\r"),
+            "first\nsecond\n\\u{1b}\tthird\\r"
+        );
+        assert_eq!(terminal_document_text("\r\n\n"), "\n\n");
     }
 
     #[test]

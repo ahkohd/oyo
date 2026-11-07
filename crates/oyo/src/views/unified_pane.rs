@@ -981,7 +981,7 @@ fn build_unified_render_model(
                     app.record_syntax_warmup_line(side, line_num);
                 }
             }
-            if let Some(spans) = app.syntax_spans_for_line(side, line_num) {
+            if let Some(spans) = app.cached_syntax_spans_for_line(side, line_num) {
                 content_spans = spans;
                 used_syntax = true;
             }
@@ -1081,14 +1081,22 @@ fn build_unified_render_model(
             } else {
                 view_line.kind
             };
+            let mut previous_style = None;
             for view_span in spans {
-                let mut style = get_span_style(
-                    view_span.kind,
-                    style_line_kind,
-                    view_line.is_active,
-                    app,
-                    highlight_allowed,
-                );
+                let mut style = match previous_style {
+                    Some((kind, style)) if kind == view_span.kind => style,
+                    _ => {
+                        let style = get_span_style(
+                            view_span.kind,
+                            style_line_kind,
+                            view_line.is_active,
+                            app,
+                            highlight_allowed,
+                        );
+                        previous_style = Some((view_span.kind, style));
+                        style
+                    }
+                };
                 if !app.stepping && is_modified_line && app.diff_bg {
                     match view_span.kind {
                         ViewSpanKind::Deleted | ViewSpanKind::PendingDelete
@@ -1119,14 +1127,13 @@ fn build_unified_render_model(
                     let leading_ws_len = text.len() - trimmed.len();
                     if leading_ws_len > 0 && !trimmed.is_empty() {
                         let ws_style = style.remove_modifier(Modifier::CROSSED_OUT);
-                        content_spans
-                            .push(Span::styled(text[..leading_ws_len].to_string(), ws_style));
-                        content_spans.push(Span::styled(trimmed.to_string(), style));
+                        append_styled_text(&mut content_spans, &text[..leading_ws_len], ws_style);
+                        append_styled_text(&mut content_spans, trimmed, style);
                     } else {
-                        content_spans.push(Span::styled(view_span.text.clone(), style));
+                        append_styled_text(&mut content_spans, &view_span.text, style);
                     }
                 } else {
-                    content_spans.push(Span::styled(view_span.text.clone(), style));
+                    append_styled_text(&mut content_spans, &view_span.text, style);
                 }
             }
         }
@@ -1186,7 +1193,7 @@ fn build_unified_render_model(
                 } else {
                     view_line.new_line.or(view_line.old_line)
                 };
-                if let Some(spans) = app.syntax_spans_for_line(side, line_num) {
+                if let Some(spans) = app.cached_syntax_spans_for_line(side, line_num) {
                     italic_line = super::line_is_italic(&spans);
                 }
             }
@@ -2107,6 +2114,25 @@ fn render_unified_pane_uncached(frame: &mut Frame, app: &mut App, area: Rect) {
     );
 }
 
+fn append_styled_text(spans: &mut Vec<Span<'static>>, text: &str, style: Style) {
+    if let Some(last) = spans.last_mut().filter(|span| {
+        span.style == style
+            && span
+                .content
+                .as_bytes()
+                .last()
+                .is_some_and(|byte| matches!(byte, b' '..=b'~'))
+            && text
+                .as_bytes()
+                .first()
+                .is_some_and(|byte| matches!(byte, b' '..=b'~'))
+    }) {
+        last.content.to_mut().push_str(text);
+    } else {
+        spans.push(Span::styled(text.to_owned(), style));
+    }
+}
+
 fn get_span_style(
     kind: ViewSpanKind,
     line_kind: LineKind,
@@ -2322,5 +2348,55 @@ mod tests {
         assert_ne!(app.search_target(), first_target);
         assert_ne!(second.search_revision, first.search_revision);
         assert_ne!(second, first);
+    }
+}
+
+#[cfg(test)]
+mod span_batch_tests {
+    use super::*;
+    use ratatui::buffer::Buffer;
+    use ratatui::widgets::Widget;
+
+    #[test]
+    fn batching_preserves_cells_styles_and_grapheme_boundaries() {
+        let style = Style::default().fg(Color::Red).bg(Color::Black);
+        let pieces = [
+            "ab", "cd", " ", "e", "\u{301}", " ", "👩", "\u{200d}", "💻", "中", "\t", "Z",
+        ];
+        let original = pieces
+            .iter()
+            .map(|text| Span::styled(*text, style))
+            .collect::<Vec<_>>();
+        let mut batched = Vec::new();
+        for text in pieces {
+            append_styled_text(&mut batched, text, style);
+        }
+        assert!(batched.len() < original.len());
+        assert_eq!(spans_width(&batched), spans_width(&original));
+        let original = expand_tabs_in_spans(&original, TAB_WIDTH);
+        let batched = expand_tabs_in_spans(&batched, TAB_WIDTH);
+        for width in [4, 12, 30] {
+            let area = Rect::new(0, 0, width, 4);
+            let mut expected = Buffer::empty(area);
+            let mut actual = Buffer::empty(area);
+            Paragraph::new(Line::from(original.clone()))
+                .wrap(Wrap { trim: false })
+                .render(area, &mut expected);
+            Paragraph::new(Line::from(batched.clone()))
+                .wrap(Wrap { trim: false })
+                .render(area, &mut actual);
+            assert_eq!(actual, expected);
+        }
+        let mut mixed = Vec::new();
+        append_styled_text(&mut mixed, " ", style);
+        append_styled_text(
+            &mut mixed,
+            "deleted",
+            style.add_modifier(Modifier::CROSSED_OUT),
+        );
+        append_styled_text(&mut mixed, " ", style);
+        assert_eq!(mixed.len(), 3);
+        assert!(!mixed[0].style.add_modifier.contains(Modifier::CROSSED_OUT));
+        assert!(mixed[1].style.add_modifier.contains(Modifier::CROSSED_OUT));
     }
 }

@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::OnceLock;
 use syntect::{
     easy::HighlightLines,
@@ -1201,10 +1201,21 @@ impl SyntaxCache {
         side: SyntaxSide,
         line_index: usize,
     ) -> Option<Vec<Span<'static>>> {
+        self.rendered_spans_with_cancel(side, line_index, None)
+    }
+
+    pub(crate) fn rendered_spans_with_cancel(
+        &mut self,
+        side: SyntaxSide,
+        line_index: usize,
+        cancelled: Option<&AtomicBool>,
+    ) -> Option<Vec<Span<'static>>> {
         syntax_debug_request();
+        let is_cancelled = || cancelled.is_some_and(|flag| flag.load(Ordering::Relaxed));
+        let cancelled = cancelled.map(|_| &is_cancelled as &dyn Fn() -> bool);
         match side {
-            SyntaxSide::Old => rendered_spans_for_store(&mut self.old, line_index),
-            SyntaxSide::New => rendered_spans_for_store(&mut self.new, line_index),
+            SyntaxSide::Old => rendered_spans_for_store(&mut self.old, line_index, cancelled),
+            SyntaxSide::New => rendered_spans_for_store(&mut self.new, line_index, cancelled),
         }
     }
 
@@ -1300,6 +1311,7 @@ impl SyntaxCache {
 fn rendered_spans_for_store(
     store: &mut SyntaxStore,
     line_index: usize,
+    cancelled: Option<&dyn Fn() -> bool>,
 ) -> Option<Vec<Span<'static>>> {
     match store {
         SyntaxStore::Full(cache) => {
@@ -1316,7 +1328,7 @@ fn rendered_spans_for_store(
             cache.rendered[line_index] = Some(rendered.clone());
             Some(rendered)
         }
-        SyntaxStore::Lazy(cache) => cache.rendered_spans(line_index),
+        SyntaxStore::Lazy(cache) => cache.rendered_spans_with_cancel(line_index, cancelled),
     }
 }
 
@@ -1380,7 +1392,16 @@ impl LazySyntaxCache {
         }
     }
 
+    #[cfg(test)]
     fn spans(&mut self, line_index: usize) -> Option<&[SyntaxSpan]> {
+        self.spans_with_cancel(line_index, None)
+    }
+
+    fn spans_with_cancel(
+        &mut self,
+        line_index: usize,
+        cancelled: Option<&dyn Fn() -> bool>,
+    ) -> Option<&[SyntaxSpan]> {
         if line_index >= self.lines.len() {
             return None;
         }
@@ -1394,7 +1415,7 @@ impl LazySyntaxCache {
         }
 
         let chunk = line_index / self.stride;
-        let state = self.ensure_checkpoint(chunk)?;
+        let state = self.ensure_checkpoint(chunk, cancelled)?;
         let chunk_start = chunk * self.stride;
         let chunk_end = ((chunk + 1) * self.stride).min(self.lines.len());
         let progress = self
@@ -1426,6 +1447,9 @@ impl LazySyntaxCache {
             syntax_debug_cached_lines(to_process);
         }
         for idx in next_line..=line_index {
+            if cancelled.is_some_and(|is_cancelled| is_cancelled()) {
+                return None;
+            }
             let line = &lines[idx];
             let ranges = highlighter
                 .highlight_line(line, &self.syntax_set)
@@ -1444,7 +1468,16 @@ impl LazySyntaxCache {
         self.spans.get(line_index).and_then(|s| s.as_deref())
     }
 
+    #[cfg(test)]
     fn rendered_spans(&mut self, line_index: usize) -> Option<Vec<Span<'static>>> {
+        self.rendered_spans_with_cancel(line_index, None)
+    }
+
+    fn rendered_spans_with_cancel(
+        &mut self,
+        line_index: usize,
+        cancelled: Option<&dyn Fn() -> bool>,
+    ) -> Option<Vec<Span<'static>>> {
         if line_index >= self.lines.len() {
             return None;
         }
@@ -1453,7 +1486,7 @@ impl LazySyntaxCache {
             return Some(rendered.clone());
         }
         syntax_debug_rendered_miss();
-        let spans = self.spans(line_index)?;
+        let spans = self.spans_with_cancel(line_index, cancelled)?;
         let rendered = syntax_spans_to_ratatui(spans);
         self.rendered[line_index] = Some(rendered.clone());
         Some(rendered)
@@ -1585,6 +1618,7 @@ impl LazySyntaxCache {
     fn ensure_checkpoint(
         &mut self,
         chunk: usize,
+        cancelled: Option<&dyn Fn() -> bool>,
     ) -> Option<(syntect::highlighting::HighlightState, ParseState)> {
         if let Some(state) = self.checkpoints.get(chunk).and_then(|c| c.clone()) {
             return Some(state);
@@ -1607,7 +1641,7 @@ impl LazySyntaxCache {
         let mut line_idx = start_chunk * self.stride;
         let chunk_start = (chunk * self.stride).min(self.lines.len());
         let lines_to_process = chunk_start.saturating_sub(line_idx);
-        if lines_to_process > MAX_SYNC_SYNTAX_LINES {
+        if cancelled.is_none() && lines_to_process > MAX_SYNC_SYNTAX_LINES {
             self.warm_progress = Some(WarmProgress {
                 next_line: line_idx,
                 next_chunk: start_chunk.saturating_add(1),
@@ -1625,6 +1659,9 @@ impl LazySyntaxCache {
                 syntax_debug_highlight_lines(checkpoint_lines);
             }
             for idx in line_idx..chunk_end {
+                if cancelled.is_some_and(|is_cancelled| is_cancelled()) {
+                    return None;
+                }
                 let line = &self.lines[idx];
                 let _ = highlighter.highlight_line(line, &self.syntax_set);
             }
@@ -2017,6 +2054,33 @@ mod tests {
         assert!(engine
             .enclosing_scope_ranges(&source, "sample.rs")
             .is_empty());
+    }
+
+    #[test]
+    fn interrupted_prefix_and_chunk_resume_with_full_multiline_context() {
+        let engine = SyntaxEngine::new("ansi", false);
+        let source = format!(
+            "/*\n{}*/\nlet value = 1;\n",
+            "comment context\n".repeat(6_500)
+        );
+        let expected = engine.highlight(&source, "file.rs");
+        for target in [150, 6_200] {
+            let mut cache = LazySyntaxCache::new(&engine, &source, "file.rs");
+            let remaining = std::cell::Cell::new(75usize);
+            let cancel = || {
+                let left = remaining.get();
+                remaining.set(left.saturating_sub(1));
+                left == 0
+            };
+            assert!(cache
+                .rendered_spans_with_cancel(target, Some(&cancel))
+                .is_none());
+            let keep_going = || false;
+            let actual = cache
+                .rendered_spans_with_cancel(target, Some(&keep_going))
+                .unwrap();
+            assert_eq!(actual, syntax_spans_to_ratatui(&expected[target]));
+        }
     }
 
     #[test]

@@ -6,6 +6,187 @@ use ratatui::text::Span;
 use std::time::Instant;
 
 #[derive(Clone)]
+struct SyntaxIdentity {
+    file_index: usize,
+    snapshot: u64,
+    revision: u64,
+    file_name: String,
+    old: std::sync::Arc<str>,
+    new: std::sync::Arc<str>,
+    engine: SyntaxEngine,
+}
+
+impl SyntaxIdentity {
+    fn matches(&self, app: &App) -> bool {
+        self.snapshot == app.multi_diff.content_snapshot()
+            && self.revision == app.multi_diff.content_revision(self.file_index)
+            && app
+                .multi_diff
+                .files
+                .get(self.file_index)
+                .is_some_and(|file| file.display_name == self.file_name)
+            && app
+                .multi_diff
+                .file_contents_arc(self.file_index)
+                .is_some_and(|(old, new)| {
+                    std::sync::Arc::ptr_eq(&self.old, &old)
+                        && std::sync::Arc::ptr_eq(&self.new, &new)
+                })
+            && app
+                .syntax_engine
+                .as_ref()
+                .is_some_and(|engine| engine.shares_syntax_with(&self.engine))
+    }
+
+    fn same(&self, other: &Self) -> bool {
+        self.file_index == other.file_index
+            && self.snapshot == other.snapshot
+            && self.revision == other.revision
+            && self.file_name == other.file_name
+            && std::sync::Arc::ptr_eq(&self.old, &other.old)
+            && std::sync::Arc::ptr_eq(&self.new, &other.new)
+            && self.engine.shares_syntax_with(&other.engine)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct SyntaxLine {
+    side: SyntaxSide,
+    index: usize,
+}
+
+type RenderedSyntax = Vec<(SyntaxLine, Option<Vec<Span<'static>>>)>;
+
+#[derive(Clone)]
+pub(super) struct SyntaxFileCache {
+    identity: SyntaxIdentity,
+    cache: Option<SyntaxCache>,
+    ready: RenderedSyntax,
+    epoch: u64,
+}
+
+impl SyntaxFileCache {
+    fn cached_rendered_spans(&self, side: SyntaxSide, index: usize) -> Option<Vec<Span<'static>>> {
+        self.ready
+            .iter()
+            .find(|(line, _)| *line == SyntaxLine { side, index })
+            .and_then(|(_, spans)| spans.clone())
+            .or_else(|| self.cache.as_ref()?.cached_rendered_spans(side, index))
+    }
+
+    fn covers(&self, lines: &[SyntaxLine]) -> bool {
+        lines
+            .iter()
+            .all(|line| self.ready.iter().any(|(ready, _)| ready == line))
+    }
+}
+
+struct SyntaxJob {
+    identity: SyntaxIdentity,
+    lines: Vec<SyntaxLine>,
+    cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+struct SyntaxResponse {
+    job: SyntaxJob,
+    ready: RenderedSyntax,
+}
+
+struct WorkerSyntaxCache {
+    identity: SyntaxIdentity,
+    cache: SyntaxCache,
+}
+
+impl SyntaxJob {
+    fn run(self, retained: &mut Option<WorkerSyntaxCache>) -> SyntaxResponse {
+        let mut ready = Vec::new();
+        if !self.cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+            if !retained
+                .as_ref()
+                .is_some_and(|slot| slot.identity.same(&self.identity))
+            {
+                *retained = Some(WorkerSyntaxCache {
+                    identity: self.identity.clone(),
+                    cache: SyntaxCache::new(
+                        &self.identity.engine,
+                        &self.identity.old,
+                        &self.identity.new,
+                        &self.identity.file_name,
+                        true,
+                    ),
+                });
+            }
+            let cache = &mut retained.as_mut().unwrap().cache;
+            for line in &self.lines {
+                if self.cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
+                let spans =
+                    cache.rendered_spans_with_cancel(line.side, line.index, Some(&self.cancelled));
+                ready.push((*line, spans));
+            }
+        }
+        SyntaxResponse { job: self, ready }
+    }
+}
+
+enum SyntaxWork {
+    Parse(SyntaxJob),
+    Clear,
+}
+
+struct SyntaxFlight {
+    identity: SyntaxIdentity,
+    lines: Vec<SyntaxLine>,
+    cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+pub(super) struct SyntaxWorker {
+    tx: std::sync::mpsc::SyncSender<SyntaxWork>,
+    rx: std::sync::mpsc::Receiver<SyntaxResponse>,
+    flight: Option<SyntaxFlight>,
+    retained: Option<SyntaxIdentity>,
+}
+
+impl SyntaxWorker {
+    fn new(
+        parse: impl Fn(SyntaxJob, &mut Option<WorkerSyntaxCache>) -> SyntaxResponse + Send + 'static,
+    ) -> Self {
+        let (tx, requests) = std::sync::mpsc::sync_channel::<SyntaxWork>(1);
+        let (responses, rx) = std::sync::mpsc::sync_channel(1);
+        std::thread::spawn(move || {
+            let mut retained = None;
+            while let Ok(work) = requests.recv() {
+                match work {
+                    SyntaxWork::Parse(job) => {
+                        if responses.send(parse(job, &mut retained)).is_err() {
+                            break;
+                        }
+                    }
+                    SyntaxWork::Clear => retained = None,
+                }
+            }
+        });
+        Self {
+            tx,
+            rx,
+            flight: None,
+            retained: None,
+        }
+    }
+}
+
+impl Drop for SyntaxWorker {
+    fn drop(&mut self) {
+        if let Some(flight) = &self.flight {
+            flight
+                .cancelled
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
+#[derive(Clone)]
 struct FoldScopeRequest {
     file_index: usize,
     snapshot: u64,
@@ -214,19 +395,58 @@ impl App {
         self.syntax_caches
             .get(self.multi_diff.selected_index)
             .and_then(|cache| cache.as_ref())
-            .map(|cache| cache.epoch().wrapping_add(1))
+            .map(|cache| {
+                cache
+                    .epoch
+                    .wrapping_add(1)
+                    .wrapping_add(cache.cache.as_ref().map(SyntaxCache::epoch).unwrap_or(0))
+            })
             .unwrap_or(0)
     }
 
     pub(crate) fn syntax_warmup_pending(&self) -> bool {
+        self.syntax_worker
+            .as_ref()
+            .is_some_and(|worker| worker.flight.is_some())
+            || (self.syntax_enabled()
+                && self.view_mode != ViewMode::Preview
+                && self
+                    .syntax_warmup_target
+                    .is_some_and(|target| target.file_index == self.multi_diff.selected_index)
+                && !self.syntax_requested_lines.is_empty()
+                && !self
+                    .syntax_caches
+                    .get(self.multi_diff.selected_index)
+                    .and_then(Option::as_ref)
+                    .is_some_and(|cache| {
+                        cache.identity.matches(self) && cache.covers(&self.syntax_requested_lines)
+                    }))
+    }
+
+    pub fn cached_syntax_spans_for_line(
+        &mut self,
+        side: SyntaxSide,
+        line_num: Option<usize>,
+    ) -> Option<Vec<Span<'static>>> {
         if !self.syntax_enabled() {
-            return false;
+            return None;
         }
-        self.syntax_caches
-            .get(self.multi_diff.selected_index)
-            .and_then(|cache| cache.as_ref())
-            .map(|cache| cache.warm_pending())
-            .unwrap_or(false)
+        let index = line_num?.checked_sub(1)?;
+        self.record_syntax_warmup_line(side, index + 1);
+        let line = SyntaxLine { side, index };
+        if !self.syntax_frame_lines.contains(&line) {
+            self.syntax_frame_lines.push(line);
+        }
+        let remote = self.is_remote_session();
+        let mut spans = self
+            .ensure_syntax_file_cache()?
+            .cached_rendered_spans(side, index)?;
+        if remote {
+            for span in &mut spans {
+                span.content = oyo_core::patch::terminal_text(&span.content).into();
+            }
+        }
+        Some(spans)
     }
 
     pub fn syntax_spans_for_line(
@@ -352,6 +572,169 @@ impl App {
     }
 
     pub(crate) fn maybe_warm_syntax_cache(&mut self) -> bool {
+        let response = match self
+            .syntax_worker
+            .as_ref()
+            .map(|worker| worker.rx.try_recv())
+        {
+            Some(Ok(response)) => Some(response),
+            Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
+                self.syntax_worker = None;
+                None
+            }
+            _ => None,
+        };
+        let mut changed = false;
+        if let Some(response) = response {
+            if let Some(worker) = self.syntax_worker.as_mut() {
+                worker.flight = None;
+                worker.retained = Some(response.job.identity.clone());
+            }
+            let identity = &response.job.identity;
+            let valid = identity.matches(self);
+            if valid {
+                if let Some(slot) = self
+                    .syntax_caches
+                    .get_mut(identity.file_index)
+                    .and_then(Option::as_mut)
+                    .filter(|slot| slot.identity.same(identity))
+                {
+                    if !response
+                        .job
+                        .cancelled
+                        .load(std::sync::atomic::Ordering::Relaxed)
+                        && response.job.lines == self.syntax_requested_lines
+                        && identity.file_index == self.multi_diff.selected_index
+                        && response.ready.len() == response.job.lines.len()
+                    {
+                        slot.ready = response.ready;
+                        slot.epoch = slot.epoch.wrapping_add(1);
+                        changed = true;
+                    }
+                }
+            }
+        }
+        let enabled = self.syntax_enabled() && self.view_mode != ViewMode::Preview;
+        if let Some(flight) = self
+            .syntax_worker
+            .as_ref()
+            .and_then(|worker| worker.flight.as_ref())
+        {
+            if !enabled
+                || flight.identity.file_index != self.multi_diff.selected_index
+                || !flight.identity.matches(self)
+                || flight.lines != self.syntax_requested_lines
+            {
+                flight
+                    .cancelled
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            return changed;
+        }
+        let clear_retained = self
+            .syntax_worker
+            .as_ref()
+            .and_then(|worker| worker.retained.as_ref())
+            .is_some_and(|identity| {
+                !enabled
+                    || identity.file_index != self.multi_diff.selected_index
+                    || !identity.matches(self)
+            });
+        if clear_retained {
+            if let Some(worker) = self.syntax_worker.as_mut() {
+                if worker.tx.try_send(SyntaxWork::Clear).is_ok() {
+                    worker.retained = None;
+                }
+            }
+        }
+        if changed {
+            self.unified_render_cache = None;
+        }
+        if self.view_mode == ViewMode::Preview {
+            return self.warm_preview_syntax_cache() || changed;
+        }
+        if !enabled
+            || self.syntax_requested_lines.is_empty()
+            || !self
+                .syntax_warmup_target
+                .is_some_and(|target| target.file_index == self.multi_diff.selected_index)
+        {
+            return changed;
+        }
+        let lines = self.syntax_requested_lines.clone();
+        let Some(slot) = self.ensure_syntax_file_cache() else {
+            return changed;
+        };
+        if slot.covers(&lines) {
+            return changed;
+        }
+        let job = SyntaxJob {
+            identity: slot.identity.clone(),
+            lines,
+            cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+        let worker = self
+            .syntax_worker
+            .get_or_insert_with(|| SyntaxWorker::new(SyntaxJob::run));
+        let flight = SyntaxFlight {
+            identity: job.identity.clone(),
+            lines: job.lines.clone(),
+            cancelled: job.cancelled.clone(),
+        };
+        match worker.tx.try_send(SyntaxWork::Parse(job)) {
+            Ok(()) => worker.flight = Some(flight),
+            Err(std::sync::mpsc::TrySendError::Full(_)) => {}
+            Err(std::sync::mpsc::TrySendError::Disconnected(_)) => self.syntax_worker = None,
+        }
+        if changed {
+            self.unified_render_cache = None;
+        }
+        changed
+    }
+
+    fn ensure_syntax_file_cache(&mut self) -> Option<&mut SyntaxFileCache> {
+        if !self.syntax_enabled() {
+            return None;
+        }
+        let index = self.multi_diff.selected_index;
+        if index >= self.multi_diff.file_count() {
+            return None;
+        }
+        if self.syntax_engine.is_none() {
+            self.poll_scope_syntax_engine();
+            if self.syntax_engine.is_none() {
+                self.start_syntax_engine_load();
+                return None;
+            }
+        }
+        if self.syntax_caches.len() != self.multi_diff.file_count() {
+            self.syntax_caches = vec![None; self.multi_diff.file_count()];
+        }
+        if !self.syntax_caches[index]
+            .as_ref()
+            .is_some_and(|cache| cache.identity.matches(self))
+        {
+            let (old, new) = self.multi_diff.file_contents_arc(index)?;
+            let identity = SyntaxIdentity {
+                file_index: index,
+                snapshot: self.multi_diff.content_snapshot(),
+                revision: self.multi_diff.content_revision(index),
+                file_name: self.current_file_path(),
+                old,
+                new,
+                engine: self.syntax_engine.as_ref()?.clone(),
+            };
+            self.syntax_caches[index] = Some(SyntaxFileCache {
+                identity,
+                cache: None,
+                ready: Vec::new(),
+                epoch: 0,
+            });
+        }
+        self.syntax_caches[index].as_mut()
+    }
+
+    fn warm_preview_syntax_cache(&mut self) -> bool {
         if !self.syntax_enabled() {
             return false;
         }
@@ -434,6 +817,7 @@ impl App {
     pub(crate) fn begin_syntax_warmup_frame(&mut self) {
         self.syntax_warmup_frame_old = None;
         self.syntax_warmup_frame_new = None;
+        self.syntax_frame_lines.clear();
     }
 
     pub(crate) fn record_syntax_warmup_line(&mut self, side: SyntaxSide, line_num: usize) {
@@ -448,6 +832,7 @@ impl App {
     }
 
     pub(crate) fn commit_syntax_warmup_frame(&mut self) {
+        self.syntax_requested_lines = self.syntax_frame_lines.clone();
         if !self.syntax_enabled() {
             return;
         }
@@ -541,12 +926,16 @@ impl App {
         self.syntax_warmup_frame_old = None;
         self.syntax_warmup_frame_new = None;
 
-        let budget = self
-            .syntax_warmup_idle_lines
-            .max(self.last_viewport_height.saturating_mul(4))
-            .max(1);
-        if let Some(cache) = self.ensure_syntax_cache() {
-            cache.warm_checkpoints(budget);
+        if self.view_mode == ViewMode::Preview {
+            let budget = self
+                .syntax_warmup_idle_lines
+                .max(self.last_viewport_height.saturating_mul(4))
+                .max(1);
+            if let Some(cache) = self.ensure_syntax_cache() {
+                cache.warm_checkpoints(budget);
+            }
+        } else {
+            self.ensure_syntax_file_cache();
         }
     }
 
@@ -675,30 +1064,27 @@ impl App {
         if !self.syntax_enabled() {
             return None;
         }
-        let idx = self.multi_diff.selected_index;
-        if idx >= self.multi_diff.file_count() {
+        if !self.ensure_syntax_engine() {
             return None;
         }
-        if idx >= self.syntax_caches.len() {
-            self.syntax_caches = vec![None; self.multi_diff.file_count()];
-        }
-        if self.syntax_caches.get(idx)?.is_none() {
-            let file_name = self.current_file_path();
-            let (old_content, new_content) = self.multi_diff.file_contents_arc(idx)?;
-            let force_lazy = true;
-            if !self.ensure_syntax_engine() {
+        let busy = self
+            .syntax_worker
+            .as_ref()
+            .is_some_and(|worker| worker.flight.is_some());
+        let slot = self.ensure_syntax_file_cache()?;
+        if slot.cache.is_none() {
+            if busy {
                 return None;
             }
-            let engine = self.syntax_engine.as_ref()?;
-            self.syntax_caches[idx] = Some(SyntaxCache::new(
-                engine,
-                old_content.as_ref(),
-                new_content.as_ref(),
-                &file_name,
-                force_lazy,
+            slot.cache = Some(SyntaxCache::new(
+                &slot.identity.engine,
+                &slot.identity.old,
+                &slot.identity.new,
+                &slot.identity.file_name,
+                true,
             ));
         }
-        self.syntax_caches[idx].as_mut()
+        slot.cache.as_mut()
     }
 
     fn syntax_line_for_display(
@@ -909,5 +1295,421 @@ mod fold_scope_tests {
             finish(&mut app);
             assert!(app.fold_scope_caches.iter().all(Option::is_none));
         }
+    }
+}
+
+#[cfg(test)]
+mod syntax_worker_tests {
+    use super::*;
+    use oyo_core::MultiFileDiff;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    fn app() -> App {
+        let mut app = App::new(
+            MultiFileDiff::from_file_pairs(
+                (0..3)
+                    .map(|i| {
+                        (
+                            format!("file{i}.rs").into(),
+                            "let before = 1;\n".into(),
+                            "let after = 2;\n".into(),
+                        )
+                    })
+                    .collect(),
+            ),
+            ViewMode::UnifiedPane,
+            0,
+            false,
+            None,
+        );
+        app.syntax_engine = Some(SyntaxEngine::new("ansi", false));
+        app
+    }
+
+    fn demand(app: &mut App, line: usize) {
+        app.begin_syntax_warmup_frame();
+        app.cached_syntax_spans_for_line(SyntaxSide::New, Some(line));
+        app.commit_syntax_warmup_frame();
+        app.maybe_warm_syntax_cache();
+    }
+
+    fn until(app: &mut App, done: impl Fn(&App) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !done(app) && Instant::now() < deadline {
+            app.maybe_warm_syntax_cache();
+            std::thread::yield_now();
+        }
+        assert!(done(app));
+    }
+
+    #[test]
+    fn gated_highlighting_keeps_navigation_responsive_and_coalesces_selected_work() {
+        let mut app = app();
+        let (started, starts) = mpsc::channel();
+        let (release, permits) = mpsc::channel();
+        let ui = std::thread::current().id();
+        app.syntax_worker = Some(SyntaxWorker::new(move |job, retained| {
+            assert_ne!(std::thread::current().id(), ui);
+            started.send(job.identity.file_index).unwrap();
+            permits.recv_timeout(Duration::from_secs(10)).unwrap();
+            job.run(retained)
+        }));
+        demand(&mut app, 1);
+        assert_eq!(starts.recv_timeout(Duration::from_secs(10)).unwrap(), 0);
+        app.select_file(1);
+        demand(&mut app, 1);
+        app.select_file(2);
+        demand(&mut app, 1);
+        assert_eq!(app.multi_diff.selected_index, 2);
+        assert!(starts.try_recv().is_err());
+        release.send(()).unwrap();
+        until(&mut app, |app| {
+            app.syntax_worker
+                .as_ref()
+                .unwrap()
+                .flight
+                .as_ref()
+                .is_some_and(|flight| flight.identity.file_index == 2)
+        });
+        assert_eq!(starts.recv_timeout(Duration::from_secs(10)).unwrap(), 2);
+        app.scroll_offset = 3;
+        app.search_query = "retained search".into();
+        release.send(()).unwrap();
+        until(&mut app, |app| {
+            app.syntax_caches[2]
+                .as_ref()
+                .unwrap()
+                .covers(&app.syntax_requested_lines)
+        });
+        let spans = app
+            .cached_syntax_spans_for_line(SyntaxSide::New, Some(1))
+            .unwrap();
+        assert_eq!(
+            spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>(),
+            "let after = 2;"
+        );
+        assert_eq!(app.scroll_offset, 3);
+        assert_eq!(app.search_query, "retained search");
+        assert!(starts.try_recv().is_err());
+    }
+
+    #[test]
+    fn highlighted_viewport_keeps_ready_colors_during_new_demand() {
+        let mut app = app();
+        demand(&mut app, 1);
+        until(&mut app, |app| {
+            app.syntax_caches[0]
+                .as_ref()
+                .unwrap()
+                .covers(&app.syntax_requested_lines)
+        });
+        let before = app
+            .cached_syntax_spans_for_line(SyntaxSide::New, Some(1))
+            .unwrap();
+        let (started, starts) = mpsc::channel();
+        let (release, permits) = mpsc::channel();
+        app.syntax_worker = Some(SyntaxWorker::new(move |job, retained| {
+            started.send(()).unwrap();
+            permits.recv_timeout(Duration::from_secs(10)).unwrap();
+            job.run(retained)
+        }));
+        demand(&mut app, 2);
+        starts.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert_eq!(
+            app.cached_syntax_spans_for_line(SyntaxSide::New, Some(1))
+                .unwrap(),
+            before
+        );
+        release.send(()).unwrap();
+        until(&mut app, |app| {
+            app.syntax_caches[0]
+                .as_ref()
+                .unwrap()
+                .covers(&app.syntax_requested_lines)
+        });
+    }
+
+    #[test]
+    fn worker_rejects_replaced_content_and_reloaded_theme_results() {
+        for theme_change in [false, true] {
+            let mut app = app();
+            let replacement_engine = theme_change.then(|| SyntaxEngine::new("github", true));
+            let (started, starts) = mpsc::channel();
+            let (release, permits) = mpsc::channel();
+            app.syntax_worker = Some(SyntaxWorker::new(move |job, retained| {
+                started.send(()).unwrap();
+                permits.recv_timeout(Duration::from_secs(10)).unwrap();
+                job.run(retained)
+            }));
+            demand(&mut app, 1);
+            starts.recv_timeout(Duration::from_secs(10)).unwrap();
+            if theme_change {
+                app.syntax_engine = replacement_engine;
+            } else {
+                app.multi_diff = MultiFileDiff::from_file_pairs(vec![(
+                    "file0.rs".into(),
+                    "old\n".into(),
+                    "fresh content\n".into(),
+                )]);
+            }
+            app.syntax_caches = vec![None; app.multi_diff.file_count()];
+            demand(&mut app, 1);
+            release.send(()).unwrap();
+            until(&mut app, |app| {
+                app.syntax_worker
+                    .as_ref()
+                    .unwrap()
+                    .flight
+                    .as_ref()
+                    .is_some_and(|flight| {
+                        !flight.cancelled.load(std::sync::atomic::Ordering::Relaxed)
+                    })
+            });
+            starts.recv_timeout(Duration::from_secs(10)).unwrap();
+            assert!(app.syntax_caches[0].as_ref().unwrap().ready.is_empty());
+            release.send(()).unwrap();
+            until(&mut app, |app| {
+                app.syntax_caches[0]
+                    .as_ref()
+                    .unwrap()
+                    .covers(&app.syntax_requested_lines)
+            });
+            let spans = app
+                .cached_syntax_spans_for_line(SyntaxSide::New, Some(1))
+                .unwrap();
+            let (_, text) = app.multi_diff.file_contents_arc(0).unwrap();
+            let expected = app
+                .syntax_engine
+                .as_ref()
+                .unwrap()
+                .highlight(&text, "file0.rs");
+            let expected = expected[0]
+                .iter()
+                .map(|span| Span::styled(span.text.clone(), span.style))
+                .collect::<Vec<_>>();
+            assert_eq!(spans, expected);
+        }
+    }
+
+    #[test]
+    fn cold_engine_delivery_highlights_the_latest_selection_through_ticks() {
+        let _guard = crate::test_utils::DiffSettingsGuard::default();
+        let mut app = App::new(
+            MultiFileDiff::from_file_pairs(
+                (0..3)
+                    .map(|index| {
+                        (
+                            format!("cold{index}.rs").into(),
+                            "let previous = 0;\n".to_owned(),
+                            format!("let selected{index} = {};\n", index + 1),
+                        )
+                    })
+                    .collect(),
+            ),
+            ViewMode::UnifiedPane,
+            0,
+            false,
+            None,
+        );
+        assert!(app.syntax_engine.is_none());
+        let (engines, engine_rx) = mpsc::channel();
+        let (built, construction) = mpsc::channel();
+        let (release, permits) = mpsc::channel();
+        let (published, publication) = mpsc::channel();
+        app.syntax_engine_rx = Some(engine_rx);
+        let theme = app.syntax_theme.clone();
+        let light = app.theme_is_light;
+        let loader = std::thread::spawn(move || {
+            let engine = SyntaxEngine::new(&theme, light);
+            built.send(()).unwrap();
+            permits.recv().unwrap();
+            engines.send(engine.clone()).unwrap();
+            published.send(()).unwrap();
+            engine
+        });
+        demand(&mut app, 1);
+        app.select_file(2);
+        demand(&mut app, 1);
+        loop {
+            match construction.try_recv() {
+                Ok(()) => break,
+                Err(mpsc::TryRecvError::Empty) => {
+                    app.tick();
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                Err(mpsc::TryRecvError::Disconnected) => panic!("engine construction disconnected"),
+            }
+        }
+        assert_eq!(app.multi_diff.selected_index, 2);
+        assert!(app.syntax_engine.is_none());
+        assert!(app
+            .cached_syntax_spans_for_line(SyntaxSide::New, Some(1))
+            .is_none());
+        release.send(()).unwrap();
+        publication.recv_timeout(Duration::from_secs(10)).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let actual = loop {
+            app.tick();
+            if let Some(spans) = app.cached_syntax_spans_for_line(SyntaxSide::New, Some(1)) {
+                break spans;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "published engine did not produce selected highlights"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        };
+        let reference = loader.join().unwrap();
+        let expected = reference.highlight("let selected2 = 3;\n", "cold2.rs");
+        let expected = expected[0]
+            .iter()
+            .map(|span| Span::styled(span.text.clone(), span.style))
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
+        assert_eq!(
+            actual
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>(),
+            "let selected2 = 3;"
+        );
+        assert!(app.syntax_caches[..2].iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn deep_context_highlighting_progresses_with_zero_optional_warmup() {
+        let text = format!(
+            "/*\n{}*/\nlet value = 1;\n",
+            "comment context\n".repeat(6_500)
+        );
+        let mut app = App::new(
+            MultiFileDiff::from_file_pairs(vec![("file.rs".into(), text.clone(), text.clone())]),
+            ViewMode::UnifiedPane,
+            0,
+            false,
+            None,
+        );
+        app.syntax_engine = Some(SyntaxEngine::new("ansi", false));
+        app.syntax_warmup_active_lines = 0;
+        app.syntax_warmup_pending_lines = 0;
+        app.syntax_warmup_idle_lines = 0;
+        demand(&mut app, 6_200);
+        until(&mut app, |app| {
+            app.syntax_caches[0]
+                .as_ref()
+                .unwrap()
+                .covers(&app.syntax_requested_lines)
+        });
+        let spans = app
+            .cached_syntax_spans_for_line(SyntaxSide::New, Some(6_200))
+            .unwrap();
+        let expected = app
+            .syntax_engine
+            .as_ref()
+            .unwrap()
+            .highlight(&text, "file.rs");
+        let expected = expected[6_199]
+            .iter()
+            .map(|span| Span::styled(span.text.clone(), span.style))
+            .collect::<Vec<_>>();
+        assert_eq!(spans, expected);
+    }
+
+    #[test]
+    fn disconnected_worker_recovers_and_drop_cancels_outstanding_work() {
+        let mut app = app();
+        app.syntax_worker = Some(SyntaxWorker::new(|_, _| {
+            panic!("synthetic worker disconnection")
+        }));
+        demand(&mut app, 1);
+        until(&mut app, |app| {
+            app.syntax_caches[0]
+                .as_ref()
+                .unwrap()
+                .covers(&app.syntax_requested_lines)
+        });
+        assert!(app
+            .cached_syntax_spans_for_line(SyntaxSide::New, Some(1))
+            .is_some());
+        let (started, starts) = mpsc::channel();
+        let (release, permits) = mpsc::channel();
+        let (stopped, stops) = mpsc::channel();
+        struct Stopped(mpsc::Sender<()>);
+        impl Drop for Stopped {
+            fn drop(&mut self) {
+                let _ = self.0.send(());
+            }
+        }
+        let stopped = Stopped(stopped);
+        app.syntax_worker = Some(SyntaxWorker::new(move |job, retained| {
+            let _ = &stopped;
+            started.send(()).unwrap();
+            permits.recv_timeout(Duration::from_secs(10)).unwrap();
+            job.run(retained)
+        }));
+        demand(&mut app, 2);
+        starts.recv_timeout(Duration::from_secs(10)).unwrap();
+        let flag = app
+            .syntax_worker
+            .as_ref()
+            .unwrap()
+            .flight
+            .as_ref()
+            .unwrap()
+            .cancelled
+            .clone();
+        drop(app);
+        assert!(flag.load(std::sync::atomic::Ordering::Relaxed));
+        release.send(()).unwrap();
+        stops.recv_timeout(Duration::from_secs(10)).unwrap();
+    }
+
+    #[test]
+    fn disabled_reload_does_not_construct_highlighting_state() {
+        for mode in [
+            ViewMode::Preview,
+            ViewMode::UnifiedPane,
+            ViewMode::Split,
+            ViewMode::Evolution,
+        ] {
+            let mut app = app();
+            app.view_mode = mode;
+            app.syntax_mode = crate::config::SyntaxMode::Off;
+            app.syntax_engine = None;
+            app.syntax_engine_rx = None;
+            app.rebuild_current_syntax_cache_after_reload();
+            assert!(app.syntax_engine.is_none());
+            assert!(app.syntax_engine_rx.is_none());
+            assert!(app.syntax_caches.iter().all(Option::is_none));
+            assert!(app.syntax_worker.is_none());
+        }
+    }
+
+    #[test]
+    fn idle_worker_releases_evicted_source_without_another_parse_request() {
+        let mut app = app();
+        demand(&mut app, 1);
+        until(&mut app, |app| {
+            app.syntax_caches[0]
+                .as_ref()
+                .unwrap()
+                .covers(&app.syntax_requested_lines)
+        });
+        let weak = std::sync::Arc::downgrade(&app.multi_diff.file_contents_arc(0).unwrap().1);
+        app.multi_diff = MultiFileDiff::from_file_pairs(vec![(
+            "other.rs".into(),
+            "old\n".into(),
+            "new\n".into(),
+        )]);
+        app.syntax_caches = vec![None];
+        app.syntax_requested_lines.clear();
+        app.maybe_warm_syntax_cache();
+        until(&mut app, |_| weak.upgrade().is_none());
+        assert!(app.syntax_worker.as_ref().unwrap().retained.is_none());
+        assert!(app.syntax_worker.as_ref().unwrap().flight.is_none());
     }
 }

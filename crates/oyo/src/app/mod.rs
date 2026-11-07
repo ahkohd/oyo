@@ -10,7 +10,7 @@ use crate::config::{
 use crate::csv_preview::CsvPreviewState;
 use crate::keybindings::Keybindings;
 use crate::structured_preview::StructuredPreviewState;
-use crate::syntax::{SyntaxCache, SyntaxEngine};
+use crate::syntax::SyntaxEngine;
 use crate::time_format::TimeFormatter;
 use crate::toasts::{ToastEvent, ToastInteraction, ToastMouseButton, Toasts};
 use oyo_core::{
@@ -801,7 +801,10 @@ pub struct App {
     /// Background startup load for the syntax highlighter
     syntax_engine_rx: Option<std::sync::mpsc::Receiver<SyntaxEngine>>,
     /// Per-file syntax cache (old/new spans)
-    syntax_caches: Vec<Option<SyntaxCache>>,
+    syntax_caches: Vec<Option<syntax::SyntaxFileCache>>,
+    syntax_worker: Option<syntax::SyntaxWorker>,
+    syntax_frame_lines: Vec<syntax::SyntaxLine>,
+    syntax_requested_lines: Vec<syntax::SyntaxLine>,
     /// Per-file named syntax scopes used by folded context bands
     fold_scope_caches: Vec<Option<syntax::FoldScopeCache>>,
     fold_scope_worker: Option<syntax::FoldScopeWorker>,
@@ -1496,6 +1499,9 @@ impl App {
             syntax_engine: None,
             syntax_engine_rx: None,
             syntax_caches: vec![None; file_count],
+            syntax_worker: None,
+            syntax_frame_lines: Vec::new(),
+            syntax_requested_lines: Vec::new(),
             fold_scope_caches: vec![None; file_count],
             fold_scope_worker: None,
             show_syntax_scopes: false,
