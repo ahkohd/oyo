@@ -1437,6 +1437,7 @@ mod syntax_worker_tests {
     fn worker_rejects_replaced_content_and_reloaded_theme_results() {
         for theme_change in [false, true] {
             let mut app = app();
+            let replacement_engine = theme_change.then(|| SyntaxEngine::new("github", true));
             let (started, starts) = mpsc::channel();
             let (release, permits) = mpsc::channel();
             app.syntax_worker = Some(SyntaxWorker::new(move |job, retained| {
@@ -1447,7 +1448,7 @@ mod syntax_worker_tests {
             demand(&mut app, 1);
             starts.recv_timeout(Duration::from_secs(10)).unwrap();
             if theme_change {
-                app.syntax_engine = Some(SyntaxEngine::new("github", true));
+                app.syntax_engine = replacement_engine;
             } else {
                 app.multi_diff = MultiFileDiff::from_file_pairs(vec![(
                     "file0.rs".into(),
@@ -1492,6 +1493,91 @@ mod syntax_worker_tests {
                 .collect::<Vec<_>>();
             assert_eq!(spans, expected);
         }
+    }
+
+    #[test]
+    fn cold_engine_delivery_highlights_the_latest_selection_through_ticks() {
+        let _guard = crate::test_utils::DiffSettingsGuard::default();
+        let mut app = App::new(
+            MultiFileDiff::from_file_pairs(
+                (0..3)
+                    .map(|index| {
+                        (
+                            format!("cold{index}.rs").into(),
+                            "let previous = 0;\n".to_owned(),
+                            format!("let selected{index} = {};\n", index + 1),
+                        )
+                    })
+                    .collect(),
+            ),
+            ViewMode::UnifiedPane,
+            0,
+            false,
+            None,
+        );
+        assert!(app.syntax_engine.is_none());
+        let (engines, engine_rx) = mpsc::channel();
+        let (built, construction) = mpsc::channel();
+        let (release, permits) = mpsc::channel();
+        let (published, publication) = mpsc::channel();
+        app.syntax_engine_rx = Some(engine_rx);
+        let theme = app.syntax_theme.clone();
+        let light = app.theme_is_light;
+        let loader = std::thread::spawn(move || {
+            let engine = SyntaxEngine::new(&theme, light);
+            built.send(()).unwrap();
+            permits.recv().unwrap();
+            engines.send(engine.clone()).unwrap();
+            published.send(()).unwrap();
+            engine
+        });
+        demand(&mut app, 1);
+        app.select_file(2);
+        demand(&mut app, 1);
+        loop {
+            match construction.try_recv() {
+                Ok(()) => break,
+                Err(mpsc::TryRecvError::Empty) => {
+                    app.tick();
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                Err(mpsc::TryRecvError::Disconnected) => panic!("engine construction disconnected"),
+            }
+        }
+        assert_eq!(app.multi_diff.selected_index, 2);
+        assert!(app.syntax_engine.is_none());
+        assert!(app
+            .cached_syntax_spans_for_line(SyntaxSide::New, Some(1))
+            .is_none());
+        release.send(()).unwrap();
+        publication.recv_timeout(Duration::from_secs(10)).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let actual = loop {
+            app.tick();
+            if let Some(spans) = app.cached_syntax_spans_for_line(SyntaxSide::New, Some(1)) {
+                break spans;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "published engine did not produce selected highlights"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        };
+        let reference = loader.join().unwrap();
+        let expected = reference.highlight("let selected2 = 3;\n", "cold2.rs");
+        let expected = expected[0]
+            .iter()
+            .map(|span| Span::styled(span.text.clone(), span.style))
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
+        assert_eq!(
+            actual
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>(),
+            "let selected2 = 3;"
+        );
+        assert!(app.syntax_caches[..2].iter().all(Option::is_none));
     }
 
     #[test]

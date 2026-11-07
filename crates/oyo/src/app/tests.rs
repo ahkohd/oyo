@@ -399,6 +399,10 @@ fn fold_context_scope_hints_are_cached_and_use_innermost_definition() {
     let new = format!("{}\n", lines.join("\n"));
     let diff = MultiFileDiff::from_file_pair("scope.rs".into(), "scope.rs".into(), old, new);
     let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+    app.syntax_engine = Some(crate::syntax::SyntaxEngine::new(
+        &app.syntax_theme,
+        app.theme_is_light,
+    ));
     app.next_step();
 
     let _ = app.current_view_with_frame(AnimationFrame::Idle);
@@ -2581,6 +2585,10 @@ fn test_tick_watch_adds_new_untracked_file() {
     let changes = oyo_core::git::get_uncommitted_changes(&repo).expect("changes");
     let diff = MultiFileDiff::from_git_changes(repo.clone(), changes).expect("diff");
     let mut app = App::new(diff, ViewMode::UnifiedPane, 0, false, None);
+    app.syntax_engine = Some(crate::syntax::SyntaxEngine::new(
+        &app.syntax_theme,
+        app.theme_is_light,
+    ));
     assert_eq!(app.multi_diff.file_count(), 0);
 
     std::fs::write(repo.join("new.txt"), "new\n").expect("write new file");
